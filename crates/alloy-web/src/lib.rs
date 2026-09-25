@@ -413,6 +413,25 @@ pub fn complete(offset: u32) -> String {
                 }
             }
 
+            Context::AllowArg { prefix, tool } => {
+                let from = offset - prefix.len();
+
+                if matches!(tool.as_deref(), None | Some("flux")) {
+                    for l in alloy::lint::LINTS {
+                        items.push(word(l.name, "constant", Some(l.summary.to_string()), from));
+                    }
+                }
+            }
+
+            Context::LuauAttrList { prefix, in_table } => {
+                let from = offset - prefix.len();
+                let names: &[&str] = if *in_table { &["use", "reason"] } else { &["native", "checked", "deprecated"] };
+
+                for name in names {
+                    items.push(word(name, "keyword", None, from));
+                }
+            }
+
             Context::CfgArg { prefix } => {
                 let from = offset - prefix.len();
 
@@ -660,7 +679,7 @@ pub fn complete(offset: u32) -> String {
                     }
                 }
 
-                for name in ["HashMap", "Set", "Queue", "Heap", "Scope", "Signal", "Symbol", "Array"] {
+                for name in ["HashMap", "Set", "BitSet", "Queue", "Heap", "Scope", "Signal", "Symbol", "Array"] {
                     items.push(word(name, "class", keywords::doc(name).map(str::to_string), from));
                 }
 

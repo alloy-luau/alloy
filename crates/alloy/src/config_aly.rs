@@ -15,9 +15,14 @@
 //! guides the conversion: it says where an empty table is a list and
 //! where a whole number is a float.
 
-use std::path::{Path, PathBuf};
+use std::collections::BTreeMap;
+use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::{Duration, Instant};
 
+#[cfg(not(target_arch = "wasm32"))]
 use mlua::{Lua, Table, Value};
 use serde_json::Value as Json;
 
@@ -26,9 +31,11 @@ pub const FILE_NAME: &str = ".config.aly";
 
 /// The `require` string the compiled config uses for the runtime. The
 /// loader answers it with the embedded runtime.
+#[cfg(not(target_arch = "wasm32"))]
 const RUNTIME_SPEC: &str = "@alloy-runtime";
 
 /// How long a config may run before the load stops it.
+#[cfg(not(target_arch = "wasm32"))]
 const TIME_LIMIT: Duration = Duration::from_secs(2);
 
 /// Runs a `.config.aly` and gives back the configuration as a table.
@@ -41,6 +48,7 @@ pub fn evaluate(path: &Path) -> Result<toml::Table, String> {
 
 /// Runs the source of a `.config.aly` that lives at `path`. The path
 /// places a relative `require`.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn evaluate_source(source: &str, path: &Path) -> Result<toml::Table, String> {
     let lua = Lua::new();
     lua.sandbox(true).map_err(lua_error)?;
@@ -70,6 +78,7 @@ pub fn evaluate_source(source: &str, path: &Path) -> Result<toml::Table, String>
 
 /// The configuration a module gives: its default export, else its
 /// export table or the table it returns.
+#[cfg(not(target_arch = "wasm32"))]
 fn pick(value: Value) -> Result<Table, String> {
     let table = match value {
         Value::Table(t) => t,
@@ -105,6 +114,7 @@ fn pick(value: Value) -> Result<Table, String> {
 
 /// Compiles and runs one module, with a `require` that reads paths
 /// from the module's own folder.
+#[cfg(not(target_arch = "wasm32"))]
 fn run_module(lua: &Lua, source: &str, path: &Path) -> Result<Value, String> {
     let is_alloy = path.extension().is_some_and(|e| e == "aly" || e == "alx");
     let code = match is_alloy {
@@ -122,6 +132,7 @@ fn run_module(lua: &Lua, source: &str, path: &Path) -> Result<Value, String> {
 }
 
 /// The Luau a config compiles to, or the first error, with its place.
+#[cfg(not(target_arch = "wasm32"))]
 fn compile(source: &str, path: &Path) -> Result<String, String> {
     let options = crate::EmitOptions {
         file_name: path.display().to_string(),
@@ -147,6 +158,7 @@ fn compile(source: &str, path: &Path) -> Result<String, String> {
 
 /// The emit keeps `const`, which the analyzer reads and the embedded VM
 /// does not. A config binds nothing twice, so `local` runs the same.
+#[cfg(not(target_arch = "wasm32"))]
 fn without_const(code: &str) -> String {
     let Ok(lexed) = alloy_syntax::lexer::lex_luau(code) else {
         return code.to_string();
@@ -174,6 +186,7 @@ fn without_const(code: &str) -> String {
 
 /// The globals of one module: the shared ones, and a `require` that
 /// reads a relative path from `dir`.
+#[cfg(not(target_arch = "wasm32"))]
 fn module_env(lua: &Lua, dir: &Path) -> Result<Table, String> {
     let env = lua.create_table().map_err(lua_error)?;
     let meta = lua.create_table().map_err(lua_error)?;
@@ -193,6 +206,7 @@ fn module_env(lua: &Lua, dir: &Path) -> Result<Table, String> {
 
 /// One `require` of a config: the runtime, or a module beside it. A
 /// module runs once; the next `require` of it reads the same value.
+#[cfg(not(target_arch = "wasm32"))]
 fn require(lua: &Lua, dir: &Path, spec: &str) -> Result<Value, String> {
     let cache: Table = lua
         .named_registry_value("alloy_modules")
@@ -241,6 +255,7 @@ fn require(lua: &Lua, dir: &Path, spec: &str) -> Result<Value, String> {
 
 /// The file a relative module path names: the path with a source
 /// extension, or the `init` file of the folder it names.
+#[cfg(not(target_arch = "wasm32"))]
 fn module_file(base: &Path) -> Option<PathBuf> {
     let exts = ["aly", "luau", "lua"];
 
@@ -250,8 +265,344 @@ fn module_file(base: &Path) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// The byte ranges of the tables that give the config, in order: the
+/// one a `return` or an `export default` gives, each exported `const`
+/// or `local`, and a local the file gives by name.
+fn tables(src: &str) -> Vec<(usize, usize)> {
+    use alloy_syntax::ast::{DefaultExport, Expr, Stmt};
+
+    let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
+        return Vec::new();
+    };
+    let toks = &lexed.toks;
+    let options = alloy_syntax::parser::ParseOptions::for_path(Path::new(FILE_NAME));
+    let (chunk, _) = alloy_syntax::parser::parse_lenient(src, toks, options);
+    let stmts = &chunk.block.stmts;
+    let name = |e: &Expr| match e {
+        Expr::Name(n) => Some(n.text(src, toks)),
+
+        _ => None,
+    };
+    let given: Vec<&str> = stmts
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::Return(r) => r.values.first().and_then(name),
+
+            Stmt::ExportDefault {
+                value: DefaultExport::Value(e),
+                ..
+            } => name(e),
+
+            _ => None,
+        })
+        .collect();
+    let mut out = Vec::new();
+
+    for stmt in stmts {
+        let values: Vec<&Expr> = match stmt.under_default() {
+            Stmt::Return(r) => r.values.iter().collect(),
+
+            Stmt::ExportDefault {
+                value: DefaultExport::Value(e),
+                ..
+            } => vec![e],
+
+            Stmt::Local(l)
+                if l.exported
+                    || matches!(stmt, Stmt::ExportDefault { .. })
+                    || l.names
+                        .iter()
+                        .any(|b| given.contains(&b.name.text(src, toks))) =>
+            {
+                l.values.iter().collect()
+            }
+
+            _ => Vec::new(),
+        };
+
+        for e in values {
+            if let Expr::Table { span, .. } = e {
+                out.push((
+                    toks[span.start as usize].start as usize,
+                    toks[span.end as usize - 1].end as usize,
+                ));
+            }
+        }
+    }
+
+    out
+}
+
+/// Formats a `.config.aly`. Each config table keeps the text its author
+/// wrote, and the code around it formats as any source does.
+pub fn format(src: &str, options: &crate::config::FmtConfig) -> Result<String, String> {
+    let tables = tables(src);
+    // A name stands in for each table while the rest formats. The
+    // trailing `__` keeps `_1__` from matching inside `_10__`.
+    let stub = |i: usize| format!("__alloy_config_{i}__");
+    let mut text = src.to_string();
+
+    for (i, &(start, end)) in tables.iter().enumerate().rev() {
+        text.replace_range(start..end, &stub(i));
+    }
+
+    let mut out = crate::fmt::format_file(&text, options)?;
+
+    for (i, &(start, end)) in tables.iter().enumerate() {
+        out = out.replacen(&stub(i), &src[start..end], 1);
+    }
+
+    Ok(out)
+}
+
+/// A key as a config writes it: bare when it is a name or a reserved
+/// word, which a config takes as a key, else in brackets.
+pub fn written_key(key: &str) -> String {
+    match alloy_syntax::contextual::is_luau_reserved(key) {
+        true => key.to_string(),
+
+        false => crate::data::luau_key(key),
+    }
+}
+
+/// `alloy.toml` as a `.config.aly`, laid out by the `[fmt]` table it
+/// holds, with its comments. The result loads to the same config, or
+/// the error says it does not.
+pub fn from_toml(text: &str) -> Result<String, String> {
+    let path = Path::new(crate::config::FILE_NAME);
+    let config = crate::config::Config::parse(text, path).map_err(|e| e.to_string())?;
+    let table: toml::Table = toml::from_str(text).map_err(|e| e.to_string())?;
+    let mut notes = Notes::read(text);
+    let mut out = String::from("export default {\n");
+    write_table(&table, "", 1, &mut notes, &mut out);
+    out.push_str("}\n");
+
+    // A comment whose line the table does not hold still comes along.
+    let rest = notes.above.into_values().chain(notes.below.into_values());
+
+    for c in rest
+        .flatten()
+        .chain(notes.trailing.into_values())
+        .chain(notes.end)
+    {
+        out.push_str(&comment("", &c));
+    }
+
+    let out = crate::fmt::format_file(&out, &config.fmt.for_source(&out))?;
+    let loaded = evaluate_source(&out, Path::new(FILE_NAME))
+        .and_then(|t| crate::config::Config::from_table(t, path).map_err(|e| e.to_string()))?;
+
+    match loaded == config {
+        true => Ok(out),
+
+        false => Err(format!(
+            "the {FILE_NAME} this writes would load to another config"
+        )),
+    }
+}
+
+/// The comments of an `alloy.toml`, each by the dotted path of the line
+/// it sits by. A block right under a line belongs to it; a block after
+/// a blank line goes above the next one.
+#[derive(Default)]
+struct Notes {
+    above: BTreeMap<String, Vec<String>>,
+    below: BTreeMap<String, Vec<String>>,
+    trailing: BTreeMap<String, String>,
+    /// The blocks after the last line.
+    end: Vec<String>,
+}
+
+impl Notes {
+    // ponytail: a line scan, not a TOML parse. A `#` line inside a
+    // multi-line string reads as a comment. The load check still holds
+    // the values; a TOML parser with spans fixes the comments.
+    fn read(text: &str) -> Self {
+        let mut notes = Self::default();
+        let mut table = String::new();
+        let mut last: Option<String> = None;
+        let mut pending: Vec<String> = Vec::new();
+
+        for line in text.lines().map(str::trim) {
+            let (code, note) = split_comment(line);
+            let at = if code.starts_with('[') {
+                table = dotted(code.trim_matches(['[', ']']));
+
+                Some(table.clone())
+            } else {
+                code.split_once('=').map(|(key, _)| match table.is_empty() {
+                    true => dotted(key),
+
+                    false => format!("{table}.{}", dotted(key)),
+                })
+            };
+
+            match (at, note) {
+                (Some(at), note) => {
+                    notes
+                        .above
+                        .entry(at.clone())
+                        .or_default()
+                        .append(&mut pending);
+
+                    if let Some(note) = note {
+                        notes.trailing.insert(at.clone(), note.to_string());
+                    }
+
+                    last = Some(at);
+                }
+
+                // `#:schema` names the JSON schema, which the new file
+                // does not read.
+                (None, Some(note)) if code.is_empty() && !note.starts_with(':') => match &last {
+                    Some(at) => notes
+                        .below
+                        .entry(at.clone())
+                        .or_default()
+                        .push(note.to_string()),
+
+                    None => pending.push(note.to_string()),
+                },
+
+                _ if line.is_empty() => {
+                    last = None;
+
+                    if pending.last().is_some_and(|c| !c.is_empty()) {
+                        pending.push(String::new());
+                    }
+                }
+
+                // The rest of a value that spans lines.
+                _ => {}
+            }
+        }
+
+        notes.end = pending;
+        notes
+    }
+}
+
+/// A line's code and its comment: the text after the first `#` outside
+/// a string.
+fn split_comment(line: &str) -> (&str, Option<&str>) {
+    let mut quote = None;
+    let mut escaped = false;
+
+    for (i, c) in line.char_indices() {
+        match (quote, c) {
+            (Some('"'), '\\') if !escaped => {
+                escaped = true;
+
+                continue;
+            }
+
+            (Some(q), c) if c == q && !escaped => quote = None,
+
+            (None, '"' | '\'') => quote = Some(c),
+
+            (None, '#') => return (line[..i].trim_end(), Some(line[i + 1..].trim())),
+
+            _ => {}
+        }
+
+        escaped = false;
+    }
+
+    (line, None)
+}
+
+/// A TOML key, `a."b".c`, as the dotted path `a.b.c`.
+fn dotted(key: &str) -> String {
+    key.split('.')
+        .map(|part| part.trim().trim_matches(['"', '\'']))
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// One comment line; an empty one is the blank line between blocks.
+fn comment(pad: &str, text: &str) -> String {
+    match text.is_empty() {
+        true => "\n".to_string(),
+
+        false => format!("{pad}-- {text}\n"),
+    }
+}
+
+/// The fields of one table, one a line. The formatter lays them out
+/// after, so the indent here only has to be whole.
+fn write_table(table: &toml::Table, at: &str, depth: usize, notes: &mut Notes, out: &mut String) {
+    let pad = "    ".repeat(depth);
+
+    for (key, value) in table {
+        let path = match at.is_empty() {
+            true => key.clone(),
+
+            false => format!("{at}.{key}"),
+        };
+
+        for c in notes.above.remove(&path).unwrap_or_default() {
+            out.push_str(&comment(&pad, &c));
+        }
+
+        out.push_str(&format!("{pad}{} = ", written_key(key)));
+        write_value(value, &path, depth, notes, out);
+        out.push(',');
+
+        if let Some(c) = notes.trailing.remove(&path) {
+            out.push_str(&format!(" -- {c}"));
+        }
+
+        out.push('\n');
+
+        // A table holds the block under its header at its top.
+        if !value.is_table() {
+            for c in notes.below.remove(&path).unwrap_or_default() {
+                out.push_str(&comment(&pad, &c));
+            }
+        }
+    }
+}
+
+fn write_value(value: &toml::Value, at: &str, depth: usize, notes: &mut Notes, out: &mut String) {
+    match value {
+        toml::Value::Table(t) => {
+            out.push_str("{\n");
+
+            for c in notes.below.remove(at).unwrap_or_default() {
+                out.push_str(&comment(&"    ".repeat(depth + 1), &c));
+            }
+
+            write_table(t, at, depth + 1, notes, out);
+            out.push_str(&"    ".repeat(depth));
+            out.push('}');
+        }
+
+        toml::Value::Array(items) => {
+            out.push('{');
+
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+
+                write_value(item, at, depth, notes, out);
+            }
+
+            out.push('}');
+        }
+
+        toml::Value::String(s) => out.push_str(&crate::data::luau_string(s)),
+
+        toml::Value::Datetime(d) => out.push_str(&crate::data::luau_string(&d.to_string())),
+
+        // An integer, a float, or a boolean reads the same in both.
+        other => out.push_str(&other.to_string()),
+    }
+}
+
 /// A Luau value as TOML, shaped by the schema node that describes it.
 /// `at` is the dotted key path, for the report.
+#[cfg(not(target_arch = "wasm32"))]
 fn convert(value: &Value, schema: Option<&Json>, at: &str) -> Result<toml::Value, String> {
     let kind = schema.and_then(|s| schema_type(s, value));
 
@@ -347,6 +698,7 @@ pub fn property<'a>(node: &'a Json, key: &str) -> Option<&'a Json> {
 
 /// The JSON type a node names for a value: its own `type`, or the one
 /// branch of an `anyOf` or a `oneOf` the value's kind fits.
+#[cfg(not(target_arch = "wasm32"))]
 fn schema_type<'a>(node: &'a Json, value: &Value) -> Option<&'a str> {
     let fits = |t: &str| match value {
         Value::Table(_) => matches!(t, "array" | "object"),
@@ -373,6 +725,7 @@ fn schema_type<'a>(node: &'a Json, value: &Value) -> Option<&'a str> {
 }
 
 /// A value's type as Luau names it: a whole number is a `number` too.
+#[cfg(not(target_arch = "wasm32"))]
 fn luau_type(value: &Value) -> &'static str {
     match value {
         Value::Integer(_) | Value::Number(_) => "number",
@@ -383,6 +736,7 @@ fn luau_type(value: &Value) -> &'static str {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn lua_error(e: mlua::Error) -> String {
     match e {
         // The traceback names the VM's frames and the file again, and
@@ -397,6 +751,12 @@ fn lua_error(e: mlua::Error) -> String {
 
         other => other.to_string(),
     }
+}
+
+/// The wasm build has no Luau VM (see Cargo.toml).
+#[cfg(target_arch = "wasm32")]
+pub fn evaluate_source(_: &str, _: &Path) -> Result<toml::Table, String> {
+    Err(format!("`{FILE_NAME}` needs the native build of alloy"))
 }
 
 #[cfg(test)]
@@ -433,6 +793,48 @@ mod tests {
         assert_eq!(t["build"]["in"].as_str(), Some("src3"));
         // The schema says `exclude` is a list, so `{}` is an empty one.
         assert_eq!(t["build"]["exclude"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[test]
+    fn a_reserved_word_is_a_bare_key() {
+        let t = eval("export default { build = { in = \"lib\" } }\n").unwrap();
+        assert_eq!(t["build"]["in"].as_str(), Some("lib"));
+        // Outside a config the word still needs its brackets.
+        let plain = crate::compile("local t = { in = 1 }\n").unwrap();
+        assert_eq!(plain.diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn fmt_keeps_the_config_tables_as_written() {
+        let options = crate::config::FmtConfig::default();
+        let src = "local   x=1\nlocal extra = {  in = x }\nexport default {\n  build = {\n    in = \"src\",\n      exclude = { \"a\" ,\"b\"}\n  }\n}\n";
+        let out = format(src, &options).unwrap();
+        assert!(
+            out.starts_with("local x = 1\nlocal extra = { in = x }\n"),
+            "{out}"
+        );
+        assert!(out.ends_with(&src[src.find("export").unwrap()..]), "{out}");
+    }
+
+    #[test]
+    fn the_template_migrates_with_its_comments_and_its_style() {
+        let out = from_toml(crate::config::TEMPLATE).unwrap();
+        // The template asks for single quotes and two spaces.
+        assert!(out.contains("\n  build = {\n    in = 'src',\n"), "{out}");
+        assert!(out.contains("wait_timeout = 5,\n    -- std_require = \"@alloy\"\n    -- erase_type_imports = false\n  },"), "{out}");
+        assert!(out.contains("-- tailwind = \"ingots/tailwind\"\n"), "{out}");
+        assert!(!out.contains("schema"), "{out}");
+
+        // A key on its own line keeps its note; `[fmt]` sets the layout.
+        let out = from_toml("[fmt]\nquote_style = \"force-double\" # house style\nindent_type = \"tabs\"\n\n[build]\n# where the code lives\nin = \"lib\"\n").unwrap();
+        assert!(
+            out.contains("\tfmt = {\n\t\tquote_style = \"force-double\", -- house style\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("\t\t-- where the code lives\n\t\tin = \"lib\",\n"),
+            "{out}"
+        );
     }
 
     #[test]

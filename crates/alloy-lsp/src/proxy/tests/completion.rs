@@ -527,8 +527,8 @@ pub(crate) fn an_attribute_list_follows_the_declaration_under_it() {
 
     assert!(!function.contains(&"@derive".to_string()), "{function:?}");
 
-    // A binding takes `@cfg` alone.
-    assert_eq!(attribute_labels("@\nlocal count = 1\n"), ["@cfg"]);
+    // A binding takes `@cfg` and `@allow` alone.
+    assert_eq!(attribute_labels("@\nlocal count = 1\n"), ["@cfg", "@allow"]);
 
     // The wire sizes go on a remote's parameter and a struct field.
     let param = attribute_labels("remote Hit(@ target: Player) from client\n");
@@ -945,7 +945,7 @@ pub(crate) fn the_global_module_temp_is_no_completion() {
 pub(crate) fn a_type_list_holds_what_the_file_can_write() {
     let (st, uri) = one_file(MATCH_FILE);
     let labels: Vec<String> = st
-        .type_completions(uri, &[])
+        .type_completions(uri, 0, &[])
         .iter()
         .map(|i| i["label"].as_str().unwrap_or("").to_string())
         .collect();
@@ -955,7 +955,7 @@ pub(crate) fn a_type_list_holds_what_the_file_can_write() {
     // The std traits a bound takes, and none of the std's own
     // numbered halves.
     assert!(labels.contains(&"Display".to_string()));
-    for internal in ["Iter2", "Array3", "ResultMethods2", "Awaitable"] {
+    for internal in ["IterCollect", "Array3", "ResultMethods2", "Awaitable"] {
         assert!(!labels.contains(&internal.to_string()), "{internal}");
     }
 }
@@ -1146,7 +1146,7 @@ pub(crate) fn no_type_list_offers_a_folded_name() {
     );
     let (st, uri) = one_file(SRC);
     let labels: Vec<String> = st
-        .type_completions(uri, &[])
+        .type_completions(uri, 0, &[])
         .iter()
         .map(|i| i["label"].as_str().unwrap_or("").to_string())
         .collect();
@@ -3396,4 +3396,166 @@ fn a_loaded_declaration_file_is_in_every_scope() {
     assert!(names.contains(&"Save"), "{names:?}");
     assert!(names.contains(&"warn_once"), "{names:?}");
     assert!(!names.contains(&"Hidden"), "{names:?}");
+}
+/// `@allow(` lists the lints and the groups, and after `flux.` the
+/// compiler's lints; Luau's list offers its attributes, and the table
+/// of `deprecated` its keys.
+#[test]
+pub(crate) fn allow_and_the_luau_list_complete() {
+    let src = "@allow(too\nlocal function f() end\n";
+    let labels = context_labels(src, "@allow(too");
+    assert!(
+        labels.contains(&"too_many_arguments".to_string()),
+        "{labels:?}"
+    );
+    assert!(labels.contains(&"pedantic".to_string()), "{labels:?}");
+    assert!(labels.contains(&"flux".to_string()), "{labels:?}");
+
+    let src = "@allow(flux.too\nlocal function f() end\n";
+    let labels = context_labels(src, "@allow(flux.too");
+    assert!(
+        labels.contains(&"too_many_arguments".to_string()),
+        "{labels:?}"
+    );
+    assert!(!labels.contains(&"flux".to_string()), "{labels:?}");
+
+    let src = "@[nat\nlocal function f() end\n";
+    let labels = context_labels(src, "@[nat");
+    assert_eq!(labels, ["native", "checked", "deprecated"]);
+
+    let src = "@[deprecated { re\nlocal function f() end\n";
+    let labels = context_labels(src, "@[deprecated { re");
+    assert_eq!(labels, ["use", "reason"]);
+}
+
+/// Two built-in attributes whose arguments no declaration types:
+/// `@allow(luau.|` lists luau-lsp's lints, and `@rename_all("|` the case
+/// styles.
+#[test]
+fn a_built_in_attribute_argument_completes() {
+    for (src, want, insert) in [
+        ("@allow(luau.\nlocal x = 1\n", "LocalShadow", "LocalShadow"),
+        (
+            "@rename_all(\"\nstruct Q\nend\n",
+            "snake_case",
+            "snake_case",
+        ),
+        ("@rename_all(\nstruct Q\nend\n", "camelCase", "'camelCase'"),
+    ] {
+        let at = src.find('\n').unwrap();
+        let (st, uri) = super::support::one_file(src);
+        let ctx = context::detect(src, at).expect("a context");
+        let items = st.context_items(uri, at, &ctx);
+        let item = items
+            .iter()
+            .find(|i| i["label"] == want)
+            .unwrap_or_else(|| panic!("no {want} in {items:?}"));
+
+        assert_eq!(item["textEdit"]["newText"], insert, "{src}");
+    }
+}
+
+/// `interface Scored extends HasName`: a literal of `Scored` fills the
+/// parent's fields too, in both header forms.
+#[test]
+fn a_literal_fills_the_fields_an_interface_inherits() {
+    let src = "interface HasName\n    name: string\nend\n\ninterface Scored extends HasName\n    score: number\nend\n\ninterface Ranked extends Scored as\n    rank: number\nend\n\nlocal r: Ranked = { \n";
+    let at = src.len() - 1;
+    let (st, uri) = one_file(src);
+    let ctx = context::detect(src, at).expect("a context");
+    let mut labels: Vec<String> = st
+        .context_items(uri, at, &ctx)
+        .iter()
+        .filter_map(|i| i["label"].as_str().map(str::to_string))
+        .collect();
+    labels.sort();
+
+    assert_eq!(labels, ["name", "rank", "score"]);
+}
+
+/// A type slot inside `namespace Geo` reads its members bare; outside,
+/// the reader writes `Geo.Vec2`, so the bare name stays out. An import
+/// alias, `Item as Thing` or `HashMap as Map`, is the name the file
+/// writes for the type.
+#[test]
+fn a_type_slot_offers_namespace_members_inside_and_import_aliases() {
+    const ITEM: &str = "export struct Item as\n    n: number\nend\n";
+    let src = "import { Item as Thing } from \"./item\"\nimport { HashMap as Map } from \"@alloy/std/collections\"\nnamespace Geo\n  struct Vec2\n    x: number\n  end\n  local z: number = 1\nend\nlocal q: number = 1\n";
+    let mut st = files(&[("file:///item.aly", ITEM), ("file:///t.aly", src)]);
+    st.docs.get_mut("file:///t.aly").expect("doc").import_decls =
+        alloy::declarations::summaries(ITEM, false);
+    let labels = |at: usize| -> Vec<String> {
+        st.type_completions("file:///t.aly", at, &[])
+            .iter()
+            .filter_map(|i| i["label"].as_str().map(str::to_string))
+            .collect()
+    };
+    let inside = labels(src.find("z: number").unwrap());
+    let outside = labels(src.find("q: number").unwrap());
+
+    assert!(inside.iter().any(|l| l == "Vec2"), "{inside:?}");
+    assert!(!outside.iter().any(|l| l == "Vec2"), "{outside:?}");
+    assert!(outside.iter().any(|l| l == "Thing"), "{outside:?}");
+    assert!(outside.iter().any(|l| l == "Map"), "{outside:?}");
+}
+
+/// `s:` calls with the value as `self`. `@derive(Default)` adds a
+/// static `default()` that takes nothing, so a colon cannot call it and
+/// the list leaves it out; `clone(self)` stays.
+#[test]
+fn a_colon_list_leaves_out_a_static_of_no_parameters() {
+    let src =
+        "struct Stats as\n    level: number\nend\nlocal s = new Stats { level = 1 }\nprint(s:)\n";
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let mut result = json!([
+        { "label": "default", "kind": 2, "detail": "() -> Stats" },
+        { "label": "clone", "kind": 2, "detail": "(Stats) -> Stats" },
+    ]);
+    clean_completion(&mut result, doc, 4, 8, false);
+    let labels: Vec<&str> = result
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|i| i["label"].as_str())
+        .collect();
+
+    assert_eq!(labels, ["clone"]);
+}
+
+/// A key the literal already writes, before the caret or after it,
+/// takes no second row.
+#[test]
+fn a_struct_literal_leaves_out_the_keys_it_writes() {
+    let src = "struct Shot as\n    @u8 power: number\n    label: string\n    x: number\nend\n\nlocal k = new Shot { power = 1,  x = f(a, b) }\n";
+    let at = src.find(",  x").unwrap() + 2;
+    let (st, uri) = one_file(src);
+    let ctx = context::detect(src, at).expect("a context");
+    let labels: Vec<String> = st
+        .context_items(uri, at, &ctx)
+        .iter()
+        .filter_map(|i| i["label"].as_str().map(str::to_string))
+        .collect();
+
+    assert_eq!(labels, ["label"]);
+}
+
+/// `for _, x in xs where |` does not compile yet, so the child reads an
+/// older artifact and its list lacks the loop's names. The scope walk
+/// reads the source as it stands and adds them.
+#[test]
+fn a_filter_being_typed_offers_the_loop_names() {
+    let src = "local xs = { 1, 5 }\nfor _, x in xs where  do\n    print(x)\nend\n";
+    let at = src.find("where ").unwrap() + "where ".len();
+    let (line, character) = position_of(src, at);
+    let (st, uri) = one_file(src);
+    let child = json!([{ "label": "print" }]);
+    let labels: Vec<String> = st
+        .value_scope(uri, line, character, &child)
+        .iter()
+        .filter_map(|i| i["label"].as_str().map(str::to_string))
+        .collect();
+
+    assert!(labels.contains(&"x".to_string()), "{labels:?}");
+    assert!(labels.contains(&"xs".to_string()), "{labels:?}");
 }

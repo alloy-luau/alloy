@@ -149,6 +149,23 @@ impl State {
                     None => params.first().map(|(_, t)| t),
                 };
 
+                // `@rename_all` is built in, so no declaration says what
+                // it takes.
+                if attr == "rename_all" && ty.is_none() {
+                    let element = alloy::desugar::RENAME_STYLES
+                        .iter()
+                        .map(|s| format!("\"{s}\""))
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+
+                    for (label, insert, _) in self.literal_items(uri, &element, *quote, attr) {
+                        let mut item = word(&label, 21, None, from);
+                        item["textEdit"]["newText"] = json!(insert);
+                        item["detail"] = json!("a case style");
+                        items.push(item);
+                    }
+                }
+
                 if let Some(ty) = ty {
                     let element = element_type(ty);
 
@@ -245,14 +262,106 @@ impl State {
             }
 
             Context::DeriveArg { prefix } => {
+                // A derive name is a std trait: its row names the module,
+                // and `Serialize` writes its `@alloy/std/serde` import
+                // where the file does not reach it.
+                let reach = super::std_completions::StdReach::of(doc);
+
                 for key in keywords::keys_with_prefix("derive:") {
                     let name = &key["derive:".len()..];
-                    items.push(word(
+                    let mut item = word(
                         name,
                         21,
                         keywords::doc(key).map(str::to_string),
                         offset - prefix.len(),
-                    ));
+                    );
+                    let row = super::std_completions::std_item(&doc.source, &reach, name, 21, None);
+                    item["detail"] = row["detail"].clone();
+
+                    if let Some(edits) = row.get("additionalTextEdits") {
+                        item["additionalTextEdits"] = edits.clone();
+                    }
+
+                    items.push(item);
+                }
+            }
+
+            Context::AllowArg { prefix, tool } => {
+                let from = offset - prefix.len();
+                let lints: Vec<(String, String)> = match tool.as_deref() {
+                    None | Some("flux") => alloy::lint::LINTS
+                        .iter()
+                        .map(|l| (l.name.to_string(), l.summary.to_string()))
+                        .chain(alloy::lint::Group::ALL.iter().map(|g| {
+                            (
+                                g.name().to_string(),
+                                format!("every lint of the `{}` group", g.name()),
+                            )
+                        }))
+                        .collect(),
+
+                    Some("alx") => alloy::lint::ALX_LINTS
+                        .iter()
+                        .map(|l| (l.name.to_string(), l.summary.to_string()))
+                        .collect(),
+
+                    Some("luau") => alloy::lint::LUAU_LINTS
+                        .iter()
+                        .map(|n| (n.to_string(), format!("luau-lsp's `{n}` lint")))
+                        .collect(),
+
+                    // A checker kind or an ingot's lint: no list here holds them.
+                    _ => Vec::new(),
+                };
+
+                for (name, summary) in lints {
+                    let mut item = word(&name, 21, Some(summary), from);
+                    item["detail"] = json!("lint");
+                    items.push(item);
+                }
+
+                // The tools a name may sit under, `flux.too_many_arguments`.
+                if tool.is_none() {
+                    for (name, what) in [
+                        ("flux", "the compiler's lints"),
+                        ("luau", "a luau-lsp lint, `luau.LocalUnused`"),
+                        ("alx", "a markup lint"),
+                    ] {
+                        let mut item = word(name, 9, Some(what.to_string()), from);
+                        item["detail"] = json!("lint tool");
+                        items.push(item);
+                    }
+                }
+            }
+
+            Context::LuauAttrList { prefix, in_table } => {
+                let from = offset - prefix.len();
+                let entries: &[(&str, &str)] = match in_table {
+                    true => &[
+                        ("use", "The name to call instead: `use = \"new_name\"`."),
+                        (
+                            "reason",
+                            "Why the function is deprecated: `reason = \"...\"`.",
+                        ),
+                    ],
+
+                    false => &[
+                        ("native", "Compile the function to native code."),
+                        (
+                            "checked",
+                            "Check the arguments of a declared function at run time.",
+                        ),
+                        (
+                            "deprecated",
+                            "Mark the function deprecated; `deprecated {use = \"f\", reason = \"...\"}` names the replacement.",
+                        ),
+                    ],
+                };
+
+                for (name, what) in entries {
+                    let mut item = word(name, 14, Some(what.to_string()), from);
+                    item["detail"] = json!("Luau attribute");
+                    items.push(item);
                 }
             }
 
@@ -403,6 +512,27 @@ impl State {
                         );
                         item["detail"] = json!(format!("game:GetService(\"{name}\")"));
                         items.push(item);
+                    }
+
+                    return items;
+                }
+
+                // `import { | } from "@alloy/std/collections"`: the names
+                // the module holds. The facade holds every one.
+                if let Some(names) = spec
+                    .as_deref()
+                    .and_then(alloy::std_names::module_of_spec)
+                    .and_then(alloy::std_names::names_in)
+                {
+                    if !*sigil {
+                        for name in names {
+                            let text = alloy::docs::type_markdown(name)
+                                .or_else(|| keywords::doc(name).map(str::to_string));
+                            let mut item = word(name, 7, text, from);
+                            let module = alloy::std_names::module_of(name).unwrap_or_default();
+                            item["detail"] = json!(format!("alloy:std:{module}"));
+                            items.push(item);
+                        }
                     }
 
                     return items;
@@ -616,7 +746,7 @@ impl State {
                     return items;
                 }
 
-                for mut item in self.type_completions(uri, &[]) {
+                for mut item in self.type_completions(uri, offset, &[]) {
                     let label = item["label"].as_str().unwrap_or("").to_string();
                     let kind = item["kind"].as_u64().unwrap_or(7);
                     let doc_text = item["documentation"]["value"].as_str().map(str::to_string);
@@ -626,9 +756,15 @@ impl State {
                     // the accept writes rides along with the label.
                     let insert = item["insertText"].as_str().map(str::to_string);
                     let format = item["insertTextFormat"].clone();
+                    // A std type the file does not reach writes its import.
+                    let imports = item.get("additionalTextEdits").cloned();
                     item = word(&label, kind, doc_text, from);
                     item["detail"] = detail;
                     item["sortText"] = json!(format!("{rank}{label}"));
+
+                    if let Some(edits) = imports {
+                        item["additionalTextEdits"] = edits;
+                    }
 
                     if let Some(insert) = insert {
                         item["textEdit"]["newText"] = json!(insert);
@@ -689,11 +825,20 @@ impl State {
                     }
                 }
 
+                let reach = super::std_completions::StdReach::of(doc);
+
                 for name in [
-                    "HashMap", "Set", "Queue", "Heap", "Scope", "Signal", "Symbol", "Array",
+                    "HashMap", "Set", "BitSet", "Queue", "Heap", "Scope", "Signal", "Symbol",
+                    "Array",
                 ] {
                     let mut item = word(name, 7, keywords::doc(name).map(str::to_string), from);
-                    item["detail"] = json!("alloy:std");
+                    let row = super::std_completions::std_item(&doc.source, &reach, name, 7, None);
+                    item["detail"] = row["detail"].clone();
+
+                    if let Some(edits) = row.get("additionalTextEdits") {
+                        item["additionalTextEdits"] = edits.clone();
+                    }
+
                     items.push(item);
                 }
 
@@ -1038,8 +1183,14 @@ impl State {
             Context::StructField { prefix, target } => {
                 let from = offset - prefix.len();
                 let inside = context::impl_target(&doc.source, offset).as_deref() == Some(target);
+                // A key the literal already writes takes no second entry.
+                let written = written_keys(&doc.source, from);
 
-                for field in self.struct_fields(uri, target, inside) {
+                for field in self
+                    .struct_fields(uri, target, inside)
+                    .into_iter()
+                    .filter(|f| !written.contains(&f.name))
+                {
                     let mut item = snippet(
                         &field.name,
                         &format!("{} = ${{1:{}}}", field.name, field.name),
@@ -1237,7 +1388,7 @@ impl State {
                     .filter_map(|i| i["label"].as_str().map(str::to_string))
                     .collect();
 
-                for item in self.type_completions(uri, &[]) {
+                for item in self.type_completions(uri, offset, &[]) {
                     if seen.insert(item["label"].as_str().unwrap_or("").to_string()) {
                         items.push(item);
                     }
@@ -1295,6 +1446,41 @@ impl State {
                     .filter(|rest| !rest.contains('/'))
                     .map(|_| "@game/")
                     .or_else(|| text.starts_with("game:").then_some("game:"));
+
+                // `"@alloy/std/|"`: the modules of the std. A path on its
+                // way there, `"@al"`, offers the std's specs whole.
+                let std_head = format!("{}/", alloy::std_names::PREFIX);
+
+                if let Some(rest) = text.strip_prefix(&std_head)
+                    && !rest.contains('/')
+                {
+                    for (module, names) in alloy::std_names::MODULES {
+                        let mut item =
+                            word(module, 9, Some(names.join(", ")), start + std_head.len());
+                        item["detail"] = json!(format!("{std_head}{module}"));
+                        items.push(item);
+                    }
+
+                    return items;
+                }
+
+                if text.starts_with('@') && std_head.starts_with(text.as_str()) {
+                    let specs = std::iter::once((
+                        alloy::std_names::PREFIX.to_string(),
+                        "every std name".to_string(),
+                    ))
+                    .chain(
+                        alloy::std_names::MODULES
+                            .iter()
+                            .map(|(m, names)| (format!("{std_head}{m}"), names.join(", "))),
+                    );
+
+                    for (spec, holds) in specs {
+                        let mut item = word(&spec, 9, Some(holds), *start);
+                        item["detail"] = json!("alloy:std");
+                        items.push(item);
+                    }
+                }
 
                 if let Some(head) = service_head {
                     let from = start + head.len();
@@ -1774,11 +1960,51 @@ impl State {
                     .chain(imported)
                     .find(|d| d.name == path)
             })
-            .map(|d| context::record_entries(&d.hover))
+            .map(|d| self.inherited_entries(&d.hover, 0))
             .unwrap_or_default()
             .into_iter()
             .filter(|f| inside || !f.private)
             .collect()
+    }
+
+    /// The entries a declaration hover lists, with those of each type
+    /// its head `extends`: `interface Scored extends HasName` holds
+    /// `name` too. The parent may live in a module the file does not
+    /// import, so the walk reads every open file.
+    fn inherited_entries(&self, hover: &str, depth: usize) -> Vec<context::Field> {
+        let mut fields = context::record_entries(hover);
+        let head = hover.lines().find(|l| !l.starts_with("```")).unwrap_or("");
+        let parents = head
+            .split_once(" extends ")
+            .map_or("", |(_, rest)| rest.trim_end().trim_end_matches(" as"));
+
+        // A cycle of `extends` is an error the compiler reports; the
+        // walk stops at a few steps.
+        if depth > 8 {
+            return fields;
+        }
+
+        for parent in parents
+            .split(',')
+            .map(|p| p.split('<').next().unwrap_or(p).trim())
+        {
+            let Some(d) = self
+                .docs
+                .values()
+                .flat_map(|d| d.decls.iter().chain(&d.import_decls))
+                .find(|d| d.name == parent)
+            else {
+                continue;
+            };
+
+            for f in self.inherited_entries(&d.hover, depth + 1) {
+                if !fields.iter().any(|x| x.name == f.name) {
+                    fields.push(f);
+                }
+            }
+        }
+
+        fields
     }
 
     /// The type a name has at a position: its annotation, the type its
@@ -1982,9 +2208,9 @@ pub(crate) fn takes_a_list(ctx: &context::Context) -> bool {
 /// the list: the author may be about to declare one.
 pub(crate) fn type_rank(prefers: context::Prefers, detail: &str) -> u8 {
     // The detail names the kind first, `struct Profile`, so the rank
-    // reads the word alone. `alloy:std trait` is the std's own line.
+    // reads the word alone. A std trait names its module.
     let word = match detail {
-        "alloy:std trait" => "trait",
+        "alloy:std trait" | "alloy:std:traits" | "alloy:std:serde" => "trait",
 
         _ => {
             let rest = detail.strip_prefix("global ").unwrap_or(detail);
@@ -2040,6 +2266,52 @@ pub(crate) fn readable_type(name: &str) -> String {
 
         _ => name.to_string(),
     }
+}
+
+/// The keys a table literal around `at` already writes, `power` of
+/// `new Shot { power = 1, | }`, before the caret and after it.
+fn written_keys(src: &str, at: usize) -> Vec<String> {
+    let Some(open) = super::super::hover::enclosing_brace(src, at) else {
+        return Vec::new();
+    };
+    let mut keys = Vec::new();
+    let mut depth = 0i32;
+    let mut entry = String::new();
+
+    for c in src[open + 1..].chars() {
+        match c {
+            '{' | '(' | '[' => depth += 1,
+
+            '}' if depth == 0 => break,
+
+            '}' | ')' | ']' => depth -= 1,
+
+            ',' | '\n' if depth == 0 => {
+                entry.clear();
+
+                continue;
+            }
+
+            '=' if depth == 0 => {
+                let key = entry.trim();
+
+                if !key.is_empty() && key.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    keys.push(key.to_string());
+                }
+
+                // The value runs to the next comma; its words name no key.
+                entry.push('=');
+
+                continue;
+            }
+
+            _ => {}
+        }
+
+        entry.push(c);
+    }
+
+    keys
 }
 
 /// The element of a list type: `Lifecycle[]` and `Array<Lifecycle>` both

@@ -169,11 +169,30 @@ pub(crate) fn builtin_attribute_targets(key: &str) -> &'static [&'static str] {
 
         "@native" | "@checked" | "@inline" | "@noinline" => &["function"],
 
-        "@unreliable" | "@ratelimit" | "@timeout" | "@validate" | "@immediate" => &["remote"],
+        "@unreliable" | "@ratelimit" | "@timeout" | "@validate" | "@immediate" | "@wire" => {
+            &["remote"]
+        }
 
         "@u8" | "@u16" | "@u32" | "@i8" | "@i16" | "@i32" | "@f32" => &["param", "field"],
 
-        "@rename" | "@skip" => &["field"],
+        "@rename" | "@skip" | "@alias" => &["field"],
+
+        "@deny_unknown_fields" | "@rename_all" => &["struct"],
+
+        "@allow" => &[
+            "function",
+            "local",
+            "struct",
+            "enum",
+            "namespace",
+            "trait",
+            "interface",
+            "impl",
+            "remote",
+            "type",
+            "field",
+            "variant",
+        ],
 
         _ => &[
             "function",

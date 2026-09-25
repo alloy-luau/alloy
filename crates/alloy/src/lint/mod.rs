@@ -431,7 +431,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Suspicious,
         default: Level::Warn,
         summary: "a function that nothing calls",
-        detail: "A `function`, a `local function`, an `async function`, or a local or const bound to a function value, whose name appears nowhere else in the file. An exported function, and a method of an `impl` or a `trait`, are for other files and do not fire. Prefix the name with `_` to keep it on purpose; `alloy flux --fix` does that.",
+        detail: "A `function`, a `local function`, an `async function`, or a local or const bound to a function value, whose name appears nowhere else in the file. An exported function, and a method of an `impl` or a `trait`, are for other files and do not fire. A function with an attribute above it does not fire either: `@test` and a declared attribute mark a function the runtime reaches by its attribute, and `@deprecated`, `@cfg`, and Luau's `@[...]` list keep that rule. Prefix the name with `_` to keep it on purpose; `alloy flux --fix` does that.",
     },
     LintInfo {
         name: "empty_block",
@@ -489,6 +489,27 @@ pub const LINTS: &[LintInfo] = &[
         default: Level::Warn,
         summary: "`typeof(x) == \"T\"` in place of `x is T`",
         detail: "Flux. `x is T` compiles to the right test for the name, `type`, `typeof`, or `IsA`, and the checker narrows `x` in the branch. A string comparison narrows nothing. `alloy flux --fix` rewrites primitives, `Instance`, and the Roblox datatypes.",
+    },
+    LintInfo {
+        name: "array_long_string",
+        group: Group::Suspicious,
+        default: Level::Warn,
+        summary: "a long string whose text reads like a nested array",
+        detail: "`[[1, 2], [3, 4]]` is Luau's long string, the text `1, 2], [3, 4`. Alloy once read it as a nested array; a nested array now puts a space between the brackets, `[ [1, 2], [3, 4] ]`. `alloy flux --fix` writes that form.",
+    },
+    LintInfo {
+        name: "pattern_shadows_local",
+        group: Group::Suspicious,
+        default: Level::Warn,
+        summary: "a match pattern that binds the name of a local in scope",
+        detail: "`case target then`, with `target` a local or a parameter, reads as a comparison and is a binding: the arm takes every value, and a `default` or a later arm never runs. Compare in a guard, `case v where v == target`, or bind a name no local holds. A const or a SCREAMING_CASE name is an error for the same reason.",
+    },
+    LintInfo {
+        name: "match_guard_and",
+        group: Group::Style,
+        default: Level::Warn,
+        summary: "a match guard written with `and`",
+        detail: "`case n and n > 5` reads as one condition joined to the pattern. `case n where n > 5` is the guard, the word a `for` filter takes too. `alloy flux --fix` swaps the word.",
     },
     LintInfo {
         name: "legacy_iterator",
@@ -899,6 +920,40 @@ pub fn alx_level_of(config: &LintConfig, name: &str) -> Level {
     })
 }
 
+/// The lints of luau-lsp, `luau.LocalShadow` under `@allow`: Luau's
+/// `kWarningNames` in `LinterConfig.h`, less its `Unknown`.
+pub const LUAU_LINTS: &[&str] = &[
+    "UnknownGlobal",
+    "DeprecatedGlobal",
+    "GlobalUsedAsLocal",
+    "LocalShadow",
+    "SameLineStatement",
+    "MultiLineStatement",
+    "LocalUnused",
+    "FunctionUnused",
+    "ImportUnused",
+    "BuiltinGlobalWrite",
+    "PlaceholderRead",
+    "UnreachableCode",
+    "UnknownType",
+    "ForRange",
+    "UnbalancedAssignment",
+    "ImplicitReturn",
+    "DuplicateLocal",
+    "FormatString",
+    "TableLiteral",
+    "UninitializedLocal",
+    "DuplicateFunction",
+    "DeprecatedApi",
+    "TableOperations",
+    "DuplicateCondition",
+    "MisleadingAndOr",
+    "CommentDirective",
+    "IntegerParsing",
+    "ComparisonPrecedence",
+    "RedundantNativeAttribute",
+];
+
 /// The group of a lint by name; the type checker's lints are `luau`,
 /// and an ingot's lints are the ingot's name.
 pub fn group_name(name: &str) -> &'static str {
@@ -1202,7 +1257,7 @@ mod tests {
             "local a = []\n",
             "local b: number[] = []\n",
             "local filled = [1, 2]\n",
-            "local nested = [[], []]\n",
+            "local nested = [ [], [] ]\n",
             "take([])\n",
             "print(a, b, filled, nested, make(), Hub)\n",
         );

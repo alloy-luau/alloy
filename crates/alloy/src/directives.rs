@@ -77,6 +77,9 @@ pub struct Directives {
     /// The `--@alloy-expect-error` lines that carry no reason. The
     /// `missing_reason` lint reports each.
     pub missing_reason: Vec<usize>,
+    /// What `@allow(name)` quiets: the first and last line of the item
+    /// it sits on, both included, and one lint or checker kind.
+    allowed: Vec<(usize, usize, String)>,
 }
 
 const IGNORE: &str = "--@alloy-ignore";
@@ -285,7 +288,261 @@ pub fn scan(src: &str) -> Directives {
 
     out.regions.sort_by_key(|r| (r.start, r.end));
 
+    if src.contains("@allow") {
+        out.allowed = allow_ranges(src);
+    }
+
     out
+}
+
+/// The ranges `@allow(...)` quiets, one per name: the lines of the
+/// declaration, the field, or the statement the attribute sits on.
+fn allow_ranges(src: &str) -> Vec<(usize, usize, String)> {
+    use alloy_syntax::ast::{Attr, DefaultExport, Stmt, TokSpan};
+
+    let options = alloy_syntax::parser::ParseOptions {
+        definitions: true,
+        reserved_keys: true,
+        ..Default::default()
+    };
+    let Ok(parsed) = alloy_syntax::parse_lenient(src, options) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let line = |byte: u32| src[..byte as usize].matches('\n').count();
+    let mut out = Vec::new();
+
+    let mut add = |attrs: &[Attr], span: TokSpan, out: &mut Vec<(usize, usize, String)>| {
+        for a in attrs {
+            if a.name.map(|n| n.text(src, toks)) != Some("allow") || span.end == 0 {
+                continue;
+            }
+
+            let first = line(toks[a.span.start as usize].start);
+            let last = line(toks[span.end as usize - 1].end);
+
+            for arg in &a.args {
+                let written: String = arg.span().text(src, toks).split_whitespace().collect();
+
+                for name in allowed_names(&written) {
+                    out.push((first, last, name));
+                }
+            }
+        }
+    };
+
+    /// One allowed range: the first and last line, and the lint name.
+    type Ranges = Vec<(usize, usize, String)>;
+
+    fn walk<'s>(
+        stmts: &'s [Stmt],
+        add: &mut dyn FnMut(&[Attr], TokSpan, &mut Ranges),
+        out: &mut Ranges,
+    ) {
+        for s in stmts {
+            match s {
+                Stmt::Function(f) => add(&f.attrs, f.span, out),
+
+                Stmt::LocalFunction(f) => add(&f.attrs, f.span, out),
+
+                Stmt::Local(l) => add(&l.attrs, l.span, out),
+
+                Stmt::Struct(st) => {
+                    add(&st.attributes, st.span, out);
+
+                    for f in &st.fields {
+                        add(&f.attributes, f.span, out);
+                    }
+                }
+
+                Stmt::Enum(e) => {
+                    add(&e.attributes, e.span, out);
+
+                    for v in &e.variants {
+                        add(&v.attributes, v.span, out);
+                    }
+                }
+
+                Stmt::Trait(t) => {
+                    add(&t.attributes, t.span, out);
+
+                    for m in &t.methods {
+                        add(&m.attributes, m.span, out);
+                    }
+                }
+
+                Stmt::Interface(i) => add(&i.attributes, i.span, out),
+
+                Stmt::Impl(i) => {
+                    add(&i.attributes, i.span, out);
+
+                    for m in &i.methods {
+                        add(&m.attrs, m.span, out);
+                        walk(&m.body.block.stmts, add, out);
+                    }
+                }
+
+                Stmt::Namespace(ns) => {
+                    add(&ns.attributes, ns.span, out);
+
+                    for m in &ns.members {
+                        walk(std::slice::from_ref(&m.stmt), add, out);
+                    }
+                }
+
+                Stmt::Remote(r) => add(&r.attributes, r.span, out),
+
+                Stmt::TypeAlias(t) => add(&t.attributes, t.span, out),
+
+                Stmt::Attributed { attrs, stmt, span } => {
+                    add(attrs, *span, out);
+                    walk(std::slice::from_ref(stmt.as_ref()), add, out);
+                }
+
+                Stmt::ExportDefault {
+                    value: DefaultExport::Decl(inner),
+                    ..
+                } => walk(std::slice::from_ref(inner.as_ref()), add, out),
+
+                _ => {}
+            }
+
+            for child in crate::desugar::stmt_children(s) {
+                match child {
+                    crate::desugar::Child::Block(b) => walk(&b.stmts, add, out),
+
+                    crate::desugar::Child::Function(f) => walk(&f.block.stmts, add, out),
+
+                    crate::desugar::Child::Expr(_) => {}
+                }
+            }
+        }
+    }
+
+    walk(&parsed.chunk.block.stmts, &mut add, &mut out);
+    out
+}
+
+/// The Alloy lint a rustc or Clippy name means, so `@allow(dead_code)`
+/// reads the way a Rust developer writes it.
+fn rust_name(name: &str) -> &str {
+    match name {
+        "unused_variables" => "unused_variable",
+
+        "unused_imports" => "unused_import",
+
+        "dead_code" => "unused_function",
+
+        "needless_return" => "redundant_return",
+
+        "let_and_return" => "local_then_return",
+
+        "print_stdout" | "dbg_macro" => "print_debug",
+
+        "todo" => "todo_comment",
+
+        other => other,
+    }
+}
+
+/// The names one `@allow` argument quiets. A bare name, or one under
+/// `flux.`, is a lint of the compiler, and a group spreads into its
+/// lints. `luau.X` is a checker kind, `alx.x` a markup lint, and any
+/// other prefix an ingot's lint, `enamel.x` for `enamel/x`.
+pub fn allowed_names(written: &str) -> Vec<String> {
+    let bare = written.trim_matches(['"', '\'']);
+
+    if bare.contains('/') {
+        return vec![bare.to_string()];
+    }
+
+    let (tool, name) = match bare.split_once('.') {
+        Some((tool, name)) => (Some(tool), name),
+
+        None => (None, bare),
+    };
+
+    let name = rust_name(name);
+
+    match tool {
+        None | Some("flux") | Some("clippy") => match crate::lint::Group::from_name(name) {
+            Some(group) => crate::lint::LINTS
+                .iter()
+                .filter(|l| l.group == group)
+                .map(|l| l.name.to_string())
+                .collect(),
+
+            None => vec![name.to_string()],
+        },
+
+        Some("luau") => vec![name.to_string()],
+
+        Some("alx") => vec![format!("{}{name}", crate::lint::ALX_PREFIX)],
+
+        Some(ingot) => vec![format!("{ingot}/{name}")],
+    }
+}
+
+/// Whether one `@allow` argument names something that can fire. The
+/// compiler knows its own lints and groups; a checker kind and an
+/// ingot's lint pass, since no list here holds them.
+pub fn allow_check(written: &str) -> Result<(), String> {
+    let bare = written.trim_matches(['"', '\'']);
+    let (tool, name) = match bare.split_once('.') {
+        Some((tool, name)) => (Some(tool), name),
+
+        None => (None, bare),
+    };
+    let name = rust_name(name);
+    let shaped = !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_');
+
+    if !shaped && !bare.contains('/') {
+        return Err(format!(
+            "`@allow` takes lint names, `@allow(too_many_arguments)` or `@allow(flux.too_many_arguments)`; `{written}` is no name"
+        ));
+    }
+
+    // A lint can be allowed; an error stays, as in Rust. The expect
+    // directive is the form for an error the author means to keep.
+    if crate::docs::KINDS.iter().any(|(kind, _)| *kind == name) {
+        return Err(format!(
+            "`{name}` is an error, and `@allow` quiets lints; write `--@alloy-expect-error <reason>` above the line to keep one"
+        ));
+    }
+
+    let known = match tool {
+        None | Some("flux") | Some("clippy") => {
+            crate::lint::LINTS.iter().any(|l| l.name == name)
+                || crate::lint::Group::from_name(name).is_some()
+        }
+
+        Some("alx") => crate::lint::is_known_name(&format!("{}{name}", crate::lint::ALX_PREFIX)),
+
+        // luau-lsp's own names; a typo there quieted nothing in silence.
+        Some("luau") => crate::lint::LUAU_LINTS.contains(&name),
+
+        _ => true,
+    };
+
+    if known {
+        return Ok(());
+    }
+
+    let names: Vec<&str> = match tool {
+        Some("luau") => crate::lint::LUAU_LINTS.to_vec(),
+
+        _ => crate::lint::LINTS.iter().map(|l| l.name).collect(),
+    };
+    let near = names
+        .into_iter()
+        .min_by_key(|l| crate::game_import::edit_distance(l, name))
+        .filter(|l| crate::game_import::edit_distance(l, name) <= 3)
+        .map(|l| format!("; did you mean `{l}`?"))
+        .unwrap_or_default();
+
+    Err(format!(
+        "`@allow` names no lint `{name}`; `alloy doc lints` lists them{near}"
+    ))
 }
 
 /// Closes the innermost open region an `--@alloy-ignore-end` matches:
@@ -454,15 +711,22 @@ impl Directives {
     /// Whether a region covers `line`. A region that names a lint or a
     /// kind covers only a diagnostic of that name.
     fn in_region(&self, line: usize, name: Option<&str>) -> bool {
-        self.regions.iter().any(|r| {
-            line > r.start
-                && line < r.end
-                && match (&r.name, name) {
-                    (None, _) => true,
-                    (Some(want), Some(got)) => want == got,
-                    (Some(_), None) => false,
-                }
-        })
+        let allowed = name.is_some_and(|name| {
+            self.allowed
+                .iter()
+                .any(|(first, last, n)| line >= *first && line <= *last && n == name)
+        });
+
+        allowed
+            || self.regions.iter().any(|r| {
+                line > r.start
+                    && line < r.end
+                    && match (&r.name, name) {
+                        (None, _) => true,
+                        (Some(want), Some(got)) => want == got,
+                        (Some(_), None) => false,
+                    }
+            })
     }
 
     /// Whether `alloy flux --fix` must leave `line` as it is.
@@ -552,6 +816,7 @@ impl Directives {
             && self.regions.is_empty()
             && self.preserved.is_empty()
             && self.errors.is_empty()
+            && self.allowed.is_empty()
     }
 }
 

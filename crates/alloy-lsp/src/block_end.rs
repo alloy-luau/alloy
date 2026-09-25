@@ -193,10 +193,11 @@ fn open_blocks(src: &str, until: usize) -> Vec<(u32, usize)> {
             "match" if !alloy_syntax::contextual::keyword_at(src, toks, i) => {}
 
             // `attribute r() on struct` names the target of the
-            // declaration; the words open no block there.
+            // declaration; the words open no block there. `local impl =
+            // 1` writes the word as a name.
             "struct" | "enum" | "interface" | "trait" | "impl" | "macro" | "match"
             | "namespace"
-                if head != "attribute" =>
+                if head != "attribute" && alloy_syntax::contextual::keyword_at(src, toks, i) =>
             {
                 stack.push((line, at));
             }

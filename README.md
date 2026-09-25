@@ -24,12 +24,12 @@ the line you wrote. One binary builds, checks, lints, formats, and
 documents. One language server shows Alloy to the editor.
 
 ```luau
-struct Player as
+struct Player
     name: string
     hp: number = 100
 end
 
-enum Msg as
+enum Msg
     Join(Player)
     Leave(Player)
 end

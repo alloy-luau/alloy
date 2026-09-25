@@ -15,7 +15,7 @@ impl<'a> Parser<'a> {
         let open = self.pos;
         self.expect("namespace")?;
         let name = self.expect_name()?;
-        self.expect("as")?;
+        self.header_as(open);
         let members = self.namespace_members()?;
         self.expect_end(open)?;
 
@@ -110,6 +110,7 @@ impl<'a> Parser<'a> {
     /// Whether `namespace` at the cursor opens a declaration. The word
     /// stays contextual, the way `export` and `global` do.
     pub(super) fn namespace_follows(&self) -> bool {
-        self.name_at(1) && self.text_at(2) == "as"
+        self.name_at(1)
+            && (matches!(self.text_at(2), "as" | "end") || self.newline_after(1) || self.name_at(2))
     }
 }

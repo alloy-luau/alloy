@@ -6,6 +6,23 @@ use alloy_syntax::ast::{
 
 use super::*;
 
+/// The type parameters the runtime declares a std type with, `<K, V>`,
+/// or an empty string for a type with none. `None` for a name the
+/// runtime declares no type for.
+fn runtime_type_params(name: &str) -> Option<String> {
+    crate::RUNTIME.lines().find_map(|line| {
+        let rest = line.strip_prefix("export type ")?.strip_prefix(name)?;
+
+        if rest.starts_with('<') {
+            let end = rest.find('>')?;
+
+            Some(rest[..=end].to_string())
+        } else {
+            rest.trim_start().starts_with('=').then(String::new)
+        }
+    })
+}
+
 /// The local an `export default <expr>` binds, when the expression is
 /// not already a name. The export table is written after the last line,
 /// so the value needs a binding to name there.
@@ -298,6 +315,109 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /// Reports a std name the file writes with no import, once per
+    /// name: the first use carries the report, and its fix writes the
+    /// import that covers every use.
+    pub(crate) fn check_std_name(&mut self, at: TokSpan, name: &str) {
+        if crate::std_names::is_std_name(name)
+            && !self.options.std_globals.ambient(name)
+            && !self.std_imports.contains(name)
+            && self.std_reported.insert(name.to_string())
+        {
+            self.diagnose(at, &crate::std_names::missing_message(name));
+        }
+    }
+
+    /// `import { HashMap } from "@alloy/std/collections"`. The name
+    /// renders as `__alloy.HashMap` wherever it stands, so the import
+    /// writes nothing. An alias writes a local and a type for it, and a
+    /// star import binds the runtime itself, so `c.HashMap` reads both
+    /// the value and the type.
+    fn std_import(&mut self, i: &Import, spec: &str, module: &str) {
+        use crate::std_names::{MODULES, PREFIX};
+
+        let anchor = self.byte_start(i.span);
+        let Some(names) = crate::std_names::names_in(module) else {
+            let modules: Vec<String> = MODULES
+                .iter()
+                .map(|(m, _)| format!("\"{PREFIX}/{m}\""))
+                .collect();
+            let message = format!(
+                "\"{spec}\" is no std module; the std has {}",
+                modules.join(", ")
+            );
+            self.diagnose(i.path, &message);
+
+            return;
+        };
+        let mut lines: Vec<String> = Vec::new();
+        let specs = match &i.kind {
+            ImportKind::Namespace(n, specs) => {
+                let name = self.text_of(*n).to_string();
+                lines.push(format!(
+                    "local {name} = require({})",
+                    luau_string(&self.options.std_require)
+                ));
+
+                specs
+            }
+
+            ImportKind::Default(n) | ImportKind::Both(n, _) => {
+                let name = self.text_of(*n).to_string();
+                let message = format!(
+                    "the std has no default export; write `import {{ ... }} from \"{spec}\"`, or `import * as {name} from \"{spec}\"` for the module"
+                );
+                self.diagnose(*n, &message);
+
+                match &i.kind {
+                    ImportKind::Both(_, specs) => specs,
+
+                    _ => return,
+                }
+            }
+
+            ImportKind::Named(specs) | ImportKind::TypeOnly(specs) => specs,
+        };
+
+        for s in specs {
+            let name = self.text_of(s.name).to_string();
+
+            if !names.contains(&name.as_str()) {
+                let message = match crate::std_names::spec_of(&name) {
+                    Some(home) => format!("\"{spec}\" has no `{name}`; it is in \"{home}\""),
+
+                    None => format!("the std has no `{name}`"),
+                };
+                self.diagnose(s.name, &message);
+
+                continue;
+            }
+
+            let Some(alias) = s.alias else {
+                continue;
+            };
+            let local = self.text_of(alias).to_string();
+
+            if AMBIENT.contains(&name.as_str()) {
+                let std = self.std();
+                lines.push(format!("local {local} = {std}.{name}"));
+            }
+
+            if let Some(params) = runtime_type_params(&name) {
+                let std = self.type_std();
+                let args = crate::desugar::strip_bounds(&params);
+                let args = match args == "<>" {
+                    true => String::new(),
+
+                    false => args,
+                };
+                lines.push(format!("type {local}{params} = {std}{name}{args}"));
+            }
+        }
+
+        self.generate(anchor, &lines.join(" "));
+    }
+
     pub(crate) fn import_stmt(&mut self, i: &Import) {
         let anchor = self.byte_start(i.span);
         // The spec as written: `strip_literal` drops a data extension,
@@ -308,6 +428,12 @@ impl<'s> Desugar<'s> {
         // index is built under: the spec the source wrote.
         let target = self.require_literal(&spec);
         let bare = spec.trim_matches(['"', '\'']);
+
+        if let Some(module) = crate::std_names::module_of_spec(bare) {
+            self.std_import(i, bare, module);
+
+            return;
+        }
 
         // `"game"` and `"game:Players"` name services, not modules, so
         // the import binds `game:GetService` calls instead of a

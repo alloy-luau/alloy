@@ -66,7 +66,8 @@ impl State {
             .filter(|n| offset >= n.start && offset <= n.end)
             .collect();
         // Every rendered member name, with the label the reader wrote
-        // when the caret can see it bare.
+        // when the caret can see it bare. The shape fold may already
+        // have turned `Rules_is_win` into its path, `Rules.is_win`.
         let mut shown: Vec<(String, String)> = Vec::new();
         let mut hidden: Vec<String> = Vec::new();
 
@@ -77,7 +78,10 @@ impl State {
                 let rendered = format!("{prefix}_{member}");
 
                 match inside.iter().any(|n| n.path == ns.path) {
-                    true => shown.push((rendered, member.clone())),
+                    true => {
+                        shown.push((rendered, member.clone()));
+                        shown.push((format!("{}.{member}", ns.path), member.clone()));
+                    }
 
                     false => hidden.push(rendered),
                 }
@@ -99,10 +103,17 @@ impl State {
             };
             item["label"] = json!(member);
 
+            // A call keeps its snippet, `is_win(${1:score})$0`, under
+            // the bare name.
+            let bare = |text: Option<&str>| {
+                text.and_then(|t| t.strip_prefix(label.as_str()))
+                    .map_or_else(|| member.clone(), |rest| format!("{member}{rest}"))
+            };
+
             if item.get("textEdit").is_some() {
-                item["textEdit"]["newText"] = json!(member);
+                item["textEdit"]["newText"] = json!(bare(item["textEdit"]["newText"].as_str()));
             } else {
-                item["insertText"] = json!(member);
+                item["insertText"] = json!(bare(item["insertText"].as_str()));
             }
 
             let full = doc

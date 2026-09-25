@@ -14,19 +14,25 @@ pub(crate) fn fold_generic_arity(text: &mut String) {
     }
 }
 
-/// An `Iter` two maps deep prints as its shape, `{ next: (self: any) ->
-/// T? }`, since the std spells it under a second name. It reads as
-/// `Iter<T>`.
+/// The receiver of an `Iter` method prints as its shape, `{ next: (self:
+/// any) -> T? }`. Both read as `Iter<T>`. The std's type function
+/// builds its methods with no parameter names, so its receiver prints
+/// as `{ next: (any) -> T? }` in the first slot. That one reads as
+/// `self: Iter<T>`, the head a method hover folds by.
 pub(crate) fn fold_iter_shapes(text: &mut String) {
-    const HEAD: &str = "{ next: (self: any) -> ";
+    fold_iter_shape(text, "{ next: (self: any) -> ", false);
+    fold_iter_shape(text, "{ next: (any) -> ", true);
+}
+
+fn fold_iter_shape(text: &mut String, head: &str, unnamed: bool) {
     let mut from = 0;
 
-    while let Some(i) = text[from..].find(HEAD) {
+    while let Some(i) = text[from..].find(head) {
         let at = from + i;
         let Some(len) = group_len(&text[at..], '{', '}') else {
             break;
         };
-        let inner = &text[at + HEAD.len()..at + len - 1];
+        let inner = &text[at + head.len()..at + len - 1];
         let Some(element) = inner.trim_end().strip_suffix('?') else {
             from = at + 1;
 
@@ -40,7 +46,11 @@ pub(crate) fn fold_iter_shapes(text: &mut String) {
             continue;
         }
 
-        let name = format!("Iter<{}>", element.trim());
+        let name = match unnamed && text[..at].ends_with('(') {
+            true => format!("self: Iter<{}>", element.trim()),
+
+            false => format!("Iter<{}>", element.trim()),
+        };
         text.replace_range(at..at + len, &name);
         from = at + name.len();
     }
@@ -349,6 +359,21 @@ fn fold_array_alias_once(text: &mut String) {
 mod tests {
     use super::super::{Known, fold};
     use super::*;
+
+    /// Only the first slot of a method is its receiver; an `Iter` in
+    /// another slot keeps no name.
+    #[test]
+    fn an_unnamed_iter_receiver_takes_the_name_self() {
+        let mut text = "chain: ({ next: (any) -> U? }, { next: (any) -> U? }) -> U?".to_string();
+        fold_iter_shapes(&mut text);
+
+        assert_eq!(text, "chain: (self: Iter<U>, Iter<U>) -> U?");
+
+        let mut named = "collect: (self: { next: (self: any) -> X? }) -> X[]".to_string();
+        fold_iter_shapes(&mut named);
+
+        assert_eq!(named, "collect: (self: Iter<X>) -> X[]");
+    }
 
     #[test]
     fn the_arity_report_names_the_alias() {

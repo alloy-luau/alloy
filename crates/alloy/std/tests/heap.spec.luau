@@ -61,6 +61,35 @@ describe("Heap", function()
 		end
 	end)
 
+	it("pops in order from from() and from pushes, with or without a comparator", function()
+		local values = {}
+		for i = 1, 300 do
+			values[i] = (i * 7919) % 211
+		end
+		local sorted = table.clone(values)
+		table.sort(sorted)
+		local desc = table.clone(values)
+		table.sort(desc, function(a, b)
+			return a > b
+		end)
+		local greater = function(a, b)
+			return a > b
+		end
+		local built = { Heap.from(values), Heap.from(values, greater), Heap.new(), Heap.new(greater) }
+		for _, v in values do
+			built[3]:push(v)
+			built[4]:push(v)
+		end
+		for k, h in built do
+			local want = if k % 2 == 1 then sorted else desc
+			local out = {}
+			while not h:is_empty() do
+				table.insert(out, h:pop())
+			end
+			expect(out).toEqual(want)
+		end
+	end)
+
 	it("to_table gives the live table, in heap order", function()
 		local h = Heap.from({ 3, 1, 2 })
 		local t = h:to_table()

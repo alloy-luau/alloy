@@ -22,6 +22,8 @@ pub enum Ty {
     StrList,
     /// A string from a fixed set.
     Choice(&'static [&'static str]),
+    /// A string from a fixed set, or a list of names `suggest` offers.
+    ChoiceOrList(&'static [&'static str]),
 }
 
 /// One key of a table.
@@ -74,6 +76,14 @@ const fn lint_list(name: &'static str, doc: &'static str) -> Key {
         doc,
         suggest: Some(lint_names),
     }
+}
+
+/// Every std name, as `[std] globals` takes them.
+fn std_names() -> Vec<String> {
+    crate::std_names::every_name()
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 /// The groups, then every lint, as a `[lint]` list accepts them.
@@ -723,6 +733,18 @@ pub const TABLES: &[Table] = &[
         open: None,
     },
     Table {
+        name: "std",
+        doc: "How a file reaches the std. `alloy doc std` lists its modules.",
+        keys: &[Key {
+            name: "globals",
+            ty: Ty::ChoiceOrList(&["none", "all"]),
+            default: Some(r#""none""#),
+            doc: "The std names a file writes with no import. `none` means a file imports each one, `import { HashMap } from \"@alloy/std/collections\"`; `all` makes every one ambient; a list makes those names ambient. `Future`, `Result`, `Ok`, `Err`, `Array`, and the operator traits need no import under any value, since a keyword or an operator writes them.",
+            suggest: Some(std_names),
+        }],
+        open: None,
+    },
+    Table {
         name: "mount",
         doc: "Where each folder lands in the DataModel: `alias = [path, mount]`. A tool that reads a Rojo or Argon project file needs no table here; Alloy reads `default.project.json`. A tool with its own format describes the tree here, and this table then wins over any project file. With it, `alloy build` also writes `default.project.json` over the sources. `alias = path`, a bare string, names a folder another mount already carries and gives it an alias alone.",
         keys: &[],
@@ -861,6 +883,17 @@ fn key_schema(k: &Key) -> Value {
         Ty::Choice(values) => {
             s.insert("type".into(), json!("string"));
             s.insert("enum".into(), json!(values));
+        }
+
+        Ty::ChoiceOrList(values) => {
+            let names = k.suggest.map(|f| f()).unwrap_or_default();
+            s.insert(
+                "anyOf".into(),
+                json!([
+                    { "type": "string", "enum": values },
+                    { "type": "array", "items": { "type": "string", "enum": names } }
+                ]),
+            );
         }
 
         Ty::StrList => {

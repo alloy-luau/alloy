@@ -670,7 +670,7 @@ pub struct AliasProblem {
 /// absent and the report names the key to move.
 pub fn misplaced_key_message(key: &str) -> String {
     format!(
-        "`{key}` sits at the top level. Luau reads `.config.luau` under a `luau` table, so this file declares nothing. Move the key into `luau = {{ ... }}`."
+        "`{key}` sits at the top level. Luau reads `.config.luau` under a `luau` table, so it ignores this key. Move the key into `luau = {{ ... }}`."
     )
 }
 
@@ -709,8 +709,8 @@ pub fn alias_problems(root: &Path, config: &Config) -> Vec<AliasProblem> {
         });
     };
 
-    // A `.config.luau` that writes the keys above the `luau` table
-    // declares nothing, so the aliases in it reach no file. The parse
+    // A `.config.luau` that writes a key above the `luau` table loses
+    // it, so the aliases in it reach no file. The parse
     // then falls through to `.luaurc`, which hides the mistake.
     let config_luau = root.join(".config.luau");
 
@@ -1878,10 +1878,23 @@ impl crate::EmitOptions {
     }
 
     /// `imports`, with the project read from the nearest `alloy.toml`.
+    /// One file compiled on its own reads the structs of the modules it
+    /// imports, so an imported struct clones, defaults, and crosses a
+    /// remote the way the project build writes it.
     pub fn imports_for_file(self, path: &Path, source: &str) -> Self {
-        let (from, aliases) = file_context(path);
+        let (from, aliases, config) = project_context(path);
+        let std_globals = config.map(|c| c.std.globals).unwrap_or_default();
+        let imported: Vec<PathBuf> = import_specs(source)
+            .iter()
+            .filter_map(|spec| resolve(spec, &from, &aliases))
+            .filter(|p| is_alloy(p))
+            .collect();
 
-        self.imports(source, &from, &aliases)
+        Self {
+            std_globals,
+            shapes: crate::build::struct_shapes(&imported),
+            ..self.imports(source, &from, &aliases)
+        }
     }
 
     /// Every private member of a struct this file does not declare: the
@@ -1911,23 +1924,27 @@ impl crate::EmitOptions {
 
 /// The absolute path of a file and the aliases of its project.
 fn file_context(path: &Path) -> (PathBuf, Vec<(String, PathBuf)>) {
+    let (from, aliases, _) = project_context(path);
+
+    (from, aliases)
+}
+
+/// `file_context`, with the configuration it read.
+fn project_context(path: &Path) -> (PathBuf, Vec<(String, PathBuf)>, Option<Config>) {
     let dir = path.parent().unwrap_or(Path::new("."));
-    let aliases = match Config::find(dir) {
-        Some(config_path) => match Config::load(&config_path) {
-            Ok(config) => {
-                let root = config_path.parent().unwrap_or(dir);
+    let config = Config::find(dir).and_then(|p| Config::load(&p).ok().map(|c| (p, c)));
+    let aliases = match &config {
+        Some((config_path, config)) => {
+            let root = config_path.parent().unwrap_or(dir);
 
-                aliases(root, &crate::project::Tree::load(root, &config))
-            }
-
-            Err(_) => Vec::new(),
-        },
+            aliases(root, &crate::project::Tree::load(root, config))
+        }
 
         None => Vec::new(),
     };
     let from = normalize(&std::env::current_dir().unwrap_or_default().join(path));
 
-    (from, aliases)
+    (from, aliases, config.map(|(_, c)| c))
 }
 
 /// The specs of a source whose module has no export table: a `.luau`
@@ -2105,6 +2122,25 @@ pub fn missing_import_message(message: &str, path: &Path, source: &str) -> Optio
         .split('\'')
         .next()?;
     let spec = import_that_exports(path, source, name)?;
+
+    // `import type { Item }` binds the type alone; a derive or a call
+    // reads the value, which the type import leaves out.
+    let as_type = source.lines().any(|line| {
+        let line = line.trim_start();
+        let words = |from: &str| {
+            from.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|w| w == name)
+        };
+
+        (line.starts_with("import type") && words(line.split(" from").next().unwrap_or("")))
+            || (line.starts_with("import") && line.contains(&format!("type {name}")))
+    });
+
+    if as_type {
+        return Some(format!(
+            "`{name}` is imported as a type, and this line reads its value, the table its functions live on; import it from \"{spec}\" without `type`"
+        ));
+    }
 
     Some(format!(
         "`{name}` is not imported; \"{spec}\" exports it, so add it to that import"
@@ -2581,8 +2617,11 @@ pub fn import_problems(
         let spec = text(node.path).trim_matches(['"', '\'']).to_string();
 
         // A `.json` or `.toml` import builds a module of its own; the
-        // build reports what is wrong with one.
-        if crate::data::Format::of(&spec).is_some() {
+        // build reports what is wrong with one. The compile reports a
+        // std import, which names no file.
+        if crate::data::Format::of(&spec).is_some()
+            || crate::std_names::module_of_spec(&spec).is_some()
+        {
             continue;
         }
 

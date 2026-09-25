@@ -45,11 +45,16 @@ kilobytes of stack per level, so a raised limit belongs on a thread
 built with a stack to match, ex: `std::thread::Builder::stack_size`.
 A limit of zero refuses everything; there is no "unlimited", because an
 unbounded recursion is the crash this field exists to prevent.
+
+`reserved_keys` lets a table key be a reserved word, `{ in = "src" }`.
+A `.config.aly` sets it: its keys are the keys of `alloy.toml`, and the
+author writes them as that file does. Emit quotes each such key.
 */
 #[derive(Debug, Clone, Copy)]
 pub struct ParseOptions {
     pub definitions: bool,
     pub max_depth: u32,
+    pub reserved_keys: bool,
 }
 
 /// The `max_depth` a default `ParseOptions` takes. A program whose
@@ -94,12 +99,14 @@ impl Default for ParseOptions {
         Self {
             definitions: false,
             max_depth: DEFAULT_DEPTH.load(std::sync::atomic::Ordering::Relaxed),
+            reserved_keys: false,
         }
     }
 }
 
 impl ParseOptions {
-    /// The options a file's name asks for: `.d.luau` and `.d.lua` are definitions
+    /// The options a file's name asks for: `.d.luau` and `.d.lua` are
+    /// definitions, and `.config.aly` takes reserved words as keys.
     pub fn for_path(path: &std::path::Path) -> Self {
         let name = path
             .file_name()
@@ -110,6 +117,7 @@ impl ParseOptions {
             definitions: name.ends_with(".d.luau")
                 || name.ends_with(".d.lua")
                 || name.ends_with(".d.aly"),
+            reserved_keys: name == ".config.aly",
             ..Self::default()
         }
     }
@@ -132,10 +140,12 @@ pub fn parse_with(src: &str, toks: &[Tok], options: ParseOptions) -> Result<Chun
         type_edits: Vec::new(),
         type_names: Vec::new(),
         global_keywords: Vec::new(),
+        reserved_keys: Vec::new(),
         no_method_call: 0,
         in_match_arm: 0,
         pattern_arg: 0,
         value_block: false,
+        value_lines: 0,
     };
 
     let block = p.block()?;
@@ -149,6 +159,7 @@ pub fn parse_with(src: &str, toks: &[Tok], options: ParseOptions) -> Result<Chun
         type_edits: p.type_edits,
         type_names: p.type_names,
         global_keywords: p.global_keywords,
+        reserved_keys: p.reserved_keys,
     })
 }
 
@@ -187,10 +198,12 @@ pub fn parse_lenient(src: &str, toks: &[Tok], options: ParseOptions) -> (Chunk, 
         type_edits: Vec::new(),
         type_names: Vec::new(),
         global_keywords: Vec::new(),
+        reserved_keys: Vec::new(),
         no_method_call: 0,
         in_match_arm: 0,
         pattern_arg: 0,
         value_block: false,
+        value_lines: 0,
     };
 
     let mut stmts = Vec::new();
@@ -229,6 +242,7 @@ pub fn parse_lenient(src: &str, toks: &[Tok], options: ParseOptions) -> (Chunk, 
         type_edits: p.type_edits,
         type_names: p.type_names,
         global_keywords: p.global_keywords,
+        reserved_keys: p.reserved_keys,
     };
 
     (chunk, p.diagnostics)
@@ -253,6 +267,8 @@ struct Parser<'a> {
     /// The `global` keyword of every declaration that wrote one; see
     /// `Chunk::global_keywords`.
     global_keywords: Vec<TokSpan>,
+    /// See `Chunk::reserved_keys`.
+    reserved_keys: Vec<TokSpan>,
     /// Above zero inside the then-branch of a ternary, where `:` closes
     /// the branch instead of opening a method call.
     no_method_call: u32,
@@ -266,6 +282,11 @@ struct Parser<'a> {
     /// value block: `try do ... end` or `async do ... end`. Such a block
     /// may end in an expression, whose value is the block's value.
     value_block: bool,
+    /// Above zero inside Alloy's own value positions: an expression arm
+    /// of a match and the body of a value block. There a string, a `{`,
+    /// or a `[` that opens a line starts the next thing, not a call or an
+    /// index of the line above; Luau code outside keeps Luau's reading.
+    value_lines: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -375,18 +396,6 @@ impl<'a> Parser<'a> {
     */
     fn reserved_binding(&self) -> bool {
         self.at_reserved() && matches!(self.text_at(1), ":" | "," | "=" | ")" | "in")
-    }
-
-    fn reject_reserved(&mut self, name: TokSpan) {
-        let tok = self.toks[name.start as usize];
-        let word = &self.src[tok.start as usize..tok.end as usize];
-
-        if is_alloy_reserved(word) {
-            self.diagnostics.push(ParseError {
-                offset: tok.start as usize,
-                message: format!("`{word}` is a reserved word and cannot be a name"),
-            });
-        }
     }
 
     fn expect_name(&mut self) -> Result<TokSpan, ParseError> {
@@ -568,28 +577,6 @@ impl<'a> Parser<'a> {
 }
 
 /*
-The words that start an Alloy declaration and nothing else. A name cannot
-be one of them: not a local, a parameter, a plain function, or a bare
-expression. After `.` or `:` each is a field, so `t.impl` stays valid.
-
-Six words are left. Each one opens a declaration that no expression
-resembles. Roblox code does name a local `remote`, and such a file must
-rename it; the reservation is a decision of 2026-09-04, taken for a
-simple grammar. `attribute`, `trait`, and `namespace` also name the
-target of an `attribute ... on` list, where the word must read as itself.
-
-Words with a meaning only inside a construct, `client`, `from`, `as`,
-`case`, and so on, are free names, and so are the words
-[`is_contextual`] lists.
-*/
-pub fn is_alloy_reserved(word: &str) -> bool {
-    matches!(
-        word,
-        "trait" | "impl" | "remote" | "macro" | "attribute" | "namespace"
-    )
-}
-
-/*
 The Alloy words a file may also use as a name.
 
 Luau reserves none of them, and each one appears in ordinary Roblox code:
@@ -620,8 +607,12 @@ differs per word:
   `local function destroy(self)` and `self:destroy()` are the name.
 - `after` takes a delay and then `do`, `Parser::after_delay_follows`.
   `after(x)`, `after = 1`, and `after[1] = 2` are the name.
-- `enum`, `struct`, and `interface` declare before a name on the same
-  line. `local enum = t` and `enum.Idle` are the name.
+- `enum`, `struct`, `interface`, `trait`, `impl`, `attribute`, `macro`,
+  and `namespace` declare before a name on the same line, and `remote`
+  before a name or `function`. `local enum = t`, `enum.Idle`, and
+  `local remote = folder.Hit` are the name.
+- `private` and `public` mark a member before a name or `function`.
+  `local private = {}` is the name.
 - `import` opens the statement before `*`, `{`, `type {`, or `Name from`.
   The call `import("m")` is the expression form and stays the keyword,
   because the emit turns it into a `require`; a file that binds a local

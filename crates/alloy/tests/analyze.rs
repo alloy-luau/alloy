@@ -510,6 +510,27 @@ fn two_maps_in_a_chain_keep_the_value_type() {
     );
 }
 
+/// `Iter.map` answered a second alias, then a third, and the third
+/// `map` in a chain gave `any`. Every callback now reads its parameter
+/// type from the step before, however long the chain.
+#[test]
+fn an_iter_chain_keeps_its_element_type_at_any_length() {
+    let src = "local xs = Iter.from([ 1, 2, 3 ])\nlocal last: nil = xs\n    :map(function(n) return tostring(n) end)\n    :map(function(s) return #s > 0 end)\n    :map(function(b) return if b then 1 else 0 end)\n    :map(function(n) return n + 1 end)\n    :map(function(n) return `{n}` end)\n    :next()\nprint(last)\n";
+    let Some(reported) = reports(src, "iter-chain") else {
+        return;
+    };
+    // `any` fits `nil`, so a collapsed chain reports nothing at all.
+    assert_eq!(reported.len(), 1, "{reported:?}");
+    assert!(reported[0].contains("'string?'"), "{reported:?}");
+
+    // A generic function reads the methods of an `Iter<T>`, and a
+    // mapped iterator fits a declared one.
+    analyze(
+        "function lengths<T>(it: Iter<T>): number[]\n    return it:map(function(x) return #tostring(x) end):collect()\nend\n\nlocal names: Iter<string> = Iter.from([ 1 ]):map(function(n) return tostring(n) end)\nprint(lengths(names), names:filter(function(s) return #s > 0 end):count())\n",
+        "iter-generic",
+    );
+}
+
 /// `unwrap_or` on a mapped Result answered `any`, so a fallback of
 /// another type named neither side.
 #[test]
@@ -542,6 +563,83 @@ fn a_type_argument_list_analyzes_as_luau() {
 #[test]
 fn a_mutating_method_chains() {
     analyze(CHAINS, "chains");
+}
+
+/// A bound reaches every type the body writes with the parameter: a
+/// local, an optional local, a loop variable, a cast, and a closure's
+/// parameter and return. A closure with a `T` of its own keeps it bare.
+#[test]
+fn a_bound_reaches_the_types_of_the_body() {
+    analyze(
+        r#"trait Shape
+    function area(self): number
+end
+
+struct Sq
+    side: number
+end
+
+impl Shape for Sq
+    function area(self): number
+        return self.side * self.side
+    end
+end
+
+local function biggest<T: Shape>(xs: { T }): T?
+    local best: T? = nil
+    for _, x: T in xs do
+        local cur: T = x
+        if best == nil or cur:area() > best:area() then
+            best = cur
+        end
+    end
+    local pick = function(a: T?): T?
+        return a
+    end
+    local keep = function<T>(a: T): T
+        return a
+    end
+    local first = (xs[1] :: T)
+    print(first:area(), keep(1))
+    return pick(best)
+end
+
+print(biggest({ new Sq { side = 2 }, new Sq { side = 3 } }))
+"#,
+        "bound-locals",
+    );
+}
+
+/// Luau checks a `return` in a function written in a for-in header
+/// against the function around the loop, so `filter` in a loop header
+/// reported `Expected '()', got 'boolean'`. The check artifact casts
+/// those values; a `return` of the loop body still checks.
+#[test]
+fn a_function_in_a_loop_header_returns_its_own_type() {
+    analyze(
+        r#"local xs = [ 1, 2, 3, 4 ]
+for x in xs:filter(function(v) return v > 2 end) do
+    local n: number = x
+    print(n)
+end
+local function f(): number
+    for x in xs:filter(function(v) return v > 2 end):map(function(v) return v * 2 end) do
+        return x
+    end
+    return 0
+end
+print(f())
+"#,
+        "loop-header",
+    );
+
+    let Some(bad) = reports(
+        "local xs = [ 1 ]\nlocal function f(): number\n    for x in xs:filter(function(v) return v > 2 end) do\n        return \"no\"\n    end\n    return 0\nend\nprint(f(), xs)\n",
+        "loop-body",
+    ) else {
+        return;
+    };
+    assert_eq!(bad.len(), 1, "{bad:?}");
 }
 
 /// `@derive(Serialize)` writes `serialize`, so the struct meets a

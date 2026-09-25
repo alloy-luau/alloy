@@ -351,6 +351,9 @@ fn alloy_toml(a: &Answers) -> String {
          wait_timeout = 5\n\
          # std_require = \"@alloy\"\n\
          # erase_type_imports = false\n\
+         \n\
+         [std]\n\
+         globals = \"none\"\n\
          \n",
     );
     out.push_str(a.preset.toml.trim_end());

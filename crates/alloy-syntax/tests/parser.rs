@@ -1221,17 +1221,26 @@ fn a_clause_needs_a_kind_word() {
     rejects("attribute s on impl as\n    requires function Start(self)\n");
 }
 
-/// A word still reserved reports when a name takes it. Six are left, and
-/// each opens a declaration no expression resembles.
+/// A declaration word is a name off its declaration: Roblox code names
+/// a local `remote`, and Luau reserves none of these words.
 #[test]
-fn a_reserved_word_still_reports() {
-    for word in ["trait", "impl", "remote", "macro", "attribute", "namespace"] {
-        let src = format!("local {word} = 1\n");
-        assert!(
-            !reserved_reports(&src).is_empty(),
-            "{src:?} reported nothing"
-        );
+fn a_declaration_word_is_a_name() {
+    for word in [
+        "trait",
+        "impl",
+        "remote",
+        "macro",
+        "attribute",
+        "namespace",
+        "private",
+        "public",
+    ] {
+        round_trip(&format!(
+            "local {word} = 1\n{word} = {word} + 1\nprint({word}, t.{word})\n"
+        ));
     }
+    // A field may take the name of a visibility word.
+    round_trip("struct P as\n    private: number\n    public hp: number\nend\n");
 }
 
 /// `new Thing():method()` and `new Thing().field` chain off the
@@ -1493,24 +1502,12 @@ fn namespaces_nest() {
     round_trip("namespace Outer as\n    private namespace Inner as\n    end\nend\n");
 }
 
-/// `namespace` stays contextual before anything but `Name as`, and it
-/// is a reserved word for a binding.
+/// `namespace` declares only before `Name as`; a binding is a name.
 #[test]
-fn namespace_is_contextual_and_reserved() {
+fn namespace_is_contextual() {
     round_trip("local t = { namespace = 1 }\nprint(t.namespace)\n");
+    round_trip("local namespace = 1\n");
     rejects("namespace Math as\n");
-
-    // A binding by the name reports the way `struct` and `enum` do.
-    let src = "local namespace = 1\n";
-    let lexed = alloy_syntax::lexer::lex(src).unwrap();
-    let (_, diagnostics) =
-        alloy_syntax::parser::parse_lenient(src, &lexed.toks, Default::default());
-    assert_eq!(diagnostics.len(), 1);
-    assert!(
-        diagnostics[0].message.contains("reserved word"),
-        "{}",
-        diagnostics[0].message
-    );
 }
 
 /*

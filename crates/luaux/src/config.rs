@@ -21,7 +21,7 @@
 
 use crate::roblox;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -311,10 +311,6 @@ pub struct Config {
     pub fragment: Option<String>,
     /// `[factory] interpolate` — how interpolated text is encoded.
     pub interpolate: Interpolate,
-    /// Alloy patch: names the caller knows are bound, on top of what the
-    /// resolver finds by parsing. Alloy's parser sees `import` and `struct`
-    /// bindings that full_moon does not.
-    pub extra_bound: HashSet<String>,
     /// `[factory] merge` — how spread groups combine.
     ///
     /// Unset, the inlined `__luaux_merge`: string keys last-wins so source order
@@ -524,7 +520,6 @@ impl Default for Config {
             backend: BackendKind::Element,
             fragment: Some("React.Fragment".to_string()),
             interpolate: arrangement_defaults(BackendKind::Element).0,
-            extra_bound: HashSet::new(),
             merge: None,
         }
     }
@@ -1104,10 +1099,7 @@ fn validate_factory(key: &str, value: &str, probe: &str) -> Result<(), ConfigErr
         });
     }
 
-    if full_moon::parse_fallible(probe, full_moon::LuaVersion::luau())
-        .into_result()
-        .is_err()
-    {
+    if crate::compile::parse_error(probe).is_some() {
         return Err(ConfigError {
             message: format!(
                 "luaux.toml: [factory] {key} = \"{value}\" is not something luaux can emit; \
@@ -1201,10 +1193,19 @@ fn validate_create(create: &str) -> Result<(), ConfigError> {
     // build nothing.
     let probe = format!("local _ = ({create}(\"Frame\")({{}}))");
 
-    if full_moon::parse_fallible(&probe, full_moon::LuaVersion::luau())
-        .into_result()
-        .is_err()
-    {
+    // Alloy patch: a colon has to be the last separator, since Luau calls
+    // `a:b` only with its arguments. Alloy reads `scope:New` alone as a
+    // method reference, so `scope:New.Now` parses there, and names nothing
+    // a factory means.
+    let colon_inside = alloy_syntax::lexer::lex(create).is_ok_and(|lexed| {
+        let toks = &lexed.toks;
+
+        toks.iter()
+            .enumerate()
+            .any(|(i, t)| t.kind == alloy_syntax::lexer::TokKind::Colon && i + 2 != toks.len())
+    });
+
+    if colon_inside || crate::compile::parse_error(&probe).is_some() {
         return reject("is not something luaux can call");
     }
 
@@ -1310,12 +1311,7 @@ mod tests {
             // Acceptance has to mean the emitted call parses, not merely that
             // the string survived the config.
             let probe = format!("local _ = ({create}(\"Frame\")({{}}))");
-            assert!(
-                full_moon::parse_fallible(&probe, full_moon::LuaVersion::luau())
-                    .into_result()
-                    .is_ok(),
-                "{create}"
-            );
+            assert!(crate::compile::parse_error(&probe).is_none(), "{create}");
         }
     }
 

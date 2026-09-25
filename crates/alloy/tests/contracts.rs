@@ -394,8 +394,8 @@ fn the_members_a_gap_names_compile() {
         "  requires public function Start(self)\n",
         "  requires private field state: number\n",
         "end\n\n",
-        "struct S as\n  x: number\nend\n\n",
-        "@service\nimpl S as\nend\n\nprint(S)\n"
+        "struct S\n  x: number\nend\n\n",
+        "@service\nimpl S\nend\n\nprint(S)\n"
     );
     let out = compile(src);
     let mut text = src.to_string();

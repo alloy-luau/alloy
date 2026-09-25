@@ -523,22 +523,6 @@ pub(crate) fn pattern_field_edits(
     out
 }
 
-/// Whether a document's `owner` is the struct a field rename reaches: the
-/// document declares the struct, or imports the name and declares no
-/// type of its own under it.
-pub(crate) fn reaches_struct(d: &Doc, owner: &str) -> bool {
-    // A namespace member is declared under its path, `Geo.Shape`.
-    let named = |n: &str| n == owner || n.rsplit('.').next() == Some(owner);
-    let declares = |kind: &str| {
-        d.decls
-            .iter()
-            .any(|x| named(&x.name) && (kind.is_empty() || x.hover.contains(&format!("{kind} "))))
-    };
-
-    declares("struct")
-        || (!declares("") && imports::bound_names(&d.source).iter().any(|n| n == owner))
-}
-
 /// The span of a field's name in the declaration that starts at `from`:
 /// `x: number` in a struct body, or in a record type. The search stops at
 /// the next statement that starts a line.

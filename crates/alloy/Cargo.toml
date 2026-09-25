@@ -30,10 +30,15 @@ serde = { version = "1", features = ["derive"] }
 toml = { version = "1", features = ["preserve_order"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 dirs = "6"
+
+# The terminal and the Luau VM have no wasm build, and the playground
+# needs neither: it reads no terminal and no project file.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 terminal_size = "0.4"
 # The prompts of `alloy init --interactive`. Pinned: the wizard styles
 # itself with the crate's render config, which moves between releases.
 inquire = { version = "0.9.4", default-features = false, features = ["crossterm"] }
+# The VM that runs a `.config.aly`.
 mlua = { version = "0.11.6", features = ["luau"] }
 
 [lints]

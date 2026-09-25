@@ -49,6 +49,26 @@ impl<'s> Desugar<'s> {
         // the namespace's own name.
         let target_name = self.impl_target_name(i.target);
         let start = self.byte_start(i.span);
+
+        // The methods land on the struct's table, which is a nil local
+        // until the struct's line runs: the file failed at load.
+        if self
+            .struct_at
+            .get(&target_name)
+            .is_some_and(|at| *at > start)
+        {
+            let shown = self.display_name(&target_name);
+            let kind = if self.enums.contains_key(&target_name) {
+                "enum"
+            } else {
+                "struct"
+            };
+            let message = format!(
+                "`{shown}` is declared below this impl; move the impl below the {kind}, since its methods land on the {kind}'s table"
+            );
+            self.diagnose(i.target, &message);
+        }
+
         // The header runs to the end of the target, and past `<T>` when
         // the impl declares parameters: Luau has no such header.
         let head_tok = i
@@ -293,6 +313,9 @@ impl<'s> Desugar<'s> {
                     }
 
                     Some("native" | "checked" | "deprecated") | None => {}
+
+                    // The lints read `@allow`; Luau reads none of it.
+                    Some("allow") => cut.push((range.0, range.1, String::new())),
 
                     // An attribute that reaches no function is a
                     // diagnostic already, and Luau reads none of it.
@@ -635,10 +658,22 @@ impl<'s> Desugar<'s> {
 
         self.struct_methods.insert(name.to_string(), sigs);
 
+        // The derives write instance methods too; the alias lists them,
+        // or `b:clone()` on a `Box<number>` finds no key.
+        let whole = format!("{name}{generics}");
+
+        if self.cloneable.contains(name) {
+            members.push(format!("read clone: (self: {whole}) -> {whole}"));
+        }
+
+        if self.serializable.contains(name) {
+            members.push(format!("read to_table: (self: {whole}) -> any"));
+            members.push(format!("read serialize: (self: {whole}) -> any"));
+        }
+
         // `function swap(self): Pair<B, A>` would make the alias name
         // itself with other arguments, which Luau rejects. The metatable
         // form takes those structs back.
-        let whole = format!("{name}{generics}");
 
         if members.iter().any(|m| names_other_args(m, name, &whole)) {
             return None;
@@ -679,10 +714,32 @@ impl<'s> Desugar<'s> {
             // A width packs a number. The wire spec read the field's own
             // type and dropped the width, so an array field took one and
             // crossed at 64 bits.
-            if let Some(base) = super::remotes::width_misfit(self.text_of(f.ty).trim()) {
+            let fty = self.text_of(f.ty).trim();
+            let seen = self
+                .alias_values
+                .get(fty.trim_end_matches('?').trim())
+                .cloned();
+
+            if let Some(base) = super::remotes::width_misfit(seen.as_deref().unwrap_or(fty)) {
                 hits.push((
                     f.name,
                     format!("`@{first}` packs a `number`; field `{fname}` is `{base}`"),
+                ));
+            }
+
+            // A default the width cannot hold fails every value built
+            // without the field, the way a remote default does.
+            if let (Some(d), Some((lo, hi))) = (&f.default, super::remotes::width_range(first))
+                && let Ok(v) = self
+                    .text_of(d.span())
+                    .replace(['_', ' '], "")
+                    .parse::<f64>()
+                && (v < lo || v > hi || v.fract() != 0.0)
+            {
+                let shown = self.text_of(d.span()).to_string();
+                hits.push((
+                    d.span(),
+                    format!("`@{first}` holds a whole number from {lo} to {hi}; the default of `{fname}`, {shown}, does not fit"),
                 ));
             }
 
@@ -701,6 +758,7 @@ impl<'s> Desugar<'s> {
 
     pub(crate) fn struct_decl(&mut self, st: &StructDecl) {
         self.check_field_widths(st);
+        self.check_serde_attrs(st);
         let name = self.decl_name(st.name);
         let start = self.byte_start(st.span);
         let end_tok = self.toks[st.span.end as usize - 1];
@@ -725,6 +783,8 @@ impl<'s> Desugar<'s> {
         let split = self.has_private_view(&name);
         let mut public_types = Vec::new();
         let mut private_types = Vec::new();
+        // Each `@alias` key and the field it stands for.
+        let mut aliases: Vec<(String, String)> = Vec::new();
 
         for f in &st.fields {
             let fname = self.text_of(f.name).to_string();
@@ -747,6 +807,21 @@ impl<'s> Desugar<'s> {
                 private_types.push(format!("{modifier}{fname}: {ty}"));
             } else {
                 public_types.push(format!("{modifier}{fname}: {ty}"));
+            }
+
+            // `@alias("hp")`: another key that reads and writes the same
+            // slot, so the type holds it too.
+            for alias in self.attr_strings(&f.attributes, "alias") {
+                let key = crate::data::luau_key(&alias);
+                field_types.push(format!("{modifier}{key}: {ty}"));
+
+                if f.visibility.is_some_and(|v| self.text_of(v) == "private") {
+                    private_types.push(format!("{modifier}{key}: {ty}"));
+                } else {
+                    public_types.push(format!("{modifier}{key}: {ty}"));
+                }
+
+                aliases.push((alias, fname.clone()));
             }
 
             if let Some(dv) = &f.default {
@@ -900,6 +975,7 @@ impl<'s> Desugar<'s> {
             if self.text_of(aname) == "derive" {
                 for arg in &a.args {
                     let which = self.text_of(arg.span()).to_string();
+                    self.check_std_name(arg.span(), &which);
                     derives_debug |= which == "Debug";
 
                     // `Eq` and `PartialEq` write the same `__eq`; naming
@@ -921,6 +997,7 @@ impl<'s> Desugar<'s> {
                         arg.span(),
                         &field_names,
                         &st.fields,
+                        &st.attributes,
                     ));
                 }
             }
@@ -961,17 +1038,41 @@ impl<'s> Desugar<'s> {
         // The check artifact leaves it out: the struct type already
         // rejects an unknown key, and a `__newindex` on the metatable
         // stops the solver from reducing a mapped type over the struct.
-        if !self.options.check
-            && st
-                .attributes
-                .iter()
-                .any(|a| a.name.is_some_and(|n| self.text_of(n) == "sealed"))
-        {
+        let sealed = st
+            .attributes
+            .iter()
+            .any(|a| a.name.is_some_and(|n| self.text_of(n) == "sealed"));
+
+        // `@alias("hp")` on `health`: `x.hp` reads and writes the slot
+        // of `health` itself. The alias key is never a key of the
+        // value, so both metamethods see every use of it.
+        let alias_map = match aliases.is_empty() || self.options.check {
+            true => String::new(),
+
+            false => {
+                let pairs: Vec<String> = aliases
+                    .iter()
+                    .map(|(a, f)| format!("{} = {}", crate::data::luau_key(a), luau_string(f)))
+                    .collect();
+                tail.push_str(&format!(
+                    " local {name}__alias = {{ {} }} {name}.__index = function(t, k) local a = {name}__alias[k] if a ~= nil then return rawget(t, a) end return {name}[k] end",
+                    pairs.join(", ")
+                ));
+
+                format!("local a = {name}__alias[k] if a ~= nil then rawset(t, a, v) return end ")
+            }
+        };
+
+        if !self.options.check && sealed {
             let keys: Vec<String> = field_names.iter().map(|f| format!("{f} = true")).collect();
             let shown = luau_string(&self.display_name(&name));
             tail.push_str(&format!(
-                " {name}.__newindex = function(t, k, v) if ({{ {} }})[k] then rawset(t, k, v) else error(string.format(\"%s has no field %s\", {shown}, tostring(k)), 2) end end",
+                " {name}.__newindex = function(t, k, v) {alias_map}if ({{ {} }})[k] then rawset(t, k, v) else error(string.format(\"%s has no field %s\", {shown}, tostring(k)), 2) end end",
                 keys.join(", "),
+            ));
+        } else if !alias_map.is_empty() {
+            tail.push_str(&format!(
+                " {name}.__newindex = function(t, k, v) {alias_map}rawset(t, k, v) end"
             ));
         }
 
@@ -1112,9 +1213,11 @@ impl<'s> Desugar<'s> {
             let Some(n) = a.name else { continue };
             let name = self.text_of(n).to_string();
 
+            // `@wire(buffer)` names a mode with a bare word, which would
+            // emit the `buffer` library; the runtime reads `pack` instead.
             if matches!(
                 name.as_str(),
-                "derive" | "test" | "native" | "checked" | "deprecated" | "cfg"
+                "derive" | "test" | "native" | "checked" | "deprecated" | "cfg" | "allow" | "wire"
             ) {
                 continue;
             }
@@ -1137,6 +1240,7 @@ impl<'s> Desugar<'s> {
         at: TokSpan,
         fields: &[String],
         decls: &[Field],
+        struct_attrs: &[Attr],
     ) -> String {
         // The check artifact types the receiver, as an impl method's self.
         // A derive reads every field, and a `write` field is not
@@ -1160,6 +1264,24 @@ impl<'s> Desugar<'s> {
         };
         let (a, b, s_, this) = (view("a"), view("b"), view("s"), view("self"));
         let tn = if self.options.check { ": any" } else { "" };
+        // A named derived method of a generic struct takes the struct's
+        // parameters, `Box.clone<T>(self: Box<T>): Box<T>`; a bare `Box`
+        // is no type there.
+        let g = match self.struct_generics.get(name) {
+            Some(t) if self.options.check => super::modules::type_arguments(t),
+
+            _ => String::new(),
+        };
+        let gself = match g.is_empty() {
+            true => sn.clone(),
+
+            false => format!(": {name}{g}"),
+        };
+        let gret = if self.options.check {
+            format!(": {name}{g}")
+        } else {
+            String::new()
+        };
 
         // A derive writes these methods on every value; a field of the
         // name would hide the method.
@@ -1169,6 +1291,14 @@ impl<'s> Desugar<'s> {
             "Debug" => &["debug"],
 
             "Serialize" => &["to_table", "serialize"],
+
+            "Deserialize" => &["from_table"],
+
+            "Default" => &["default"],
+
+            "Eq" | "PartialEq" => &["eq"],
+
+            "Ord" => &["lt", "le"],
 
             _ => &[],
         };
@@ -1185,9 +1315,25 @@ impl<'s> Desugar<'s> {
         }
         match which {
             "Eq" | "PartialEq" => {
+                // A scalar compares with `==`; a field that holds a table,
+                // an array or a map, compares by content, as Rust's derive
+                // compares a Vec. `==` on two arrays asked for identity.
+                let std = self.std();
                 let cmp: Vec<String> = fields
                     .iter()
-                    .map(|f| format!("{a}.{f} == {b}.{f}"))
+                    .map(|f| {
+                        let scalar = decls
+                            .iter()
+                            .find(|d| self.text_of(d.name) == f.as_str())
+                            .map(|d| self.text_of(d.ty).trim().trim_end_matches('?').trim())
+                            .is_some_and(|t| matches!(t, "number" | "string" | "boolean"));
+
+                        match scalar {
+                            true => format!("{a}.{f} == {b}.{f}"),
+
+                            false => format!("{std}.deep_eq({a}.{f}, {b}.{f})"),
+                        }
+                    })
                     .collect();
                 let body = if cmp.is_empty() {
                     "true".to_string()
@@ -1195,7 +1341,11 @@ impl<'s> Desugar<'s> {
                     cmp.join(" and ")
                 };
 
-                format!("{name}.__eq = function(a{sn}, b{sn}) return {body} end")
+                // The `Eq` bound asks for `eq`, so the derive writes the
+                // method beside the metamethod, the way an `impl` does.
+                format!(
+                    "{name}.__eq = function(a{sn}, b{sn}) return {body} end {name}.eq = {name}.__eq"
+                )
             }
 
             // Field by field, in declaration order: the first field that
@@ -1207,8 +1357,10 @@ impl<'s> Desugar<'s> {
                     .collect();
                 let steps = steps.join(" ");
 
+                // The `Ord` bound asks for `lt` and `le`, the methods an
+                // `impl Ord` writes.
                 format!(
-                    "{name}.__lt = function(a{sn}, b{sn}) {steps} return false end {name}.__le = function(a{sn}, b{sn}) {steps} return true end"
+                    "{name}.__lt = function(a{sn}, b{sn}) {steps} return false end {name}.__le = function(a{sn}, b{sn}) {steps} return true end {name}.lt = {name}.__lt {name}.le = {name}.__le"
                 )
             }
 
@@ -1233,17 +1385,115 @@ impl<'s> Desugar<'s> {
             "Clone" => {
                 // The checker reads `setmetatable` of a metatable type as a
                 // new shape; the annotation keeps the struct's own.
-                let ret = if self.options.check {
-                    format!(": {name}")
-                } else {
-                    String::new()
-                };
+                let ret = &gret;
+                // A field clones the way Rust's derive clones it: a struct
+                // that derives Clone through its own `clone`, an array or
+                // a table as a new one. Any other value is shared.
+                let mut deep = String::new();
+
+                for f in decls {
+                    let fname = self.text_of(f.name).to_string();
+                    let ty = self.text_of(f.ty).trim().to_string();
+                    let (inner, optional) = match ty.strip_suffix('?') {
+                        Some(t) => (t.trim().to_string(), true),
+
+                        None => (ty.clone(), false),
+                    };
+                    let field = format!("v.{fname}");
+                    let copy = match self.clone_of(&inner, &field) {
+                        Some(copy) => copy,
+
+                        None => continue,
+                    };
+
+                    deep.push_str(&match optional {
+                        true => format!(" if {field} ~= nil then {field} = {copy} end"),
+
+                        false => format!(" {field} = {copy}"),
+                    });
+                }
+
                 let value = self.any_cast(&format!("setmetatable(table.clone(self), {name})"));
 
-                format!("function {name}.clone(self{sn}){ret} return {value} end")
+                match deep.is_empty() {
+                    true => {
+                        format!("function {name}.clone{g}(self{gself}){ret} return {value} end")
+                    }
+
+                    false => format!(
+                        "function {name}.clone{g}(self{gself}){ret} local v = {}{deep} return v end",
+                        self.any_cast(&format!("setmetatable(table.clone(self), {name})"))
+                    ),
+                }
             }
 
-            "Serialize" => {
+            "Default" => {
+                let ret = &gret;
+                let mut parts: Vec<String> = Vec::new();
+
+                for f in decls {
+                    // The constructor writes a default the field declares.
+                    if f.default.is_some() {
+                        continue;
+                    }
+
+                    let fname = self.text_of(f.name).to_string();
+                    let ty = self.text_of(f.ty).trim().to_string();
+
+                    match self.zero_of(&ty) {
+                        Some(Some(value)) => parts.push(format!("{fname} = {value}")),
+
+                        Some(None) => {}
+
+                        None => {
+                            let message = format!(
+                                "`@derive(Default)` needs a starting value for `{fname}: {ty}`; write one, `{fname}: {ty} = ...`, or derive Default on the type"
+                            );
+                            self.diagnose(f.name, &message);
+                        }
+                    }
+                }
+
+                // A generic struct's table is still being typed here, and
+                // Luau refuses the fields table against the raw
+                // constructor's own `T`; the table casts, and `default<T>`
+                // names the result.
+                let fields = format!("{{ {} }}", parts.join(", "));
+                let fields = match g.is_empty() {
+                    true => fields,
+
+                    false => self.any_cast(&fields),
+                };
+                let value = format!("{}({fields})", self.raw_ctor(name));
+
+                // `T` sits in the result alone, which a call site cannot
+                // fill from `local b: Box<number> =`; a generic default
+                // answers `any` and the binding's annotation types it.
+                match g.is_empty() {
+                    true => format!("function {name}.default(){ret} return {value} end"),
+
+                    false => format!(
+                        "function {name}.default() return {} end",
+                        self.any_cast(&value)
+                    ),
+                }
+            }
+
+            "Serialize" | "Deserialize" => {
+                // A struct that derives both reads its fields once for
+                // the reports; the second derive writes its half alone.
+                let report = which == "Serialize" || !self.serializable.contains(name);
+                // The container options, serde's: every key under one
+                // case, and a table that holds no key the struct lacks.
+                let rename_all = self
+                    .attr_strings(struct_attrs, "rename_all")
+                    .into_iter()
+                    .next();
+                let deny = struct_attrs.iter().any(|a| {
+                    a.name
+                        .is_some_and(|n| self.text_of(n) == "deny_unknown_fields")
+                });
+                let mut known: Vec<String> = Vec::new();
                 let mut to = Vec::new();
                 let mut from = Vec::new();
                 let mut keys: Vec<(String, String)> = Vec::new();
@@ -1261,10 +1511,10 @@ impl<'s> Desugar<'s> {
 
                     // The serializer writes what a type names, and `~T`
                     // names what a value is not.
-                    if self.has_negation(f.ty) {
+                    if report && self.has_negation(f.ty) {
                         let ty = self.text_of(f.ty).to_string();
                         let message = format!(
-                            "a struct that derives Serialize writes each field's type: `{fname}` has type `{ty}`, a negation; name the types it holds, or mark it @skip"
+                            "a struct that derives {which} writes each field's type: `{fname}` has type `{ty}`, a negation; name the types it holds, or mark it @skip"
                         );
                         self.diagnose(f.ty, &message);
                     }
@@ -1281,10 +1531,20 @@ impl<'s> Desugar<'s> {
 
                             crate::data::literal_text(text).unwrap_or_else(|| text.to_string())
                         })
-                        .unwrap_or(fname.clone());
+                        .unwrap_or_else(|| {
+                            rename_all
+                                .as_deref()
+                                .and_then(|style| rename_case(&fname, style))
+                                .unwrap_or(fname.clone())
+                        });
+                    let aliases = self.attr_strings(&f.attributes, "alias");
+                    known.push(key.clone());
+                    known.extend(aliases.iter().cloned());
 
                     // Two fields under one key: the table holds one.
-                    if let Some((_, other)) = keys.iter().find(|(k, _)| *k == key) {
+                    if let Some((_, other)) = keys.iter().find(|(k, _)| *k == key)
+                        && report
+                    {
                         let message = format!(
                             "`{other}` and `{fname}` serialize under one key, `{key}`, and the derived table keeps one; give one of them another `@rename`"
                         );
@@ -1295,44 +1555,62 @@ impl<'s> Desugar<'s> {
                     // A key that is no Luau name, `regen-per-second` or
                     // `end`, goes in brackets on both sides.
                     let key = crate::data::luau_key(&key);
-                    let read = match key.starts_with('[') {
-                        true => format!("t{key}"),
+                    let at_key = |k: &str| match k.starts_with('[') {
+                        true => format!("t{k}"),
 
-                        false => format!("t.{key}"),
+                        false => format!("t.{k}"),
+                    };
+                    // An alias is another key the table may hold the
+                    // field under: the field's own key wins, and the last
+                    // alias is the fallback. An `else nil` would type the
+                    // read as nil and fail a field that is not optional.
+                    let read = match aliases.split_last() {
+                        None => at_key(&key),
+
+                        Some((last, rest)) => {
+                            let mut chain = format!("(if {0} ~= nil then {0}", at_key(&key));
+
+                            for alias in rest {
+                                let other = at_key(&crate::data::luau_key(alias));
+                                chain.push_str(&format!(" elseif {other} ~= nil then {other}"));
+                            }
+
+                            chain.push_str(&format!(
+                                " else {})",
+                                at_key(&crate::data::luau_key(last))
+                            ));
+                            chain
+                        }
                     };
                     let field = format!("{this}.{fname}");
-                    // A field of a struct that derives Serialize goes
-                    // through that struct's own pair, both ways.
-                    let ty = self.text_of(f.ty).trim();
-                    let (inner, optional) = match ty.strip_suffix('?') {
-                        Some(t) => (t.trim(), true),
+                    let ty = self.text_of(f.ty).trim().to_string();
+                    let (out, back) = (
+                        self.serde_of("Serialize", &ty, &field, 0),
+                        self.serde_of("Deserialize", &ty, &read, 0),
+                    );
+                    // A key an older save lacks reads nil, and the
+                    // constructor then writes the field's default; a
+                    // rebuild of the missing value would raise instead.
+                    let back = match back {
+                        // A required field's slot takes no nil, so the
+                        // guarded read casts; the table from JSON is
+                        // untyped either way.
+                        Some(b) if !ty.ends_with('?') => {
+                            let guarded = format!("(if {read} == nil then nil else {b})");
 
-                        None => (ty, false),
-                    };
+                            match f.default.is_some() {
+                                true => guarded,
 
-                    if self.serializable.contains(inner) {
-                        let (out, back) = (
-                            format!("{inner}.to_table({field})"),
-                            format!("{inner}.from_table({read})"),
-                        );
-
-                        match optional {
-                            true => {
-                                to.push(format!("{key} = if {field} == nil then nil else {out}"));
-                                from.push(format!(
-                                    "{fname} = if {read} == nil then nil else {back}"
-                                ));
-                            }
-
-                            false => {
-                                to.push(format!("{key} = {out}"));
-                                from.push(format!("{fname} = {back}"));
+                                false => self.any_cast(&guarded),
                             }
                         }
-                    } else {
-                        to.push(format!("{key} = {field}"));
-                        from.push(format!("{fname} = {read}"));
-                    }
+
+                        Some(b) => b,
+
+                        None => read,
+                    };
+                    to.push(format!("{key} = {}", out.unwrap_or(field)));
+                    from.push(format!("{fname} = {back}"));
                 }
 
                 // `serialize` is the name the `Serialize` bound asks
@@ -1340,12 +1618,50 @@ impl<'s> Desugar<'s> {
                 // `T: Serialize` and both names give one table.
                 let ret = if self.options.check { ": any" } else { "" };
 
-                format!(
-                    "function {name}.to_table(self{sn}) return {{ {} }} end function {name}.from_table(t{tn}) return {}({{ {} }}) end function {name}.serialize(self{sn}){ret} return {name}.to_table(self) end",
-                    to.join(", "),
-                    self.raw_ctor(name),
-                    from.join(", ")
-                )
+                match which {
+                    "Serialize" => format!(
+                        "function {name}.to_table{g}(self{gself}) return {{ {} }} end function {name}.serialize{g}(self{gself}){ret} return {name}.to_table(self) end",
+                        to.join(", ")
+                    ),
+
+                    _ => {
+                        // `@deny_unknown_fields`: a key the struct neither
+                        // names nor aliases raises, as serde refuses one.
+                        let check = match deny {
+                            true => {
+                                let keys: Vec<String> = known
+                                    .iter()
+                                    .map(|k| format!("{} = true", crate::data::luau_key(k)))
+                                    .collect();
+                                let shown = luau_string(&self.display_name(name));
+
+                                format!(
+                                    "for k in pairs(t) do if not ({{ {} }})[k] then error(string.format(\"%s has no field %s\", {shown}, tostring(k)), 2) end end ",
+                                    keys.join(", ")
+                                )
+                            }
+
+                            false => String::new(),
+                        };
+
+                        // The return names the struct: inferred, a struct
+                        // with a `next: Node?` field read as `Node?`.
+                        // A generic struct's `from_table` answers `any`, as
+                        // its `default` does: `T` is in the result alone.
+                        let value = format!("{}({{ {} }})", self.raw_ctor(name), from.join(", "));
+
+                        match g.is_empty() {
+                            true => format!(
+                                "function {name}.from_table(t{tn}){gret} {check}return {value} end"
+                            ),
+
+                            false => format!(
+                                "function {name}.from_table(t{tn}) {check}return {} end",
+                                self.any_cast(&value)
+                            ),
+                        }
+                    }
+                }
             }
 
             other => {
@@ -1355,6 +1671,311 @@ impl<'s> Desugar<'s> {
                 String::new()
             }
         }
+    }
+
+    /// serde's options, where they can go wrong: `@rename_all` and
+    /// `@deny_unknown_fields` shape the tables the derives write and
+    /// read, and an `@alias` key must name no other slot.
+    fn check_serde_attrs(&mut self, st: &StructDecl) {
+        let derives = |which: &str| {
+            st.attributes.iter().any(|a| {
+                a.name.is_some_and(|n| self.text_of(n) == "derive")
+                    && a.args.iter().any(|x| self.text_of(x.span()) == which)
+            })
+        };
+        let (ser, de) = (derives("Serialize"), derives("Deserialize"));
+        let mut hits: Vec<(TokSpan, String)> = Vec::new();
+
+        for a in &st.attributes {
+            let Some(n) = a.name else { continue };
+
+            match self.text_of(n) {
+                "rename_all" if !ser && !de => hits.push((
+                    a.span,
+                    "`@rename_all` sets the keys `Serialize` and `Deserialize` use; derive one of them".to_string(),
+                )),
+
+                "deny_unknown_fields" if !de => hits.push((
+                    a.span,
+                    "`@deny_unknown_fields` checks the table `Deserialize` reads; derive Deserialize".to_string(),
+                )),
+
+                _ => {}
+            }
+        }
+
+        let names: Vec<&str> = st.fields.iter().map(|f| self.text_of(f.name)).collect();
+        let mut taken: Vec<String> = Vec::new();
+
+        for f in &st.fields {
+            for alias in self.attr_strings(&f.attributes, "alias") {
+                let at = f
+                    .attributes
+                    .iter()
+                    .find(|a| a.name.is_some_and(|n| self.text_of(n) == "alias"))
+                    .map_or(f.name, |a| a.span);
+
+                if names.contains(&alias.as_str()) {
+                    hits.push((
+                        at,
+                        format!("`{alias}` is a field of this struct; an alias names another key"),
+                    ));
+                } else if taken.contains(&alias) {
+                    hits.push((at, format!("two fields take the alias `{alias}`; keep one")));
+                }
+
+                taken.push(alias);
+            }
+        }
+
+        for (at, message) in hits {
+            self.diagnose(at, &message);
+        }
+    }
+
+    /// The string arguments of every `@name(...)` in a list, as the text
+    /// each literal stands for.
+    pub(crate) fn attr_strings(&self, attrs: &[Attr], name: &str) -> Vec<String> {
+        attrs
+            .iter()
+            .filter(|a| a.name.is_some_and(|n| self.text_of(n) == name))
+            .flat_map(|a| a.args.iter())
+            .filter_map(|e| crate::data::literal_text(self.text_of(e.span())))
+            .collect()
+    }
+
+    /*
+    The value a serde half writes for a field of type `ty` read at `x`, or
+    `None` to copy it as it is. A struct that derives the half goes
+    through its own function, an array maps its items, and a map or a set
+    is rebuilt. A table from JSON or a DataStore has no metatable, so
+    without this a loaded array had no `push` and a loaded struct no
+    methods.
+    */
+    fn serde_of(&mut self, which: &str, ty: &str, x: &str, depth: usize) -> Option<String> {
+        let ty = ty.trim();
+
+        if let Some(inner) = ty.strip_suffix('?') {
+            let value = self.serde_of(which, inner, x, depth)?;
+
+            return Some(format!("if {x} == nil then nil else {value}"));
+        }
+
+        let derived = match which {
+            "Serialize" => self.serializable.contains(ty) || self.star_derives(ty, which),
+
+            _ => self.deserializable.contains(ty) || self.star_derives(ty, which),
+        };
+
+        if derived {
+            let f = if which == "Serialize" {
+                "to_table"
+            } else {
+                "from_table"
+            };
+
+            return Some(format!("{ty}.{f}({x})"));
+        }
+
+        // A payload variant is a table under the enum's metatable, which
+        // carries the enum's methods; a unit variant is its own string.
+        let payload_enum = self
+            .enum_decls
+            .get(ty)
+            .is_some_and(|vs| vs.iter().any(|(_, n)| *n > 0));
+
+        if payload_enum && which == "Deserialize" {
+            let text = format!("if type({x}) == \"table\" then setmetatable({x}, {ty}) else {x}");
+
+            return Some(self.any_cast(&format!("({text})")));
+        }
+
+        let std = self.std();
+        let element = super::types::array_element(ty).or_else(|| {
+            ty.strip_prefix("Array<")
+                .and_then(|t| t.strip_suffix('>'))
+                .map(str::trim)
+        });
+
+        if let Some(element) = element {
+            let v = format!("_v{depth}");
+            let text = match self.serde_of(which, element, &v, depth + 1) {
+                Some(item) => format!("{std}.Array.map({x}, function({v}) return {item} end)"),
+
+                // An array of plain values keeps its items; the way back
+                // restores the metatable that carries the methods.
+                None if which == "Serialize" => return None,
+
+                None => format!("{std}.Array.from({x})"),
+            };
+
+            return Some(self.any_cast(&text));
+        }
+
+        // A map's values go through their own half, one entry at a time:
+        // `HashMap<string, Item>` and `{ [string]: Item }`.
+        let head = ty.split('<').next().unwrap_or(ty).trim();
+        let value_ty = match head {
+            "HashMap" => super::types::split_generics(&ty[head.len()..])
+                .get(1)
+                .cloned(),
+
+            _ if ty.starts_with("{ [") || ty.starts_with("{[") => ty
+                .trim_start_matches('{')
+                .trim_end_matches('}')
+                .split_once("]:")
+                .map(|(_, v)| v.trim().to_string()),
+
+            _ => None,
+        };
+        let each = value_ty.and_then(|v| {
+            let v_var = format!("_e{depth}");
+
+            self.serde_of(which, &v, &v_var, depth + 1)
+                .map(|item| format!("function({v_var}) return {item} end"))
+        });
+
+        if let Some(f) = each {
+            let text = match (head, which) {
+                ("HashMap", "Serialize") => format!("{std}.map_values({x}:to_table(), {f})"),
+
+                ("HashMap", _) => format!("{std}.HashMap.from({std}.map_values({x}, {f}))"),
+
+                _ => format!("{std}.map_values({x}, {f})"),
+            };
+
+            return Some(self.any_cast(&text));
+        }
+
+        let text = match (head, which) {
+            ("HashMap", "Serialize") => format!("{x}:to_table()"),
+
+            ("HashMap", _) => format!("{std}.HashMap.from({x})"),
+
+            ("Set", "Serialize") => format!("{x}:to_array()"),
+
+            ("Set", _) => format!("{std}.Set.from({x})"),
+
+            _ => return None,
+        };
+
+        Some(self.any_cast(&text))
+    }
+
+    /// Whether `ty` names a struct through a star import, `I.Item`, and
+    /// that struct derives `which` in the file that declares it.
+    fn star_derives(&self, ty: &str, which: &str) -> bool {
+        let Some((module, name)) = ty.split_once('.') else {
+            return false;
+        };
+
+        self.star_modules.contains(module)
+            && self
+                .options
+                .shapes
+                .iter()
+                .any(|s| s.name == name && s.derives.iter().any(|d| d == which))
+    }
+
+    /// The copy `Clone` writes for a field of type `ty` read at `field`,
+    /// `None` for a value the clone shares.
+    fn clone_of(&mut self, ty: &str, field: &str) -> Option<String> {
+        let element = super::types::array_element(ty).or_else(|| {
+            ty.strip_prefix("Array<")
+                .and_then(|t| t.strip_suffix('>'))
+                .map(str::trim)
+        });
+
+        if self.cloneable.contains(ty) || self.star_derives(ty, "Clone") {
+            return Some(format!("{ty}.clone({field})"));
+        }
+
+        if let Some(element) = element {
+            let std = self.std();
+
+            // The checker infers `unknown[]` for a copy; the field's own
+            // type is the one to keep.
+            let element = element.trim();
+            let copy = match self.cloneable.contains(element) || self.star_derives(element, "Clone")
+            {
+                true => format!("{std}.Array.map({field}, {}.clone)", element.trim()),
+
+                false => format!("{std}.Array.from(table.clone({field}))"),
+            };
+
+            return Some(self.any_cast(&copy));
+        }
+
+        // A map and a set are new collections of the same entries, as
+        // Rust's derive clones a HashMap; a shared one leaked every write.
+        let std = self.std();
+
+        match ty.split('<').next().unwrap_or(ty).trim() {
+            "HashMap" => {
+                return Some(self.any_cast(&format!(
+                    "{std}.HashMap.from(table.clone({field}:to_table()))"
+                )));
+            }
+
+            "Set" => return Some(self.any_cast(&format!("{std}.Set.from({field}:to_array())"))),
+
+            _ => {}
+        }
+
+        // A table type, `{ T }` or `{ [K]: V }`, copies its entries.
+        (ty.starts_with('{') && ty.ends_with('}')).then(|| format!("table.clone({field})"))
+    }
+
+    /// The value `Default` starts a field of type `ty` at: `Some(None)`
+    /// for nil, `None` when the type has no default.
+    fn zero_of(&mut self, ty: &str) -> Option<Option<String>> {
+        let ty = ty.trim();
+
+        if ty.ends_with('?') || matches!(ty, "any" | "unknown" | "nil") {
+            return Some(None);
+        }
+
+        let value = match ty {
+            "number" => "0".to_string(),
+
+            "string" => "\"\"".to_string(),
+
+            "boolean" => "false".to_string(),
+
+            "Vector3" | "Vector2" => format!("{ty}.zero"),
+
+            "CFrame" => "CFrame.identity".to_string(),
+
+            "UDim2" | "UDim" | "Color3" => format!("{ty}.new()"),
+
+            // An empty container infers `unknown` elements; the field's
+            // type is the one to keep.
+            _ if ty.ends_with("[]") || ty.starts_with("Array<") => {
+                let std = self.std();
+
+                self.any_cast(&format!("{std}.Array.from({{}})"))
+            }
+
+            _ if ty.starts_with("HashMap<") || ty.starts_with("Set<") => {
+                let std = self.std();
+                let head = ty.split('<').next().unwrap_or(ty);
+
+                self.any_cast(&format!("{std}.{head}.new()"))
+            }
+
+            // A list or a map; a record has fields no empty table holds.
+            _ if ty.starts_with('{') && (!ty.contains(':') || ty.contains("]:")) => {
+                "{}".to_string()
+            }
+
+            _ if self.defaultable.contains(ty) || self.star_derives(ty, "Default") => {
+                format!("{ty}.default()")
+            }
+
+            _ => return None,
+        };
+
+        Some(Some(value))
     }
 
     // --- traits --------------------------------------------------------------
@@ -1809,9 +2430,16 @@ impl<'s> Desugar<'s> {
         }
 
         self.note_field_types(&name, &st.fields);
+        // A `@skip` field stays off the wire, as it stays out of the
+        // derived table; the reader's constructor fills its default.
         let wire_fields = st
             .fields
             .iter()
+            .filter(|f| {
+                !f.attributes
+                    .iter()
+                    .any(|a| a.name.is_some_and(|n| self.text_of(n) == "skip"))
+            })
             .map(|f| WireField {
                 name: self.text_of(f.name).to_string(),
                 ty: self.text_of(f.ty).trim().to_string(),
@@ -1907,6 +2535,14 @@ impl<'s> Desugar<'s> {
         let (base, args) = ty.strip_suffix('>')?.split_once('<')?;
         let base = base.trim();
 
+        // `import { HashMap as Map }`: the alias names the std type, and
+        // `Map.new()` takes the arguments `Map<K, V>` writes.
+        if let Some(original) = self.import_renames.get(base)
+            && generic_head(&format!("{original}<{args}>")).is_some()
+        {
+            return Some((base.to_string(), args.trim().to_string()));
+        }
+
         self.generic_types
             .contains(base)
             .then(|| (base.to_string(), args.trim().to_string()))
@@ -1940,19 +2576,44 @@ impl<'s> Desugar<'s> {
 
             _ => {
                 let (base, links) = flatten(value);
+                let ctor =
+                    |f: &TokSpan| matches!(self.text_of(*f), "new" | "from" | "with_capacity");
+                // The type the annotation names, without a module path.
+                let bare = base_name.rsplit('.').next().unwrap_or(base_name);
 
-                matches!(base, Expr::Name(n) if self.text_of(*n) == base_name)
-                    && matches!(
-                        links.as_slice(),
+                match (base, links.as_slice()) {
+                    (
+                        Expr::Name(n),
                         [
                             Link::Plain(Step::Field(f)),
                             Link::Plain(Step::Call {
                                 method: None,
                                 type_args: None,
                                 ..
-                            })
-                        ] if matches!(self.text_of(*f), "new" | "from" | "with_capacity")
-                    )
+                            }),
+                        ],
+                    ) => self.text_of(*n) == base_name && ctor(f),
+
+                    // `c.HashMap.new()` through `import * as c`.
+                    (
+                        Expr::Name(n),
+                        [
+                            Link::Plain(Step::Field(m)),
+                            Link::Plain(Step::Field(f)),
+                            Link::Plain(Step::Call {
+                                method: None,
+                                type_args: None,
+                                ..
+                            }),
+                        ],
+                    ) => {
+                        self.star_modules.contains(self.text_of(*n))
+                            && self.text_of(*m) == bare
+                            && ctor(f)
+                    }
+
+                    _ => false,
+                }
             }
         }
     }
@@ -2595,6 +3256,85 @@ impl<'s> Desugar<'s> {
         });
     }
 }
+
+/// A field name under a serde case: `max_hp` becomes `maxHp` under
+/// `camelCase`. `None` for a style serde does not name.
+pub(crate) fn rename_case(name: &str, style: &str) -> Option<String> {
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+
+    for c in name.chars() {
+        if c == '_' || c == '-' {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+
+            continue;
+        }
+
+        let boundary = c.is_uppercase()
+            && word
+                .chars()
+                .last()
+                .is_some_and(|p| p.is_lowercase() || p.is_ascii_digit());
+
+        if boundary {
+            words.push(std::mem::take(&mut word));
+        }
+
+        word.extend(c.to_lowercase());
+    }
+
+    if !word.is_empty() {
+        words.push(word);
+    }
+
+    let capital = |w: &String| {
+        let mut c = w.chars();
+
+        c.next()
+            .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+            .unwrap_or_default()
+    };
+
+    Some(match style {
+        // serde's two case styles change the case alone: `max_hp` stays
+        // `max_hp`, and UPPERCASE writes `MAX_HP`.
+        "lowercase" => name.to_lowercase(),
+
+        "UPPERCASE" => name.to_uppercase(),
+
+        "PascalCase" => words.iter().map(capital).collect(),
+
+        "camelCase" => words
+            .iter()
+            .enumerate()
+            .map(|(i, w)| if i == 0 { w.clone() } else { capital(w) })
+            .collect(),
+
+        "snake_case" => words.join("_"),
+
+        "SCREAMING_SNAKE_CASE" => words.join("_").to_uppercase(),
+
+        "kebab-case" => words.join("-"),
+
+        "SCREAMING-KEBAB-CASE" => words.join("-").to_uppercase(),
+
+        _ => return None,
+    })
+}
+
+/// The styles `@rename_all` takes, serde's names for them.
+pub const RENAME_STYLES: &[&str] = &[
+    "lowercase",
+    "UPPERCASE",
+    "PascalCase",
+    "camelCase",
+    "snake_case",
+    "SCREAMING_SNAKE_CASE",
+    "kebab-case",
+    "SCREAMING-KEBAB-CASE",
+];
 
 #[cfg(test)]
 mod tests {

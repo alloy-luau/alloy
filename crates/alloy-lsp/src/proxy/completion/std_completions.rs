@@ -1,5 +1,71 @@
 use super::*;
 
+/// What a file reaches of the std with no import: its project's
+/// `[std] globals`, and the std names its own imports bind.
+pub(crate) struct StdReach {
+    globals: alloy::std_names::Globals,
+    imported: HashSet<String>,
+}
+
+impl StdReach {
+    pub(crate) fn of(doc: &Doc) -> Self {
+        Self {
+            globals: doc.std_globals.clone(),
+            imported: alloy::std_names::imported(&doc.source),
+        }
+    }
+
+    pub(crate) fn reaches(&self, name: &str) -> bool {
+        self.globals.ambient(name) || self.imported.contains(name)
+    }
+}
+
+/// A std name as a completion row: the module it sits in, as
+/// `alloy:std:collections`, and the import it writes when the file does
+/// not reach the name. A name the std table does not hold keeps
+/// `alloy:std`.
+pub(crate) fn std_item(
+    src: &str,
+    reach: &StdReach,
+    name: &str,
+    kind: u64,
+    documentation: Option<String>,
+) -> Value {
+    let detail = match alloy::std_names::module_of(name) {
+        Some(module) => format!("alloy:std:{module}"),
+
+        None => "alloy:std".to_string(),
+    };
+    let mut item = json!({ "label": name, "kind": kind, "detail": detail });
+
+    if let Some(d) = documentation {
+        item["documentation"] = json!({ "kind": "markdown", "value": d });
+    }
+
+    if alloy::std_names::is_std_name(name) && !reach.reaches(name) {
+        let fixes = alloy::std_names::import_fixes(src, &[name]);
+        item["additionalTextEdits"] = json!(fix_edits(src, &fixes));
+    }
+
+    item
+}
+
+/// Rewrites of a source as LSP edits.
+pub(crate) fn fix_edits(src: &str, fixes: &[alloy::lint::Fix]) -> Vec<Value> {
+    fixes
+        .iter()
+        .map(|f| {
+            json!({
+                "range": range_value(
+                    position_of(src, f.start as usize),
+                    position_of(src, f.end as usize),
+                ),
+                "newText": f.replacement,
+            })
+        })
+        .collect()
+}
+
 impl State {
     /// Completion items for the ambient std names, `HashMap` and the
     /// rest. The child knows them only as `__alloy.Name`, so a name typed
@@ -61,7 +127,7 @@ impl State {
             .unwrap_or_default();
 
         if type_slot {
-            return self.type_completions(uri, &labels);
+            return self.type_completions(uri, offset, &labels);
         }
 
         if before.ends_with(['.', ':', '$', '@']) {
@@ -81,6 +147,7 @@ impl State {
         }
 
         let mut items: Vec<Value> = Vec::new();
+        let reach = StdReach::of(doc);
         items.extend(
             alloy::desugar::AMBIENT
                 .iter()
@@ -90,15 +157,10 @@ impl State {
 
                     // A std type reads with the names it carries, the way
                     // its hover does.
-                    let doc = alloy::docs::type_markdown(name)
+                    let text = alloy::docs::type_markdown(name)
                         .or_else(|| crate::keywords::doc(name).map(str::to_string));
 
-                    json!({
-                        "label": name,
-                        "kind": kind,
-                        "detail": "alloy:std",
-                        "documentation": doc.map(|d| json!({ "kind": "markdown", "value": d })),
-                    })
+                    std_item(&doc.source, &reach, name, kind, text)
                 }),
         );
 
@@ -135,27 +197,58 @@ impl State {
     /// The type names for an annotation: every struct, interface, enum,
     /// trait, and type alias of the workspace, the std types, and the
     /// primitives.
-    pub(crate) fn type_completions(&self, uri: &str, labels: &[&str]) -> Vec<Value> {
+    pub(crate) fn type_completions(&self, uri: &str, offset: usize, labels: &[&str]) -> Vec<Value> {
         let mut items = Vec::new();
         let mut seen: HashSet<String> = labels.iter().map(|l| l.to_string()).collect();
         let folded = self.folded_names();
-        let mut push = |name: &str, kind: u64, detail: &str, doc_text: Option<String>| {
+        let row = |name: &str, kind: u64, detail: &str, doc_text: Option<String>| {
+            let mut item = json!({ "label": name, "kind": kind, "detail": detail });
+
+            if let Some(d) = doc_text {
+                item["documentation"] = json!({ "kind": "markdown", "value": d });
+            }
+
+            item
+        };
+        let mut push = |item: Value| {
+            let name = item["label"].as_str().unwrap_or_default();
+
             if !is_internal_name(name) && !folded.contains(name) && seen.insert(name.to_string()) {
-                let mut item = json!({ "label": name, "kind": kind, "detail": detail });
-
-                if let Some(d) = doc_text {
-                    item["documentation"] = json!({ "kind": "markdown", "value": d });
-                }
-
                 items.push(item);
             }
         };
 
+        // Inside `namespace Geo` its members read bare, `Vec2`; outside,
+        // the reader writes the path, which the `Geo.` row starts.
+        let inside: Vec<String> = self
+            .docs
+            .get(uri)
+            .map(|d| {
+                d.namespace_ranges
+                    .iter()
+                    .filter(|n| offset >= n.start && offset <= n.end)
+                    .map(|n| format!("{}.", n.path))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         for d in self.decls_in_scope(uri) {
-            if d.name.starts_with(['$', '@']) || d.name.contains('.') {
+            if d.name.starts_with(['$', '@']) {
                 continue;
             }
 
+            let name = match d.name.contains('.') {
+                true => match inside
+                    .iter()
+                    .find_map(|path| d.name.strip_prefix(path.as_str()))
+                {
+                    Some(member) if !member.contains('.') => member,
+
+                    _ => continue,
+                },
+
+                false => d.name.as_str(),
+            };
             let head = d.hover.lines().nth(1).unwrap_or("");
             let kind = if head.contains("struct ") || head.contains("class ") {
                 Some(7)
@@ -174,7 +267,51 @@ impl State {
             if let Some(kind) = kind
                 && let Some(detail) = declaration_detail(&d.hover)
             {
-                push(&d.name, kind, &detail, Some(d.hover.clone()));
+                push(row(name, kind, &detail, Some(d.hover.clone())));
+            }
+        }
+
+        // `import { Item as Thing }` and `import { HashMap as Map }`: the
+        // alias is the name this file writes for the type.
+        if let Some(doc) = self.docs.get(uri) {
+            for entry in super::super::navigation::import_entries(&doc.source) {
+                if entry.alias_at.is_none() {
+                    continue;
+                }
+
+                if alloy::std_names::module_of_spec(&entry.spec).is_some()
+                    && alloy::std_names::is_std_name(&entry.name)
+                {
+                    let detail = alloy::std_names::module_of(&entry.name)
+                        .map_or("alloy:std".to_string(), |m| format!("alloy:std:{m}"));
+                    push(row(
+                        &entry.bound,
+                        7,
+                        &detail,
+                        alloy::docs::type_markdown(&entry.name),
+                    ));
+
+                    continue;
+                }
+
+                let Some(d) = doc.import_decls.iter().find(|d| d.name == entry.name) else {
+                    continue;
+                };
+                let head = d.hover.lines().nth(1).unwrap_or("");
+                let is_type = [
+                    "struct ",
+                    "class ",
+                    "interface ",
+                    "trait ",
+                    "enum ",
+                    "type ",
+                ]
+                .iter()
+                .any(|w| head.contains(w));
+
+                if is_type && let Some(detail) = declaration_detail(&d.hover) {
+                    push(row(&entry.bound, 7, &detail, Some(d.hover.clone())));
+                }
             }
         }
 
@@ -182,51 +319,62 @@ impl State {
         // in every type slot of that head and its body.
         if let Some(doc) = self.docs.get(uri) {
             for name in declared_type_parameters(&doc.source) {
-                push(&name, 25, "type parameter", None);
+                push(row(&name, 25, "type parameter", None));
             }
         }
 
         // The list the parser marks as ambient in a type slot, so the
-        // two stay in step.
-        for name in alloy::desugar::AMBIENT_TYPES {
-            push(
-                name,
-                7,
-                "alloy:std",
-                alloy::docs::type_markdown(name)
-                    .or_else(|| keywords::doc(name).map(str::to_string)),
-            );
-        }
+        // two stay in step, then the traits a bound and an `impl` take.
+        // Each row names its module and writes the import it needs.
+        let std_rows: Vec<(&str, u64, Option<String>)> = alloy::desugar::AMBIENT_TYPES
+            .iter()
+            .map(|name| {
+                let text = alloy::docs::type_markdown(name)
+                    .or_else(|| keywords::doc(name).map(str::to_string));
 
-        // The traits a bound and an `impl` take, which the std declares.
-        for name in [
-            "Display",
-            "Debug",
-            "Clone",
-            "Eq",
-            "PartialEq",
-            "Ord",
-            "Serialize",
-            "Drop",
-            "Deletable",
-            "Add",
-            "Sub",
-            "Mul",
-            "Div",
-        ] {
-            push(
-                name,
-                8,
-                "alloy:std trait",
-                keywords::doc(name).map(str::to_string),
-            );
+                (*name, 7, text)
+            })
+            .chain(
+                [
+                    "Display",
+                    "Debug",
+                    "Clone",
+                    "Eq",
+                    "PartialEq",
+                    "Ord",
+                    "Serialize",
+                    "Drop",
+                    "Deletable",
+                    "Add",
+                    "Sub",
+                    "Mul",
+                    "Div",
+                ]
+                .into_iter()
+                .map(|name| (name, 8, keywords::doc(name).map(str::to_string))),
+            )
+            .collect();
+
+        if let Some(doc) = self.docs.get(uri) {
+            let reach = StdReach::of(doc);
+
+            for (name, kind, text) in std_rows {
+                let mut item = std_item(&doc.source, &reach, name, kind, text);
+
+                // A trait the table does not hold reads as one.
+                if kind == 8 && !alloy::std_names::is_std_name(name) {
+                    item["detail"] = json!("alloy:std trait");
+                }
+
+                push(item);
+            }
         }
 
         for name in [
             "string", "number", "boolean", "nil", "any", "unknown", "never", "thread", "buffer",
             "table", "vector",
         ] {
-            push(name, 14, "primitive", None);
+            push(row(name, 14, "primitive", None));
         }
 
         // The engine's classes and datatypes, which the child lists as
@@ -236,7 +384,7 @@ impl State {
             .chain(alloy::roblox_classes::DATATYPES)
             .filter(|name| !is_flat_enum(name))
         {
-            push(name, 7, "roblox", None);
+            push(row(name, 7, "roblox", None));
         }
 
         // Luau's type functions. `typeof` reads an expression in

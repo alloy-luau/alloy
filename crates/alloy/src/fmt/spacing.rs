@@ -83,7 +83,7 @@ impl<'s> Formatter<'s> {
         }
 
         if continues(&it.text) {
-            return true;
+            return !it.value_start;
         }
 
         self.prev_code(i)
@@ -318,6 +318,10 @@ impl<'s> Formatter<'s> {
     }
 
     fn is_unary(&self, i: usize) -> bool {
+        if self.items[i].value_start {
+            return true;
+        }
+
         self.prev_code(i).is_none_or(|p| {
             let t = self.items[p].text.as_str();
 

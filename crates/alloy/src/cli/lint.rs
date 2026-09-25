@@ -5,8 +5,8 @@
 use std::process::ExitCode;
 
 use crate::cli::lint_support::{
-    apply_header_as_fixes, apply_lint_fixes, lint_context, lint_files, list_lints, offer_fixes,
-    print_lints,
+    apply_header_as_fixes, apply_lint_fixes, apply_std_import_fixes, lint_context, lint_files,
+    list_lints, offer_fixes, print_lints,
 };
 use crate::cli::support::{is_source, positionals, print_diagnostics};
 use crate::ui::{self, Painter};
@@ -34,7 +34,7 @@ pub(crate) fn lint_cmd(args: &[String]) -> ExitCode {
         return lint_files("lint", &positional, &lint_config, args);
     }
 
-    let report = match alloy::build::check_project(&root, &config) {
+    let mut report = match alloy::build::check_project(&root, &config) {
         Ok(r) => r,
 
         Err(e) => {
@@ -45,13 +45,29 @@ pub(crate) fn lint_cmd(args: &[String]) -> ExitCode {
 
     let p = Painter::for_stderr();
     let input = root.join(&config.build.input);
-    print_diagnostics(&input, &report.diagnostics, &report.failures);
     let fix = args.iter().any(|a| a == "--fix");
-    let header_rewrites = if fix {
-        apply_header_as_fixes(&input, &report.diagnostics)
-    } else {
-        0
+    // The source rewrites run before the report, as in `alloy flux`.
+    let header_rewrites = match fix {
+        true => {
+            apply_header_as_fixes(&input, &report.diagnostics)
+                + apply_std_import_fixes(&input, &report.diagnostics)
+        }
+
+        false => 0,
     };
+
+    if header_rewrites > 0 {
+        report = match alloy::build::check_project(&root, &config) {
+            Ok(r) => r,
+
+            Err(e) => {
+                fail(&e.to_string());
+                return ExitCode::FAILURE;
+            }
+        };
+    }
+
+    print_diagnostics(&input, &report.diagnostics, &report.failures);
     let (rewrites, remaining) = if fix {
         apply_lint_fixes(&input, &report.lints, &lint_config)
     } else {

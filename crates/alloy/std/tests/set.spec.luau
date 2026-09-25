@@ -40,6 +40,28 @@ describe("Set", function()
 		expect(a:len()).toBe(3)
 	end)
 
+	it("counts the sets it builds and leaves the inputs alone", function()
+		local small = Set.from({ 1, 2 })
+		local big = Set.from({ 2, 3, 4, 5 })
+		local u = small:union(big)
+		expect(u:len()).toBe(5)
+		expect(big:union(small):len()).toBe(5)
+		u:add(9)
+		expect(big:has(9) or small:has(9)).toBe(false)
+		expect(small:intersection(big):len()).toBe(1)
+		expect(big:difference(small):len()).toBe(3)
+		expect(Set.from({ 1, 1, 1 }):len()).toBe(1)
+	end)
+
+	it("iterates its members in a for loop, not its own fields", function()
+		local seen = {}
+		for v in Set.from({ "a", "b" }) do
+			table.insert(seen, v)
+		end
+		table.sort(seen)
+		expect(seen).toEqual({ "a", "b" })
+	end)
+
 	it("to_array gives an Array", function()
 		local xs = Set.from({ 5 }):to_array()
 		expect(xs:len()).toBe(1)

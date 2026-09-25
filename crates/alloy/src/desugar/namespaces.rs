@@ -1074,17 +1074,15 @@ impl<'s> Desugar<'s> {
         }
     }
 
-    /// The byte the header ends at: the `as` that opens the body.
+    /// The byte the header ends at: the name, or the `as` after it.
     fn namespace_head_end(&self, ns: &NamespaceDecl) -> u32 {
-        for i in ns.span.start..ns.span.end {
-            let one = TokSpan::new(i as usize, i as usize + 1);
+        let after = TokSpan::new(ns.name.end as usize, ns.name.end as usize + 1);
 
-            if self.text_of(one) == "as" {
-                return self.byte_end(one);
-            }
+        match self.text_of(after) == "as" {
+            true => self.byte_end(after),
+
+            false => self.byte_end(ns.name),
         }
-
-        self.byte_start(ns.span)
     }
 
     /// Renders `namespace Name as ... end`.

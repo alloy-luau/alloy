@@ -94,6 +94,32 @@ pub(crate) fn is_variant_name(name: &str) -> bool {
     name.chars().next().is_some_and(char::is_uppercase)
 }
 
+/// `MAX` and `MAX_HP`: a constant's name, never a variant's or a binding's.
+fn is_screaming(name: &str) -> bool {
+    name.len() > 1
+        && name.chars().any(char::is_uppercase)
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// The body of one arm the statement chain writes.
+pub(crate) enum ArmBody<'a> {
+    /// A statement match's block.
+    Block(&'a Block),
+    /// A value arm of a hoisted match: one expression, or a block that
+    /// ends in its value.
+    Value(&'a Expr),
+}
+
+/// One arm of the chain, from either form of `match`.
+pub(crate) struct ChainArm<'a> {
+    patterns: &'a [Pattern],
+    guard: Option<&'a Expr>,
+    span: TokSpan,
+    body: ArmBody<'a>,
+}
+
 impl<'s> Desugar<'s> {
     /*
     A payload variant is a constructor that returns a tagged table with the
@@ -297,6 +323,7 @@ impl<'s> Desugar<'s> {
 
             for arg in &a.args {
                 let which = self.text_of(arg.span()).to_string();
+                self.check_std_name(arg.span(), &which);
                 // `Eq` and `PartialEq` write the same `__eq`.
                 let key = if which == "PartialEq" { "Eq" } else { &which };
 
@@ -306,8 +333,9 @@ impl<'s> Desugar<'s> {
 
                 match which.as_str() {
                     "Eq" | "PartialEq" => {
+                        let std = self.std();
                         let slots: Vec<String> = (1..=max_arity)
-                            .map(|i| format!(" and a._{i} == b._{i}"))
+                            .map(|i| format!(" and {std}.deep_eq(a._{i}, b._{i})"))
                             .collect();
                         printer.push_str(&format!(
                             " {name}.__eq = function(a: any, b: any): boolean return a.tag == b.tag{} end",
@@ -321,7 +349,26 @@ impl<'s> Desugar<'s> {
                         ));
                     }
 
-                    _ => {}
+                    // `Debug` is every enum's printer already.
+                    "Debug" => {}
+
+                    // A derive that writes nothing must not pass in silence:
+                    // a unit variant is a string, and a payload variant a
+                    // plain tagged table.
+                    other => {
+                        let message = match other {
+                            "Ord" => "`@derive(Ord)` has no meaning on an enum: a unit variant is a string, which compares by its text; compare the variants' order yourself".to_string(),
+
+                            "Default" => "`@derive(Default)` has no meaning on an enum; name the variant a value starts as where you build it".to_string(),
+
+                            "Serialize" | "Deserialize" => format!(
+                                "`@derive({other})` has nothing to write on an enum: a unit variant is already a string, and a payload variant a plain table"
+                            ),
+
+                            _ => format!("unknown derive `{other}`"),
+                        };
+                        self.diagnose(arg.span(), &message);
+                    }
                 }
             }
         }
@@ -932,6 +979,7 @@ impl<'s> Desugar<'s> {
     pub(crate) fn check_variant_patterns(&mut self, arms: &[&[Pattern]]) -> bool {
         let mut reported = false;
         let mut flat: Vec<(TokSpan, usize)> = Vec::new();
+        let mut paths: Vec<TokSpan> = Vec::new();
 
         for pats in arms {
             let mut stack: Vec<&Pattern> = pats.iter().collect();
@@ -951,6 +999,8 @@ impl<'s> Desugar<'s> {
                         }
                     }
 
+                    Pattern::Path(span) => paths.push(*span),
+
                     // `case Lobby then` writes a unit variant as a bare
                     // name, which the parser reads as a binding. A
                     // capital says the author meant a variant, so a name
@@ -959,8 +1009,44 @@ impl<'s> Desugar<'s> {
                         flat.push((*name, 0));
                     }
 
+                    // `case target then` with `target` in scope binds a
+                    // new name over it, and the arm takes every value.
+                    Pattern::Bind(name) if self.is_local(self.text_of(*name)) => {
+                        let text = self.text_of(*name).to_string();
+                        let tok = self.toks[name.start as usize];
+                        self.lints.push(Lint {
+                            name: "pattern_shadows_local",
+                            start: tok.start,
+                            end: tok.end,
+                            message: format!(
+                                "`{text}` is a local in scope, and this pattern binds a new `{text}` that takes every value; to compare, write `case v where v == {text}`, and to bind, pick another name"
+                            ),
+                            fix: None,
+                        });
+                    }
+
                     _ => {}
                 }
+            }
+        }
+
+        // `case R.Aa`: a dotted path into a declared enum that names no
+        // variant compares with a nil field and never holds.
+        for span in paths {
+            let text = self.text_of(span).to_string();
+
+            if let Some((e, v)) = self.enum_of_path(&text)
+                && let Some(vs) = self.enums.get(&e)
+                && !vs.iter().any(|(n, _)| *n == v)
+            {
+                let names: Vec<&str> = vs.iter().map(|(n, _)| n.as_str()).collect();
+                let message = format!(
+                    "`{}` has no variant `{v}`; its variants are {}",
+                    self.display_name(&e),
+                    list_names(&names)
+                );
+                self.diagnose(span, &message);
+                reported = true;
             }
         }
 
@@ -1021,6 +1107,21 @@ impl<'s> Desugar<'s> {
                         );
                         self.diagnose(name, &message);
                         reported = true;
+                    } else if binds == 0 && (self.is_local(&vname) || is_screaming(&vname)) {
+                        // `case MAX then` reads as a comparison and binds a
+                        // new `MAX` that takes every value, so a `default`
+                        // below it never runs and nothing says so.
+                        let message = match self.is_local(&vname) {
+                            true => format!(
+                                "`{vname}` names a value, and a bare name in a pattern binds a new one, so this arm takes every value; compare in a guard: `case n where n == {vname}`"
+                            ),
+
+                            false => format!(
+                                "`{vname}` is written as a constant's name, and a bare name in a pattern binds a new one that takes every value; bind a lowercase name, or compare in a guard: `case n where n == {vname}`"
+                            ),
+                        };
+                        self.diagnose(name, &message);
+                        reported = true;
                     }
                 }
             }
@@ -1079,6 +1180,28 @@ impl<'s> Desugar<'s> {
                 message: "this `default` is empty and swallows every variant without an arm; name them, or write the fallback".to_string(),
                 fix: None,
             });
+        }
+    }
+
+    /// Reports a guard written with `and`; the fix writes `where`.
+    fn guard_lints<'e>(&mut self, guards: impl Iterator<Item = &'e Expr>) {
+        for g in guards {
+            let Some(k) = (g.span().start as usize).checked_sub(1) else {
+                continue;
+            };
+            let tok = self.toks[k];
+
+            if self.text_of(TokSpan::new(k, k + 1)) == "and" {
+                self.lints.push(Lint {
+                    name: "match_guard_and",
+                    start: tok.start,
+                    end: tok.end,
+                    message:
+                        "a match guard takes `where`, as a `for` filter does: `case n where n > 5`"
+                            .to_string(),
+                    fix: Some(crate::lint::Fix::new(self.src, tok.start, tok.end, "where")),
+                });
+            }
         }
     }
 
@@ -1395,7 +1518,7 @@ impl<'s> Desugar<'s> {
                     let all_bind = items.iter().all(|i| self.irrefutable(i));
 
                     if !all_bind {
-                        return false;
+                        continue;
                     }
 
                     match rest {
@@ -1413,7 +1536,7 @@ impl<'s> Desugar<'s> {
                     // `Color.Red` covers the unit variant `Red` of `Color`.
                     let text = self.text_of(*span).to_string();
                     let Some((e, v)) = self.enum_of_path(&text) else {
-                        return false;
+                        continue;
                     };
 
                     match self.enums.get(&e) {
@@ -1422,7 +1545,7 @@ impl<'s> Desugar<'s> {
                             rows.push((v, Vec::new()));
                         }
 
-                        _ => return false,
+                        _ => continue,
                     }
                 }
 
@@ -1436,7 +1559,7 @@ impl<'s> Desugar<'s> {
                     });
 
                     let Some(e) = owner else {
-                        return false;
+                        continue;
                     };
 
                     enum_name.get_or_insert(e);
@@ -1449,13 +1572,11 @@ impl<'s> Desugar<'s> {
                 // and covers nothing. One arm that tests a literal
                 // field covers nothing on its own, so the scan reads
                 // the next arm instead of answering for the column.
-                Pattern::Struct { .. } => {
-                    if self.struct_pattern_covers(p) {
-                        return true;
-                    }
-                }
+                Pattern::Struct { .. } if self.struct_pattern_covers(p) => return true,
 
-                _ => return false,
+                // A refutable row covers part of the value, so the scan
+                // reads on: a later `case _` or binding still covers.
+                _ => {}
             }
         }
 
@@ -1551,49 +1672,149 @@ impl<'s> Desugar<'s> {
 
     /// `match` as a statement: an if-chain on temps, one arm per line.
     pub(crate) fn match_stmt(&mut self, m: &MatchStmt) {
-        let start = self.byte_start(m.span);
-        let with_end = self.toks[m
+        let arms: Vec<ChainArm<'_>> = m
             .arms
-            .first()
-            .map(|a| a.span.start)
-            .unwrap_or(m.span.end - 1) as usize
-            - 1]
-        .end;
+            .iter()
+            .map(|a| ChainArm {
+                patterns: &a.patterns,
+                guard: a.guard.as_ref(),
+                span: a.span,
+                body: ArmBody::Block(&a.block),
+            })
+            .collect();
+        let default = m.default.as_ref().map(ArmBody::Block);
 
-        let pats: Vec<&[Pattern]> = m.arms.iter().map(|a| a.patterns.as_slice()).collect();
+        self.match_chain(m.span, &m.scrutinees, &m.aliases, &arms, default, None, "");
+    }
+
+    /// `local s = match ...` whose arms run statements: the statement
+    /// chain, each arm ending by writing its value after `sink`, `s = `
+    /// or `return `. `lead` goes before the chain's `do`.
+    pub(crate) fn match_hoisted(&mut self, m: &MatchExpr, sink: &str, lead: &str) {
+        let arms: Vec<ChainArm<'_>> = m
+            .arms
+            .iter()
+            .map(|a| ChainArm {
+                patterns: &a.patterns,
+                guard: a.guard.as_ref(),
+                span: a.span,
+                body: ArmBody::Value(&a.value),
+            })
+            .collect();
+        let default = m.default.as_deref().map(ArmBody::Value);
+
+        self.match_chain(
+            m.span,
+            &m.scrutinees,
+            &m.aliases,
+            &arms,
+            default,
+            Some(sink),
+            lead,
+        );
+    }
+
+    /// One arm's body in the chain; returns the byte the next copy starts
+    /// at. A value goes after the sink; a block of an arm that gives a
+    /// value writes its last line into the sink.
+    fn chain_body(&mut self, body: &ArmBody<'_>, cursor: u32, sink: Option<&str>) -> u32 {
+        let block = match body {
+            ArmBody::Block(b) => Some(*b),
+
+            ArmBody::Value(Expr::Block { block, .. }) => Some(block),
+
+            ArmBody::Value(_) => None,
+        };
+
+        match (block, body) {
+            (Some(b), _) => {
+                let body_start = self.block_start_or(b, cursor);
+                self.copy(cursor, body_start);
+                let saved = std::mem::replace(&mut self.value_sink, sink.map(str::to_string));
+                self.block(b);
+                self.value_sink = saved;
+
+                self.block_end_or(b, body_start)
+            }
+
+            (None, ArmBody::Value(e)) => {
+                let at = self.byte_start(e.span());
+                self.copy(cursor, at);
+                self.generate(at, sink.unwrap_or("return "));
+                self.expr(e);
+
+                self.byte_end(e.span())
+            }
+
+            (None, ArmBody::Block(_)) => cursor,
+        }
+    }
+
+    /// The statement match: `do local _m1 = x` and an if-chain on it,
+    /// one arm per line group.
+    #[allow(clippy::too_many_arguments)]
+    fn match_chain(
+        &mut self,
+        span: TokSpan,
+        scrutinees: &[Expr],
+        aliases: &[Option<TokSpan>],
+        arms: &[ChainArm<'_>],
+        default: Option<ArmBody<'_>>,
+        sink: Option<&str>,
+        lead: &str,
+    ) {
+        let start = self.byte_start(span);
+        let with_end =
+            self.toks[arms.first().map(|a| a.span.start).unwrap_or(span.end - 1) as usize - 1].end;
+
+        let pats: Vec<&[Pattern]> = arms.iter().map(|a| a.patterns).collect();
 
         // `match a, b with` becomes `do local _1 = a local _2 = b`. Each
         // scrutinee keeps its chunks, so the editor maps its names.
-        self.generate(start, "do");
-        let paths = self.head_locals(start, &m.scrutinees, &m.aliases, &pats);
-        self.alias_lints(m.span, &m.aliases);
+        self.generate(start, &format!("{lead}do"));
+        let paths = self.head_locals(start, scrutinees, aliases, &pats);
+        self.alias_lints(span, aliases);
+        self.guard_lints(arms.iter().filter_map(|a| a.guard));
 
         let mut cursor = with_end;
-        let guards: Vec<bool> = m.arms.iter().map(|a| a.guard.is_some()).collect();
+        let guards: Vec<bool> = arms.iter().map(|a| a.guard.is_some()).collect();
 
         let exhaustive = self.match_is_exhaustive(&pats, &guards);
         // A rejected pattern makes the arm list unreliable, so the
         // exhaustiveness message would name the wrong variant.
         let bad_arm = self.check_variant_patterns(&pats);
 
-        if m.default.is_none() && !exhaustive && !bad_arm {
+        if default.is_none() && !exhaustive && !bad_arm {
             let msg = self.not_exhaustive_message(&pats);
-            self.diagnose(m.span, &msg);
+            self.diagnose(span, &msg);
         }
 
-        if let Some(d) = &m.default {
-            let arms_end = m.arms.last().map_or(m.span.start, |a| a.span.end);
-            self.default_lints(m.span, arms_end, exhaustive, d.stmts.is_empty());
+        // `case n` or `case _` last, after another arm, writes `else`: an
+        // `elseif true` reads to the checker as a path that falls through.
+        let catch_all = arms.len() > 1
+            && default.is_none()
+            && arms.last().is_some_and(|a| {
+                a.guard.is_none() && matches!(a.patterns, [p] if self.irrefutable(p))
+            });
+
+        if let Some(d) = &default {
+            let arms_end = arms.last().map_or(span.start, |a| a.span.end);
+            let empty = matches!(d, ArmBody::Block(b) if b.stmts.is_empty());
+            self.default_lints(span, arms_end, exhaustive, empty);
         }
 
-        for (i, arm) in m.arms.iter().enumerate() {
+        for (i, arm) in arms.iter().enumerate() {
             let arm_start = self.byte_start(arm.span);
             self.copy(cursor, arm_start);
-            let (test, c) = self.arm_test(&arm.patterns, &paths, arm.guard.as_ref());
+            let (test, c) = self.arm_test(arm.patterns, &paths, arm.guard);
             let keyword = if i == 0 { "if" } else { "elseif" };
-            let text = format!("{keyword} {test} then");
+            let text = if catch_all && i + 1 == arms.len() {
+                "else".to_string()
+            } else {
+                format!("{keyword} {test} then")
+            };
 
-            // The arm head runs to `then`; the block follows.
+            // The arm head runs to `then`; the body follows.
             let then_tok = self.find_tok_after(
                 arm.patterns
                     .last()
@@ -1614,37 +1835,33 @@ impl<'s> Desugar<'s> {
                 }
             }
 
-            let body_start = self.block_start_or(&arm.block, cursor);
-            self.copy(cursor, body_start);
-            self.block(&arm.block);
+            cursor = self.chain_body(&arm.body, cursor, sink);
             self.scopes.pop();
-            cursor = self.block_end_or(&arm.block, body_start);
         }
 
-        if let Some(d) = &m.default {
-            // The `default` token sits before the block.
-            let default_tok = self.toks[d.span.start as usize - 1];
-            let default_tok = if d.span.is_empty() {
-                self.toks[m.span.end as usize - 2]
-            } else {
-                default_tok
+        if let Some(d) = &default {
+            // The `default` token sits before the body.
+            let default_tok = match d {
+                ArmBody::Block(b) if b.span.is_empty() => self.toks[span.end as usize - 2],
+
+                ArmBody::Block(b) => self.toks[b.span.start as usize - 1],
+
+                ArmBody::Value(e) => self.toks[e.span().start as usize - 1],
             };
             self.copy(cursor, default_tok.start);
             self.generate(default_tok.start, "else");
             cursor = default_tok.end;
-            let body_start = self.block_start_or(d, cursor);
-            self.copy(cursor, body_start);
-            self.block(d);
-            cursor = self.block_end_or(d, body_start);
+            cursor = self.chain_body(d, cursor, sink);
         }
 
-        let end_tok = self.toks[m.span.end as usize - 1];
+        let end_tok = self.toks[span.end as usize - 1];
         self.copy(cursor, end_tok.start);
 
         // Every variant has an arm, so the chain has no `else` and the
         // checker reads a path that falls through. The raise closes it,
-        // and an exhaustive match whose arms all return counts as one.
-        if m.default.is_none() && exhaustive && !m.arms.is_empty() {
+        // and an exhaustive match whose arms all return counts as one. A
+        // last arm that takes every value is the `else` already.
+        if default.is_none() && exhaustive && !arms.is_empty() && !catch_all {
             self.generate(
                 end_tok.start,
                 "else error(\"match: no arm covers this value\", 2) ",
@@ -1670,6 +1887,7 @@ impl<'s> Desugar<'s> {
             self.scrutinee_paths(&m.scrutinees, &pats)
         };
         self.alias_lints(m.span, &m.aliases);
+        self.guard_lints(m.arms.iter().filter_map(|a| a.guard.as_ref()));
         let guards: Vec<bool> = m.arms.iter().map(|a| a.guard.is_some()).collect();
         let exhaustive = self.match_is_exhaustive(&pats, &guards);
         // A rejected pattern makes the arm list unreliable, so the
@@ -1697,8 +1915,25 @@ impl<'s> Desugar<'s> {
             .unwrap_or(m.span.end - 1) as usize
             - 1]
         .end;
+        // The closure an alias needs holds no `...` of its own, so the
+        // function's arguments pass through it, as `expr_in_place` does.
+        let vararg = |e: &Expr| super::any_part(e, &|x| matches!(x, Expr::Vararg(_)));
+        let forwards = aliased
+            && (m.scrutinees.iter().any(vararg)
+                || m.arms
+                    .iter()
+                    .any(|a| vararg(&a.value) || a.guard.as_ref().is_some_and(vararg))
+                || m.default.as_deref().is_some_and(vararg));
+
         if aliased {
-            self.generate(start, "(function()");
+            self.generate(
+                start,
+                if forwards {
+                    "(function(...)"
+                } else {
+                    "(function()"
+                },
+            );
             paths = self.head_locals(start, &m.scrutinees, &m.aliases, &pats);
             self.generate(start, " return (");
         } else {
@@ -1761,7 +1996,14 @@ impl<'s> Desugar<'s> {
 
         let end_tok = self.toks[m.span.end as usize - 1];
         self.copy(cursor, end_tok.start);
-        self.generate(end_tok.start, if aliased { ") end)()" } else { ")" });
+        let close = match (aliased, forwards) {
+            (true, true) => ") end)(...)",
+
+            (true, false) => ") end)()",
+
+            _ => ")",
+        };
+        self.generate(end_tok.start, close);
     }
 
     /// `local Ok(v) = e` and let-else.
@@ -2972,6 +3214,23 @@ mod tests {
                 .contains("else error(\"match: no arm covers this value\", 2)"),
             "{}",
             out.ship
+        );
+    }
+
+    /// A literal arm covers part of the value, so a `case _` or a
+    /// binding after it still makes the match exhaustive.
+    #[test]
+    fn a_catch_all_after_a_literal_covers() {
+        for arm in ["case _ then print(2)", "case n then print(n)"] {
+            let src = format!(
+                "local function f(x: number)\n    match x with\n        case 1 then print(1)\n        {arm}\n    end\nend\nf(1)\n"
+            );
+            assert!(messages(&src).is_empty(), "{arm}: {:?}", messages(&src));
+        }
+        let src = "local function f(x: number)\n    match x with\n        case 1 then print(1)\n        case 2 then print(2)\n    end\nend\nf(1)\n";
+        assert_eq!(
+            messages(src),
+            ["this match is not exhaustive; add a `default` arm"]
         );
     }
 

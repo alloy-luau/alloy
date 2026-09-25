@@ -47,6 +47,30 @@ describe("HashMap", function()
 		expect(seen).toEqual({ x = 10, y = 20 })
 	end)
 
+	it("iterates its pairs in a for loop, not its own fields", function()
+		local m = HashMap.from({ x = 10, y = 20 })
+		local seen = {}
+		for k, v in m do
+			seen[k] = v
+		end
+		expect(seen).toEqual({ x = 10, y = 20 })
+	end)
+
+	it("from copies a table and leaves its metatable behind", function()
+		local source = setmetatable({ a = 1, b = 2 }, { __index = function()
+			return 0
+		end })
+		local m = HashMap.from(source)
+		expect(m:len()).toBe(2)
+		expect(getmetatable(m:to_table())).toBeNil()
+		m:set("c", 3)
+		expect(rawget(source, "c")).toBeNil()
+		local plain = { k = true }
+		local copy = HashMap.from(plain)
+		copy:set("z", true)
+		expect(plain.z).toBeNil()
+	end)
+
 	it("get_or_insert stores the default one time", function()
 		local m = HashMap.new()
 		expect(m:get_or_insert("n", 1)).toBe(1)

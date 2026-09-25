@@ -61,6 +61,27 @@ fn a_member_completes_without_the_prefix_inside() {
     );
 }
 
+/// The shape fold turns `Math_unit` into its path, `Math.unit`, before
+/// this pass runs. Inside the namespace the path reads as the bare
+/// name too, and a call keeps its snippet.
+#[test]
+fn a_folded_member_completes_bare_inside() {
+    let (st, uri) = one_file(SRC);
+    let mut result = json!([
+        { "label": "Math.PI", "kind": 6 },
+        { "label": "Math.unit", "kind": 3, "insertText": "Math.unit()$0" },
+    ]);
+    st.mark_namespaces(uri, 7, 15, &mut result);
+
+    assert_eq!(
+        result,
+        json!([
+            { "label": "PI", "kind": 6, "insertText": "PI", "documentation": result[0]["documentation"] },
+            { "label": "unit", "kind": 3, "insertText": "unit()$0", "documentation": result[1]["documentation"] },
+        ])
+    );
+}
+
 /// Outside the namespace the emitted names are nobody's: the list
 /// drops them and the reader writes `Math.` instead.
 #[test]
@@ -170,7 +191,7 @@ fn an_exported_namespace_hovers_at_the_import() {
         .expect("the namespace declaration");
     assert_eq!(
         hover.hover,
-        "```alloy\nexport namespace Geom as\n    public const ORIGIN: number\n    public struct Point\nend\n```"
+        "```alloy\nexport namespace Geom\n    public const ORIGIN: number\n    public struct Point\nend\n```"
     );
 
     // The member reads under its path too.

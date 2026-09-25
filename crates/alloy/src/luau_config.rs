@@ -108,9 +108,9 @@ pub fn parse_config_luau(text: &str) -> Option<LuauConfig> {
 }
 
 /// The Luau key a `.config.luau` writes at the top level, outside the
-/// `luau` table. Luau reads the keys under `luau` alone, so a file that
-/// writes them higher declares nothing. `None` when the file has the
-/// `luau` table, or writes no key this reads.
+/// `luau` table. Luau reads the keys under `luau` alone, so it ignores
+/// one written higher, beside a `luau` table or with none. `None` when
+/// the file writes no key this reads at the top level.
 pub fn misplaced_key(text: &str) -> Option<&'static str> {
     let parsed = alloy_syntax::parse_lenient(text, Default::default()).ok()?;
     let toks = &parsed.lexed.toks;
@@ -119,10 +119,6 @@ pub fn misplaced_key(text: &str) -> Option<&'static str> {
 
         _ => None,
     })?;
-
-    if field(text, toks, returned, "luau").is_some() {
-        return None;
-    }
 
     ["aliases", "languagemode"]
         .into_iter()
@@ -222,11 +218,11 @@ pub fn add_alias_config_luau(text: &str, alias: (&str, &str)) -> Result<Option<S
     }
 
     let mut out = text.to_string();
-    let (at, entry) = match table_body(&out, "aliases") {
+    let (at, entry) = match table_body(&out, &["luau", "aliases"]) {
         Some(at) => (at, format!("\n            {} = \"{}\",", alias.0, alias.1)),
 
         None => (
-            table_body(&out, "luau").ok_or("the chunk has no `luau` table")?,
+            table_body(&out, &["luau"]).ok_or("the chunk has no `luau` table")?,
             format!(
                 "\n        aliases = {{\n            {} = \"{}\",\n        }},",
                 alias.0, alias.1
@@ -238,12 +234,27 @@ pub fn add_alias_config_luau(text: &str, alias: (&str, &str)) -> Result<Option<S
     Ok(Some(out))
 }
 
-/// The byte after the `{` that opens the table field named `name`.
-fn table_body(text: &str, name: &str) -> Option<usize> {
-    let at = text.find(name)?;
-    let brace = text[at..].find('{')?;
+/// The byte after the `{` that opens the table at `path` in the table
+/// the chunk returns. A same-named table elsewhere, such as a top-level
+/// `aliases` beside `luau`, is not the one Luau reads.
+fn table_body(text: &str, path: &[&str]) -> Option<usize> {
+    let parsed = alloy_syntax::parse_lenient(text, Default::default()).ok()?;
+    let toks = &parsed.lexed.toks;
+    let mut table = parsed.chunk.block.stmts.iter().find_map(|s| match s {
+        Stmt::Return(r) => r.values.first(),
 
-    Some(at + brace + 1)
+        _ => None,
+    })?;
+
+    for name in path {
+        table = field(text, toks, table, name)?;
+    }
+
+    let Expr::Table { span, .. } = table else {
+        return None;
+    };
+
+    Some(toks.get(span.start as usize)?.end as usize)
 }
 
 /// The same as `add_defaults_luaurc`, for a `.config.luau`. The entries
@@ -260,7 +271,7 @@ pub fn add_defaults_config_luau(text: &str) -> Option<(String, Vec<String>)> {
     }
 
     if current.language_mode.is_none() {
-        let at = table_body(&out, "luau")?;
+        let at = table_body(&out, &["luau"])?;
         out.insert_str(at, "\n        languagemode = \"strict\",");
         added.push("strict mode".to_string());
     }
@@ -407,5 +418,27 @@ mod tests {
         };
         assert_eq!(parse_config_luau(&render_config_luau(&c)).unwrap(), c);
         assert_eq!(parse_luaurc(&render_luaurc(&c)).unwrap(), c);
+    }
+
+    /// An `aliases` table beside `luau` is not the one Luau reads. The
+    /// alias goes under `luau`, once, and the stray table reports.
+    #[test]
+    fn an_alias_goes_under_luau_past_a_stray_table() {
+        let text = "return {\n\tluau = {\n\t\tlanguagemode = \"strict\",\n\t},\n\n\taliases = {\n\t\tlest = \".lest/core\",\n\t}\n}\n";
+        let out = add_alias_config_luau(text, ("lest", ".lest/core"))
+            .unwrap()
+            .expect("the alias is new under `luau`");
+        let read = parse_config_luau(&out).unwrap();
+
+        assert_eq!(
+            read.aliases,
+            [("lest".to_string(), ".lest/core".to_string())]
+        );
+        assert_eq!(
+            add_alias_config_luau(&out, ("lest", ".lest/core")),
+            Ok(None)
+        );
+        assert_eq!(misplaced_key(text), Some("aliases"));
+        assert_eq!(misplaced_key(&render_config_luau(&read)), None);
     }
 }

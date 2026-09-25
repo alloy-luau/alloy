@@ -24,7 +24,7 @@ use strings::last_word;
 #[allow(unused_imports)]
 pub use bodies::impl_target;
 #[allow(unused_imports)]
-pub use declarations::declared;
+pub use declarations::{declared, declared_at};
 #[allow(unused_imports)]
 pub use fields::{Field, instance_class, record_entries, struct_literal_target};
 #[allow(unused_imports)]
@@ -56,6 +56,15 @@ pub enum Context {
     },
     /// `@derive(Eq, De|`: a derive name.
     DeriveArg { prefix: String },
+    /// `@allow(too_many|` or `@allow(flux.too|`: a lint or a group.
+    /// `tool` is the prefix written before the name, `flux` or `alx`.
+    AllowArg {
+        prefix: String,
+        tool: Option<String>,
+    },
+    /// `@[nat|` or `@[deprecated { re| }]`: Luau's attribute list.
+    /// `in_table` is set inside the table `deprecated` takes.
+    LuauAttrList { prefix: String, in_table: bool },
     /// `@provider({ lifecycles = [ | ] })`: a literal an attribute
     /// argument takes. `attr` names the attribute, `param` the parameter
     /// the caret belongs to, and `quote` the opening quote when the caret
@@ -339,7 +348,7 @@ pub fn ternary_else(head: &str) -> bool {
 
 /// Whether an expression may start at the caret: after `then`, `else`,
 /// the `?` or the `:` of a ternary, `default`, `=`, `(`, `,`, `return`,
-/// or an operator. luau-lsp answers nothing at those bytes inside an
+/// a guard's `where`, or an operator. luau-lsp answers nothing at those bytes inside an
 /// `if` expression and right before a literal, so the proxy builds the
 /// value scope for them itself.
 pub fn expression_start(src: &str, offset: usize) -> bool {
@@ -393,6 +402,7 @@ pub fn expression_start(src: &str, offset: usize) -> bool {
             | "if"
             | "elseif"
             | "while"
+            | "where"
     )
 }
 
@@ -581,6 +591,39 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
         });
     }
 
+    if let Some(i) = head.rfind("@allow(")
+        && !head[i..].contains(')')
+    {
+        // `flux.too`: the tool, then the name being typed.
+        let arg = head[i + "@allow(".len()..]
+            .rsplit(',')
+            .next()
+            .unwrap_or("")
+            .trim_start();
+        let (tool, name) = match arg.rsplit_once('.') {
+            Some((tool, name)) => (Some(tool.to_string()), name),
+
+            None => (None, arg),
+        };
+
+        return Some(Context::AllowArg {
+            prefix: name.to_string(),
+            tool,
+        });
+    }
+
+    // Luau's attribute list, open on this line: `@[native, dep|`.
+    if let Some(i) = head.rfind("@[")
+        && !head[i..].contains(']')
+    {
+        let inner = &head[i..];
+
+        return Some(Context::LuauAttrList {
+            prefix: prefix.to_string(),
+            in_table: inner.matches('{').count() > inner.matches('}').count(),
+        });
+    }
+
     // `any(` and `all(` nest, so the parenthesis is open while more
     // opened than closed.
     if let Some(i) = head.rfind("@cfg(")
@@ -743,9 +786,14 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
         return Some(Context::Nothing);
     }
 
+    // `case Join(pi|`: a payload binding is a new name. Past the arm's
+    // `then` or its guard, `case 1 then print(|`, the caret is in code.
     if let Some(i) = head.rfind("case ")
         && head[i..].contains('(')
         && !head[i..].contains(')')
+        && ![" then", " where ", " and "]
+            .iter()
+            .any(|w| head[i..].contains(w))
     {
         return Some(Context::Nothing);
     }
@@ -1161,6 +1209,24 @@ mod tests {
         assert_eq!(at("for k, v in pa|"), None);
         assert_eq!(at("remote Test(nam|"), Some(Context::Nothing));
         assert_eq!(at("macro twice(val|"), Some(Context::Nothing));
+    }
+
+    /// A `(` in an arm's pattern opens a payload, whose names are new.
+    /// Past the `then` or the guard the same `(` opens a call.
+    #[test]
+    fn an_arm_body_on_the_case_line_is_code() {
+        assert_eq!(
+            at("match m with\n    case Join(pi|"),
+            Some(Context::Nothing)
+        );
+        assert_ne!(
+            at("match m with\n    case 1 then print(|"),
+            Some(Context::Nothing)
+        );
+        assert_ne!(
+            at("match m with\n    case n where f(|"),
+            Some(Context::Nothing)
+        );
     }
 
     /// The variant column of an `enum` body: the name is the author's,

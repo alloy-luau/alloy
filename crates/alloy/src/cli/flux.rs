@@ -11,8 +11,8 @@ use alloy::lint;
 
 use crate::cli::build::watch_project;
 use crate::cli::lint_support::{
-    apply_header_as_fixes, apply_lint_fixes, lint_context, lint_one, list_lints, offer_fixes,
-    print_lints,
+    apply_header_as_fixes, apply_lint_fixes, apply_std_import_fixes, lint_context, lint_one,
+    list_lints, offer_fixes, print_lints,
 };
 use crate::cli::support::{is_source, option, positionals, print_diagnostics};
 use crate::ui::{self, Level, Painter};
@@ -101,6 +101,31 @@ fn flux_once(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let fix = args.iter().any(|a| a == "--fix");
+    let input = root.join(&config.build.input);
+
+    // A missing std import and a header without `as` are source
+    // rewrites: they run before the report, which then reads the fixed
+    // files, so a run that fixed them does not report them or fail.
+    let header_rewrites = match fix {
+        true => {
+            apply_header_as_fixes(&input, &report.diagnostics)
+                + apply_std_import_fixes(&input, &report.diagnostics)
+        }
+
+        false => 0,
+    };
+
+    if header_rewrites > 0 {
+        report = match alloy::build::flux_project(&root, &config) {
+            Ok(r) => r,
+
+            Err(e) => {
+                fail(&e.to_string());
+                return ExitCode::FAILURE;
+            }
+        };
+    }
 
     if !only.is_empty() {
         report.diagnostics.retain(|(r, _)| only.contains(r));
@@ -117,7 +142,6 @@ fn flux_once(args: &[String]) -> ExitCode {
 
     let report = report;
     let p = Painter::for_stderr();
-    let input = root.join(&config.build.input);
     print_diagnostics(&input, &report.diagnostics, &report.failures);
 
     // The type check: errors count as errors, the checker's lints take
@@ -207,12 +231,6 @@ fn flux_once(args: &[String]) -> ExitCode {
         }
     }
 
-    let fix = args.iter().any(|a| a == "--fix");
-    let header_rewrites = if fix {
-        apply_header_as_fixes(&input, &report.diagnostics)
-    } else {
-        0
-    };
     let (rewrites, remaining) = if fix {
         apply_lint_fixes(&input, &report.lints, &lint_config)
     } else {

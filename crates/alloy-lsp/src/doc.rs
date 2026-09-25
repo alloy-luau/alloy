@@ -63,6 +63,11 @@ pub struct Doc {
     /// The text of those modules, for a declaration the file uses but
     /// does not hold: a `remote`, an exported `const`.
     pub import_sources: Vec<String>,
+    /// For each import spec, the types that module exports, as the
+    /// compile read them.
+    pub import_types: Vec<(String, Vec<String>)>,
+    /// `[std] globals` of the file's project, as the compile read it.
+    pub std_globals: alloy::std_names::Globals,
     /// The error that stopped the compile, when one did. The child then
     /// sees the Alloy source, which it cannot read.
     pub error: Option<alloy::CompileError>,
@@ -373,6 +378,8 @@ impl Doc {
             interfaces: Vec::new(),
             import_interfaces: Vec::new(),
             import_sources: Vec::new(),
+            import_types: Vec::new(),
+            std_globals: options.std_globals.clone(),
             error: None,
             is_alx: options.file_name.ends_with(".alx"),
             repair: None,
@@ -411,6 +418,8 @@ impl Doc {
             alloy::modules::import_shapes_for_file(std::path::Path::new(&options.file_name), text);
         self.import_sources =
             alloy::modules::import_sources_for_file(std::path::Path::new(&options.file_name), text);
+        self.import_types = options.import_types.clone();
+        self.std_globals = options.std_globals.clone();
         // A member of an imported namespace prints by its emit name
         // too, `Ns_T`, and the fold reads the pair off this list.
         self.namespaces.extend(

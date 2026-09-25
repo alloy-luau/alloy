@@ -39,6 +39,7 @@ pub(crate) fn run(s: &Scan) -> Vec<Lint> {
     s.raw_require(&mut out);
     s.manual_class(&mut out);
     s.explicit_any(&mut out);
+    s.array_long_string(&mut out);
     out
 }
 
@@ -248,13 +249,26 @@ impl<'s> Scan<'s> {
                 continue;
             }
 
+            // `->` reads a nil receiver as nil, so `x?:FindFirstChild("y")`
+            // drops its `?`. `=>` has no such guard, so `?:WaitForChild`
+            // stays.
+            let optional = i > 0 && self.at(i - 1, "?");
+
+            if optional && arrow == "=>" {
+                continue;
+            }
+
+            let from = if optional { i - 1 } else { i };
             let call = self.t(i + 1);
             self.lint(
                 out,
                 "manual_child_lookup",
-                i,
+                from,
                 i + 4,
-                format!("`:{call}(\"{name}\")` is `{arrow}{name}`"),
+                format!(
+                    "`{}:{call}(\"{name}\")` is `{arrow}{name}`",
+                    if optional { "?" } else { "" }
+                ),
                 Some(format!("{arrow}{name}")),
             );
         }
@@ -805,16 +819,57 @@ impl<'s> Scan<'s> {
                 "manual_class",
                 i,
                 i + 4,
-                format!("`{name}.__index = {name}` is the class idiom by hand; `struct {name} as ... end` and `impl {name}` write it with types"),
+                format!("`{name}.__index = {name}` is the class idiom by hand; `struct {name} ... end` and `impl {name}` write it with types"),
                 None,
             );
+        }
+    }
+
+    /// `[[1, 2], [3, 4]]`: Alloy wrote a nested array this way before
+    /// `[[` became Luau's long string again, and the old spelling now
+    /// builds a string in silence.
+    fn array_long_string(&self, out: &mut Vec<Lint>) {
+        for (i, tok) in self.toks.iter().enumerate() {
+            let text = self.t(i);
+
+            if !matches!(tok.kind, alloy_syntax::lexer::TokKind::Str { .. })
+                || !text.starts_with("[[")
+                || text.contains('\n')
+            {
+                continue;
+            }
+
+            let inner = &text[2..text.len().saturating_sub(2)];
+
+            if inner.contains("], [") || inner.contains("],[") {
+                self.lint(
+                    out,
+                    "array_long_string",
+                    i,
+                    i,
+                    "`[[` opens a Luau long string, so this is text and not a nested array; write `[ [1, 2], [3, 4] ]`".to_string(),
+                    Some(format!("[ [{inner}] ]")),
+                );
+            }
         }
     }
 
     /// `: any` turns the checker off; `unknown` with `is` keeps it on.
     fn explicit_any(&self, out: &mut Vec<Lint>) {
         for i in 0..self.toks.len() {
-            if self.t(i) == "any" && matches!(self.prev(i), ":" | "::") && !self.at(i + 1, "_cast")
+            // `t:any(f)` calls a method named any; an annotation takes no
+            // call after it.
+            let called = self.at(i + 1, "(")
+                || self.at(i + 1, "{")
+                || self
+                    .toks
+                    .get(i + 1)
+                    .is_some_and(|t| matches!(t.kind, alloy_syntax::lexer::TokKind::Str { .. }));
+
+            if self.t(i) == "any"
+                && matches!(self.prev(i), ":" | "::")
+                && !self.at(i + 1, "_cast")
+                && !(called && self.prev(i) == ":")
             {
                 self.lint(
                     out,
@@ -893,6 +948,18 @@ mod tests {
             fixed("local n = 3\nprint(\"v\" .. n .. \"!\")\n"),
             "local n = 3\nprint(`v{n}!`)\n"
         );
+    }
+
+    /// `->` reads a nil receiver as nil, so a `?` before the lookup goes
+    /// with the call. `=>` has no guard, so a guarded wait stays.
+    #[test]
+    fn a_guarded_child_lookup_drops_its_question_mark() {
+        assert_eq!(
+            fixed("local f = script.Parent?:FindFirstChild(\"systems\")\n"),
+            "local f = script.Parent->systems\n"
+        );
+        let src = "local f = script.Parent?:WaitForChild(\"systems\")\n";
+        assert_eq!(fixed(src), src);
     }
 
     #[test]

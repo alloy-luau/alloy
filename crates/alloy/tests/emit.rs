@@ -18,7 +18,7 @@ fn messages(src: &str) -> Vec<String> {
 #[test]
 fn a_rename_that_is_no_name_goes_in_brackets() {
     let out = ship(
-        "@derive(Serialize)\nstruct P as\n    @rename('regen-per-second')\n    regen: number\n    @rename(\"end\")\n    stop: number\nend\n",
+        "@derive(Serialize, Deserialize)\nstruct P as\n    @rename('regen-per-second')\n    regen: number\n    @rename(\"end\")\n    stop: number\nend\n",
     );
     assert!(out.contains("[\"regen-per-second\"] = self.regen"), "{out}");
     assert!(out.contains("regen = t[\"regen-per-second\"]"), "{out}");
@@ -29,10 +29,12 @@ fn a_rename_that_is_no_name_goes_in_brackets() {
 /// formatter picks and an escape change nothing.
 #[test]
 fn a_rename_reads_the_text_of_its_literal() {
-    let single =
-        ship("@derive(Serialize)\nstruct P as\n    @rename('it\\'s')\n    a: number\nend\n");
-    let double =
-        ship("@derive(Serialize)\nstruct P as\n    @rename(\"it's\")\n    a: number\nend\n");
+    let single = ship(
+        "@derive(Serialize, Deserialize)\nstruct P as\n    @rename('it\\'s')\n    a: number\nend\n",
+    );
+    let double = ship(
+        "@derive(Serialize, Deserialize)\nstruct P as\n    @rename(\"it's\")\n    a: number\nend\n",
+    );
     for out in [single, double] {
         assert!(out.contains("{ [\"it's\"] = self.a }"), "{out}");
         assert!(out.contains("P({ a = t[\"it's\"] })"), "{out}");
@@ -45,10 +47,14 @@ fn a_rename_reads_the_text_of_its_literal() {
 #[test]
 fn a_nested_struct_serializes_through_its_own_pair() {
     let out = ship(
-        "@derive(Serialize)\nstruct Inner as\n    v: number\nend\n@derive(Serialize)\nstruct Outer as\n    inner: Inner\n    maybe: Inner?\nend\n",
+        "@derive(Serialize, Deserialize)\nstruct Inner as\n    v: number\nend\n@derive(Serialize, Deserialize)\nstruct Outer as\n    inner: Inner\n    maybe: Inner?\nend\n",
     );
     assert!(out.contains("inner = Inner.to_table(self.inner)"), "{out}");
-    assert!(out.contains("inner = Inner.from_table(t.inner)"), "{out}");
+    // A key an older save lacks leaves the field to its default.
+    assert!(
+        out.contains("inner = (if t.inner == nil then nil else Inner.from_table(t.inner))"),
+        "{out}"
+    );
     assert!(
         out.contains("maybe = if self.maybe == nil then nil else Inner.to_table(self.maybe)"),
         "{out}"

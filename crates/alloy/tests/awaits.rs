@@ -238,3 +238,34 @@ fn an_await_before_a_spaced_paren_is_the_word() {
     let out = alloy::compile_with(luau, &options).unwrap();
     assert!(out.ship.contains("print(await(1))"), "{}", out.ship);
 }
+
+/// A function written in a spawner's call runs on a thread the spawner
+/// starts for it, so it yields safely. A function it calls does not,
+/// and neither does a comparator, which C code calls.
+#[test]
+fn a_spawned_function_may_await() {
+    let head = "local function f(): Future<number>\n    return async do return 1 end\nend\n";
+
+    for call in [
+        "game:GetService(\"Players\").PlayerAdded:Connect(function(p)\n    print(await f(), p)\nend)\n",
+        "workspace.ChildAdded:Once(function()\n    print(await f())\nend)\n",
+        "task.spawn(function()\n    print(await f())\nend)\n",
+        "task.defer(function()\n    print(await f())\nend)\n",
+        "task.delay(1, function()\n    print(await f())\nend)\n",
+    ] {
+        clean("m.aly", &format!("{head}{call}"));
+    }
+
+    only(
+        "m.aly",
+        &format!(
+            "{head}table.sort({{ 2, 1 }}, function(a, b)\n    print(await f())\n    return a < b\nend)\n"
+        ),
+    );
+    only(
+        "m.aly",
+        &format!(
+            "{head}task.spawn(function()\n    local function inner()\n        print(await f())\n    end\n    inner()\nend)\n"
+        ),
+    );
+}

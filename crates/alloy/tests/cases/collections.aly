@@ -1,4 +1,4 @@
--- `$set` and `$map` build the std collections; `[[` opens a nested array.
+-- `$set` and `$map` build the std collections; after them `[[` opens the pairs.
 local tags = $set["a", "b"]
 local prices = $map[[ "sword", 10 ], [ "pet", 25 ]]
 local grid = [ [ 1, 2 ], [ 3, 4 ] ]

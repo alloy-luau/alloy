@@ -284,7 +284,7 @@ pub const BOOK: &[Section] = &[
         number: "6.6",
         id: "ref-std",
         title: "Standard library",
-        key: None,
+        key: Some("topic:std"),
     },
     Section {
         number: "6.7",

@@ -17,6 +17,7 @@ const MUTATING_METHODS: &[&str] = &[
     "pop",
     "insert",
     "remove",
+    "swap_remove",
     "clear",
     "set",
     "add",
@@ -372,6 +373,12 @@ impl<'s> Scan<'s> {
             // bodies never stand together. Any other attribute, such as
             // `@test`, leaves both bodies in the build.
             if self.cfg_gated(head) {
+                continue;
+            }
+
+            // A trait's method is a contract each impl writes, not a body
+            // of the file: two traits may name one method.
+            if self.inside_block(i, &["trait"]) {
                 continue;
             }
 
@@ -847,6 +854,29 @@ impl<'s> Scan<'s> {
 
             if k == 0 {
                 return false;
+            }
+
+            // Luau's list, `@[native]`: the `]` closes an `@[`.
+            if src[k - 1] == b']' {
+                let mut depth = 0i32;
+
+                while k > 0 {
+                    k -= 1;
+
+                    match src[k] {
+                        b']' => depth += 1,
+                        b'[' => {
+                            depth -= 1;
+
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                return depth == 0 && k > 0 && src[k - 1] == b'@';
             }
 
             // `@name(...)`: step over the arguments.

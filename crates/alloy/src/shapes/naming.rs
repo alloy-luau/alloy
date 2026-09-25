@@ -307,7 +307,9 @@ pub(crate) fn name_of_body(body: &str, known: &Known) -> Option<String> {
             }
         }
 
-        return None;
+        // A step of an `Iter` chain carries `__iter` in its metatable,
+        // and the members name it.
+        return iter_name(&typed);
     }
 
     // A generic struct: the check artifact writes its alias as a plain
@@ -483,6 +485,12 @@ pub(crate) fn name_of_body(body: &str, known: &Known) -> Option<String> {
         return Some(format!("HashMap<{k}, {v}>"));
     }
 
+    // A BitSet has the members of a Set, and its `add` takes an index
+    // where a Set's takes a value.
+    if get("add").is_some_and(|sig| sig.contains("index: number")) && has("has") && has("union") {
+        return Some("BitSet".to_string());
+    }
+
     if let Some(sig) = get("add")
         && has("has")
         && has("union")
@@ -608,16 +616,26 @@ pub(crate) fn name_of_body(body: &str, known: &Known) -> Option<String> {
         return Some(format!("{kind}<{t}>"));
     }
 
-    if has("next") && has("take_while") && has("collect") {
-        let t = get("next")
-            .and_then(return_type)
-            .map(|t| t.trim_end_matches('?').to_string())
-            .unwrap_or_else(|| "any".to_string());
+    iter_name(&m)
+}
 
-        return Some(format!("Iter<{t}>"));
+/// An `Iter`, by three members only it has together. The element is
+/// what `next` returns.
+fn iter_name(m: &[(String, String)]) -> Option<String> {
+    let has = |key: &str| m.iter().any(|(k, _)| k == key);
+
+    if !(has("next") && has("take_while") && has("collect")) {
+        return None;
     }
 
-    None
+    let t = m
+        .iter()
+        .find(|(k, _)| k == "next")
+        .and_then(|(_, v)| return_type(v))
+        .map(|t| t.trim_end_matches('?').to_string())
+        .unwrap_or_else(|| "any".to_string());
+
+    Some(format!("Iter<{t}>"))
 }
 
 /// The one name a union carries: every member names the same shape, or
@@ -699,6 +717,16 @@ mod tests {
         assert_eq!(name_of_body(body, &known), Some("Iter<U>".to_string()));
     }
 
+    /// A step of an `Iter` chain prints with its `__iter` metatable in
+    /// place, and names no struct.
+    #[test]
+    fn an_iter_step_under_its_metatable_reads_as_iter() {
+        let known = Known::default();
+        let body = "{ @metatable { __iter: (any) -> () -> string? }, { collect: <X>(self: { next: (self: any) -> X? }) -> X[], next: ({ next: (any) -> string? }) -> string?, take_while: ({ next: (any) -> string? }, (string) -> boolean) -> *CYCLE* } }";
+
+        assert_eq!(name_of_body(body, &known), Some("Iter<string>".to_string()));
+    }
+
     /// A bound on a type parameter prints as the trait's own record.
     /// The trait is a name the source wrote, and the emit marks every
     /// method of one `read`, so the record is no mapped type.
@@ -726,5 +754,15 @@ mod tests {
             name_of_body(queue, &known),
             Some("Queue<number>".to_string())
         );
+    }
+
+    #[test]
+    fn a_bitset_is_not_a_set() {
+        let known = Known::default();
+        let bits = "{ add: (self: t1, index: number) -> t1, has: (self: t1, index: number) -> boolean, len: (self: t1) -> number, to_array: (self: t1) -> number[], union: (self: t1, other: t1) -> t1 }";
+        let set = "{ add: (self: t1, value: string) -> t1, has: (self: t1, value: string) -> boolean, to_table: (self: t1) -> { [string]: boolean }, union: (self: t1, other: t1) -> t1 }";
+
+        assert_eq!(name_of_body(bits, &known), Some("BitSet".to_string()));
+        assert_eq!(name_of_body(set, &known), Some("Set<string>".to_string()));
     }
 }

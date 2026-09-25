@@ -133,6 +133,15 @@ impl State {
 
                     None => (None, message.replace(&format!("{}: ", path.display()), "")),
                 };
+                // A value the load refuses, `Sgnal` in a list of std
+                // names, sits where the source writes it. The message
+                // names no line for it.
+                let span = span.or_else(|| {
+                    let name = shown.split('`').nth(1).filter(|n| !n.is_empty())?;
+                    let at = key_offset(&doc.source, name)?;
+
+                    Some((at, at + name.len()))
+                });
                 let (start, end) = span.unwrap_or_else(|| {
                     line_span(
                         doc.source
@@ -213,7 +222,9 @@ impl Server {
                 .map(|text| json!({ "contents": { "kind": "markdown", "value": text } })),
 
             _ => config_aly::site_at(&doc.source, offset).and_then(|site| {
-                let items = config_aly::completions(&schema, &site);
+                // The snippets write the quotes and indent `[fmt]` asks for.
+                let fmt = st.fmt_config(uri).for_source(&doc.source);
+                let items = config_aly::completions(&schema, &site, &fmt);
                 let space =
                     message.pointer("/params/context/triggerCharacter") == Some(&json!(" "));
 

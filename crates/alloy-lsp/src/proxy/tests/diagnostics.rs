@@ -420,6 +420,39 @@ pub(crate) fn one_report_per_problem() {
     assert_eq!(items, vec![one]);
 }
 
+/// `import { Ha } from "@alloy/std/collections"`: the name the module
+/// does not export draws one report, not a second that calls it unused.
+#[test]
+fn a_missing_import_is_not_also_unused() {
+    let at = |line: u32, character: u32, message: &str| {
+        json!({
+            "range": {
+                "start": { "line": line, "character": character },
+                "end": { "line": line, "character": character + 2 },
+            },
+            "message": message,
+        })
+    };
+    let missing = at(0, 9, "ImportError: the std has no `Ha`");
+    let unused = at(1, 9, "unused_import: `Hb` is imported and never used");
+    let mut items = vec![
+        missing.clone(),
+        at(0, 9, "unused_import: `Ha` is imported and never used"),
+        unused.clone(),
+    ];
+    collapse_diagnostics(&mut items);
+    assert_eq!(items, vec![missing, unused]);
+
+    // `Nope as N`: the alias stands four columns past the name.
+    let aliased = at(2, 9, "ImportError: \"./x\" does not export `Nope`");
+    let mut items = vec![
+        json!({ "range": range_value((2, 9), (2, 13)), "message": aliased["message"] }),
+        at(2, 17, "unused_import: `N` is imported and never used"),
+    ];
+    collapse_diagnostics(&mut items);
+    assert_eq!(items.len(), 1, "{items:?}");
+}
+
 /// Two open files: a module and the file that imports it. The import
 /// checks read the module from disk, so a module that gains an
 /// `export default` clears the report of the importer, and the export
@@ -1069,6 +1102,13 @@ fn a_config_file_reports_its_keys_and_its_load() {
         ["the config does not load"]
     );
     assert!(messages("export const build = { out = \"dist\" }\n").is_empty());
+
+    // A reserved word is a bare key there, and the child reads it quoted.
+    let src = "export const build = { in = \"src\" }\n";
+    assert!(messages(src).is_empty());
+    let st = super::support::files(&[("file:///p/.config.aly", src)]);
+    let shadow = &st.docs["file:///p/.config.aly"].shadow;
+    assert!(shadow.contains("[\"in\"] = \"src\""), "{shadow}");
 }
 
 /// The child computes a refactor on the lowered Luau. An edit over text
@@ -1226,6 +1266,31 @@ fn a_config_file_names_a_wrong_lint_and_the_line_that_failed() {
             2,
             "the config does not load: attempt to index nil with 'x'".to_string()
         )]
+    );
+}
+
+/// A std name the load refuses sits on its string. The message names no
+/// line, and the report once covered the whole `export` line.
+#[test]
+fn a_config_std_name_typo_sits_on_its_string() {
+    let src = "export default { std = { globals = { \"HashMap\", \"Sgnal\" } } }\n";
+    let st = super::support::files(&[("file:///p/.config.aly", src)]);
+    let reports = st.full_diagnostics("file:///p/.config.aly", Vec::new());
+    let at = src.find("Sgnal").unwrap() as u64;
+
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert_eq!(
+        reports[0]["range"],
+        json!({
+            "start": { "line": 0, "character": at },
+            "end": { "line": 0, "character": at + 5 },
+        })
+    );
+    assert!(
+        reports[0]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("`Sgnal` is no std name")),
+        "{reports:?}"
     );
 }
 

@@ -333,6 +333,15 @@ fn compile_with(
     Ok(out)
 }
 
+/// Alloy patch: the parser's first complaint about `source`, with its byte
+/// offset, or `None` when it parses. Alloy's parser reads what the markup
+/// lowers to, Alloy syntax included, where full_moon read Luau alone.
+pub(crate) fn parse_error(source: &str) -> Option<String> {
+    alloy_syntax::parse_one(source)
+        .err()
+        .map(|e| format!("{} at byte {}", e.message, e.offset))
+}
+
 /// Compiles and then re-parses the output as Luau (PLAN.md §5.4, step 8).
 ///
 /// A codegen bug that emits invalid Luau should surface here, not on the user's
@@ -345,15 +354,7 @@ pub fn compile_verified(
 ) -> Result<(String, Vec<Warning>), CompileError> {
     let (output, warnings) = compile_configured(source, backend, config.clone())?;
 
-    if let Err(errors) =
-        full_moon::parse_fallible(&output, full_moon::LuaVersion::luau()).into_result()
-    {
-        let detail = errors
-            .iter()
-            .map(|error| error.to_string())
-            .collect::<Vec<_>>()
-            .join("; ");
-
+    if let Some(detail) = parse_error(&output) {
         return Err(CompileError {
             message: format!(
                 "internal error: the {} backend emitted invalid Luau — {detail}",
@@ -1095,9 +1096,11 @@ mod tests {
 
         assert!(compiled.output.contains("Frmae"), "{}", compiled.output);
         assert!(compiled.output.contains("after"), "{}", compiled.output);
-        full_moon::parse_fallible(&compiled.output, full_moon::LuaVersion::luau())
-            .into_result()
-            .expect("recovered output is still Luau");
+        assert_eq!(
+            parse_error(&compiled.output),
+            None,
+            "recovered output is still Luau"
+        );
     }
 
     /// An unknown tag has an unknown class, so its attributes cannot be checked
@@ -1201,8 +1204,8 @@ mod tests {
     /// which never reaches codegen.
     #[test]
     fn a_method_factory_emits_and_reparses() {
-        // The spread case below overflows the harness's own 2 MB inside
-        // full_moon — the very thing the CLI's `STACK` exists for.
+        // The spread case below once overflowed the harness's own 2 MB
+        // inside the parser — the very thing the CLI's `STACK` exists for.
         std::thread::Builder::new()
             .stack_size(16 * 1024 * 1024)
             .spawn(|| {
@@ -1539,7 +1542,7 @@ mod tests {
             "return function(props) return <Frame>{props.children}</Frame> end",
         ];
 
-        // full_moon's recursive-descent parser has large stack frames in debug
+        // A recursive-descent parser has large stack frames in debug
         // builds — enough to exhaust a test thread's 2 MB on the inlined merge
         // helper. Give it room rather than shrinking the fixtures to suit the
         // harness. The CLI runs on a larger stack for the same reason; see
@@ -2026,8 +2029,8 @@ fragment = \"Frag\"
         /// call takes no trailing comma where a table does.
         #[test]
         fn every_fixture_reparses() {
-            // full_moon's recursive-descent parser has large stack frames in
-            // debug builds — enough to exhaust a test thread's 2 MB. Same reason
+            // A recursive-descent parser has large stack frames in debug
+            // builds — enough to exhaust a test thread's 2 MB. Same reason
             // the one-table suite spawns, and the same reason the CLI sets
             // `STACK` in luaux-cli's main.rs.
             std::thread::Builder::new()

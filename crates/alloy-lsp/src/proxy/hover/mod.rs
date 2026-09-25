@@ -8,14 +8,14 @@ mod modules;
 mod restyle;
 
 pub(crate) use declarations::{
-    binds_a_value, case_arm_of_binding, case_binding_span, case_binding_text, import_alias_source,
-    let_else_binding,
+    binds_a_value, case_arm_of_binding, case_binding_span, case_binding_text, formatted_hover,
+    import_alias_source, let_else_binding,
 };
 pub(crate) use fields::{
     declared_field_hover, declared_field_owner, declared_parameter_hover,
-    declared_type_parameters_of, field_key, foreign_method_hover, function_name_of, literal_key,
-    literal_key_path, receiver_type, record_entry, remote_parameter_hover, used_field_hover,
-    used_field_owner,
+    declared_type_parameters_of, enclosing_brace, field_key, foreign_method_hover,
+    function_name_of, literal_key, literal_key_path, name_solver_local, name_solver_struct,
+    receiver_type, record_entry, remote_parameter_hover, used_field_hover, used_field_owner,
 };
 pub(crate) use members::{attach_std_member_docs, std_member_hover, std_receiver};
 pub(crate) use modules::{import_spec, module_hover, remote_spec, service_hover};
@@ -23,13 +23,15 @@ pub(crate) use modules::{import_spec, module_hover, remote_spec, service_hover};
 #[cfg(test)]
 #[cfg(test)]
 pub(crate) use modules::shadows_an_import;
+pub(crate) use restyle::group_len;
 pub(crate) use restyle::{
     close_empty_packs, close_item_packs, declared_annotation, declared_head, declared_signature,
     drop_bound_intersections, empty_parameter_names, fold_std_shapes, invents_a_type,
     is_byte_count, keep_annotation, lowers_a_block, member_doc, name_by_declaration,
     name_method_doc, name_method_receiver, name_self_receiver, name_solver_variable,
     name_trait_method, names_a_key, prefer_constructed_struct, restates_itself,
-    restore_struct_arguments, restyle_hover, restyle_signatures, source_type, unlocal_parameter,
+    restore_struct_arguments, restyle_hover, restyle_signatures, source_type, std_generic,
+    unlocal_parameter,
 };
 
 use super::completion::{lands_on_member, member_position, sep_of};
@@ -279,6 +281,7 @@ impl Server {
 
         // A std name the file binds itself, through an import or a
         // declaration, is the file's: the child answers for that one.
+        let owned = keywords::attribute_argument_hover(&doc.source, offset);
         let hit = keywords::hover(&doc.source, offset).filter(|(start, end, _)| {
             let word = &doc.source[*start..*end];
             let is_std = alloy::desugar::AMBIENT.contains(&word)
@@ -312,6 +315,7 @@ impl Server {
             !(is_std && doc_binds(doc, word))
         });
 
+        let hit = owned.or_else(|| hit.map(|(s, e, t)| (s, e, t.to_string())));
         let result = match hit {
             Some((start, end, text)) => {
                 let (sl, sc) = position_of(&doc.source, start);

@@ -29,6 +29,45 @@ describe("Queue", function()
 		expect(q:pop()).toBe("c")
 	end)
 
+	it("keeps its order when the ring wraps and grows", function()
+		local q = Queue.new()
+		local popped = {}
+		local next_in = 1
+		-- Pops keep the front moving, so pushes wrap past the end of the
+		-- ring, and the queue grows while it has wrapped.
+		for round = 1, 60 do
+			for _ = 1, round % 7 + 1 do
+				q:push(next_in)
+				next_in += 1
+			end
+			for _ = 1, round % 5 do
+				local v = q:pop()
+				if v ~= nil then
+					table.insert(popped, v)
+				end
+			end
+			local front = (popped[#popped] or 0) + 1
+			local arr = q:to_array()
+			expect(arr:len()).toBe(q:len())
+			for i, v in arr do
+				expect(v).toBe(front + i - 1)
+			end
+			local k = 0
+			for v in q do
+				k += 1
+				expect(v).toBe(arr[k])
+			end
+			expect(k).toBe(q:len())
+		end
+		while not q:is_empty() do
+			table.insert(popped, q:pop())
+		end
+		expect(#popped).toBe(next_in - 1)
+		for i, v in popped do
+			expect(v).toBe(i)
+		end
+	end)
+
 	it("iterates front to back without a pop", function()
 		local q = Queue.from({ 1, 2, 3 })
 		local seen = {}

@@ -15,8 +15,7 @@ use crate::backend::EmitError;
 use crate::config::Config;
 use crate::markup::ElementName;
 use crate::roblox;
-use full_moon::ast;
-use full_moon::visitors::Visitor;
+use alloy_syntax::lexer::{Tok, TokKind};
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,31 +46,8 @@ impl Resolver {
     /// LuauX regions must already be blanked — see [`blank_luaux_regions`] — because
     /// `.luaux` is not parseable as Luau.
     pub fn new(blanked_source: &str, config: Config) -> Self {
-        let mut collector = Bindings {
-            names: HashSet::new(),
-        };
-
-        // parse_fallible so a file that is invalid for unrelated reasons still
-        // yields whatever bindings it can. A missing binding degrades to a
-        // "no such element" error, never to a silent miscompile.
-        //
-        // Alloy patch: `~T` is Alloy's type negation, and full_moon panics
-        // on it inside a table type. A space keeps the offsets, and `~=`
-        // stays. Any other panic costs the bindings, not the process.
-        let luau = blank_negations(blanked_source);
-        let parsed = std::panic::catch_unwind(|| {
-            full_moon::parse_fallible(&luau, full_moon::LuaVersion::luau())
-        });
-
-        if let Ok(parsed) = &parsed {
-            collector.visit_ast(parsed.ast());
-        }
-
-        // Alloy patch: the caller's bindings join the parsed ones.
-        collector.names.extend(config.extra_bound.iter().cloned());
-
         Self {
-            bound: collector.names,
+            bound: bound_names(blanked_source),
             config,
         }
     }
@@ -198,22 +174,6 @@ fn suggestion(candidates: &[&'static str]) -> Option<String> {
     }
 }
 
-/// The source with each `~` that is no `~=` as a space.
-fn blank_negations(source: &str) -> String {
-    let mut out = String::with_capacity(source.len());
-    let mut chars = source.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        out.push(if c == '~' && chars.peek() != Some(&'=') {
-            ' '
-        } else {
-            c
-        });
-    }
-
-    out
-}
-
 /// Replaces every LuauX region with same-length filler so the result parses as
 /// Luau while keeping byte offsets and line numbers intact.
 ///
@@ -255,75 +215,181 @@ pub fn blank_luaux_regions(source: &str, spans: &[(usize, usize)]) -> String {
     out
 }
 
-struct Bindings {
-    names: HashSet<String>,
-}
+/// The names a file binds, by a token scan of the blanked source. The
+/// scan reads Alloy syntax too: `import`, `const`, `struct`, and the
+/// rest. A name that is not a binding but looks like one costs nothing:
+/// it only lets `<Name>` resolve to a component.
+pub fn bound_names(src: &str) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
+        return names;
+    };
+    let toks = &lexed.toks;
+    let text = |t: &Tok| t.text(src);
+    let is_ident = |t: &Tok| t.kind == TokKind::Ident;
+    let mut i = 0;
 
-impl Bindings {
-    fn insert(&mut self, token: &full_moon::tokenizer::TokenReference) {
-        self.names.insert(token.token().to_string());
-    }
-}
+    while i < toks.len() {
+        let word = text(&toks[i]);
 
-impl Visitor for Bindings {
-    fn visit_local_assignment(&mut self, node: &ast::LocalAssignment) {
-        for name in node.names() {
-            self.insert(name);
-        }
-    }
+        match word {
+            "local" | "const" => {
+                i += 1;
 
-    fn visit_local_function(&mut self, node: &ast::LocalFunction) {
-        self.insert(node.name());
-    }
+                if i < toks.len() && text(&toks[i]) == "function" {
+                    if let Some(t) = toks.get(i + 1).filter(|t| is_ident(t)) {
+                        names.insert(text(t).to_string());
+                    }
 
-    // `const` binds exactly as `local` does, and missing it is not a quiet
-    // degradation: the factory check reports `vide` is not in scope for a file
-    // that imported it, and every component declared that way stops resolving,
-    // so `<Card/>` is told it is not a Roblox class.
-    fn visit_const_assignment(&mut self, node: &ast::luau::ConstAssignment) {
-        for name in node.names() {
-            self.insert(name);
-        }
-    }
+                    continue;
+                }
 
-    fn visit_const_function(&mut self, node: &ast::luau::ConstFunction) {
-        self.insert(node.name());
-    }
+                // `local a, b`, `local { a, b = c }`, `local [ x, ...rest ]`.
+                let mut depth = 0i32;
 
-    fn visit_function_declaration(&mut self, node: &ast::FunctionDeclaration) {
-        // `function Receipt()` binds a global; `function a.b.c()` binds nothing
-        // new, but recording the head is harmless.
-        if let Some(first) = node.name().names().iter().next() {
-            self.insert(first);
-        }
-    }
+                while i < toks.len() {
+                    let t = &toks[i];
+                    let s = text(t);
 
-    fn visit_function_body(&mut self, node: &ast::FunctionBody) {
-        for parameter in node.parameters() {
-            if let ast::Parameter::Name(name) = parameter {
-                self.insert(name);
+                    match s {
+                        "{" | "[" => depth += 1,
+
+                        "}" | "]" => depth -= 1,
+
+                        "=" if depth == 0 => break,
+
+                        ":" if depth == 0 => break,
+
+                        _ if is_ident(t) => {
+                            // In a table destructure `a = b` binds `b`; the
+                            // name before `=` is a key. Keeping both is safe.
+                            names.insert(s.to_string());
+                        }
+
+                        _ => {}
+                    }
+
+                    if depth == 0
+                        && s != ","
+                        && !is_ident(t)
+                        && !matches!(s, "{" | "[" | "}" | "]" | "...")
+                    {
+                        break;
+                    }
+
+                    i += 1;
+                }
+
+                continue;
             }
-        }
-    }
 
-    fn visit_numeric_for(&mut self, node: &ast::NumericFor) {
-        self.insert(node.index_variable());
-    }
+            "function" => {
+                if let Some(t) = toks.get(i + 1).filter(|t| is_ident(t)) {
+                    names.insert(text(t).to_string());
+                }
 
-    fn visit_generic_for(&mut self, node: &ast::GenericFor) {
-        for name in node.names() {
-            self.insert(name);
-        }
-    }
+                // The parameters: `function f<T>(a, b: T, ...)`. A name
+                // right after `(` or `,` is one; a type or a default is not.
+                let mut j = i + 1;
 
-    fn visit_assignment(&mut self, node: &ast::Assignment) {
-        // Plain `Receipt = function() ... end` binds a global.
-        for variable in node.variables() {
-            if let ast::Var::Name(name) = variable {
-                self.insert(name);
+                while toks
+                    .get(j)
+                    .is_some_and(|t| is_ident(t) || matches!(text(t), "." | ":" | "<" | ">" | ","))
+                {
+                    j += 1;
+                }
+
+                let mut depth = 0i32;
+
+                while toks.get(j).is_some_and(|t| text(t) == "(") || depth > 0 {
+                    let Some(t) = toks.get(j) else {
+                        break;
+                    };
+
+                    match text(t) {
+                        "(" | "{" | "[" => depth += 1,
+
+                        ")" | "}" | "]" => depth -= 1,
+
+                        _ if depth == 1
+                            && is_ident(t)
+                            && matches!(text(&toks[j - 1]), "(" | ",") =>
+                        {
+                            names.insert(text(t).to_string());
+                        }
+
+                        _ => {}
+                    }
+
+                    j += 1;
+                }
             }
+
+            // `for i = 1, n` and `for k, v: T in t`.
+            "for" => {
+                let mut j = i + 1;
+
+                while let Some(t) = toks
+                    .get(j)
+                    .filter(|t| !matches!(text(t), "in" | "=" | "do"))
+                {
+                    if is_ident(t) && matches!(text(&toks[j - 1]), "for" | ",") {
+                        names.insert(text(t).to_string());
+                    }
+
+                    j += 1;
+                }
+            }
+
+            // `Receipt = function() ... end` at the start of a statement
+            // binds a global. A key of a table on its own line reads the
+            // same, and costs nothing.
+            _ if is_ident(&toks[i])
+                && toks.get(i + 1).is_some_and(|t| text(t) == "=")
+                && (i == 0
+                    || text(&toks[i - 1]) == ";"
+                    || src[toks[i - 1].end as usize..toks[i].start as usize].contains('\n')) =>
+            {
+                names.insert(word.to_string());
+            }
+
+            // A namespace holds components: `<Scope.card/>` names one.
+            "struct" | "enum" | "trait" | "interface" | "remote" | "attribute" | "macro"
+            | "class" | "namespace" => {
+                if let Some(t) = toks.get(i + 1).filter(|t| is_ident(t)) {
+                    names.insert(text(t).to_string());
+                }
+            }
+
+            "import" => {
+                // `import * as N`, `import D from`, `import { a as b, c }`.
+                let mut j = i + 1;
+
+                while j < toks.len() {
+                    let t = &toks[j];
+                    let s = text(t);
+
+                    if s == "from" || matches!(t.kind, TokKind::Str { .. }) {
+                        break;
+                    }
+
+                    // An alias `a as b` binds `b`; keeping `a` too is
+                    // harmless, since a name only lets a tag resolve.
+                    if is_ident(t) && s != "type" && s != "as" {
+                        names.insert(s.to_string());
+                    }
+
+                    j += 1;
+                }
+            }
+
+            _ => {}
         }
+
+        i += 1;
     }
+
+    names
 }
 
 #[cfg(test)]
@@ -416,7 +482,8 @@ mod tests {
         );
     }
 
-    /// full_moon panics on a negation inside a table type.
+    /// A negation inside a table type is Alloy syntax, and the scan
+    /// reads past it.
     #[test]
     fn a_negation_in_a_table_type_keeps_the_bindings() {
         let resolver = resolver("type T = { t: ~nil }\nlocal Card = 1\nprint(Card ~= 2)");
@@ -438,6 +505,6 @@ mod tests {
         assert!(blanked.ends_with("local b = 2"));
 
         // And the result is parseable, which is the whole point.
-        assert!(full_moon::parse(&blanked).is_ok(), "{blanked}");
+        assert!(alloy_syntax::parse_one(&blanked).is_ok(), "{blanked}");
     }
 }

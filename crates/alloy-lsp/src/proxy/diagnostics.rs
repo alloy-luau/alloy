@@ -388,6 +388,15 @@ impl State {
                 ))
             } else if let Some(found) = self.missing_arm_fix(doc, &d.message, (start, end)) {
                 Some(found)
+            } else if let Some(name) = alloy::std_names::missing_name(&d.message) {
+                // A std name with no import: the line the report names.
+                let spec = alloy::std_names::spec_of(name).unwrap_or_default();
+                let fixes = alloy::std_names::import_fixes(&doc.source, &[name]);
+
+                Some((
+                    format!("Import `{name}` from \"{spec}\""),
+                    json!(super::completion::fix_edits(&doc.source, &fixes)),
+                ))
             } else {
                 nearest_variant_fix(&d.message).map(|name| {
                     (
@@ -411,6 +420,32 @@ impl State {
                     "message": alloy::docs::labeled(&d.message),
                 }],
                 "edit": { "changes": { uri: edits } },
+            }));
+        }
+
+        // Two std names or more with no import: one action writes every
+        // import, the way `alloy flux --fix` does.
+        let missing: Vec<&str> = doc
+            .output
+            .as_ref()
+            .map(|o| o.diagnostics.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|d| alloy::std_names::missing_name(&d.message))
+            .collect();
+
+        if missing.len() > 1
+            && actions.iter().any(|a| {
+                a["title"]
+                    .as_str()
+                    .is_some_and(|t| t.starts_with("Import `") && t.contains("@alloy/std"))
+            })
+        {
+            let fixes = alloy::std_names::import_fixes(&doc.source, &missing);
+            actions.push(json!({
+                "title": "Import every std name this file uses",
+                "kind": "quickfix",
+                "edit": { "changes": { uri: super::completion::fix_edits(&doc.source, &fixes) } },
             }));
         }
 
@@ -1129,6 +1164,31 @@ pub(crate) fn collapse_diagnostics(items: &mut Vec<Value>) {
         !spans
             .iter()
             .any(|(other, span)| other == message && *span != range && covers(range, *span))
+    });
+
+    // A name the module does not export draws an `ImportError` and an
+    // `unused_import` on the same span, or on its alias: `Nope as N`
+    // reports `Nope` and `N`. The name is wrong, and the second report
+    // says nothing more.
+    let missing: Vec<Span> = items
+        .iter()
+        .filter(|d| {
+            d.get("message")
+                .and_then(Value::as_str)
+                .is_some_and(|m| m.starts_with("ImportError"))
+        })
+        .filter_map(|d| d.get("range").and_then(range_of))
+        .collect();
+
+    items.retain(|d| {
+        !d.get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|m| m.starts_with("unused_import"))
+            || d.get("range").and_then(range_of).is_none_or(|r| {
+                !missing
+                    .iter()
+                    .any(|m| *m == r || (m.1.0 == r.0.0 && m.1.1 + " as ".len() as u32 == r.0.1))
+            })
     });
 
     // A nil base makes every key on it unknown. `could be nil` names

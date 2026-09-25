@@ -63,6 +63,10 @@ pub struct Structure {
     pub ends: Vec<Option<usize>>,
     /// For each token, the zero-based line it starts on.
     pub lines: Vec<usize>,
+    /// For each token, whether it sits in an arm of a `match` in value
+    /// position, where a line that opens with `-` is the arm's next
+    /// value and not a subtraction.
+    pub value_arm: Vec<bool>,
 }
 
 /// The zero-based line each token starts on, in one pass over the
@@ -100,8 +104,10 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
     let mut ends = vec![None; toks.len()];
     let mut depth = 0usize;
     let lines = token_lines(src, toks);
+    let mut value_arm = vec![false; toks.len()];
 
     for (i, t) in toks.iter().enumerate() {
+        value_arm[i] = stack.last().is_some_and(|f| f.kind == Kind::Arm && f.expr);
         let text = t.text(src);
         let prev = if i > 0 {
             Some(toks[i - 1].text(src))
@@ -290,9 +296,12 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
                 // behind the word that exports it or gives it a
                 // visibility in a namespace; the same words inside
                 // `attribute ... on struct, enum` do not.
+                // `trait = 1` at the start of a line is a name.
                 "struct" | "enum" | "trait" | "impl" | "interface" | "macro" | "namespace"
-                    if first_on_line(src, toks, i)
-                        || matches!(prev, Some("export" | "global" | "public" | "private")) =>
+                    if (first_on_line(src, toks, i)
+                        || matches!(prev, Some("export" | "global" | "public" | "private"))
+                        || after_attributes(src, toks, i))
+                        && alloy_syntax::contextual::keyword_at(src, toks, i) =>
                 {
                     push(&mut stack, Kind::Block, 1, &mut opens, &mut closes);
                 }
@@ -428,7 +437,12 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
         depth = depth.saturating_sub(closes) + opens;
     }
 
-    Structure { steps, ends, lines }
+    Structure {
+        steps,
+        ends,
+        lines,
+        value_arm,
+    }
 }
 
 /// A `function` line with no body: a `declare function`, a method of a
@@ -468,6 +482,18 @@ fn signature_only(src: &str, toks: &[Tok], i: usize, stack: &[Frame], lines: &[u
 }
 
 /// Whether token `i` is the first on its line.
+/// Whether the word at `i` follows attributes that open its line:
+/// `@test namespace Suite`.
+fn after_attributes(src: &str, toks: &[Tok], i: usize) -> bool {
+    let mut j = i;
+
+    while j > 0 && !first_on_line(src, toks, j) {
+        j -= 1;
+    }
+
+    j < i && toks[j].text(src) == "@"
+}
+
 fn first_on_line(src: &str, toks: &[Tok], i: usize) -> bool {
     match i.checked_sub(1) {
         None => true,

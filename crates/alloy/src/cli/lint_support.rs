@@ -640,6 +640,37 @@ pub(crate) fn apply_header_as_fixes(
     rewrites
 }
 
+/// `--fix`: writes the std imports the compile reported missing. Each
+/// file takes one rewrite that imports every name it reported.
+pub(crate) fn apply_std_import_fixes(
+    input: &Path,
+    diagnostics: &[(PathBuf, alloy::Diagnostic)],
+) -> usize {
+    let mut files: std::collections::BTreeMap<&PathBuf, Vec<&str>> = Default::default();
+
+    for (rel, d) in diagnostics {
+        if let Some(name) = alloy::std_names::missing_name(&d.message) {
+            files.entry(rel).or_default().push(name);
+        }
+    }
+
+    let mut rewrites = 0;
+
+    for (rel, names) in files {
+        let path = input.join(rel);
+        let Ok(source) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let fixes = alloy::std_names::import_fixes(&source, &names);
+
+        if !fixes.is_empty() && fs::write(&path, alloy::std_names::apply(&source, &fixes)).is_ok() {
+            rewrites += names.len();
+        }
+    }
+
+    rewrites
+}
+
 /// `--fix`: applies the rewrites of the lints at `warn` or `deny`, one
 /// file at a time. Returns how many rewrites landed and the lints that
 /// had none, which the caller prints.

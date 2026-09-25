@@ -295,7 +295,6 @@ impl<'a> Parser<'a> {
         self.expect("function")?;
 
         let name = self.expect_name()?;
-        self.reject_reserved(name);
         let body = self.function_body(start)?;
 
         Ok(Stmt::LocalFunction(LocalFunction {
@@ -318,12 +317,6 @@ impl<'a> Parser<'a> {
 
         let mut path = vec![self.expect_name()?];
         let mut is_method = false;
-
-        // A plain `function new()` binds a global; `Vec2.new` is a field,
-        // and so is a method in an `impl` or `trait` body.
-        if !self.at(".") && !self.at(":") && self.method_context == 0 {
-            self.reject_reserved(path[0]);
-        }
 
         loop {
             if self.eat(".") {
@@ -638,12 +631,7 @@ impl<'a> Parser<'a> {
                         TokSpan::new(i, i + 1)
                     }
 
-                    false => {
-                        let n = self.expect_name()?;
-                        self.reject_reserved(n);
-
-                        n
-                    }
+                    false => self.expect_name()?,
                 }
             }
         };

@@ -22,6 +22,7 @@ pub struct Config {
     pub roblox: RobloxConfig,
     pub test: TestConfig,
     pub project: Project,
+    pub std: StdConfig,
     /// The `[mount]` table: alias to `[path, mount]`. The folder at
     /// `path` lands at `mount` in the DataModel. The table is the tree
     /// when the project writes one, over any project file at the root.
@@ -872,6 +873,16 @@ impl Default for TestConfig {
     }
 }
 
+/// The `[std]` table: how a file reaches the std.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct StdConfig {
+    /// The std names a file writes with no import: `"none"`, the
+    /// default, `"all"`, or a list of names. The names the language
+    /// owns, `Result` and the rest, need no import under any value.
+    pub globals: crate::std_names::Globals,
+}
+
 /// The `[emit]` table: the few knobs that change what emitted code does.
 /// Each one is a named exception to the razor, so the list stays short.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -951,6 +962,9 @@ artifact = "ship"
 wait_timeout = 5
 # std_require = "@alloy"
 # erase_type_imports = false
+
+[std]
+globals = "none"
 
 [fmt]
 recommended = true

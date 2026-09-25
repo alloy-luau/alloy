@@ -10,7 +10,7 @@ out="../docs/public/play"
 mkdir -p "$out"
 
 # 1. The compiler.
-(cd alloy-web && wasm-pack build --target web --release --out-dir pkg)
+(cd crates/alloy-web && wasm-pack build --target web --release --out-dir pkg)
 cp crates/alloy-web/pkg/alloy_web.js crates/alloy-web/pkg/alloy_web_bg.wasm "$out/"
 
 # 2. The analyzer and the VM.

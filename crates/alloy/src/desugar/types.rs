@@ -14,10 +14,14 @@ pub(crate) fn generic_head(ty: &str) -> Option<(String, String)> {
     let ty = named.trim();
     let open = ty.find('<')?;
     let base = ty[..open].trim();
+    // `c.HashMap<K, V>` names the std type through `import * as c`.
+    let last = base.rsplit('.').next().unwrap_or(base);
 
+    // `Iter.from` is an overload set, which Luau cannot instantiate by
+    // hand; it reads its element type off the source instead.
     if !matches!(
-        base,
-        "HashMap" | "Set" | "Array" | "Queue" | "Heap" | "Iter" | "Future"
+        last,
+        "HashMap" | "Set" | "Array" | "Queue" | "Heap" | "Future"
     ) || !ty.ends_with('>')
     {
         return None;
@@ -88,21 +92,40 @@ pub(crate) fn generic_bounds(text: &str) -> Vec<(String, String)> {
 
 /// A generic list without its bounds: `<T: Shape, U>` gives `<T, U>`.
 pub(crate) fn strip_bounds(text: &str) -> String {
-    let names: Vec<String> = split_generics(text)
+    format!("<{}>", generic_names(text).join(", "))
+}
+
+/// The names a generic list declares: `<T: Shape, U>` gives `T` and `U`.
+pub(crate) fn generic_names(text: &str) -> Vec<String> {
+    split_generics(text)
         .into_iter()
         .map(|item| match item.split_once(':') {
             Some((name, _)) => name.trim().to_string(),
 
             None => item,
         })
-        .collect();
-
-    format!("<{}>", names.join(", "))
+        .collect()
 }
 
 /// Rewrites each bounded generic name in a type to `(T & Bound)`.
 pub(crate) fn apply_bounds(ty: &str, bounds: &[(String, String)]) -> String {
     let mut out = String::with_capacity(ty.len() + 16);
+    let mut from = 0;
+
+    for (start, end, bound) in bound_spots(ty, bounds) {
+        out.push_str(&ty[from..start]);
+        out.push_str(&format!("({} & {bound})", &ty[start..end]));
+        from = end;
+    }
+
+    out.push_str(&ty[from..]);
+    out
+}
+
+/// Each bounded generic name in a type that takes its bound: the byte
+/// range of the name and the bound it takes.
+pub(crate) fn bound_spots(ty: &str, bounds: &[(String, String)]) -> Vec<(usize, usize, String)> {
+    let mut out = Vec::new();
     let bytes = ty.as_bytes();
     let mut i = 0;
     let is_word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
@@ -145,13 +168,12 @@ pub(crate) fn apply_bounds(ty: &str, bounds: &[(String, String)]) -> String {
             let is_field =
                 bytes.get(i).is_some_and(|c| *c == b':') || (start > 0 && bytes[start - 1] == b'.');
 
-            match bounds.iter().find(|(n, _)| n == word) {
-                Some((_, bound)) if !is_field => out.push_str(&format!("({word} & {bound})")),
-
-                _ => out.push_str(word),
+            if let Some((_, bound)) = bounds.iter().find(|(n, _)| n == word)
+                && !is_field
+            {
+                out.push((start, i, bound.clone()));
             }
         } else {
-            out.push(bytes[i] as char);
             i += 1;
         }
     }

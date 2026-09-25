@@ -83,6 +83,70 @@ pub fn hover(source: &str, offset: usize) -> Option<(usize, usize, &'static str)
     best
 }
 
+/// The hover of a word inside `@allow( )` or Luau's `@[ ]`: a lint's
+/// doc, a group, a tool prefix, or one of Luau's attributes and the keys
+/// `deprecated` takes. The text is built, so it is owned.
+pub fn attribute_argument_hover(source: &str, offset: usize) -> Option<(usize, usize, String)> {
+    let bytes = source.as_bytes();
+
+    if offset >= bytes.len() || !is_word(bytes[offset]) {
+        return None;
+    }
+
+    let (start, end) = word_at(bytes, offset);
+    let word = &source[start..end];
+    let line_start = source[..start].rfind('\n').map_or(0, |i| i + 1);
+    let before = &source[line_start..start];
+    let open =
+        |head: &str, close: char| before.rfind(head).filter(|i| !before[*i..].contains(close));
+
+    if open("@allow(", ')').is_some() {
+        let text = if let Some(l) = alloy::lint::LINTS.iter().find(|l| l.name == word) {
+            format!(
+                "**{}**, a lint of the `{}` group\n\n{}\n\n{}",
+                l.name,
+                l.group.name(),
+                l.summary,
+                l.detail
+            )
+        } else if let Some(group) = alloy::lint::Group::from_name(word) {
+            format!(
+                "**{}**, a lint group: `@allow({})` quiets each of its lints.",
+                group.name(),
+                group.name()
+            )
+        } else {
+            match word {
+                "flux" => "`flux.`: a lint of the compiler, `@allow(flux.too_many_arguments)`.".to_string(),
+
+                "luau" => "`luau.`: a lint of luau-lsp, `@allow(luau.LocalShadow)`. An error stays an error.".to_string(),
+
+                "alx" => "`alx.`: a markup lint, `@allow(alx.static_conditional_child)`.".to_string(),
+
+                _ => return None,
+            }
+        };
+
+        return Some((start, end, text));
+    }
+
+    if open("@[", ']').is_some() {
+        let text = match word {
+            "native" | "checked" | "deprecated" => lookup(&format!("@{word}"))?.to_string(),
+
+            "use" => "The name to call instead of the deprecated function, a string.".to_string(),
+
+            "reason" => "Why the function is deprecated, a string.".to_string(),
+
+            _ => return None,
+        };
+
+        return Some((start, end, text));
+    }
+
+    None
+}
+
 /*
 The doc of a keyword, cut to the meaning the position reads.
 
@@ -102,8 +166,11 @@ fn meaning(source: &str, start: usize, word: &str, text: &'static str) -> &'stat
 
         "default" if crate::context::match_scrutinee(source, start).is_some() => paragraph(0),
 
-        // `import * as M` renames the whole module.
-        "as" if in_name_list(source, start) || head.ends_with('*') => paragraph(1),
+        // `import * as M` renames the whole module. The rename is the
+        // doc's last paragraph, after the header's example.
+        "as" if in_name_list(source, start) || head.ends_with('*') => {
+            text.rsplit("\n\n").next().unwrap_or(text)
+        }
 
         "as" if opens_a_body(head) => paragraph(0),
 
@@ -335,6 +402,25 @@ pub fn is_keyword(word: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// A name inside `@allow( )` reads its lint, a group its members, and
+    /// a name inside Luau's `@[ ]` its attribute.
+    #[test]
+    fn an_attribute_argument_hovers_its_meaning() {
+        let src = "@allow(too_many_arguments, pedantic)\n@[native, deprecated {use = \"f\"}]\n";
+        let at = |needle: &str| {
+            attribute_argument_hover(src, src.find(needle).unwrap() + 1).map(|(_, _, t)| t)
+        };
+        assert!(
+            at("too_many")
+                .unwrap()
+                .starts_with("**too_many_arguments**")
+        );
+        assert!(at("pedantic").unwrap().contains("a lint group"));
+        assert!(at("native").unwrap().contains("Luau's own"));
+        assert!(at("use =").unwrap().starts_with("The name to call instead"));
+        assert_eq!(attribute_argument_hover("local too_many = 1\n", 7), None);
+    }
+
     #[test]
     fn a_keyword_as_a_name_is_not_the_keyword() {
         assert!(hover("function new() end", 10).is_none());
@@ -411,13 +497,14 @@ mod tests {
         assert!(!text.contains("fallback arm"), "{text}");
     }
 
-    /// `as` opens a declaration body and renames a name in a list. A
-    /// `match` alias names neither meaning, so the whole doc stands.
+    /// `as` splits a header from a one-line body and renames a name in a
+    /// list. A `match` alias names neither meaning, so the whole doc
+    /// stands.
     #[test]
     fn as_reads_the_meaning_of_its_position() {
-        let decl = "struct Vec2 as\n    x: number\nend\n";
+        let decl = "enum Color as Red, Green end\n";
         let text = hover(decl, decl.find(" as").unwrap() + 1).unwrap().2;
-        assert!(text.starts_with("Marks where"), "{text}");
+        assert!(text.starts_with("Splits a declaration"), "{text}");
 
         let list = "import { shade as tint } from \"./m\"\n";
         let text = hover(list, list.find(" as").unwrap() + 1).unwrap().2;
@@ -429,7 +516,7 @@ mod tests {
 
         let alias = "match msg as m with\n    default 0\nend\n";
         let text = hover(alias, alias.find(" as").unwrap() + 1).unwrap().2;
-        assert!(text.contains("Marks where"), "{text}");
+        assert!(text.contains("Splits a declaration"), "{text}");
         assert!(text.contains("renames a name"), "{text}");
     }
 

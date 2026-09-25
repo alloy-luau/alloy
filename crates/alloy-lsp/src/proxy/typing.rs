@@ -179,18 +179,13 @@ impl State {
 }
 
 /// The layout of one open document, by the formatter `alloy fmt` reads
-/// for its name: markup lays out by its own rules, so an `.alx` file
-/// takes the markup pass.
+/// for its name.
 pub(crate) fn format_source(
     uri: &str,
     source: &str,
     options: &alloy::config::FmtConfig,
 ) -> Result<String, String> {
-    match uri.ends_with(".alx") {
-        true => alloy::fmt::alx::format_alx_file(source, options),
-
-        false => alloy::fmt::format_file(source, options),
-    }
+    alloy::fmt::format_named(uri, source, options)
 }
 
 /// Whether an `end` already stands under the opener: the first line

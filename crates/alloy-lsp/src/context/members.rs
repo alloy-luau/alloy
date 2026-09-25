@@ -84,8 +84,13 @@ pub fn member_at(src: &str, offset: usize) -> Option<(String, Access, char, usiz
     };
     let base = &before[start..];
 
-    (!base.is_empty() && !base.ends_with('.') && !base.starts_with(|c: char| c.is_numeric()))
-        .then(|| (base.to_string(), access, sep, word))
+    // `o?.inner.`: a guard stands inside the chain, so the path after it
+    // names no receiver alone. `guarded_member_column` answers there.
+    (!base.is_empty()
+        && !base.starts_with('.')
+        && !base.ends_with('.')
+        && !base.starts_with(|c: char| c.is_numeric()))
+    .then(|| (base.to_string(), access, sep, word))
 }
 
 /// Where a receiver that ends in a bracket starts: `mo?["k"]` from the
@@ -364,6 +369,18 @@ pub fn member_column(
 pub fn guarded_member_column(head: &str, shadow_line: &str, sep: char) -> Option<usize> {
     let guarded = head.trim_end_matches(is_word_byte);
     let guarded = guarded.strip_suffix(sep)?;
+    // `o?.inner.`: the guard stands on an earlier link, and the plain
+    // path after it, `.inner`, follows the guard's word on the lowered
+    // line too: `else o.inner.`.
+    let path_len = guarded.len()
+        - guarded
+            .trim_end_matches(|c: char| is_word_byte(c) || c == '.')
+            .len();
+    let (guarded, path) = guarded.split_at(guarded.len() - path_len);
+
+    if !path.is_empty() && !path.starts_with('.') {
+        return None;
+    }
 
     if !guarded.ends_with(['?', '!']) {
         return None;
@@ -371,13 +388,15 @@ pub fn guarded_member_column(head: &str, shadow_line: &str, sep: char) -> Option
 
     let receiver = guarded.trim_end_matches(['?', '!']);
 
-    if !receiver.ends_with([')', ']']) && !receiver.contains(['?', '!']) {
+    if path.is_empty() && !receiver.ends_with([')', ']']) && !receiver.contains(['?', '!']) {
         return None;
     }
 
     if !shadow_line.contains("== nil") && !shadow_line.contains("~= nil") {
         return None;
     }
+
+    let after = format!("{path}{sep}");
 
     // The word the guard hands on, right after the branch it opens.
     for opener in ["then ", "else "] {
@@ -391,8 +410,8 @@ pub fn guarded_member_column(head: &str, shadow_line: &str, sep: char) -> Option
             // `!` closes its guard before the separator: `_2).kills`.
             let word = word.strip_prefix(')').unwrap_or(word);
 
-            if word.len() < rest.len() && word.starts_with(sep) {
-                found = Some(shadow_line.len() - word.len() + 1);
+            if word.len() < rest.len() && word.starts_with(&after) {
+                found = Some(shadow_line.len() - word.len() + after.len());
             }
 
             from = from + i + 1;
@@ -562,6 +581,29 @@ mod tests {
         assert_eq!(
             member_column(source, shadow, "mo", Access::Optional, '[', 0, open + 1),
             Some(shadow.find("mo[").unwrap() + 3)
+        );
+    }
+
+    /// `o?.inner.`: the guard stands on an earlier link. The chain names
+    /// no receiver alone, and the member follows the path after the
+    /// guard's branch on the lowered line.
+    #[test]
+    fn a_path_after_a_guard_finds_its_member() {
+        let head = "print(o?.inner.";
+        assert_eq!(member_at(head, head.len()), None);
+
+        let shadow = "print((if o == nil then nil else o.inner.HOLE))";
+        assert_eq!(
+            guarded_member_column(head, shadow, '.'),
+            Some(shadow.find("o.inner.").unwrap() + "o.inner.".len())
+        );
+        assert_eq!(
+            guarded_member_column(
+                "local x = o!.inner.",
+                "local x = (if o == nil then (error(\"o is nil\") :: never) else o).inner.HOLE",
+                '.'
+            ),
+            Some("local x = (if o == nil then (error(\"o is nil\") :: never) else o).inner.".len())
         );
     }
 

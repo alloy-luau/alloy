@@ -43,6 +43,9 @@ struct Item {
     /// `new` of `local new = Instance.new`. The layout and the spacing
     /// treat it as the identifier it is.
     name_here: bool,
+    /// A `-` that opens a line of a value arm: the arm's value, `-v`,
+    /// not a subtraction from the line above.
+    value_start: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,10 +123,10 @@ pub const OUTPUT_UNPARSED: &str = "fmt: the output would not parse; the file is 
 /// `as`, for a caller that reads a diagnostic and wants the rewrite.
 pub const NEEDS_AS: &str = alloy_syntax::parser::NEEDS_AS;
 
-/// The rewrites that write the `as` an `impl` or a `trait` header is
-/// missing, in source order. `alloy flux --fix` and the server's quick
-/// fix apply these, so a file written before `as` migrates in place;
-/// `alloy fmt` writes the same text as part of a whole format.
+/// The rewrites that write the `as` a declaration header is missing
+/// before a body on its own line, in source order. `alloy flux
+/// --fix` and the server's quick fix apply these. A body on the next
+/// line needs no `as`, so it takes no rewrite.
 pub fn header_as_fixes(src: &str) -> Vec<crate::lint::Fix> {
     let Ok(Lexed { toks, .. }) = lex(src) else {
         return Vec::new();
@@ -133,17 +136,27 @@ pub fn header_as_fixes(src: &str) -> Vec<crate::lint::Fix> {
     let mut i = 0;
 
     while i < toks.len() {
-        if !matches!(text(i), "impl" | "trait") || !opens_a_header(src, &toks, i) {
+        let opener = text(i);
+
+        if !matches!(
+            opener,
+            "impl" | "trait" | "struct" | "enum" | "interface" | "namespace"
+        ) || !opens_a_header(src, &toks, i)
+        {
             i += 1;
 
             continue;
         }
 
+        // An `impl` header runs over names, `.`, and `for`; the others end
+        // at their one name, past `<...>` and an interface's `extends`.
         let mut j = i + 1;
         let mut angle = 0usize;
+        let mut names = 0usize;
 
         while j < toks.len() {
             let t = text(j);
+            let name = toks[j].kind == TokKind::Ident && !is_keyword(t);
 
             if angle > 0 {
                 angle += usize::from(t == "<");
@@ -152,14 +165,22 @@ pub fn header_as_fixes(src: &str) -> Vec<crate::lint::Fix> {
             } else if t == "<" {
                 angle += 1;
                 j += 1;
-            } else if t == "." || t == "for" || (toks[j].kind == TokKind::Ident && !is_keyword(t)) {
+            } else if opener == "impl" && (t == "." || t == "for" || name) {
+                j += 1;
+            } else if (opener == "interface" && (t == "extends" || t == "," || (name && names > 0)))
+                || (name && names == 0)
+            {
+                names += 1;
                 j += 1;
             } else {
                 break;
             }
         }
 
-        if angle == 0 && j > i + 1 && j < toks.len() && text(j) != "as" {
+        let same_line =
+            j < toks.len() && !src[toks[j - 1].end as usize..toks[j].start as usize].contains('\n');
+
+        if angle == 0 && j > i + 1 && same_line && !matches!(text(j), "as" | "end") {
             let at = toks[j - 1].end;
             out.push(crate::lint::Fix::new(src, at, at, " as"));
         }
@@ -185,13 +206,21 @@ fn opens_a_header(src: &str, toks: &[Tok], i: usize) -> bool {
         || src[prev.end as usize..toks[i].start as usize].contains('\n')
 }
 
-/// The parser's first complaint about a whole file, if it has one. A
-/// `.d.aly` file writes `declare`, so the definition syntax is allowed.
-pub fn parse_error(src: &str) -> Option<String> {
-    let options = alloy_syntax::parser::ParseOptions {
+/// How the formatter parses: it lays out every file, so it takes the
+/// syntax each kind of file allows.
+fn parse_options() -> alloy_syntax::parser::ParseOptions {
+    alloy_syntax::parser::ParseOptions {
         definitions: true,
+        reserved_keys: true,
         ..Default::default()
-    };
+    }
+}
+
+/// The parser's first complaint about a whole file, if it has one. A
+/// `.d.aly` file writes `declare` and a `.config.aly` writes `in` as a
+/// key, so the parse takes both.
+pub fn parse_error(src: &str) -> Option<String> {
+    let options = parse_options();
 
     match alloy_syntax::parse_lenient(src, options) {
         Err(e) => Some(e.message),
@@ -204,6 +233,18 @@ pub fn parse_error(src: &str) -> Option<String> {
             .iter()
             .find(|d| !d.message.ends_with(alloy_syntax::parser::NEEDS_AS))
             .map(|d| d.message.clone()),
+    }
+}
+
+/// Formats a file by its name: markup takes the `.alx` pass, and a
+/// `.config.aly` keeps its config tables as written.
+pub fn format_named(name: &str, src: &str, options: &FmtConfig) -> Result<String, String> {
+    if name.ends_with(".alx") {
+        alx::format_alx_file(src, options)
+    } else if name.rsplit(['/', '\\']).next() == Some(crate::config_aly::FILE_NAME) {
+        crate::config_aly::format(src, options)
+    } else {
+        format_file(src, options)
     }
 }
 
@@ -255,11 +296,7 @@ fn format_tokens(src: &str, options: &FmtConfig) -> Result<String, String> {
     }
 
     // `parse_error` has read the file already, so the tree is whole.
-    let options_parse = alloy_syntax::parser::ParseOptions {
-        definitions: true,
-        ..Default::default()
-    };
-    let (chunk, _) = alloy_syntax::parser::parse_lenient(src, &toks, options_parse);
+    let (chunk, _) = alloy_syntax::parser::parse_lenient(src, &toks, parse_options());
     let annotation = colons::annotation_colons(src, &toks, &chunk);
 
     let mut f = Formatter {
@@ -346,6 +383,18 @@ fn items_of(src: &str, toks: &[Tok], comments: &[(u32, u32)]) -> Vec<Item> {
         })
         .map(|(_, t)| t.start as usize)
         .collect();
+    let arms = structure::structure(src, toks).value_arm;
+    let value_starts: std::collections::HashSet<usize> = toks
+        .iter()
+        .enumerate()
+        .filter(|(i, t)| {
+            t.text(src) == "-"
+                && arms[*i]
+                && *i > 0
+                && src[toks[i - 1].end as usize..t.start as usize].contains('\n')
+        })
+        .map(|(_, t)| t.start as usize)
+        .collect();
     let mut all: Vec<(usize, usize, ItemKind)> = toks
         .iter()
         .map(|t| (t.start as usize, t.end as usize, ItemKind::Tok(t.kind)))
@@ -378,6 +427,7 @@ fn items_of(src: &str, toks: &[Tok], comments: &[(u32, u32)]) -> Vec<Item> {
             newlines_before: between.matches('\n').count(),
             space_before: !between.is_empty(),
             name_here: names.contains(&a),
+            value_start: value_starts.contains(&a),
         });
         prev_end = b;
     }
@@ -530,13 +580,14 @@ fn synthetic(text: &str) -> Item {
         newlines_before: 0,
         space_before: false,
         name_here: false,
+        value_start: false,
     }
 }
 
 /// A string literal with the quotes the option asks for. The content
 /// keeps its characters; under an `auto` style a string that holds the
 /// other quote keeps the quotes it has.
-pub(crate) fn requote(text: &str, style: QuoteStyle) -> String {
+pub fn requote(text: &str, style: QuoteStyle) -> String {
     let Some(first) = text.chars().next() else {
         return text.to_string();
     };
@@ -834,7 +885,7 @@ mod tests {
     #[test]
     fn an_annotation_colon_takes_one_space_after() {
         let src = "local x:number = 1\n\nfunction f(a:number, b :number):number\n  return a + b\nend\n\nstruct S as\n  y:number?\n  z : string\nend\n\nlocal function g<T : Show>(a : T) : T\n  return a\nend\n\nlocal m: { [string] : number } = {}\nlocal h : typeof(m) = m\nlocal o: number? = x > 1 ? 1 : 2\nfor i : number = 1, 2 do\n  print(i)\nend\nlocal cb = m:get\nprint(m:get(1), m:get \"s\", o, h, cb)\n";
-        let want = "local x: number = 1\n\nfunction f(a: number, b: number): number\n  return a + b\nend\n\nstruct S as\n  y: number?\n  z: string\nend\n\nlocal function g<T: Show>(a: T): T\n  return a\nend\n\nlocal m: { [string]: number } = {}\nlocal h: typeof(m) = m\nlocal o: number? = x > 1 ? 1 : 2\nfor i: number = 1, 2 do\n  print(i)\nend\nlocal cb = m:get\nprint(m:get(1), m:get('s'), o, h, cb)\n";
+        let want = "local x: number = 1\n\nfunction f(a: number, b: number): number\n  return a + b\nend\n\nstruct S\n  y: number?\n  z: string\nend\n\nlocal function g<T: Show>(a: T): T\n  return a\nend\n\nlocal m: { [string]: number } = {}\nlocal h: typeof(m) = m\nlocal o: number? = x > 1 ? 1 : 2\nfor i: number = 1, 2 do\n  print(i)\nend\nlocal cb = m:get\nprint(m:get(1), m:get('s'), o, h, cb)\n";
         assert_eq!(fmt(src), want);
         assert_eq!(fmt(want), want);
     }
@@ -846,15 +897,15 @@ mod tests {
     #[test]
     fn a_visibility_word_opens_a_declaration_body() {
         let decls = [
-            "public struct T as\n    x: number\n  end",
-            "private struct T as\n    x: number\n  end",
-            "public enum E as\n    A\n    B\n  end",
+            "public struct T\n    x: number\n  end",
+            "private struct T\n    x: number\n  end",
+            "public enum E\n    A\n    B\n  end",
             "public function f()\n    return 1\n  end",
             "private const K = 1",
         ];
 
         for decl in decls {
-            let want = format!("export namespace Ns as\n  {decl}\nend\n");
+            let want = format!("export namespace Ns\n  {decl}\nend\n");
             let flat: String = want
                 .lines()
                 .map(str::trim_start)
@@ -980,6 +1031,17 @@ mod tests {
     }
 
     #[test]
+    fn a_trailing_comma_goes_before_the_last_comment() {
+        let src = "local t = {\n  a = 1,\n  b = 2 -- two\n}\nlocal u = {\n  a = 1,\n  -- note\n}\nlocal v = {\n  -- only\n}\n";
+        let once = format(src).unwrap();
+        assert_eq!(
+            once,
+            "local t = {\n  a = 1,\n  b = 2, -- two\n}\nlocal u = {\n  a = 1,\n  -- note\n}\nlocal v = {\n  -- only\n}\n"
+        );
+        assert_eq!(format(&once).unwrap(), once);
+    }
+
+    #[test]
     fn a_magic_trailing_comma_keeps_a_group_expanded() {
         let src = "local t = {\n  a = 1,\n  b = 2,\n}\n";
         assert_eq!(fmt(src), src);
@@ -1045,12 +1107,12 @@ mod tests {
         );
     }
 
-    /// `enum Opt<T> as` keeps its parameter list, and the body indents
+    /// `enum Opt<T>` keeps its parameter list, and the body indents
     /// the way a struct's does. A second pass changes nothing.
     #[test]
     fn a_generic_enum_formats_like_a_struct() {
         let src = "enum Either<L, R = string> as\n  Left(L)\n  Right(R)\nend\n";
-        let want = "enum Either<L, R = string> as\n  Left(L)\n  Right(R)\nend\n";
+        let want = "enum Either<L, R = string>\n  Left(L)\n  Right(R)\nend\n";
         assert_eq!(fmt(src), want);
         assert_eq!(fmt(want), want);
         assert_eq!(
@@ -1077,11 +1139,14 @@ mod tests {
             fmt("local s = $set['a', 'b']\n"),
             "local s = $set['a', 'b']\n"
         );
-        // A plain array of arrays keeps the array spacing.
+        // A plain array of arrays keeps the array spacing, so it never
+        // prints the `[[` of a long string.
         assert_eq!(
-            fmt("local g = [[1, 2], [3, 4]]\n"),
+            fmt("local g = [ [1, 2], [3, 4]]\n"),
             "local g = [ [ 1, 2 ], [ 3, 4 ] ]\n"
         );
+        let long = "local s = [[1, 2], [3, 4]]\n";
+        assert_eq!(fmt(long), long);
     }
 
     #[test]
@@ -1270,7 +1335,7 @@ mod tests {
     /// line of every file.
     #[test]
     fn crlf_round_trips() {
-        let src = "struct T as\r\n  x: number -- a note\r\nend\r\n\r\n--[[ long\r\ncomment ]]\r\nlocal t = new T { x = 1 }\r\nprint(t.x)\r\n";
+        let src = "struct T\r\n  x: number -- a note\r\nend\r\n\r\n--[[ long\r\ncomment ]]\r\nlocal t = new T { x = 1 }\r\nprint(t.x)\r\n";
         assert_eq!(format(src).unwrap(), src);
         assert!(!format(src).unwrap().contains("\r\r"));
 
@@ -1305,29 +1370,47 @@ mod tests {
 
     /// The header of an `impl` and of a `trait` closes with `as`, the
     /// way a `struct` header closes.
+    /// Luau's attribute list keeps Luau's form: no padding inside the
+    /// brackets and no parentheses around a table argument.
     #[test]
-    fn an_impl_and_a_trait_header_gain_as() {
+    fn a_luau_attribute_list_keeps_its_form() {
+        for src in [
+            "@[native]\nlocal function a() end\n",
+            "@[native, deprecated]\nlocal function c() end\n",
+            "@[deprecated { use = 'a', reason = 'old' }]\nlocal function b() end\n",
+        ] {
+            assert_eq!(format(src).unwrap(), src);
+        }
+    }
+
+    #[test]
+    fn a_header_drops_as_over_a_body_below() {
+        for src in [
+            "impl Circle\n  function f(self) end\nend\n",
+            "impl Shape for Circle\n  function f(self) end\nend\n",
+            "impl Box<T>\n  function f(self) end\nend\n",
+            "struct P\n  x: number\nend\n",
+            "interface Sized extends Named\n  size: number\nend\n",
+        ] {
+            assert_eq!(format(src).unwrap(), src);
+            let with_as = src.replacen("\n", " as\n", 1);
+            assert_eq!(format(&with_as).unwrap(), src, "{with_as:?}");
+        }
+        for one_line in ["trait Empty end\n", "enum Color as Red, Green end\n"] {
+            assert_eq!(format(one_line).unwrap(), one_line);
+        }
+        // A comment after the `as` stays on the header line.
         assert_eq!(
-            format("impl Circle\n  function f(self) end\nend\n").unwrap(),
-            "impl Circle as\n  function f(self) end\nend\n"
+            format("namespace Geo as -- shapes\n  const X = 1\nend\n").unwrap(),
+            "namespace Geo -- shapes\n  const X = 1\nend\n"
         );
-        assert_eq!(
-            format("impl Shape for Circle\n  function f(self) end\nend\n").unwrap(),
-            "impl Shape for Circle as\n  function f(self) end\nend\n"
-        );
-        assert_eq!(
-            format("impl Box<T>\n  function f(self) end\nend\n").unwrap(),
-            "impl Box<T> as\n  function f(self) end\nend\n"
-        );
-        assert_eq!(format("trait Empty end\n").unwrap(), "trait Empty as end\n");
-        assert_eq!(format("impl Empty end\n").unwrap(), "impl Empty as end\n");
     }
 
     /// The rewrite `alloy flux --fix` and the server's quick fix apply:
     /// one insertion per header, at the end of the header.
     #[test]
     fn the_header_rewrite_inserts_one_as_per_header() {
-        let src = "impl Circle\n  function f(self) end\nend\ntrait Shape\n  function a(self): number\nend\nimpl Shape for Circle as\nend\n";
+        let src = "impl Circle function f(self) end\nend\ntrait Shape function a(self): number\nend\nimpl Shape for Circle\nend\n";
         let fixes = header_as_fixes(src);
         assert_eq!(fixes.len(), 2, "{fixes:?}");
         let (text, n) = crate::lint::apply_fixes(
@@ -1346,7 +1429,7 @@ mod tests {
         assert_eq!(n, 2);
         assert_eq!(
             text,
-            "impl Circle as\n  function f(self) end\nend\ntrait Shape as\n  function a(self): number\nend\nimpl Shape for Circle as\nend\n"
+            "impl Circle as function f(self) end\nend\ntrait Shape as function a(self): number\nend\nimpl Shape for Circle\nend\n"
         );
         assert!(parse_error(&text).is_none(), "{text}");
         assert!(header_as_fixes(&text).is_empty());
@@ -1368,11 +1451,9 @@ mod tests {
 
     /// A header that already reads `as` gains no second one.
     #[test]
-    fn the_as_of_a_header_is_written_once() {
-        let src = "impl Shape for Circle as\n  function f(self) end\nend\n";
-        assert_eq!(format(src).unwrap(), src);
-        let trait_src = "trait Shape as\n  function area(self): number\nend\n";
-        assert_eq!(format(trait_src).unwrap(), trait_src);
+    fn the_as_of_a_one_line_header_stays() {
+        let src = "impl Shape for Circle as function f(self) end end\n";
+        assert_eq!(format(src).unwrap().matches(" as ").count(), 1);
     }
 
     #[test]
@@ -1381,33 +1462,8 @@ mod tests {
         o.align_struct_fields = true;
         assert_eq!(
             format_with("struct P as\n  x: number\n  name: string\nend\n", &o).unwrap(),
-            "struct P as\n  x:    number\n  name: string\nend\n"
+            "struct P\n  x:    number\n  name: string\nend\n"
         );
-    }
-
-    /// Drops the `as` that closes an `impl` or a `trait` header, so a
-    /// file written before that form compares with its formatted text.
-    fn drop_header_as(toks: Vec<String>) -> Vec<String> {
-        let mut out = Vec::with_capacity(toks.len());
-        let mut header = false;
-
-        for t in toks {
-            if header {
-                if t == "as" {
-                    header = false;
-
-                    continue;
-                }
-
-                header = !matches!(t.as_str(), "function" | "end" | "@");
-            } else {
-                header = matches!(t.as_str(), "impl" | "trait");
-            }
-
-            out.push(t);
-        }
-
-        out
     }
 
     #[test]
@@ -1428,17 +1484,16 @@ mod tests {
                 let once = format(&src).unwrap();
                 let twice = format(&once).unwrap();
                 assert_eq!(once, twice, "{}", path.display());
-                // The token stream holds, save for the rewrites.
+                // The token stream holds, save for the rewrites: quotes,
+                // call parentheses, and the `as` of a header.
                 let norm = |text: &str| -> Vec<String> {
-                    let toks: Vec<String> = lex(text)
+                    lex(text)
                         .unwrap()
                         .toks
                         .iter()
                         .map(|t| t.text(text).replace('\'', "\""))
-                        .filter(|t| !matches!(t.as_str(), "(" | ")" | ","))
-                        .collect();
-
-                    drop_header_as(toks)
+                        .filter(|t| !matches!(t.as_str(), "(" | ")" | "," | "as"))
+                        .collect()
                 };
                 assert_eq!(norm(&src), norm(&once), "{}", path.display());
             }

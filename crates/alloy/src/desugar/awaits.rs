@@ -5,7 +5,10 @@
 //! thread: the body of an `async function`, an `async do` block, the
 //! body of an `after` block, which `task.delay` runs on a thread of its
 //! own, and the top level of a Roblox Script, which is a thread of its
-//! own too.
+//! own too. A function literal handed to a spawner runs on a thread of
+//! its own as well: `task.spawn`, `task.defer`, `task.delay`, and the
+//! `Connect` and `Once` of a signal. Roblox and the std `Signal` both
+//! start each handler on a new thread.
 //!
 //! Anywhere else the yield lands in the caller. At a module's top level
 //! it lands in `require`. In a plain callback it lands wherever the
@@ -15,7 +18,9 @@
 //! library the std runs a Future to completion at once, so `await` never
 //! yields and a standalone test suite passes.
 
-use alloy_syntax::ast::{Block, ClassMember, DefaultExport, Expr, FunctionBody, Stmt, TokSpan};
+use alloy_syntax::ast::{
+    Block, CallArgs, ClassMember, DefaultExport, Expr, FunctionBody, Stmt, TokSpan,
+};
 
 use super::{Child, Desugar, expr_children, stmt_children};
 
@@ -23,7 +28,7 @@ use super::{Child, Desugar, expr_children, stmt_children};
 /// safe.
 enum Spot {
     /// A thread the runtime owns: an `async function` body, an
-    /// `async do` block, an `after` block.
+    /// `async do` block, an `after` block, a spawned function.
     Async,
     /// The top level of a `.server` or `.client` file, which Roblox
     /// runs as a Script on a thread of its own.
@@ -168,13 +173,30 @@ impl Desugar<'_> {
             Spot::Plain(name)
         };
 
+        self.awaits_in_body_at(body, &spot);
+    }
+
+    fn awaits_in_body_at(&mut self, body: &FunctionBody, spot: &Spot) {
         for p in &body.params {
             if let Some(d) = &p.default {
-                self.awaits_in_expr(d, &spot);
+                self.awaits_in_expr(d, spot);
             }
         }
 
-        self.awaits_in_block(&body.block, &spot);
+        self.awaits_in_block(&body.block, spot);
+    }
+
+    /// Whether a call starts each function it is handed on a thread of
+    /// its own.
+    fn spawns_threads(&self, func: &Expr, method: Option<TokSpan>) -> bool {
+        match method {
+            Some(m) => matches!(self.text_of(m), "Connect" | "Once"),
+
+            None => matches!(
+                self.dotted_name(func).as_deref(),
+                Some("task.spawn" | "task.defer" | "task.delay")
+            ),
+        }
     }
 
     fn awaits_in_expr(&mut self, e: &Expr, spot: &Spot) {
@@ -187,6 +209,25 @@ impl Desugar<'_> {
 
             Expr::AsyncBlock { block, .. } => {
                 self.awaits_in_block(block, &Spot::Async);
+
+                return;
+            }
+
+            Expr::Call {
+                func,
+                method,
+                args: CallArgs::Paren(args),
+                ..
+            } if self.spawns_threads(func, *method) => {
+                self.awaits_in_expr(func, spot);
+
+                for a in args {
+                    match a {
+                        Expr::Function { body, .. } => self.awaits_in_body_at(body, &Spot::Async),
+
+                        _ => self.awaits_in_expr(a, spot),
+                    }
+                }
 
                 return;
             }

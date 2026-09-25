@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 
-use alloy_syntax::lexer::{Tok, TokKind};
+use alloy_syntax::lexer::TokKind;
 
 use crate::render::{Edit, SpanMap, apply_edits};
 use crate::{CompileError, Diagnostic, EmitOptions, Output};
@@ -31,7 +31,7 @@ pub struct AlxOutput {
 pub fn compile_alx(
     src: &str,
     options: &EmitOptions,
-    mut config: luaux::Config,
+    config: luaux::Config,
 ) -> Result<AlxOutput, CompileError> {
     let spans = luaux::compile::markup_spans(src).map_err(|e| CompileError {
         offset: e.offset,
@@ -39,7 +39,6 @@ pub fn compile_alx(
     })?;
     let blanked = luaux::resolve::blank_luaux_regions(src, &spans);
     let bound = bound_names(&blanked);
-    config.extra_bound = bound.clone();
 
     let compiled = match config.backend {
         luaux::config::BackendKind::Table => {
@@ -1026,120 +1025,7 @@ pub fn blank_markup(src: &str) -> Option<(Vec<(usize, usize)>, String)> {
     })
 }
 
-/// The names the file binds, by a token scan of the blanked source.
-///
-/// luaux collects bindings with full_moon, which does not read Alloy
-/// syntax; this scan sees `import`, `const`, `struct`, and the rest. A
-/// name that is not a binding but looks like one costs nothing: it only
-/// lets `<Name>` resolve to a component.
-pub fn bound_names(src: &str) -> HashSet<String> {
-    let mut names = HashSet::new();
-    let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
-        return names;
-    };
-    let toks = &lexed.toks;
-    let text = |t: &Tok| t.text(src);
-    let is_ident = |t: &Tok| t.kind == TokKind::Ident;
-    let mut i = 0;
-
-    while i < toks.len() {
-        let word = text(&toks[i]);
-
-        match word {
-            "local" | "const" => {
-                i += 1;
-
-                if i < toks.len() && text(&toks[i]) == "function" {
-                    if let Some(t) = toks.get(i + 1).filter(|t| is_ident(t)) {
-                        names.insert(text(t).to_string());
-                    }
-
-                    continue;
-                }
-
-                // `local a, b`, `local { a, b = c }`, `local [ x, ...rest ]`.
-                let mut depth = 0i32;
-
-                while i < toks.len() {
-                    let t = &toks[i];
-                    let s = text(t);
-
-                    match s {
-                        "{" | "[" => depth += 1,
-
-                        "}" | "]" => depth -= 1,
-
-                        "=" if depth == 0 => break,
-
-                        ":" if depth == 0 => break,
-
-                        _ if is_ident(t) => {
-                            // In a table destructure `a = b` binds `b`; the
-                            // name before `=` is a key. Keeping both is safe.
-                            names.insert(s.to_string());
-                        }
-
-                        _ => {}
-                    }
-
-                    if depth == 0
-                        && s != ","
-                        && !is_ident(t)
-                        && !matches!(s, "{" | "[" | "}" | "]" | "...")
-                    {
-                        break;
-                    }
-
-                    i += 1;
-                }
-
-                continue;
-            }
-
-            "function" => {
-                if let Some(t) = toks.get(i + 1).filter(|t| is_ident(t)) {
-                    names.insert(text(t).to_string());
-                }
-            }
-
-            // A namespace holds components: `<Scope.card/>` names one.
-            "struct" | "enum" | "trait" | "interface" | "remote" | "attribute" | "macro"
-            | "class" | "namespace" => {
-                if let Some(t) = toks.get(i + 1).filter(|t| is_ident(t)) {
-                    names.insert(text(t).to_string());
-                }
-            }
-
-            "import" => {
-                // `import * as N`, `import D from`, `import { a as b, c }`.
-                let mut j = i + 1;
-
-                while j < toks.len() {
-                    let t = &toks[j];
-                    let s = text(t);
-
-                    if s == "from" || matches!(t.kind, TokKind::Str { .. }) {
-                        break;
-                    }
-
-                    // An alias `a as b` binds `b`; keeping `a` too is
-                    // harmless, since a name only lets a tag resolve.
-                    if is_ident(t) && s != "type" && s != "as" {
-                        names.insert(s.to_string());
-                    }
-
-                    j += 1;
-                }
-            }
-
-            _ => {}
-        }
-
-        i += 1;
-    }
-
-    names
-}
+pub use luaux::resolve::bound_names;
 
 #[cfg(test)]
 mod tests {
@@ -1236,6 +1122,20 @@ mod tests {
         }
 
         assert!(!names.contains("from"));
+
+        // What full_moon's walk used to add: parameters, loop names, and
+        // a global a statement assigns.
+        let names = bound_names(
+            "local function Wrap<T>(Inner, n: number, opt: { k: T } = d)\nend\nfor i, Item: T in items do end\nReceipt = function() end\n",
+        );
+
+        for n in ["Wrap", "Inner", "n", "opt", "i", "Item", "Receipt"] {
+            assert!(names.contains(n), "{n} missing from {names:?}");
+        }
+
+        for n in ["number", "k", "T", "d", "items"] {
+            assert!(!names.contains(n), "{n} is no binding: {names:?}");
+        }
     }
 
     /// A component whose props parameter names a struct: a tag's
@@ -1466,7 +1366,6 @@ return Panel\n";
     fn lower(src: &str) -> (luaux::compile::Compiled, SpanMap) {
         let mut config = luaux::Config::bare();
         config.create = "create".to_string();
-        config.extra_bound = bound_names(src);
         let compiled = luaux::compile::compile_recovering(src, &luaux::Table, config)
             .expect("the markup compiles");
         let map = lowering_map(src, &compiled);

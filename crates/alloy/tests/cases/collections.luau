@@ -1,4 +1,4 @@
--- `$set` and `$map` build the std collections; `[[` opens a nested array.
+-- `$set` and `$map` build the std collections; after them `[[` opens the pairs.
 local __alloy = require("@alloy") local tags = __alloy.Set.from({ "a", "b" })
 local prices = __alloy.HashMap.from({ ["sword"] = 10, ["pet"] = 25 } :: { [string]: number })
 local grid = __alloy.Array.from({ __alloy.Array.from({ 1, 2 }), __alloy.Array.from({ 3, 4 }) })

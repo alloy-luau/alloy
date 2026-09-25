@@ -61,6 +61,9 @@ pub struct Chunk {
     /// word left the language, so the declaration parses as an `export`
     /// and the compiler reports here. See the globals-removal RFC.
     pub global_keywords: Vec<TokSpan>,
+    /// Each table key that is a reserved word, `{ in = 1 }`. Only a
+    /// parse with `reserved_keys` reads one, and emit quotes it.
+    pub reserved_keys: Vec<TokSpan>,
 }
 
 /// A piece of Alloy syntax inside a type span. Types stay spans, so the
@@ -332,6 +335,9 @@ pub struct TraitDecl {
 
 #[derive(Debug)]
 pub struct TraitMethod {
+    /// `@allow(...)` above the signature, the one attribute a trait
+    /// method takes.
+    pub attributes: Vec<Attr>,
     pub name: TokSpan,
     /// The `async` word in front of `function`. The signature then
     /// declares `Future<T>`, the same as an `async function` does.
@@ -589,7 +595,8 @@ pub struct MatchArm {
     pub span: TokSpan,
 }
 
-/// The expression form: every arm is one expression.
+/// The expression form: an arm is one expression, or an [`Expr::Block`]
+/// that ends in the value.
 #[derive(Debug)]
 pub struct MatchExpr {
     pub scrutinees: Vec<Expr>,
@@ -872,6 +879,8 @@ pub struct FunctionBody {
 
 #[derive(Debug)]
 pub struct Param {
+    /// The attributes in front of the name, `@u8 hp: number`.
+    pub attributes: Vec<Attr>,
     /// The name token, or the `...` token for a vararg param.
     pub name: TokSpan,
     pub is_vararg: bool,
@@ -955,6 +964,15 @@ pub enum Expr {
     True(TokSpan),
     False(TokSpan),
     Vararg(TokSpan),
+    /// The body of a match arm that runs statements before its value,
+    /// `case Err(e) then warn(e) 0`. Its last statement is the value, a
+    /// value-only `return`, or leaves: `return`, `break`, `continue`.
+    /// It stands only as an arm of a `match` that `local x =`, `x =`,
+    /// or `return` holds.
+    Block {
+        block: Block,
+        span: TokSpan,
+    },
     Number(TokSpan),
     String(TokSpan),
     /// A backtick string with no hole.
@@ -1159,7 +1177,8 @@ impl Expr {
             | Expr::String(s)
             | Expr::InterpString(s)
             | Expr::Name(s) => *s,
-            Expr::Function { span, .. }
+            Expr::Block { span, .. }
+            | Expr::Function { span, .. }
             | Expr::Table { span, .. }
             | Expr::Binary { span, .. }
             | Expr::Unary { span, .. }

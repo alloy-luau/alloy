@@ -544,20 +544,24 @@ impl State {
         ))
     }
 
-    /// The source of the module a spec names: an open document first,
-    /// then the file on disk. A `.alx` in another folder is open only
-    /// when the author has it in a tab, so the disk answers for the
-    /// rest.
-    pub(crate) fn module_source(&self, uri: &str, spec: &str) -> Option<String> {
+    /// The source of the module a spec names, with its file: an open
+    /// document first, then the file on disk. A `.alx` in another
+    /// folder is open only when the author has it in a tab, so the disk
+    /// answers for the rest.
+    pub(crate) fn module_source(&self, uri: &str, spec: &str) -> Option<(String, PathBuf)> {
         let target = imports::module_path(&self.resolve_spec(uri, spec)?);
 
         for (u, d) in &self.docs {
-            if uri_to_path(u).is_some_and(|p| imports::module_path(&p) == target) {
-                return Some(d.source.clone());
+            if let Some(p) = uri_to_path(u)
+                && imports::module_path(&p) == target
+            {
+                return Some((d.source.clone(), p));
             }
         }
 
-        std::fs::read_to_string(imports::module_file(&target)?).ok()
+        let file = imports::module_file(&target)?;
+
+        Some((std::fs::read_to_string(&file).ok()?, file))
     }
 
     /// The documents of the modules a file imports. Each one holds the

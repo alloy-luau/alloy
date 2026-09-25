@@ -337,6 +337,19 @@ pub fn exports_of_file(path: &Path, depth: u8) -> Vec<Export> {
     let is_alx = path.extension().is_some_and(|e| e == "alx");
     let mut out = exports_of(&src, is_alx);
 
+    if depth < 3 {
+        for e in passed_on(&src, path, depth) {
+            push_export(
+                &mut out,
+                e.name,
+                e.is_type,
+                e.is_default,
+                e.is_attribute,
+                e.kind,
+            );
+        }
+    }
+
     if depth < 3
         && let Some(spec) = follow_of(&src)
         && let Some(dir) = path.parent()
@@ -349,6 +362,48 @@ pub fn exports_of_file(path: &Path, depth: u8) -> Vec<Export> {
             {
                 out.push(e);
             }
+        }
+    }
+
+    out
+}
+
+/// The names a file at `path` passes on with `export { a, T as U } from
+/// "./x"`, each as the module it names exports it. A name that module
+/// does not export, or a module out of reach, passes on as the list
+/// writes it.
+pub fn passed_on(src: &str, path: &Path, depth: u8) -> Vec<Export> {
+    let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let name_of = |span: alloy_syntax::ast::TokSpan| span.text(src, toks).to_string();
+    let mut out = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        let Stmt::ExportList(list) = stmt else {
+            continue;
+        };
+        let Some(at) = list.from else {
+            continue;
+        };
+        let spec = name_of(at);
+        let there = alloy::modules::resolve(spec.trim_matches(['"', '\'']), path, &[])
+            .map(|file| exports_of_file(&file, depth + 1))
+            .unwrap_or_default();
+
+        for s in &list.specs {
+            let name = name_of(s.name);
+            let found = there.iter().find(|e| e.name == name && !e.is_default);
+
+            push_export(
+                &mut out,
+                name_of(s.alias.unwrap_or(s.name)),
+                found.map_or(list.type_only || s.is_type, |e| e.is_type),
+                false,
+                found.is_some_and(|e| e.is_attribute),
+                found.map_or(6, |e| e.kind),
+            );
         }
     }
 

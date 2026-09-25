@@ -410,6 +410,35 @@ fn a_star_alias_of_a_self_import_hovers_in_an_init_script() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A name the module passes on with `export { T } from` is one of its
+/// exports. The list left it out. Its spec reads from the module's own
+/// folder.
+#[test]
+fn a_star_alias_lists_a_name_passed_on_with_export_from() {
+    let dir = std::env::temp_dir().join(format!("alloy-pass-hover-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("game")).expect("temp dir");
+    std::fs::write(
+        dir.join("game/scored.aly"),
+        "export type Tally = number\nexport trait Scored\n  function score(self): number\nend\n",
+    )
+    .expect("module");
+    std::fs::write(
+        dir.join("game/scoring.aly"),
+        "export { Scored, Tally as Count } from './scored'\nexport const BONUS = 2\n",
+    )
+    .expect("module");
+    let src = "import * as Game from './game/scoring'\n";
+
+    assert_eq!(
+        star_module_hover(src, "Game", 12, Some(&dir.join("main.aly")), &[]).as_deref(),
+        Some(
+            "```alloy\nimport * as Game from './game/scoring'\n```\nExports: `BONUS`, `Scored`, `Count`"
+        )
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
 /// A hover on a std member reads the member's own section, not the
 /// type's whole page. The receiver resolves from the source: an
 /// annotation, an initializer, or the type name itself.

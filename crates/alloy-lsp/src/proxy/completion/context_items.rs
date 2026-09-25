@@ -1755,10 +1755,15 @@ impl State {
 
     /// The module path an import spec names from a file. `@self/x` is
     /// `x` in the folder of an `init` file, `@alias/x` goes through the
-    /// project's aliases, and a relative spec is path arithmetic.
+    /// project's aliases, and a relative spec is path arithmetic. The
+    /// walk over another module's imports passes an absolute path.
     pub(crate) fn resolve_spec(&self, uri: &str, spec: &str) -> Option<PathBuf> {
         let path = uri_to_path(uri)?;
         let dir = path.parent()?;
+
+        if Path::new(spec).is_absolute() {
+            return Some(PathBuf::from(spec));
+        }
 
         if let Some(tail) = spec.strip_prefix("@self/") {
             return alloy::build::is_init(&path).then(|| imports::lexical(dir, tail));
@@ -1793,6 +1798,7 @@ impl State {
 
             if imports::module_path(&p) == target {
                 exports.extend(d.exports.iter().cloned());
+                exports.extend(imports::passed_on(&d.source, &p, 0));
             }
         }
 

@@ -523,13 +523,13 @@ pub fn component_module(src: &str, name: &str, load: &Load) -> Option<String> {
 
     specs
         .into_iter()
-        .find(|spec| load(spec).is_some_and(|text| text.contains(&head)))
+        .find(|spec| load(spec).is_some_and(|(text, _)| text.contains(&head)))
 }
 
 /// The source that declares the component a tag names: `None` when this
 /// file declares it, and otherwise the module an import brings it from.
 pub fn component_source(src: &str, name: &str, load: &Load) -> Option<String> {
-    load(&component_module(src, name, load)?)
+    load(&component_module(src, name, load)?).map(|(text, _)| text)
 }
 
 /// The fields the type `name` declares in `src`: a `type` alias over a
@@ -1704,7 +1704,8 @@ mod tests {
             "export function Card(props: CardProps): any end\n",
         );
         let src = "import { Card } from \"./card\"\nlocal function App(): any\n    return (<Card  />)\nend\n";
-        let load = |spec: &str| (spec == "./card").then(|| card.to_string());
+        let load =
+            |spec: &str| (spec == "./card").then(|| (card.to_string(), "/w/card.aly".into()));
         let owner = component_source(src, "Card", &load).expect("the module");
         let items = completions(
             &Spot::AttributeSlot {

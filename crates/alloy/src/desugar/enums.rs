@@ -33,6 +33,12 @@ pub(crate) fn join_tests(tests: &[String]) -> String {
     }
 }
 
+/// The test that a value is one variant: `type(v) == "table" and
+/// v.tag == "Sword"`.
+fn variant_test(at: &str, variant: &str) -> String {
+    format!("type({at}) == \"table\" and {at}.tag == \"{variant}\"")
+}
+
 /// Two type spellings that name one type. The comparison drops the
 /// spacing, which the author is free to write either way.
 pub(crate) fn same_type_text(a: &str, b: &str) -> bool {
@@ -823,6 +829,36 @@ impl<'s> Desugar<'s> {
 
     /// Compiles a pattern against an access path.
     pub(crate) fn compile_pattern(&mut self, p: &Pattern, path: &str, out: &mut Compiled) {
+        self.compile_at(p, path, None, out);
+    }
+
+    /*
+    A pattern under another one, in the check artifact.
+
+    The checker reads a test on a nested path wrong. `v._1.tag == "Sword"`
+    or `type(v._1) == "table"`, where the slot holds an enum, narrows `v`
+    itself to `never`, and with it every name the arm binds. A cast of
+    the path, `(v :: any)._1`, still narrows `v`. So a test below the top
+    stands inside `(test :: boolean)`, which narrows nothing. It reads its
+    path through `(v :: any)`, since nothing narrowed the levels above
+    it. The test of the top narrows `v`, and a name one level down reads
+    its path under that.
+
+    A name further down takes `ty`, the type of the value at its path.
+    Each level works it out from the level above: the constructor of an
+    enum that is not generic gives it, and for anything else a function
+    narrows a parameter of the parent's type. The checker narrows a
+    parameter right, since it is a local.
+    */
+    fn compile_at(&mut self, p: &Pattern, path: &str, ty: Option<&str>, out: &mut Compiled) {
+        let nested = self.options.check && path.contains(['.', '[']);
+        let mute = |test: String| match nested {
+            true => format!("(({test}) :: boolean)"),
+
+            false => test,
+        };
+        let at = self.cast_root(path);
+
         match p {
             Pattern::Wildcard(_) => {}
 
@@ -834,20 +870,25 @@ impl<'s> Desugar<'s> {
                     // variant as a tagged table; the tag test narrows
                     // the union the way a payload test does.
                     Some(e) if self.options.check && self.castable_enum(&e).is_none() => {
-                        out.tests.push(format!(
-                            "type({path}) == \"table\" and {path}.tag == \"{n}\""
-                        ));
+                        out.tests.push(mute(variant_test(&at, &n)));
                     }
 
-                    Some(_) => out.tests.push(format!("{path} == \"{n}\"")),
+                    Some(_) => out.tests.push(mute(format!("{at} == \"{n}\""))),
 
-                    None => out.binds.push((*name, path.to_string(), None)),
+                    None => {
+                        let value = match ty {
+                            Some(t) => format!("({at} :: {t})"),
+
+                            None => path.to_string(),
+                        };
+                        out.binds.push((*name, value, None));
+                    }
                 }
             }
 
             Pattern::Literal(e) => {
                 let lit = self.render_to_string(e);
-                out.tests.push(format!("{path} == {lit}"));
+                out.tests.push(mute(format!("{at} == {lit}")));
             }
 
             Pattern::Path(span) => {
@@ -862,87 +903,81 @@ impl<'s> Desugar<'s> {
 
                     None => written.clone(),
                 };
-                out.tests.push(format!("{path} == {text}"));
+                out.tests.push(mute(format!("{at} == {text}")));
             }
 
             Pattern::Variant { name, args, .. } => {
                 let (vname, _) = self.pattern_variant(*name);
-                out.tests.push(format!(
-                    "type({path}) == \"table\" and {path}.tag == \"{vname}\""
-                ));
-                // The checker reads a second `type(x) == "table"` in one
-                // chain as `never` for the payload under it. A name that a
-                // nested variant binds takes the type its constructor gives.
-                let nested = self.options.check && path.contains(['.', '[']);
+                out.tests.push(mute(variant_test(&at, &vname)));
+                let own = variant_test("_x", &vname);
 
                 for (i, a) in args.iter().enumerate() {
-                    let sub = format!("{path}._{}", i + 1);
-
-                    if let Pattern::Bind(n) = a
-                        && nested
-                        && self.unit_variant_of(self.text_of(*n)).is_none()
-                        && let Some(ty) = self.payload_type(*name, args.len(), i + 1)
-                    {
-                        let value = format!("({} :: {ty})", self.cast_root(&sub));
-                        out.binds.push((*n, value, None));
-
-                        continue;
-                    }
-
-                    self.compile_pattern(a, &sub, out);
+                    let seg = format!("._{}", i + 1);
+                    let known = self.payload_type(*name, args.len(), i + 1);
+                    let sub_ty = self.child_type(path, ty, &own, &seg, known);
+                    self.compile_at(a, &format!("{path}{seg}"), sub_ty.as_deref(), out);
                 }
             }
 
             Pattern::Struct { name, fields, .. } => {
-                match name {
-                    Some(n) => {
-                        let sname = self.text_of(*n).to_string();
-                        out.tests
-                            .push(format!("getmetatable({}) == {sname}", self.any_cast(path)));
-                    }
+                let test = |d: &Self, at: &str| match name {
+                    Some(n) => format!("getmetatable({}) == {}", d.any_cast(at), d.text_of(*n)),
 
-                    None => out.tests.push(format!("type({path}) == \"table\"")),
-                }
+                    None => format!("type({at}) == \"table\""),
+                };
+                out.tests.push(mute(test(self, &at)));
+                let own = test(self, "_x");
 
                 for FieldPattern { field, pattern } in fields {
-                    let fname = self.text_of(*field).to_string();
-                    let sub = format!("{path}.{fname}");
+                    let seg = format!(".{}", self.text_of(*field));
+                    let sub = format!("{path}{seg}");
+                    let sub_ty = self.child_type(path, ty, &own, &seg, None);
 
                     match pattern {
-                        Some(sub_pat) => self.compile_pattern(sub_pat, &sub, out),
+                        Some(sub_pat) => self.compile_at(sub_pat, &sub, sub_ty.as_deref(), out),
 
-                        None => out.binds.push((*field, sub, None)),
+                        None => {
+                            let value = match &sub_ty {
+                                Some(t) => format!("({} :: {t})", self.cast_root(&sub)),
+
+                                None => sub,
+                            };
+                            out.binds.push((*field, value, None));
+                        }
                     }
                 }
             }
 
             Pattern::Array { items, rest, .. } => {
                 let op = if rest.is_some() { ">=" } else { "==" };
-                out.tests.push(format!(
-                    "type({path}) == \"table\" and #{path} {op} {}",
-                    items.len()
-                ));
+                let n = items.len();
+                let test = |at: &str| format!("type({at}) == \"table\" and #{at} {op} {n}");
+                out.tests.push(mute(test(&at)));
+                let own = test("_x");
 
                 for (i, item) in items.iter().enumerate() {
-                    let sub = format!("{path}[{}]", i + 1);
-                    self.compile_pattern(item, &sub, out);
+                    let seg = format!("[{}]", i + 1);
+                    let sub_ty = self.child_type(path, ty, &own, &seg, None);
+                    self.compile_at(item, &format!("{path}{seg}"), sub_ty.as_deref(), out);
                 }
 
                 if let Some(r) = rest {
                     let std = self.std();
-                    out.binds.push((
-                        *r,
-                        format!("{std}.Array.slice({path}, {})", items.len() + 1),
-                        None,
-                    ));
+                    let list = match self.child_type(path, ty, &own, "", None) {
+                        Some(t) => format!("({at} :: {t})"),
+
+                        None => path.to_string(),
+                    };
+                    out.binds
+                        .push((*r, format!("{std}.Array.slice({list}, {})", n + 1), None));
                 }
             }
 
             Pattern::Or(a, b, span) => {
                 let mut ca = Compiled::default();
                 let mut cb = Compiled::default();
-                self.compile_pattern(a, path, &mut ca);
-                self.compile_pattern(b, path, &mut cb);
+                self.compile_at(a, path, ty, &mut ca);
+                self.compile_at(b, path, ty, &mut cb);
                 let ta = self.cast_tests(&join_tests(&ca.tests), path);
                 let tb = self.cast_tests(&join_tests(&cb.tests), path);
                 out.tests.push(format!("(({ta}) or ({tb}))"));
@@ -963,13 +998,45 @@ impl<'s> Desugar<'s> {
                         .unwrap_or_else(|| pa.clone());
                     // The checker refines each side by its own tag and
                     // cannot pick one across the `or`; the check artifact
-                    // reads the payload untyped.
-                    let (pa, pb) = (self.cast_root(pa), self.cast_root(&pb));
+                    // reads the payload untyped. A value that carries a
+                    // cast of its own keeps it.
+                    let cast = |v: &str| match v.starts_with('(') {
+                        true => v.to_string(),
+
+                        false => self.cast_root(v),
+                    };
+                    let (pa, pb) = (cast(pa), cast(&pb));
                     out.binds
                         .push((*n, format!("(if {ta} then {pa} else {pb})"), None));
                 }
             }
         }
+    }
+
+    /// The type of the value at `path{seg}` in the check artifact, for a
+    /// pattern under the one at `path`. `None` when `path` is the top:
+    /// its own test narrows it, so a child reads its path as it is.
+    /// `known` is the type a constructor gives. Without one, a function
+    /// narrows a parameter `_x` of the parent's type by `test`.
+    fn child_type(
+        &self,
+        path: &str,
+        ty: Option<&str>,
+        test: &str,
+        seg: &str,
+        known: Option<String>,
+    ) -> Option<String> {
+        if !self.options.check || !path.contains(['.', '[']) {
+            return None;
+        }
+
+        Some(known.unwrap_or_else(|| {
+            let parent = ty.map_or_else(|| format!("typeof({path})"), str::to_string);
+
+            format!(
+                "typeof((function(_x: {parent}) if {test} then return _x{seg} end return error(\"\") end)(nil :: any))"
+            )
+        }))
     }
 
     /// Whether a name stands for something here: a local, an import, a
@@ -3331,12 +3398,24 @@ mod tests {
             "{}",
             out.check
         );
+        // The test below the top narrows nothing.
+        assert!(
+            out.check.contains(
+                "((type((_m1 :: any)._1) == \"table\" and (_m1 :: any)._1.tag == \"Sword\") :: boolean)"
+            ),
+            "{}",
+            out.check
+        );
         // The ship artifact reads the path as it is.
         let ship = crate::compile(src).unwrap().ship;
         assert!(ship.contains("local d = _m1._1._1"), "{ship}");
+        assert!(
+            ship.contains("type(_m1._1) == \"table\" and _m1._1.tag == \"Sword\" then"),
+            "{ship}"
+        );
 
         // An `import type` binds no table to call the constructor on, so
-        // the name reads the path the checker refines.
+        // a function narrows a parameter of the slot's type.
         let typed = "import type { Item } from \"./lib\"\nimport { Purchase } from \"./lib\"\nlocal function f(r: Purchase)\n    match r with\n        case Purchase.Bought(Item.Sword(d)) then print(d)\n        default print(0)\n    end\nend\nprint(f)\n";
         let options = EmitOptions {
             check: true,
@@ -3354,7 +3433,56 @@ mod tests {
         };
         let out = crate::compile_with(typed, &options).unwrap();
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
-        assert!(out.check.contains("local d = _m1._1._1"), "{}", out.check);
+        assert!(
+            out.check.contains(
+                "local d = ((_m1 :: any)._1._1 :: typeof((function(_x: typeof(_m1._1)) if type(_x) == \"table\" and _x.tag == \"Sword\" then return _x._1 end return error(\"\") end)(nil :: any)))"
+            ),
+            "{}",
+            out.check
+        );
+    }
+
+    /// A generic variant under an enum that is not generic has no
+    /// constructor to type its payload. A function narrows a parameter of
+    /// the slot's type, which the outer constructor gives. A name one
+    /// level down reads its path, since only the top narrows the root.
+    #[test]
+    fn a_nested_generic_variant_types_its_binding() {
+        let src = "enum Opt<T> as\n    Some(T)\n    Nil\nend\nenum Wrap as\n    W(Opt<string>)\n    Empty\nend\nenum Pair as\n    Both(Wrap, number)\n    Neither\nend\nlocal p = Pair.Neither\nmatch p with\n    case Pair.Both(Wrap.W(Opt.Some(s)), n) then print(s, n)\n    default print(0)\nend\n";
+        let options = EmitOptions {
+            check: true,
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(src, &options).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.check.contains(
+                "local s, n = ((_m1 :: any)._1._1._1 :: typeof((function(_x: typeof(Wrap.W(nil :: any)._1)) if type(_x) == \"table\" and _x.tag == \"Some\" then return _x._1 end return error(\"\") end)(nil :: any))), _m1._2"
+            ),
+            "{}",
+            out.check
+        );
+    }
+
+    /// A struct and an array pattern under a variant bind through the
+    /// same function, with the test of their own level.
+    #[test]
+    fn a_struct_and_an_array_under_a_variant_type_their_bindings() {
+        let src = "type Rec = { name: string }\nenum Box as\n    Full(Rec)\n    List({ number })\nend\nenum Order as\n    B(Box)\n    Nothing\nend\nlocal o = Order.Nothing\nmatch o with\n    case Order.B(Box.Full({ name = m })) then print(m)\n    case Order.B(Box.List([f, ...rest])) then print(f, rest)\n    default print(0)\nend\n";
+        let options = EmitOptions {
+            check: true,
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(src, &options).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+        for want in [
+            "local m = ((_m1 :: any)._1._1.name :: typeof((function(_x: typeof(Box.Full(nil :: any)._1)) if type(_x) == \"table\" then return _x.name end return error(\"\") end)(nil :: any)))",
+            "local f, rest = ((_m1 :: any)._1._1[1] :: typeof((function(_x: typeof(Box.List(nil :: any)._1)) if type(_x) == \"table\" and #_x >= 1 then return _x[1] end return error(\"\") end)(nil :: any)))",
+            "Array.slice(((_m1 :: any)._1._1 :: typeof((function(_x: typeof(Box.List(nil :: any)._1)) if type(_x) == \"table\" and #_x >= 1 then return _x end return error(\"\") end)(nil :: any))), 2)",
+        ] {
+            assert!(out.check.contains(want), "{want}\n{}", out.check);
+        }
     }
 
     #[test]

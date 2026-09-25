@@ -485,6 +485,58 @@ fn a_derived_debug_on_an_enum_writes_debug() {
     );
 }
 
+/// A test on a nested path narrowed the root to `never`, so every name
+/// the arm bound went through unchecked: a generic variant under an
+/// enum, and a name one level down beside a nested pattern. Each takes
+/// its own type now.
+#[test]
+fn a_nested_generic_variant_and_its_sibling_take_their_types() {
+    let src = "enum Opt<T> as\n    Some(T)\n    Nil\nend\nenum Wrap as\n    W(Opt<string>)\n    Empty\nend\nenum Pair as\n    Both(Wrap, number)\n    Neither\nend\nlocal function a(p: Pair): boolean\n    return match p with\n        case Pair.Both(Wrap.W(Opt.Some(s)), _) then s\n        case Pair.Both(Wrap.Empty, n) then n\n        default true\n    end\nend\nlocal function b(o: Opt<Wrap>): boolean\n    match o with\n        case Opt.Some(Wrap.W(Opt.Some(t))) then\n            return t\n        default\n            return true\n    end\nend\nprint(a, b)\n";
+    let Some(reported) = reports(src, "nested-generic") else {
+        return;
+    };
+    assert_eq!(reported.len(), 3, "{reported:?}");
+
+    for (line, ty) in [(15, "string"), (16, "number"), (23, "string")] {
+        assert!(
+            reported.iter().any(|r| r.contains(&format!("({line},"))
+                && r.contains(&format!("Expected this to be 'boolean', but got '{ty}'"))),
+            "{line}: {reported:?}"
+        );
+    }
+
+    let good = "enum Opt<T> as\n    Some(T)\n    Nil\nend\nenum Wrap as\n    W(Opt<string>)\n    Empty\nend\nenum Pair as\n    Both(Wrap, number)\n    Neither\nend\nlocal function a(p: Pair): string\n    return match p with\n        case Pair.Both(Wrap.W(Opt.Some(s)), n) then s:upper() .. tostring(n + 1)\n        default \"x\"\n    end\nend\nprint(a)\n";
+    analyze(good, "nested-generic-good");
+}
+
+/// A struct or an array pattern under a variant bound `never`, or read
+/// a union no test narrowed. Each name takes its field or element type.
+#[test]
+fn a_struct_and_an_array_under_a_variant_take_their_types() {
+    let src = "struct Point\n    x: number\n    y: number\nend\ntype Rec = { name: string }\nenum Box as\n    Full(Rec)\n    List({ number })\n    Pt(Point)\n    Empty\nend\nenum Order as\n    B(Box)\n    Nothing\nend\ntype Holder = { item: Box }\nlocal function a(o: Order): boolean\n    return match o with\n        case Order.B(Box.Full({ name = m })) then m\n        case Order.B(Box.List([f, ...rest])) then rest\n        case Order.B(Box.Pt(Point { x = qx })) then qx\n        default true\n    end\nend\nlocal function b(h: Holder): boolean\n    return match h with\n        case { item = Box.Full({ name = k }) } then k\n        default true\n    end\nend\nprint(a, b)\n";
+    let Some(reported) = reports(src, "nested-struct") else {
+        return;
+    };
+    assert_eq!(reported.len(), 4, "{reported:?}");
+
+    for (line, ty) in [
+        (19, "string"),
+        (20, "Array<number>"),
+        (21, "number"),
+        (27, "string"),
+    ] {
+        assert!(
+            reported.iter().any(|r| r.contains(&format!("({line},"))
+                && r.contains(&format!("Expected this to be 'boolean', but got '{ty}'"))),
+            "{line}: {reported:?}"
+        );
+    }
+
+    // A literal item reads its slot with no test in front of it.
+    let good = "enum Box as\n    List({ number })\n    Empty\nend\nenum Order as\n    B(Box)\n    Nothing\nend\nlocal function a(o: Order): number\n    return match o with\n        case Order.B(Box.List([1, g])) then g * 2\n        default 0\n    end\nend\nprint(a)\n";
+    analyze(good, "nested-struct-good");
+}
+
 /// A `for` over an `Iter`, a `Queue`, or a `Heap` reported "Cannot
 /// iterate over a table without indexer": the checker reads an
 /// `__iter` from the type's metatable, and the std types had none.

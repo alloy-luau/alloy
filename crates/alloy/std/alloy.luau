@@ -32,6 +32,13 @@ function alloy.text(v: string | number): string
 	return tostring(v)
 end
 
+--- An attribute value in markup. Only the check artifact calls it, cast
+--- to a function of the property's type or the prop's type, so another
+--- value is a type error at the attribute.
+function alloy.prop(v: any): any
+	return v
+end
+
 local function show_list(values: { any }, open: string, close: string): string
 	if #values == 0 then
 		return open .. close

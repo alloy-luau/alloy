@@ -39,6 +39,10 @@ pub fn compile_alx(
     })?;
     let blanked = luaux::resolve::blank_luaux_regions(src, &spans);
     let bound = bound_names(&blanked);
+    // A reactive library takes a source where a property wants a value,
+    // so only a plain lowering types a Roblox tag's attributes.
+    let plain = config.interpolate == luaux::config::Interpolate::Plain;
+    let (problems, typed) = component_props_problems(src, &bound, plain);
 
     let compiled = match config.backend {
         luaux::config::BackendKind::Table => {
@@ -83,6 +87,17 @@ pub fn compile_alx(
             Some((
                 lowering.to_output(start as u32)?,
                 lowering.to_output(end as u32 - 1)? + 1,
+            ))
+        })
+        .collect();
+    // An attribute value the walk typed, as bytes of the lowered text.
+    options.attribute_types = typed
+        .into_iter()
+        .filter_map(|(start, end, ty)| {
+            Some((
+                lowering.to_output(start as u32)?,
+                lowering.to_output(end as u32 - 1)? + 1,
+                ty,
             ))
         })
         .collect();
@@ -180,9 +195,7 @@ pub fn compile_alx(
         });
     }
 
-    for d in component_props_problems(src, &bound) {
-        output.diagnostics.push(d);
-    }
+    output.diagnostics.extend(problems);
 
     for d in struct_props_problems(&blanked, &spans, &options) {
         output.diagnostics.push(d);
@@ -321,39 +334,54 @@ struct Prop {
 /// rewrites into properties before the tag is built.
 pub const FREE_PROPS: &[&str] = &["key", "ClassName"];
 
+/// The source bytes of an attribute value and the Luau type it must
+/// have, for the check artifact.
+type Typed = (usize, usize, String);
+
 /// The attributes of every component tag, against the props the
 /// component declares: a prop it does not take, a required prop the tag
-/// leaves out, and a literal of the wrong type.
-fn component_props_problems(src: &str, bound: &HashSet<String>) -> Vec<Diagnostic> {
+/// leaves out, and a literal of the wrong type. The second list holds
+/// each other value a declared type covers, for the check artifact. With
+/// `plain` false, a Roblox tag adds nothing to it.
+fn component_props_problems(
+    src: &str,
+    bound: &HashSet<String>,
+    plain: bool,
+) -> (Vec<Diagnostic>, Vec<Typed>) {
     let Ok(spans) = luaux::compile::markup_spans(src) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
     let mut out = Vec::new();
+    let mut typed = Vec::new();
 
     for (start, _) in spans {
         let Ok((node, _)) = luaux::markup::parse_node(src, start) else {
             continue;
         };
-        check_node(&node, src, bound, &mut out);
+        check_node(&node, src, bound, plain, &mut out, &mut typed);
     }
 
     out.sort_by_key(|d| d.start);
     out.dedup_by(|a, b| a.start == b.start && a.message == b.message);
+    typed.sort();
+    typed.dedup();
 
-    out
+    (out, typed)
 }
 
 fn check_node(
     node: &luaux::markup::Node,
     src: &str,
     bound: &HashSet<String>,
+    plain: bool,
     out: &mut Vec<Diagnostic>,
+    typed: &mut Vec<Typed>,
 ) {
     use luaux::markup::{Child, Node};
 
     let children = match node {
         Node::Element(e) => {
-            check_element(e, src, bound, out);
+            check_element(e, src, bound, plain, out, typed);
             &e.children
         }
 
@@ -362,7 +390,7 @@ fn check_node(
 
     for child in children {
         match child {
-            Child::Node(n) => check_node(n, src, bound, out),
+            Child::Node(n) => check_node(n, src, bound, plain, out, typed),
 
             // A tag inside a hole is one expression to the markup
             // parser, so its own region is parsed from the text.
@@ -374,7 +402,7 @@ fn check_node(
 
                     match luaux::markup::parse_node(src, at) {
                         Ok((inner, next)) => {
-                            check_node(&inner, src, bound, out);
+                            check_node(&inner, src, bound, plain, out, typed);
                             at = next.max(at + 1);
                         }
 
@@ -394,14 +422,16 @@ fn check_element(
     element: &luaux::markup::Element,
     src: &str,
     bound: &HashSet<String>,
+    plain: bool,
     out: &mut Vec<Diagnostic>,
+    typed: &mut Vec<Typed>,
 ) {
-    use luaux::markup::Attribute;
+    use luaux::markup::{Attribute, AttributeValue};
 
     let name = element.name.as_written();
 
     if luaux::roblox::is_class(&name) {
-        check_intrinsic(element, &name, out);
+        check_intrinsic(element, &name, src, plain.then_some(typed), out);
 
         return;
     }
@@ -456,12 +486,25 @@ fn check_element(
             continue;
         };
 
-        let Some(got) = value.and_then(literal_type) else {
+        let literal = value.and_then(literal_type);
+        let want = prop.ty.trim().trim_end_matches('?');
+        let primitive = matches!(want, "string" | "number" | "boolean");
+
+        // A literal against a primitive is the text check's report. The
+        // checker types every other value, `item={5}` against `Item` too.
+        if !(literal.is_some() && primitive)
+            && !matches!(value, Some(AttributeValue::Boolean))
+            && let Some(ty) = prop_type(prop)
+            && let Some(bytes) = value_bytes(src, span)
+        {
+            typed.push((bytes.0, bytes.1, ty));
+        }
+
+        let Some(got) = literal else {
             continue;
         };
-        let want = prop.ty.trim().trim_end_matches('?');
 
-        if matches!(want, "string" | "number" | "boolean") && want != got {
+        if primitive && want != got {
             out.push(Diagnostic {
                 start: span.start as u32,
                 end: (span.start + attr.len()) as u32,
@@ -499,8 +542,15 @@ fn check_element(
 /// A Roblox tag's attributes against the class: a literal where the
 /// property takes another type, and a literal on an event, which takes
 /// a function. A property the class does not have is luaux's report.
-fn check_intrinsic(element: &luaux::markup::Element, class: &str, out: &mut Vec<Diagnostic>) {
-    use luaux::markup::Attribute;
+/// Each other value of a typed property goes to `typed`, when given.
+fn check_intrinsic(
+    element: &luaux::markup::Element,
+    class: &str,
+    src: &str,
+    mut typed: Option<&mut Vec<Typed>>,
+    out: &mut Vec<Diagnostic>,
+) {
+    use luaux::markup::{Attribute, AttributeValue};
 
     for attribute in &element.attributes {
         let Attribute::Named { name, span, value } = attribute else {
@@ -511,6 +561,16 @@ fn check_intrinsic(element: &luaux::markup::Element, class: &str, out: &mut Vec<
         }
 
         let Some(got) = literal_type(value) else {
+            // A nil field of the props table leaves the property unset,
+            // so the value may be nil too: `if on then red else nil`.
+            if let (Some(typed), AttributeValue::Expression(_)) = (typed.as_mut(), value)
+                && !luaux::roblox::is_event(class, name)
+                && let Some(want) = crate::roblox_props::property_type(class, name)
+                && let Some((start, end)) = value_bytes(src, *span)
+            {
+                typed.push((start, end, format!("{want}?")));
+            }
+
             continue;
         };
         let report = |out: &mut Vec<Diagnostic>, message: String| {
@@ -546,6 +606,42 @@ fn check_intrinsic(element: &luaux::markup::Element, class: &str, out: &mut Vec<
                 ),
             );
         }
+    }
+}
+
+/// The source bytes of an attribute's value: the expression between its
+/// braces, or its quoted text. `None` for a bare attribute.
+fn value_bytes(src: &str, span: luaux::markup::Span) -> Option<(usize, usize)> {
+    let text = src.get(span.start..span.end)?;
+    let after = text.find('=')? + 1;
+    let value = text[after..].trim();
+    let mut at = span.start + after + (text[after..].len() - text[after..].trim_start().len());
+    let value = match value.strip_prefix('{').and_then(|v| v.strip_suffix('}')) {
+        Some(inner) => {
+            at += 1 + inner.len() - inner.trim_start().len();
+            inner.trim()
+        }
+
+        None => value,
+    };
+
+    (!value.is_empty()).then_some((at, at + value.len()))
+}
+
+/// The type a prop's value must have, on one line, since the check
+/// artifact writes it into the line of the tag. A comment in the type
+/// would end that line, so such a type is left out.
+fn prop_type(prop: &Prop) -> Option<String> {
+    let ty = prop.ty.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    if ty.is_empty() || ty.contains("--") {
+        return None;
+    }
+
+    match prop.optional && !ty.ends_with('?') {
+        true => Some(format!("({ty})?")),
+
+        false => Some(ty),
     }
 }
 
@@ -1245,6 +1341,39 @@ mod tests {
             .output;
 
         assert!(!out.check.contains("__alloy.text"), "{}", out.check);
+    }
+
+    /// An attribute value that is no literal must fit its property or
+    /// its prop. The check artifact casts `__alloy.prop` to a function
+    /// of that type and passes the value through it. The ship artifact
+    /// keeps it bare. A literal against a primitive stays with the text
+    /// check, and a reactive library keeps a Roblox tag's values bare.
+    #[test]
+    fn an_attribute_value_checks_its_type() {
+        let src = "local function create(k: any, p: any): any return p end\ntype Props = { item: Item, count: number }\nlocal function Row(props: Props) return nil end\nlocal n = 1\nreturn <Frame><TextLabel Text={n} Visible /><Row item={5} count={1} /></Frame>\n";
+        let mut config = luaux::Config::bare();
+        config.create = "create".to_string();
+        config.interpolate = luaux::config::Interpolate::Plain;
+        let out = compile_alx(src, &EmitOptions::default(), config.clone())
+            .expect("the markup compiles")
+            .output;
+
+        for want in [
+            "Text = (__alloy.prop :: (string?) -> (string?))(n)",
+            "item = (__alloy.prop :: (Item) -> (Item))(5)",
+            "count = 1",
+        ] {
+            assert!(out.check.contains(want), "{want}\n{}", out.check);
+        }
+        assert!(!out.ship.contains("__alloy"), "{}", out.ship);
+
+        config.interpolate = luaux::config::Interpolate::Wrap;
+        let out = compile_alx(src, &EmitOptions::default(), config)
+            .expect("the markup compiles")
+            .output;
+
+        assert!(out.check.contains("Text = n"), "{}", out.check);
+        assert!(out.check.contains("(__alloy.prop :: (Item) -> (Item))(5)"));
     }
 
     /// A warn-level markup lint is a lint. As a diagnostic it was an

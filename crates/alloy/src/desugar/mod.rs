@@ -217,6 +217,10 @@ pub struct EmitOptions {
     /// `{expr}` the markup gives as `Text`. The check artifact passes
     /// each one through `__alloy.text`, which takes a string or a number.
     pub text_holes: Vec<(u32, u32)>,
+    /// The byte ranges of the lowered `.alx` text that hold an attribute
+    /// value, with the type the property or the prop declares. The check
+    /// artifact passes each one through `__alloy.prop`, cast to that type.
+    pub attribute_types: Vec<(u32, u32, String)>,
 }
 
 /// One field of a struct or an interface, as the prescan keeps it.
@@ -447,6 +451,7 @@ impl Default for EmitOptions {
             naming: crate::naming::Naming::default(),
             markup: crate::naming::Markup::default(),
             text_holes: Vec::new(),
+            attribute_types: Vec::new(),
         }
     }
 }

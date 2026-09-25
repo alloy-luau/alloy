@@ -742,15 +742,18 @@ impl<'s> Desugar<'s> {
         }
 
         // The check artifact wraps a lone `{expr}` that markup gives as
-        // `Text`, so the walk has to reach the statement that holds one.
+        // `Text`, and each attribute value it types, so the walk has to
+        // reach the statement that holds one.
         if self.options.check {
             let (start, end) = (self.byte_start(s.span()), self.byte_end(s.span()));
+            let holds = |a: u32, b: u32| start <= a && b <= end;
 
-            if self
-                .options
-                .text_holes
-                .iter()
-                .any(|&(a, b)| start <= a && b <= end)
+            if self.options.text_holes.iter().any(|&(a, b)| holds(a, b))
+                || self
+                    .options
+                    .attribute_types
+                    .iter()
+                    .any(|(a, b, _)| holds(*a, *b))
             {
                 return true;
             }

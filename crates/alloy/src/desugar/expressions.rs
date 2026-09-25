@@ -253,6 +253,26 @@ impl<'s> Desugar<'s> {
             self.generate(start, &format!("{std}.text("));
         }
 
+        // An attribute value in markup must fit the type its property or
+        // its prop declares. The check artifact passes it through
+        // `__alloy.prop`, cast to a function of that type.
+        let attribute_type = match self.options.check {
+            true => self
+                .options
+                .attribute_types
+                .iter()
+                .find(|(a, b, _)| (*a, *b) == (start, end))
+                .map(|(_, _, ty)| ty.clone()),
+
+            false => None,
+        };
+
+        if let Some(ty) = &attribute_type {
+            let ty = self.lower_type(ty);
+            let std = self.std();
+            self.generate(start, &format!("({std}.prop :: ({ty}) -> ({ty}))("));
+        }
+
         // A table literal runs nothing before its fields, so each field
         // keeps its own hoists instead. A closure around the whole literal
         // types it `{ x: number }`, and Luau rejects that where `{ x:
@@ -266,7 +286,7 @@ impl<'s> Desugar<'s> {
             self.expr_node(e);
         }
 
-        if text_hole {
+        if text_hole || attribute_type.is_some() {
             self.generate(end, ")");
         }
 

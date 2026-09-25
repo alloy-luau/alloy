@@ -999,6 +999,13 @@ impl<'s> Desugar<'s> {
         }
 
         let ty = self.castable_enum(e)?;
+        // An `import type` binds no table to call the constructor on.
+        let head = ty.split('.').next().unwrap_or(&ty);
+
+        if self.imported_types.get(head) == Some(&false) {
+            return None;
+        }
+
         let args = vec!["nil :: any"; arity].join(", ");
 
         Some(format!("typeof({ty}.{vname}({args})._{slot})"))
@@ -3327,6 +3334,27 @@ mod tests {
         // The ship artifact reads the path as it is.
         let ship = crate::compile(src).unwrap().ship;
         assert!(ship.contains("local d = _m1._1._1"), "{ship}");
+
+        // An `import type` binds no table to call the constructor on, so
+        // the name reads the path the checker refines.
+        let typed = "import type { Item } from \"./lib\"\nimport { Purchase } from \"./lib\"\nlocal function f(r: Purchase)\n    match r with\n        case Purchase.Bought(Item.Sword(d)) then print(d)\n        default print(0)\n    end\nend\nprint(f)\n";
+        let options = EmitOptions {
+            check: true,
+            import_enums: vec![
+                (
+                    "Item".to_string(),
+                    vec![("Sword".to_string(), 1), ("Nothing".to_string(), 0)],
+                ),
+                (
+                    "Purchase".to_string(),
+                    vec![("Bought".to_string(), 1), ("Denied".to_string(), 1)],
+                ),
+            ],
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(typed, &options).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(out.check.contains("local d = _m1._1._1"), "{}", out.check);
     }
 
     #[test]

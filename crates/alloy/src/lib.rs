@@ -631,6 +631,24 @@ mod tests {
         assert!(got[1].contains("has no field `z`"), "{got:?}");
     }
 
+    /// Alloy has no Rust field shorthand. Luau read `{ max_hp }` as an
+    /// array item and reported a table mismatch that named no field.
+    #[test]
+    fn a_field_with_no_name_names_the_full_form() {
+        let src = "struct Stats as\n    max_hp: number\n    result: number\nend\nlocal max_hp, result = 1, 2\nlocal s = new Stats { max_hp, result }\nlocal t = new Stats { max_hp = 1, 2 }\n";
+        let got = messages(src);
+
+        assert_eq!(
+            got,
+            [
+                "a struct takes each field by name: write `max_hp = max_hp`",
+                "a struct takes each field by name: write `result = result`",
+                "a struct takes each field by name: write `field = value`",
+            ]
+        );
+        assert!(got.iter().all(|m| docs::kind_for(m) == "StructError"));
+    }
+
     #[test]
     fn a_spread_turns_the_missing_field_check_off() {
         let src = "struct P as\n    x: number\nend\nlocal a = new P { x = 1 }\nlocal b = new P { ...a }\n";

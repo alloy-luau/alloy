@@ -3056,6 +3056,26 @@ impl<'s> Desugar<'s> {
                     given.push(fname);
                 }
 
+                // Luau reads a value with no name as an array item, and
+                // its report says nothing of the struct. Alloy has no
+                // Rust shorthand, so the report names the full form.
+                TableField::Positional(value) => {
+                    let shape = match value {
+                        Expr::Name(v) => {
+                            let v = self.text_of(*v);
+
+                            format!("{v} = {v}")
+                        }
+
+                        _ => "field = value".to_string(),
+                    };
+                    self.diagnose(
+                        value.span(),
+                        &format!("a struct takes each field by name: write `{shape}`"),
+                    );
+                    open = true;
+                }
+
                 _ => open = true,
             }
         }

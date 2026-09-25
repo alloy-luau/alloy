@@ -74,6 +74,9 @@ pub fn section_kinds(number: &str) -> Vec<&'static str> {
 /// first match wins, from the most specific wording to the least.
 const KIND_RULES: &[(&[&str], &str)] = &[
     (&["internal:"], "InternalError"),
+    // A struct field with no name. The report quotes the field, so a
+    // name like `result` or `remote` would reach a rule below.
+    (&["a struct takes each field by name"], "StructError"),
     // A negation the analyzer cannot build, said before it tries.
     (&["negates twice", "luau cannot negate"], "TypeError"),
     // A name after the rest of a pattern: the parser's report, which

@@ -41,8 +41,9 @@ pub(crate) fn chain_has_type_args(e: &Expr) -> bool {
     })
 }
 
-/// A module path the analyzer can follow: a string, or a chain of names
-/// and fields such as `script.Parent.Module`.
+/// A module path the analyzer can follow: a string, or a chain of names,
+/// fields, and named children such as `script.Parent=>Module`. The check
+/// artifact writes a child there as the plain call, see `require_arg`.
 pub(crate) fn is_static_module(e: &Expr) -> bool {
     if matches!(e, Expr::String(_)) {
         return true;
@@ -51,9 +52,20 @@ pub(crate) fn is_static_module(e: &Expr) -> bool {
     let (base, links) = flatten(e);
 
     matches!(base, Expr::Name(_))
-        && links
-            .iter()
-            .all(|l| matches!(l, Link::Plain(Step::Field(_))))
+        && links.iter().all(|l| {
+            matches!(
+                l,
+                Link::Plain(Step::Field(_))
+                    | Link::Plain(Step::Child {
+                        name: ChildName::Name(_) | ChildName::Str(_),
+                        ..
+                    })
+                    | Link::Optional(Step::Child {
+                        name: ChildName::Name(_) | ChildName::Str(_),
+                        ..
+                    })
+            )
+        })
 }
 
 /// A written type that is one plain name, `Box` or `Enum.Material`.
@@ -595,6 +607,18 @@ impl<'s> Desugar<'s> {
 
                         _ => None,
                     };
+                    let required = match e {
+                        Expr::Call {
+                            func,
+                            method: None,
+                            args: args @ CallArgs::Paren(list),
+                            ..
+                        } if matches!(func.as_ref(), Expr::Name(n) if self.bare_require(self.text_of(*n), args)) => {
+                            Some(std::ptr::from_ref::<Expr>(&list[0]))
+                        }
+
+                        _ => None,
+                    };
                     let mut at = 0;
                     self.stitch(e.span(), &children, |d, child| {
                         at += 1;
@@ -606,7 +630,11 @@ impl<'s> Desugar<'s> {
                                 d.reads = reads;
                             }
 
-                            Child::Expr(c) => d.expr_lazy(at > lazy_from, c),
+                            Child::Expr(c) => {
+                                d.require_arg = required == Some(std::ptr::from_ref::<Expr>(c));
+                                d.expr_lazy(at > lazy_from, c);
+                                d.require_arg = false;
+                            }
 
                             Child::Block(b) => d.block(b),
 
@@ -1422,9 +1450,15 @@ impl<'s> Desugar<'s> {
     `?` adds its prefix to `guards`, and the chain needs no temp.
     */
     pub(crate) fn chain_parts(&mut self, e: &Expr) -> ChainParts {
+        // Both flags belong to this chain alone, not to a chain inside it.
+        let bare = std::mem::take(&mut self.require_arg);
+        let target = std::mem::take(&mut self.chain_target);
         let (base, links) = flatten(e);
         self.check_child_chain(base, &links);
         let timed_waits = self.options.wait_timeout.is_some();
+        let casts: Vec<Option<&'static str>> = (0..links.len())
+            .map(|i| Self::child_cast(&links, i, target, bare))
+            .collect();
         // A timed `WaitForChild` can return nil, so the link after it guards.
         let mut pending_guard = false;
 
@@ -1482,7 +1516,13 @@ impl<'s> Desugar<'s> {
                     crate::data::strip_literal(&self.render_to_string(&list[0]))
                 }
 
-                _ => self.args_text(args),
+                _ => {
+                    self.require_arg = self.bare_require("require", args);
+                    let a = self.args_text(args);
+                    self.require_arg = false;
+
+                    a
+                }
             };
             // A relative path in an `init.luau` starts one folder up, as
             // it does for an `import` statement.
@@ -1578,22 +1618,23 @@ impl<'s> Desugar<'s> {
             };
         }
 
-        let count = links.len();
-
-        for (i, link) in links.into_iter().enumerate() {
+        for (link, cast) in links.into_iter().zip(casts) {
             let link = match link {
                 Link::Plain(step) if pending_guard => Link::Optional(step),
+
+                Link::Optional(step @ Step::Child { .. }) if bare => Link::Plain(step),
 
                 other => other,
             };
             pending_guard = false;
-            self.last_link = i + 1 == count;
+            self.child_cast = cast;
 
             match link {
                 Link::Plain(step) => {
                     inner_simple = inner_simple && matches!(step, Step::Field(_));
                     rereadable = rereadable && matches!(step, Step::Field(_));
-                    pending_guard = timed_waits && matches!(step, Step::Child { wait: true, .. });
+                    pending_guard =
+                        timed_waits && !bare && matches!(step, Step::Child { wait: true, .. });
                     // Past a `?`, a step runs only when the prefix is not
                     // nil, and so do its arguments.
                     inner = self.apply_step(!guards.is_empty(), &inner, &step);
@@ -1655,6 +1696,47 @@ impl<'s> Desugar<'s> {
         }
 
         ChainParts { guards, inner }
+    }
+
+    /// Whether a call of `callee` with `args` is a `require` of one child
+    /// lookup that the check artifact renders bare, see `require_arg`.
+    fn bare_require(&self, callee: &str, args: &CallArgs) -> bool {
+        self.options.check
+            && callee == "require"
+            && matches!(args, CallArgs::Paren(list) if matches!(list.as_slice(), [Expr::Child { .. }]))
+    }
+
+    /// The cast the check artifact puts on link `i` of a chain, when the
+    /// link is a child lookup. None keeps the plain call, and luau-lsp
+    /// types it as it types the method call: the child's class from the
+    /// sourcemap, else `Instance?` for `FindFirstChild` and a timed
+    /// `WaitForChild`, and `Instance` for a `WaitForChild` with no timeout.
+    ///
+    /// A field or a method after the child needs `any`, since `Instance`
+    /// has no `CFrame`. A child lookup after it needs a receiver that is
+    /// not nil: a `->` or a timed `=>` guards it, and a `=>` with no
+    /// timeout gives one. Only a `->` before an unguarded `=>` casts to
+    /// `Instance`. `bare` drops every guard, see `require_arg`.
+    fn child_cast(links: &[Link<'_>], i: usize, target: bool, bare: bool) -> Option<&'static str> {
+        let (Link::Plain(Step::Child { wait, .. }) | Link::Optional(Step::Child { wait, .. })) =
+            &links[i]
+        else {
+            return None;
+        };
+
+        match links.get(i + 1) {
+            None if target => Some("any"),
+
+            None => None,
+
+            // A `=>` with no timeout gives an `Instance`. A timed one
+            // makes the next link optional, see `pending_guard`.
+            Some(next @ (Link::Plain(Step::Child { .. }) | Link::Optional(Step::Child { .. }))) => {
+                (!bare && !*wait && matches!(next, Link::Plain(_))).then_some("Instance")
+            }
+
+            Some(_) => Some("any"),
+        }
     }
 
     /// Applies a step, as code that runs on some paths only when `lazy`
@@ -1786,7 +1868,9 @@ impl<'s> Desugar<'s> {
                 } else {
                     t
                 };
+                self.require_arg = m.is_empty() && self.bare_require(prefix, args);
                 let a = self.args_text(args);
+                self.require_arg = false;
 
                 format!("{prefix}{m}{t}{a}")
             }
@@ -1808,26 +1892,10 @@ impl<'s> Desugar<'s> {
                     (false, _) => format!("{prefix}:FindFirstChild({n})"),
                 };
 
-                // The source names no class. A chain that goes on past the
-                // child continues untyped, since `Instance` has no
-                // `CFrame`. A child that ends the chain is what the call
-                // returns: `->` finds an `Instance` or nil, so `is`
-                // narrows it. `=>` waits for an `Instance`; with
-                // `wait_timeout` the wait gives up and returns nil, as
-                // Roblox types `WaitForChild` with a timeout.
-                if self.options.check {
-                    let timed = self.options.wait_timeout.is_some();
-                    let ty = match (*wait, self.last_link) {
-                        (_, false) => "any",
+                match self.child_cast {
+                    Some(ty) if self.options.check => format!("({call} :: {ty})"),
 
-                        (true, true) if !timed => "Instance",
-
-                        (_, true) => "Instance?",
-                    };
-
-                    format!("({call} :: {ty})")
-                } else {
-                    call
+                    _ => call,
                 }
             }
         }
@@ -2190,6 +2258,55 @@ mod tests {
         let fine =
             "local ins = script\nprint(ins=>Foo:IsA(\"Part\"), ins=>Foo[1], ins=>Foo.Name)\n";
         assert!(messages(fine).is_empty(), "{:?}", messages(fine));
+    }
+
+    /// A child that ends a chain is the plain call in the check
+    /// artifact, so luau-lsp types it from the sourcemap as it types
+    /// `FindFirstChild`. A field after a child casts to `any`. A
+    /// `require` of a child path loses its guards, since luau-lsp
+    /// resolves a module from plain calls only.
+    #[test]
+    fn a_child_lookup_keeps_the_plain_call_in_the_check_artifact() {
+        let check = |src: &str, wait_timeout: Option<f64>| {
+            let options = EmitOptions {
+                check: true,
+                wait_timeout,
+                ..EmitOptions::default()
+            };
+
+            crate::compile_with(src, &options).unwrap().check
+        };
+        let src = concat!(
+            "local a = p=>Hud\n",
+            "local b = p->Hud->Bar\n",
+            "local c = p->Hud=>Bar\n",
+            "local d = p=>Hud.Size\n",
+            "local e = require(p->Hud->Mod)\n",
+            "p=>Hud.Name = \"x\"\n",
+        );
+        let out = check(src, None);
+
+        for want in [
+            "local a = p:WaitForChild(\"Hud\")\n",
+            "local _1 = (if p == nil then nil else p:FindFirstChild(\"Hud\")) local b = (if _1 == nil then nil else _1:FindFirstChild(\"Bar\"))\n",
+            "local c = (if p == nil then nil else (p:FindFirstChild(\"Hud\") :: Instance):WaitForChild(\"Bar\"))\n",
+            "local d = (p:WaitForChild(\"Hud\") :: any).Size\n",
+            "local e = require(p:FindFirstChild(\"Hud\"):FindFirstChild(\"Mod\"))\n",
+            "(p:WaitForChild(\"Hud\") :: any).Name = \"x\"\n",
+        ] {
+            assert!(out.contains(want), "{want}\n{out}");
+        }
+
+        // A timed wait guards the next link, and a `require` drops it.
+        let out = check("local h = p=>A=>B\nlocal m = require(p=>A=>B)\n", Some(5.0));
+        assert!(
+            out.contains("local h = (if _1 == nil then nil else _1:WaitForChild(\"B\", 5))"),
+            "{out}"
+        );
+        assert!(
+            out.contains("local m = require(p:WaitForChild(\"A\", 5):WaitForChild(\"B\", 5))"),
+            "{out}"
+        );
     }
 
     #[test]

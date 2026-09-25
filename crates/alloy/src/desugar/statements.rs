@@ -2032,6 +2032,7 @@ impl<'s> Desugar<'s> {
             return (Vec::new(), self.render_to_string(target));
         };
 
+        self.chain_target = true;
         let parts = self.chain_parts(object);
         let mut guard = parts.guards;
         let mut obj = parts.inner;

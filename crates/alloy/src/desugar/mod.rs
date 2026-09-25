@@ -532,7 +532,9 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         field_expected: HashMap::new(),
         value_sink: None,
         for_header: 0,
-        last_link: false,
+        child_cast: None,
+        require_arg: false,
+        chain_target: false,
         expected_payload: None,
         result_asyncs: options.import_result_asyncs.iter().cloned().collect(),
         // Luau reads a reserved word as a key only in brackets.
@@ -1129,9 +1131,17 @@ struct Desugar<'s> {
     /// Above zero while the check artifact renders a for-in header; see
     /// the `return` cast in `statements`.
     for_header: u32,
-    /// Whether the link under render ends its chain; a child lookup
-    /// there keeps its `Instance` type in the check artifact.
-    last_link: bool,
+    /// The cast the check artifact puts on the child lookup under
+    /// render. None emits the plain call, so luau-lsp types the child
+    /// from the sourcemap. See `chain_parts`.
+    child_cast: Option<&'static str>,
+    /// Set while the check artifact renders the argument of `require`.
+    /// The child lookups of that chain lose their nil guards, since
+    /// luau-lsp resolves a module from plain calls only.
+    require_arg: bool,
+    /// Set while an assignment target renders its object. A field
+    /// follows the chain's last link, so a child there casts to `any`.
+    chain_target: bool,
     /// `local f: Future<T> = async do ... end`: the payload type `T`,
     /// so the block's closure carries it. Without it the checker infers
     /// the closure's result, and an open result lands on `unknown`. An

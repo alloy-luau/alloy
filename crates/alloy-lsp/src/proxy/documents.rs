@@ -1764,6 +1764,123 @@ pub(crate) fn map_from_shadow(value: &mut Value, ctx: Option<&str>, st: &State) 
     }
 }
 
+/*
+A child refactor can send a command that follows its edit: "Extract to
+local variable" asks for `luau-lsp.rename` on the new name. The
+arguments name the shadow, at a place in the text after the edit. The
+place sits in text an edit inserts, and that text lands in the source
+as it is, so the place moves with the edit. A command with a place in
+older text goes: its arguments would name a file of the mirror.
+*/
+pub(crate) fn map_follow_up(action: &mut Value, st: &State) {
+    let Some(args) = action
+        .pointer("/command/arguments")
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    let Some((i, shadow)) = args.iter().enumerate().find_map(|(i, a)| {
+        a.as_str()
+            .filter(|u| st.shadows.contains_key(*u))
+            .map(|u| (i, u.to_string()))
+    }) else {
+        return;
+    };
+    let moved = st.shadows.get(&shadow).and_then(|source| {
+        let doc = st.docs.get(source)?;
+        let (line, character) = args.get(i + 1).and_then(position_of_value)?;
+        let edit = action.get("edit")?;
+        let mut edits: Vec<&Value> = edit
+            .get("changes")
+            .and_then(|c| c.get(&shadow))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .collect();
+
+        for change in edit
+            .get("documentChanges")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if change.pointer("/textDocument/uri").and_then(Value::as_str) == Some(&shadow) {
+                edits.extend(
+                    change
+                        .get("edits")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten(),
+                );
+            }
+        }
+
+        let at = inserted_place(&edits, doc, (line, character))?;
+
+        Some((source.clone(), at))
+    });
+
+    match (moved, action.pointer_mut("/command/arguments")) {
+        (Some((source, (l, c))), Some(Value::Array(args))) => {
+            args[i] = json!(source);
+            args[i + 1] = json!({ "line": l, "character": c });
+        }
+
+        _ => {
+            if let Some(action) = action.as_object_mut() {
+                action.remove("command");
+            }
+        }
+    }
+}
+
+/// Where a place after the edits lands in the source, when it sits in
+/// text an edit inserts. The edits go in order, and each one moves the
+/// lines below it by the lines it adds, on each side. `None` when the
+/// place is in text that was there before.
+fn inserted_place(
+    edits: &[&Value],
+    doc: &Doc,
+    (line, character): (u32, u32),
+) -> Option<(u32, u32)> {
+    let mut edits: Vec<_> = edits
+        .iter()
+        .filter_map(|e| Some((range_of(e.get("range")?)?, e.get("newText")?.as_str()?)))
+        .collect();
+    edits.sort_by_key(|((start, _), _)| *start);
+    let (mut shadow_shift, mut source_shift) = (0i64, 0i64);
+
+    for ((start, end), text) in edits {
+        let mut mapped = range_value(start, end);
+        map_range_value(&mut mapped, doc);
+        let (to, to_end) = range_of(&mapped)?;
+        let lines: Vec<&str> = text.split('\n').collect();
+        let k = i64::from(line) - (i64::from(start.0) + shadow_shift);
+
+        if let Some(piece) = usize::try_from(k).ok().and_then(|k| lines.get(k)) {
+            let from = if k == 0 { start.1 } else { 0 };
+            let width = piece.encode_utf16().count() as u32;
+
+            if (from..=from + width).contains(&character) {
+                let l = i64::from(to.0) + source_shift + k;
+                let c = if k == 0 {
+                    to.1 + character - start.1
+                } else {
+                    character
+                };
+
+                return Some((u32::try_from(l).ok()?, c));
+            }
+        }
+
+        let added = lines.len() as i64 - 1;
+        shadow_shift += added - i64::from(end.0 - start.0);
+        source_shift += added - i64::from(to_end.0 - to.0);
+    }
+
+    None
+}
+
 /// Moves both ends of a range up by `by` lines.
 pub(crate) fn shift_lines(range: &mut Value, by: usize) {
     for end in ["start", "end"] {

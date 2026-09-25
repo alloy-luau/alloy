@@ -1152,3 +1152,38 @@ pub(crate) fn a_hint_names_a_module_type_by_its_path() {
     let named = "import planck, { type Scheduler } from '@pkg/planck'\n\nexport const scheduler = new planck.Scheduler()\n";
     assert_eq!(hint(named, true).0, ": Scheduler<>");
 }
+
+/// "Extract to local variable" sends `luau-lsp.rename` with the shadow's
+/// URI, a file of the mirror, and a place in the text it inserts. The
+/// command now names the source, at the new name there. A command whose
+/// place is in older text goes.
+#[test]
+pub(crate) fn a_refactor_follow_up_names_the_source() {
+    let (mut st, uri) = one_file("local function f(w: number)\n    return w * 2\nend\n");
+    let shadow = "file:///m/t.luau";
+    st.shadows.insert(shadow.to_string(), uri.to_string());
+    let action = |at: Value| {
+        json!({
+            "title": "Extract to local variable",
+            "edit": { "changes": { shadow: [
+                { "range": range_value((1, 0), (1, 0)), "newText": "    local extracted = w * 2\n" },
+                { "range": range_value((1, 11), (1, 16)), "newText": "extracted" },
+            ] } },
+            "command": { "command": "luau-lsp.rename", "arguments": [shadow, at] },
+        })
+    };
+
+    let mut moved = action(json!({ "line": 1, "character": 10 }));
+    map_follow_up(&mut moved, &st);
+
+    assert_eq!(
+        moved["command"]["arguments"],
+        json!([uri, { "line": 1, "character": 10 }])
+    );
+
+    // Line 2 after the edit is the old `return` line: no inserted text.
+    let mut dropped = action(json!({ "line": 2, "character": 4 }));
+    map_follow_up(&mut dropped, &st);
+
+    assert!(dropped.get("command").is_none(), "{dropped}");
+}

@@ -49,10 +49,10 @@ use diagnostics::{
 };
 #[allow(unused_imports)]
 use documents::{
-    RUNTIME_ALIAS, UPDATE_IMPORTS, claim_mirror, config_dir_from, export_surface, map_from_shadow,
-    map_into_shadow, map_uris_into_mirror, mirror_above, mirror_base, mirror_dir, mirror_luau_text,
-    mirrored_sourcemap, mount_alias_settings, normalize, project_aliases, purge_stale_mirrors,
-    relative, shift_lines,
+    RUNTIME_ALIAS, UPDATE_IMPORTS, claim_mirror, config_dir_from, export_surface, map_follow_up,
+    map_from_shadow, map_into_shadow, map_uris_into_mirror, mirror_above, mirror_base, mirror_dir,
+    mirror_luau_text, mirrored_sourcemap, mount_alias_settings, normalize, project_aliases,
+    purge_stale_mirrors, relative, shift_lines,
 };
 #[allow(unused_imports)]
 use hints::{

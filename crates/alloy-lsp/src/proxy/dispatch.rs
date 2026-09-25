@@ -1683,6 +1683,20 @@ impl Server {
                 }));
             }
 
+            // A follow-up command reads the shadow's edits, so it maps
+            // before the edits do.
+            match method.as_str() {
+                "textDocument/codeAction" => result
+                    .as_array_mut()
+                    .into_iter()
+                    .flatten()
+                    .for_each(|a| map_follow_up(a, &st)),
+
+                "codeAction/resolve" => map_follow_up(result, &st),
+
+                _ => {}
+            }
+
             map_from_shadow(result, ctx.as_deref(), &st);
 
             if method == "textDocument/diagnostic"

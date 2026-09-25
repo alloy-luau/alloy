@@ -585,6 +585,44 @@ fn an_init_script_requires_a_file_of_its_folder_by_self() {
 }
 
 /*
+`import { E } from "./m"` beside `export { E } from "./m"` wrote
+`type E` and `export type E`, and Luau reported a redefinition of `E`.
+The import's alias now takes the `export` word, and the list writes no
+second alias.
+*/
+#[test]
+fn an_import_and_a_reexport_of_one_type_write_one_alias() {
+    let dir = temp_project("reexport-import");
+    fs::write(dir.join("alloy.toml"), "[build]\n").unwrap();
+    fs::write(
+        dir.join("src/m.aly"),
+        "export enum E\n    A\nend\n\nexport type T = { n: number }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/r.aly"),
+        "import { E, T } from \"./m\"\nexport { E, T } from \"./m\"\n\nlocal t: T = { n = 1 }\nprint(E.A, t)\n",
+    )
+    .unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run_project(&dir, &config).unwrap();
+
+    assert!(report.is_clean(), "{report:?}");
+
+    let text = fs::read_to_string(dir.join("build/r.luau")).unwrap();
+
+    for name in ["E", "T"] {
+        assert_eq!(text.matches(&format!("type {name} =")).count(), 1, "{text}");
+        assert!(text.contains(&format!("export type {name} =")), "{text}");
+    }
+
+    assert!(text.contains("return { E = _m2.E }"), "{text}");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/*
 A remote's wire layout reads a type name through the imports of the file
 that writes it. The layout took "the one project type of this name", so
 a private `Inner` in a file nothing imports stripped the layout: the enum

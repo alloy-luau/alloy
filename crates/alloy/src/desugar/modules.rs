@@ -987,18 +987,27 @@ impl<'s> Desugar<'s> {
                     let args = self.module_type_params(&spec, &name);
                     let type_args = type_arguments(&args);
                     let alias = format!("export type {exported}{args} = {temp}.{name}{type_args}");
+                    // An import of the name from this module already
+                    // writes the alias with the word; a second is a
+                    // redefinition.
+                    let imported = sp.alias.is_none() && self.export_listed_types.contains(&name);
 
                     if e.type_only || sp.is_type || self.module_exports_type_only(&spec, &name) {
-                        types.push(alias);
+                        if !imported {
+                            types.push(alias);
+                        }
                     } else {
                         // A struct or an enum is a value and a type,
                         // and the list sends both on.
-                        if self.module_exports_type(&spec, &name) {
+                        if !imported && self.module_exports_type(&spec, &name) {
                             types.push(alias);
                         }
 
-                        let members = self.namespace_type_aliases(&spec, &name, &exported, &temp);
-                        types.extend(members.into_iter().map(|t| format!("export {t}")));
+                        if !imported {
+                            let members =
+                                self.namespace_type_aliases(&spec, &name, &exported, &temp);
+                            types.extend(members.into_iter().map(|t| format!("export {t}")));
+                        }
                         self.exports.push((exported, format!("{temp}.{name}")));
                     }
                 }

@@ -163,6 +163,18 @@ impl<'s> Desugar<'s> {
                     self.export_listed_bare.insert(name.clone());
                 }
 
+                // `export { E } from "./m"` beside `import { E } from
+                // "./m"`: each writes an alias of `E`, and Luau reads the
+                // second as a redefinition. The import's alias takes the
+                // word, and the list writes none.
+                if let Some(from) = list.from
+                    && spec.alias.is_none()
+                    && self.imports_by_own_name(&block.stmts, self.text_of(from), &name)
+                {
+                    self.export_listed_types.insert(name.clone());
+                    self.export_listed_bare.insert(name.clone());
+                }
+
                 self.export_listed.insert(name);
             }
         }
@@ -294,6 +306,31 @@ impl<'s> Desugar<'s> {
                 self.imported_types.insert(local, value);
             }
         }
+    }
+
+    /// Whether an import of the file binds `name` under its own name
+    /// from the module `quoted` names.
+    fn imports_by_own_name(&self, stmts: &[Stmt], quoted: &str, name: &str) -> bool {
+        let bare = |q: &str| q.trim_matches(['"', '\'']).to_string();
+
+        stmts.iter().any(|stmt| {
+            let Stmt::Import(i) = stmt else {
+                return false;
+            };
+            let specs = match &i.kind {
+                ImportKind::Named(v)
+                | ImportKind::Both(_, v)
+                | ImportKind::Namespace(_, v)
+                | ImportKind::TypeOnly(v) => v,
+
+                ImportKind::Default(_) => return false,
+            };
+
+            bare(self.text_of(i.path)) == bare(quoted)
+                && specs
+                    .iter()
+                    .any(|sp| sp.alias.is_none() && self.text_of(sp.name) == name)
+        })
     }
 
     /// The namespaces the file imports. A module that exports

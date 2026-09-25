@@ -2796,10 +2796,18 @@ impl State {
         else {
             return bound;
         };
+        let from = doc
+            .source
+            .split_inclusive('\n')
+            .take(at)
+            .map(str::len)
+            .sum();
         let at = at as u32;
         let width = text.encode_utf16().count() as u32;
 
-        bound && doc.copies_source(doc.to_shadow(at, 0), doc.to_shadow(at, width))
+        bound
+            && doc.copies_source(doc.to_shadow(at, 0), doc.to_shadow(at, width))
+            && inline_keeps_behaviour(&doc.source, from, name)
     }
 
     /// Puts parentheses around a value a resolved "Inline variable"
@@ -2949,6 +2957,222 @@ fn edit_count(edit: &Value) -> usize {
         );
 
     lists.filter_map(Value::as_array).map(Vec::len).sum()
+}
+
+/*
+Whether "Inline variable" keeps what the code does, for the declaration
+of `name` on the line that starts at byte `from`.
+
+The child writes the value at each use and deletes the declaration. A
+value with a call then runs at the use: once per item inside a `for`
+body, or after a later call that it ran before. So a literal and a
+plain name inline anywhere. Other values inline only when they read
+names, fields, and operators, and when one use at most reads them,
+outside any loop or function that starts after the declaration.
+*/
+fn inline_keeps_behaviour(src: &str, from: usize, name: &str) -> bool {
+    use alloy_syntax::lexer::TokKind;
+
+    const OPERATORS: [&str; 15] = [
+        "+", "-", "*", "/", "//", "%", "^", "..", "==", "~=", "<", ">", "<=", ">=", "#",
+    ];
+    // The words a value may hold. The first three carry it to the next line.
+    const WORDS: [&str; 10] = [
+        "and", "or", "not", "nil", "true", "false", "if", "then", "else", "elseif",
+    ];
+
+    let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
+        return false;
+    };
+    let toks = &lexed.toks;
+    let text = |i: usize| toks[i].text(src);
+    let mut at = 0;
+    let mut row = 0;
+    let lines: Vec<usize> = toks
+        .iter()
+        .map(|t| {
+            row += src[at..t.start as usize].matches('\n').count();
+            at = t.start as usize;
+
+            row
+        })
+        .collect();
+    // A `(`, a string, or a `{` after one of these makes a call.
+    let ends_a_value = |i: usize| {
+        (toks[i].kind == TokKind::Ident && !WORDS.contains(&text(i)))
+            || matches!(text(i), ")" | "]")
+    };
+    let Some(bound) = (0..toks.len()).find(|&i| toks[i].start as usize >= from && text(i) == name)
+    else {
+        return false;
+    };
+    let mut depth = 0;
+    let Some(eq) = (bound + 1..toks.len()).find(|&i| {
+        match text(i) {
+            "(" | "{" | "[" => depth += 1,
+
+            ")" | "}" | "]" => depth -= 1,
+
+            _ => {}
+        }
+
+        depth == 0 && text(i) == "="
+    }) else {
+        return false;
+    };
+
+    // The value runs to the end of its line, or further while a bracket
+    // is open or an operator carries it on.
+    let carries = |i: usize| OPERATORS.contains(&text(i)) || WORDS[..3].contains(&text(i));
+    let mut end = eq + 1;
+    let mut depth = 0;
+
+    while end < toks.len() {
+        if depth == 0
+            && end > eq + 1
+            && lines[end] > lines[end - 1]
+            && !carries(end - 1)
+            && !carries(end)
+            && !matches!(text(end), "then" | "else" | "elseif")
+        {
+            break;
+        }
+
+        match text(end) {
+            "(" | "{" | "[" => depth += 1,
+
+            ")" | "}" | "]" => depth -= 1,
+
+            _ => {}
+        }
+
+        end += 1;
+    }
+
+    let value = eq + 1..end;
+
+    if value.len() == 1 {
+        return matches!(
+            toks[value.start].kind,
+            TokKind::Number | TokKind::Str { .. } | TokKind::InterpStr | TokKind::Ident
+        );
+    }
+
+    let pure = value.clone().all(|i| {
+        let call = i > value.start && ends_a_value(i - 1);
+
+        match toks[i].kind {
+            TokKind::Ident => !matches!(
+                text(i),
+                "function" | "await" | "new" | "match" | "do" | "end" | "try"
+            ),
+
+            TokKind::Number | TokKind::InterpMid | TokKind::InterpTail | TokKind::RParen => true,
+
+            TokKind::Str { .. } | TokKind::InterpStr | TokKind::InterpHead | TokKind::LParen => {
+                !call
+            }
+
+            TokKind::Dot => toks.get(i + 1).is_some_and(|t| t.kind == TokKind::Ident),
+
+            TokKind::Colon => false,
+
+            // A table constructor and its `[key]`. A `[` after a value
+            // is an index, which can run `__index`.
+            TokKind::Symbol => match text(i) {
+                "{" => !call,
+
+                "[" => i > value.start && matches!(text(i - 1), "{" | "," | ";"),
+
+                "}" | "]" | "," | ";" | "=" => true,
+
+                t => OPERATORS.contains(&t),
+            },
+        }
+    });
+
+    if !pure {
+        return false;
+    }
+
+    // The rest of the block. Each open block says whether it runs its
+    // body again: a loop and a function do. An `if` value closes with
+    // its `else`.
+    #[derive(PartialEq)]
+    enum Open {
+        Block,
+        Again,
+        IfValue,
+    }
+
+    let mut open: Vec<Open> = Vec::new();
+    let mut loop_head = false;
+    let mut uses = 0;
+
+    for i in end..toks.len() {
+        if toks[i].kind != TokKind::Ident {
+            continue;
+        }
+
+        let before = if i > 0 { text(i - 1) } else { "" };
+
+        match text(i) {
+            "function" | "repeat" => open.push(Open::Again),
+
+            "for" | "while" => {
+                open.push(Open::Again);
+                loop_head = true;
+            }
+
+            "do" if loop_head => loop_head = false,
+
+            "do" | "struct" | "enum" | "interface" | "impl" | "trait" | "macro" | "namespace" => {
+                open.push(Open::Block);
+            }
+
+            "match" if alloy_syntax::contextual::keyword_at_byte(src, toks[i].start as usize) => {
+                open.push(Open::Block);
+            }
+
+            "if" => {
+                let value = OPERATORS.contains(&before)
+                    || matches!(
+                        before,
+                        "=" | "(" | "," | "[" | "{" | "return" | "and" | "or" | "not"
+                    )
+                    || (matches!(before, "then" | "else") && open.last() == Some(&Open::IfValue));
+
+                open.push(if value { Open::IfValue } else { Open::Block });
+            }
+
+            "else" if open.last() == Some(&Open::IfValue) => {
+                open.pop();
+            }
+
+            "end" | "until" => {
+                if open.pop().is_none() {
+                    break;
+                }
+            }
+
+            // The branch or the arm that declares the name ends here.
+            "else" | "elseif" if open.is_empty() => break,
+
+            "case" | "default" if open.is_empty() && lines[i] > lines[i - 1] => break,
+
+            word if word == name && !matches!(before, "." | ":") => {
+                if open.contains(&Open::Again) {
+                    return false;
+                }
+
+                uses += 1;
+            }
+
+            _ => {}
+        }
+    }
+
+    uses <= 1
 }
 
 /// The edits that double the `<` at `at` and the `>` that closes it:

@@ -1805,6 +1805,41 @@ fn a_refactor_over_a_key_or_lowered_text_leaves_the_list() {
     assert!(st.keeps_child_action(&inline("t"), uri, at(9, 26)));
 }
 
+/// "Inline variable" moved `task.wait(0.1)` into a `for` body, where it
+/// ran once per item, and moved `bump()` past a second `bump()`. A value
+/// with a call leaves the list. A value of names and operators stays
+/// when one use outside a later loop reads it. A literal stays always.
+#[test]
+fn an_inline_that_moves_a_call_leaves_the_list() {
+    let src = concat!(
+        "local function tick(items: { number }, p: { x: number })\n",
+        "    local dt = task.wait(0.1)\n",
+        "    local first = bump()\n",
+        "    bump()\n",
+        "    local scale = 2\n",
+        "    local sum = p.x + scale\n",
+        "    local loopy = p.x * 2\n",
+        "    local twice = p.x + 1\n",
+        "    for _, x in items do\n",
+        "        print(x * dt * scale * loopy)\n",
+        "    end\n",
+        "    print(first, sum, twice, twice)\n",
+        "end\n",
+    );
+    let (st, uri) = one_file(src);
+    let inline = |name: &str| json!({ "title": format!("Inline variable '{name}'"), "kind": "refactor.inline", "data": { "type": "inlineVariable" } });
+    let keeps = |name: &str, line: u32| {
+        st.keeps_child_action(&inline(name), uri, Some(((line, 10), (line, 10))))
+    };
+
+    assert!(!keeps("dt", 1));
+    assert!(!keeps("first", 2));
+    assert!(keeps("scale", 4));
+    assert!(keeps("sum", 5));
+    assert!(!keeps("loopy", 6));
+    assert!(!keeps("twice", 7));
+}
+
 /// "Inline variable" wrote `{ stage = 2 }.stage`, which does not parse.
 /// A value that is no prefix expression takes parentheses where the use
 /// goes on with `.`, `:`, `[` or `(`; a name needs none.

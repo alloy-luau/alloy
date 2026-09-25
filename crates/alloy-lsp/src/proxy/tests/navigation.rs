@@ -325,6 +325,40 @@ pub(crate) fn a_rename_of_an_imported_name_reaches_every_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A file that imports through a barrel renamed only its own use, and
+/// its import kept the old name. Its references were empty. The walk
+/// now starts at the module that declares the name, from the importer
+/// and from the barrel's own list.
+#[test]
+fn a_rename_through_a_barrel_reaches_every_file() {
+    let (st, dir) = project("barrel-rename");
+    let uri = |rel: &str| format!("file://{}", dir.join("src").join(rel).display());
+    let edits_at = |rel: &str, offset: usize| match st.name_target(&uri(rel), offset) {
+        Some(Target::Export(file, name)) => {
+            rows(&st.export_rename(&file, &name, "release").expect("rename"))
+        }
+
+        other => panic!("{rel} at {offset}: {other:?}"),
+    };
+    let every_file = [
+        "barrel.aly 0:9-16 -> release",
+        "m.aly 12:13-20 -> release",
+        "other.aly 0:9-16 -> release",
+        "star.aly 4:13-20 -> release",
+        "use.aly 0:9-16 -> release",
+        "use.aly 10:26-33 -> release",
+        "use.aly 12:23-30 -> release",
+        "via.aly 0:9-16 -> release",
+        "via.aly 1:6-13 -> release",
+    ];
+
+    // `print(version)` in the importer, and `version` in the barrel.
+    assert_eq!(edits_at("via.aly", 42), every_file);
+    assert_eq!(edits_at("barrel.aly", 10), every_file);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The caret at the end of a name is on that name: the column typing
 /// it leaves. The rename there writes what the caret one column left
 /// writes, in every file, and definition and hover read the word too.

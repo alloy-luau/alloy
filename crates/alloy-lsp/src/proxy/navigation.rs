@@ -226,6 +226,26 @@ impl Server {
             Target::Export(file, name) => match st.export_rename(&file, &name, &new_name) {
                 Some(edit) => edit,
 
+                // The child sees the import as generated text and edits
+                // this file alone, which leaves the import on the old
+                // name. No edit is better than half of one.
+                None if file.extension().is_some_and(|e| e == "aly" || e == "alx") => {
+                    drop(st);
+                    self.to_client(&json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {
+                            "code": -32803,
+                            "message": format!(
+                                "Cannot rename `{name}`: no module that `{}` reaches declares it",
+                                file.display()
+                            ),
+                        },
+                    }));
+
+                    return true;
+                }
+
                 None => return false,
             },
 
@@ -1079,6 +1099,22 @@ impl State {
             }
 
             return Some(Target::Export(self.entry_module(uri, &entry)?, entry.name));
+        }
+
+        // `export { X as Y } from "./m"`: `X` is the name of `./m`, and
+        // `Y` is the name of this barrel. Without an alias the barrel's
+        // name is the one `./m` declares, and the rename walks from there.
+        let inside = |(s, e): (usize, usize)| (s..=e).contains(&offset);
+
+        if let Some(entry) = reexport_entries(source)
+            .into_iter()
+            .find(|e| inside(e.name_at) || e.alias_at.is_some_and(inside))
+        {
+            return match entry.alias_at.is_some() && inside(entry.name_at) {
+                true => Some(Target::Export(self.entry_module(uri, &entry)?, entry.name)),
+
+                false => Some(Target::Export(uri_to_path(uri)?, entry.bound)),
+            };
         }
 
         if let Some(file) = uri_to_path(uri)
@@ -2677,6 +2713,15 @@ impl State {
                 for (s, e) in name_uses(&d.source, name) {
                     edits.push(text_edit(&d.source, s, e, new_name));
                 }
+
+                // `export { X }` after the import sends the name on too.
+                if export_list_entries(&d.source)
+                    .iter()
+                    .any(|it| it.name == name && it.alias_at.is_none())
+                    && let Some(path) = uri_to_path(u)
+                {
+                    barrels.push((u.clone(), imports::module_path(&path)));
+                }
             }
 
             for (s, e) in member_uses(&d.source, &holders, name) {
@@ -2725,11 +2770,14 @@ impl State {
     /// only its own name changes; an entry without one changes with
     /// every use under it, and `M.name` under a module binding too.
     pub(crate) fn export_rename(&self, file: &Path, name: &str, new_name: &str) -> Option<Value> {
+        // An import of a barrel names the barrel, which declares
+        // nothing. The walk starts where the name is declared, and it
+        // comes back to the barrel and its importers from there.
+        let file = self.export_home(file, name)?;
+        let file = file.as_path();
         let module = imports::module_path(file);
         let module_uri = path_to_uri(file);
         let text = self.module_text(file)?;
-
-        export_span(&text, name)?;
 
         // A definitions file writes no import: an ambient declaration
         // stands in scope everywhere, so a type name it spells is this
@@ -2784,6 +2832,34 @@ impl State {
         }
 
         (!changes.is_empty()).then(|| json!({ "changes": changes }))
+    }
+
+    /// The module that declares a name `file` exports. A barrel sends
+    /// the name on with `export { X } from "./m"`, or with an import
+    /// and `export { X }`, and the walk follows it. A barrel that sends
+    /// the name out under an alias declares the alias itself.
+    fn export_home(&self, file: &Path, name: &str) -> Option<PathBuf> {
+        let mut file = file.to_path_buf();
+
+        for _ in 0..8 {
+            let text = self.module_text(&file)?;
+
+            if export_span(&text, name).is_some() {
+                return Some(file);
+            }
+
+            let passed = export_list_entries(&text)
+                .iter()
+                .any(|e| e.bound == name && e.alias_at.is_none());
+            let entry = reexport_entries(&text)
+                .into_iter()
+                .chain(import_entries(&text).into_iter().filter(|_| passed))
+                .find(|e| e.bound == name && e.alias_at.is_none())?;
+
+            file = self.spec_module(&path_to_uri(&file), &entry.spec)?;
+        }
+
+        None
     }
 
     /// The definition a default import's binding names: the
@@ -3992,6 +4068,7 @@ pub(crate) fn export_span(src: &str, name: &str) -> Option<(usize, usize)> {
         .or_else(|| {
             export_list_entries(src)
                 .into_iter()
+                .chain(reexport_entries(src))
                 .find(|e| e.bound == name)
                 .and_then(|e| e.alias_at)
         })

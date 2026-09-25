@@ -1747,6 +1747,13 @@ fn resolve_import(from: &Path, path: &str, sources: &[PathBuf]) -> Option<PathBu
         return None;
     }
 
+    // A data or Luau file is no source. `with_extension` below would
+    // read `./data.json` as `./data.aly`, the module beside it.
+    if crate::data::Format::of(path).is_some() || path.ends_with(".luau") || path.ends_with(".lua")
+    {
+        return None;
+    }
+
     let base = from.parent().unwrap_or(Path::new(""));
     let mut joined = PathBuf::new();
 
@@ -2036,6 +2043,14 @@ mod tests {
         let files: Vec<String> = lints.iter().map(|(p, _)| p.display().to_string()).collect();
         assert_eq!(files, vec!["a.aly", "b.aly", "c.aly"]);
         assert!(lints[0].1.message.contains("`a.aly` imports `b.aly`"));
+
+        // `data.aly` beside `data.json`: an import of the data file is
+        // no import of the module, so there is no cycle to report.
+        let data = vec![(
+            PathBuf::from("data.aly"),
+            vec![im("./data.json"), im("./data.luau")],
+        )];
+        assert!(circular_imports(&data).is_empty());
     }
 
     #[test]

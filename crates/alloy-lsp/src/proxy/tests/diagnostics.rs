@@ -1840,6 +1840,44 @@ fn an_inline_that_moves_a_call_leaves_the_list() {
     assert!(!keeps("twice", 7));
 }
 
+/// The child's "Change 'flyer' to 'Flyer'" replaced all of `t.flyer`
+/// with `Flyer`, a global the file does not have. The edit now takes
+/// the name alone. On an enum, Alloy's "Rename to `Flyer`" stays and
+/// the child's fix goes.
+#[test]
+fn a_spelling_fix_of_the_child_edits_the_name_alone() {
+    let src = "local t = { Flyer = 1 }\nprint(t.flyer)\n";
+    let uri = "file:///s.aly";
+    let change = |sc: u32| {
+        json!({
+            "title": "Change 'flyer' to 'Flyer'",
+            "kind": "quickfix",
+            "isPreferred": true,
+            "edit": { "changes": { uri: [{
+                "range": { "start": { "line": 1, "character": sc }, "end": { "line": 1, "character": 13 } },
+                "newText": "Flyer",
+            }] } },
+        })
+    };
+    let mut actions = vec![change(6)];
+    super::super::dispatch::mend_child_spelling(&mut actions, uri, src);
+
+    assert_eq!(
+        actions[0]["edit"]["changes"][uri][0]["range"]["start"],
+        json!({ "line": 1, "character": 8 })
+    );
+
+    // An edit that does not end on the name leaves the list.
+    let mut actions = vec![change(6)];
+    actions[0]["edit"]["changes"][uri][0]["range"]["end"]["character"] = json!(12);
+    super::super::dispatch::mend_child_spelling(&mut actions, uri, src);
+    assert!(actions.is_empty());
+
+    let mut actions = vec![change(6), json!({ "title": "Rename to `Flyer`" })];
+    super::super::dispatch::mend_child_spelling(&mut actions, uri, src);
+    assert_eq!(actions, [json!({ "title": "Rename to `Flyer`" })]);
+}
+
 /// "Inline variable" wrote `{ stage = 2 }.stage`, which does not parse.
 /// A value that is no prefix expression takes parentheses where the use
 /// goes on with `.`, `:`, `[` or `(`; a name needs none.

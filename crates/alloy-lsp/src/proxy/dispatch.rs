@@ -1956,6 +1956,10 @@ impl Server {
                         st.unused_import_actions(uri, range, actions);
                         drop_child_prefix_fixes(actions);
                         drop_child_requires(actions);
+
+                        if let Some(doc) = st.docs.get(uri) {
+                            mend_child_spelling(actions, uri, &doc.source);
+                        }
                     }
                 }
 
@@ -2462,6 +2466,69 @@ pub(crate) fn drop_child_requires(actions: &mut Vec<Value>) {
         let t = title(a);
 
         !t.starts_with("Add require for '") && t != "Add all missing requires"
+    });
+}
+
+/// The child's "Change 'flyer' to 'Flyer'" on `t.flyer` edits the whole
+/// `t.flyer`, and the code then reads a global `Flyer`. The edit now
+/// takes the name alone, and an edit that does not end on the name
+/// drops the action. Where Alloy's "Rename to `Flyer`" makes the same
+/// fix, the child's goes.
+pub(crate) fn mend_child_spelling(actions: &mut Vec<Value>, uri: &str, src: &str) {
+    let ours: Vec<String> = actions
+        .iter()
+        .filter_map(|a| a.get("title").and_then(Value::as_str).map(str::to_string))
+        .collect();
+
+    actions.retain_mut(|a| {
+        let Some((old, new)) = a
+            .get("title")
+            .and_then(Value::as_str)
+            .and_then(|t| {
+                t.strip_prefix("Change '")?
+                    .strip_suffix('\'')?
+                    .split_once("' to '")
+            })
+            .map(|(o, n)| (o.to_string(), n.to_string()))
+        else {
+            return true;
+        };
+
+        if ours.contains(&format!("Rename to `{new}`")) {
+            return false;
+        }
+
+        let Some(edits) = a
+            .pointer_mut("/edit/changes")
+            .and_then(|c| c.get_mut(uri))
+            .and_then(Value::as_array_mut)
+        else {
+            return true;
+        };
+
+        edits.iter_mut().all(|e| {
+            let Some(((sl, sc), (el, ec))) = e.get("range").and_then(range_of) else {
+                return false;
+            };
+            let (Some(start), Some(end)) = (offset_of(src, sl, sc), offset_of(src, el, ec)) else {
+                return false;
+            };
+            let Some(head) = src
+                .get(start..end)
+                .and_then(|t| t.strip_suffix(old.as_str()))
+            else {
+                return false;
+            };
+
+            if !head.is_empty() && !head.ends_with(['.', ':']) {
+                return false;
+            }
+
+            let (l, c) = position_of(src, end - old.len());
+            e["range"]["start"] = json!({ "line": l, "character": c });
+
+            true
+        })
     });
 }
 

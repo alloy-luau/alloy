@@ -870,26 +870,84 @@ impl<'s> Desugar<'s> {
             return;
         }
 
-        let heads: HashSet<&str> = self
+        self.remote_shadows = crate::naming::scoped_bindings(self.src, self.toks, block);
+
+        // `const vote = Net.Vote`: the local holds the remote, so a call
+        // through it takes the check a call through `Net.Vote` takes.
+        // The locals come in source order, so an alias of an alias
+        // reads through the first.
+        let mut locals = Vec::new();
+        locals_in(block, &mut locals);
+
+        for l in locals {
+            for (b, value) in l.names.iter().zip(&l.values) {
+                let Some(path) = self.dotted_name(value).filter(|_| b.destructure.is_none()) else {
+                    continue;
+                };
+                let name = self.text_of(b.name).to_string();
+
+                for (rest, sides) in self.remotes_under(&path, value.span().start as usize) {
+                    self.remote_aliases
+                        .insert((b.name.start as usize, format!("{name}{rest}")), sides);
+                }
+            }
+        }
+
+        let heads: HashSet<String> = self
             .remote_sides
             .keys()
-            .map(|k| k.split('.').next().unwrap_or(k))
+            .chain(self.remote_aliases.keys().map(|(_, k)| k))
+            .map(|k| k.split('.').next().unwrap_or(k).to_string())
             .collect();
-        self.remote_shadows = crate::naming::scoped_bindings(self.src, self.toks, block)
-            .into_iter()
-            .filter(|(name, _)| heads.contains(name.as_str()))
-            .collect();
+        self.remote_shadows
+            .retain(|(name, _, _)| heads.contains(name.as_str()));
     }
 
-    /// Whether a local, a parameter, or a loop variable of the name holds
-    /// the token at `at`, so the name there is no remote.
-    fn shadows_remote(&self, name: &str, at: usize) -> bool {
-        self.remote_shadows.iter().any(|(n, reach)| {
-            n == name
-                && reach
-                    .as_ref()
-                    .is_none_or(|ranges| ranges.iter().any(|&(a, b)| a <= at && at < b))
-        })
+    /// The token that declares the binding of `name` that holds the
+    /// token at `at`: the latest one, since an inner or a later binding
+    /// hides an outer one. `None` when no local, parameter, or loop
+    /// variable holds it, so the name is the file's own or an import.
+    fn binding_at(&self, name: &str, at: usize) -> Option<usize> {
+        self.remote_shadows
+            .iter()
+            .filter(|(n, _, reach)| {
+                n == name
+                    && reach
+                        .as_ref()
+                        .is_none_or(|ranges| ranges.iter().any(|&(a, b)| a <= at && at < b))
+            })
+            .map(|&(_, tok, _)| tok)
+            .max()
+    }
+
+    /// The remotes a dotted path at the token `at` reaches, each with
+    /// the rest of its key past the path and its sides. `Net` reaches
+    /// `.Vote`, and `Net.Vote` reaches itself with an empty rest. The
+    /// binding of the head decides the table: an alias reads its own
+    /// keys, any other binding holds no remote, and no binding reads the
+    /// file's remotes and the imported ones.
+    fn remotes_under(&self, path: &str, at: usize) -> Vec<(String, (bool, bool))> {
+        let head = path.split('.').next().unwrap_or(path);
+        let rest = |key: &str| {
+            key.strip_prefix(path)
+                .filter(|r| r.is_empty() || r.starts_with('.'))
+                .map(str::to_string)
+        };
+
+        match self.binding_at(head, at) {
+            Some(tok) => self
+                .remote_aliases
+                .iter()
+                .filter(|((t, _), _)| *t == tok)
+                .filter_map(|((_, key), sides)| Some((rest(key)?, *sides)))
+                .collect(),
+
+            None => self
+                .remote_sides
+                .iter()
+                .filter_map(|(key, sides)| Some((rest(key)?, *sides)))
+                .collect(),
+        }
     }
 
     /*
@@ -902,7 +960,9 @@ impl<'s> Desugar<'s> {
     A file with a side runs on that side alone, so the check is sound
     there. A shared file may run on either side and gets no report. A
     local, a parameter, or a loop variable of the remote's name is some
-    other value, so a call through it gets none either.
+    other value, so a call through it gets none either. A local that
+    holds the remote, `const up = Up`, is the remote, so a call through
+    it gets the report.
     */
     pub(crate) fn check_remote_side(&mut self, e: &Expr) {
         use crate::directives::Side;
@@ -925,14 +985,13 @@ impl<'s> Desugar<'s> {
             return;
         };
         let receiver = self.text_of(object.span()).trim().to_string();
-        let Some(&(from_client, from_server)) = self.remote_sides.get(&receiver) else {
+        let Some((_, (from_client, from_server))) = self
+            .remotes_under(&receiver, object.span().start as usize)
+            .into_iter()
+            .find(|(rest, _)| rest.is_empty())
+        else {
             return;
         };
-        let head = receiver.split('.').next().unwrap_or(&receiver);
-
-        if self.shadows_remote(head, object.span().start as usize) {
-            return;
-        }
 
         let verb = self.text_of(*verb).to_string();
         let (sends, receives) = match side {
@@ -1475,6 +1534,34 @@ impl<'s> Desugar<'s> {
     }
 
     // --- attributes ------------------------------------------------------------
+}
+
+/// Every `local` and `const` of a block, in source order, the ones in
+/// nested blocks and function bodies included.
+fn locals_in<'a>(block: &'a Block, out: &mut Vec<&'a alloy_syntax::ast::Local>) {
+    for stmt in &block.stmts {
+        if let alloy_syntax::ast::Stmt::Local(l) = stmt {
+            out.push(l);
+        }
+
+        for c in stmt_children(stmt) {
+            locals_in_child(c, out);
+        }
+    }
+}
+
+fn locals_in_child<'a>(c: Child<'a>, out: &mut Vec<&'a alloy_syntax::ast::Local>) {
+    match c {
+        Child::Block(b) => locals_in(b, out),
+
+        Child::Function(f) => locals_in(&f.block, out),
+
+        Child::Expr(e) => {
+            for c in expr_children(e) {
+                locals_in_child(c, out);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

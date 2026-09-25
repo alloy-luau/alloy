@@ -332,24 +332,33 @@ impl State {
         // the file binds the head, and the declaration names the last.
         // ponytail: the last name alone picks the declaration, so two
         // namespaces with a remote of one name read the first.
-        let head = base.split('.').next().unwrap_or(&base);
-        let name = base.rsplit('.').next().unwrap_or(&base);
-        let here = remote_spec(&doc.source, name);
-        let spec = match here {
-            Some(spec) => Some(spec),
+        let spec_of = |base: &str| {
+            let head = base.split('.').next().unwrap_or(base);
+            let name = base.rsplit('.').next().unwrap_or(base);
 
-            // The declaration sits in the module the file imports it
-            // from; a name no import bound is not this remote.
-            None => imports::bound_names(&doc.source)
-                .iter()
-                .any(|b| b == head)
-                .then(|| {
-                    self.docs
-                        .values()
-                        .find_map(|d| remote_spec(&d.source, name))
-                })
-                .flatten(),
+            match remote_spec(&doc.source, name) {
+                Some(spec) => Some(spec),
+
+                // The declaration sits in the module the file imports it
+                // from; a name no import bound is not this remote.
+                None => imports::bound_names(&doc.source)
+                    .iter()
+                    .any(|b| b == head)
+                    .then(|| {
+                        self.docs
+                            .values()
+                            .find_map(|d| remote_spec(&d.source, name))
+                    })
+                    .flatten(),
+            }
         };
+        // `const vote = Net.Vote` makes `vote.` the list of `Net.Vote`.
+        let head = base.split('.').next().unwrap_or(&base);
+        let spec = spec_of(&base).or_else(|| {
+            let path = aliased_path(&doc.source, offset, head)?;
+
+            spec_of(&format!("{path}{}", &base[head.len()..]))
+        });
         let Some(spec) = spec else {
             return;
         };
@@ -361,6 +370,29 @@ impl State {
                 .is_none_or(|label| spec.holds(label, side))
         });
     }
+}
+
+/// The dotted path a local holds, when a line before `offset` writes
+/// `local name = Net.Vote` or `const name = Net.Vote`.
+// ponytail: the nearest such line wins and no scope is read, so a local
+// of the name in another function can answer; the compiler's side check
+// reads the scopes.
+fn aliased_path(source: &str, offset: usize, name: &str) -> Option<String> {
+    source.get(..offset)?.lines().rev().find_map(|line| {
+        let t = line.trim();
+        let t = t.strip_prefix("export ").unwrap_or(t);
+        let rest = t
+            .strip_prefix("local ")
+            .or_else(|| t.strip_prefix("const "))?;
+        let (lhs, rhs) = rest.split_once('=')?;
+        let rhs = rhs.trim();
+        let path = rhs.starts_with(|c: char| c.is_alphabetic() || c == '_')
+            && rhs
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '.');
+
+        (lhs.trim() == name && path).then(|| rhs.to_string())
+    })
 }
 
 /// Whether a completion answer is the scope of an expression and not a

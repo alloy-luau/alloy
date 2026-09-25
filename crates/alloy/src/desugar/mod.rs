@@ -616,6 +616,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         file_side: crate::directives::file_side(&options.file_name),
         remote_sides: options.import_remotes.iter().cloned().collect(),
         remote_shadows: Vec::new(),
+        remote_aliases: HashMap::new(),
         own_names: top_level_names(src, toks, chunk),
         exports: Vec::new(),
         has_default_export: false,
@@ -1254,9 +1255,13 @@ struct Desugar<'s> {
     /// Each remote a name here reaches, declared or imported, with
     /// whether the client and the server fire it.
     remote_sides: HashMap<String, (bool, bool)>,
-    /// The bindings of this file that share a name with a remote, with
-    /// the tokens each one holds; see `naming::scoped_bindings`.
+    /// The bindings of this file that share a name with a remote or an
+    /// alias of one, with the tokens each one holds; see
+    /// `naming::scoped_bindings`.
     remote_shadows: Vec<crate::naming::ScopedBinding>,
+    /// Each remote a local holds, `const vote = Net.Vote`, keyed by the
+    /// token that declares the local and the path through it.
+    remote_aliases: HashMap<(usize, String), (bool, bool)>,
     /// Every name the top level of this file binds.
     own_names: HashSet<String>,
     /// Names the module exports, as `name = value` pairs for the table.

@@ -1231,9 +1231,9 @@ fn markup_returns(toks: &[Tok], block: &Block, markup: &Markup, out: &mut HashSe
     }
 }
 
-/// A binding's name, with the token ranges its scope holds; `None` for
-/// a scope the walk does not know.
-pub(crate) type ScopedBinding = (String, Option<Vec<(usize, usize)>>);
+/// A binding's name, the token that declares it, and the token ranges
+/// its scope holds; `None` for a scope the walk does not know.
+pub(crate) type ScopedBinding = (String, usize, Option<Vec<(usize, usize)>>);
 
 /// Each value binding of a block, other than an import, a remote or a
 /// namespace, with the token ranges its scope holds, end exclusive: a
@@ -1287,7 +1287,7 @@ pub(crate) fn scoped_bindings(src: &str, toks: &[Tok], block: &Block) -> Vec<Sco
                 Reach::None => None,
             };
 
-            (w.text(d.tok).to_string(), reach)
+            (w.text(d.tok).to_string(), d.tok, reach)
         })
         .collect()
 }

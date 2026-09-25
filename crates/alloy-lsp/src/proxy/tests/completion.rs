@@ -1137,6 +1137,43 @@ pub(crate) fn a_remote_in_a_namespace_offers_its_side() {
     assert_eq!(labels(4, 7), ["spec", "instance", "on", "wait"]);
     assert_eq!(labels(5, 9), ["spec", "instance", "fire", "fire_all"]);
 }
+
+/// A local that holds a remote keeps the remote's side in the list: the
+/// server's `vote.` offered `fire` after `const vote = Net.Up`, for a
+/// remote that goes from the client.
+#[test]
+pub(crate) fn an_alias_of_a_remote_offers_its_side() {
+    let (mut st, one) = one_file("");
+    st.docs.remove(one);
+    let doc = |src: &str| {
+        Doc::new(
+            src.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        )
+    };
+    let uri = "file:///main.server.aly";
+    let src = "import { Net } from \"./net\"\nconst vote = Net.Up\nvote.on(print)\n";
+    st.docs.insert(
+        "file:///net.aly".to_string(),
+        doc("export namespace Net\n    remote Up(id: string) from client\nend\n"),
+    );
+    st.docs.insert(uri.to_string(), doc(src));
+    let mut result = json!(
+        ["spec", "instance", "fire", "fire_all", "on", "wait"].map(|l| json!({ "label": l }))
+    );
+    st.filter_remote_members(uri, 2, 5, &mut result);
+    let labels: Vec<&str> = result
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["label"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(labels, ["spec", "instance", "on", "wait"]);
+}
 /// The first line of the emit binds the module of each global under
 /// `_g1`, and a module's own `global local` values under `_gs`. No
 /// source writes either name, so no list offers one.

@@ -892,6 +892,71 @@ relay(nil)
 }
 
 /*
+A local that holds a remote skipped the side check: `const vote =
+Net.Up` then `vote.fire("x")` passed on the server and called
+`FireClient("x")`. An alias of a namespace, an alias of an alias, and a
+local in a function body hold the remote too. A parameter of the alias's
+name is some other value.
+*/
+#[test]
+fn a_local_that_holds_a_remote_keeps_its_side() {
+    let dir = temp_project("remote-alias");
+    fs::write(dir.join("alloy.toml"), "[build]\nout = \"dist\"\n").unwrap();
+    fs::write(
+        dir.join("src/net.aly"),
+        "export namespace Net\n    remote Up(id: string) from client\n    remote Down(n: number) from server\nend\nexport remote Top(n: number) from client\n",
+    )
+    .unwrap();
+    let src = "import { Net, Top } from \"./net\"
+const vote = Net.Up
+vote.fire(\"x\")
+local top = Top
+top.fire(1)
+const n = Net
+n.Up.fire(\"y\")
+const again = n.Up
+again.fire(\"z\")
+vote.on(function(p, id) print(p, id) end)
+local function relay(vote: any)
+    vote.fire(\"fine\")
+end
+local function down()
+    local d = Net.Down
+    d.fire_all(1)
+    d.on(function(k) print(k) end)
+end
+relay(nil)
+down()
+";
+    fs::write(dir.join("src/a.server.aly"), src).unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run(&dir, &config.build, &config.emit).unwrap();
+    let got: Vec<(usize, &str)> = report
+        .diagnostics
+        .iter()
+        .map(|(_, d)| {
+            let line = src[..d.start as usize].matches('\n').count() + 1;
+
+            (line, d.message.as_str())
+        })
+        .collect();
+
+    assert_eq!(
+        got,
+        [
+            (3, "`vote` goes from the client; the server cannot fire it"),
+            (5, "`top` goes from the client; the server cannot fire it"),
+            (7, "`n.Up` goes from the client; the server cannot fire it"),
+            (9, "`again` goes from the client; the server cannot fire it"),
+            (17, "`d` goes from the server; the server cannot handle it"),
+        ]
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/*
 An imported struct gives its derives to this file: a field of it clones
 and serializes through it. The lookup took the first project struct of
 the name. A private `Inner` in another file then decided it: a clone

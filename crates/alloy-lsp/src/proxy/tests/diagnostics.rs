@@ -1442,6 +1442,16 @@ fn a_config_file_names_a_wrong_lint_and_the_line_that_failed() {
             ),
         ]
     );
+
+    // A word the key does not take reports the same way.
+    assert_eq!(
+        reports("local t = \"tabz\"\nexport default {\n    fmt = { indent_type = t },\n}\n"),
+        [(
+            2,
+            "the config does not load: `fmt.indent_type` takes one of \"spaces\", \"tabs\"; `\"tabz\"` is none of them"
+                .to_string()
+        )]
+    );
 }
 
 /// A std name the load refuses sits on its string. The message names no

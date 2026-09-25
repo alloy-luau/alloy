@@ -68,8 +68,28 @@ pub fn evaluate_source(source: &str, path: &Path) -> Result<toml::Table, String>
     let value = run_module(&lua, source, path)?;
     let config = pick(value)?;
     let schema = crate::schema::project(&[]);
-    let mut problems = Vec::new();
-    let table = convert(&Value::Table(config), Some(&schema), "", &mut problems)?;
+    let mut refused = Vec::new();
+    let table = convert(&Value::Table(config), Some(&schema), "", &mut refused)?;
+    // A word the key does not take may have a report of its own, such
+    // as `Sgnal` is no std name. That report wins over the schema's.
+    let problems: Vec<(String, String)> = refused
+        .into_iter()
+        .filter_map(
+            |(at, message, word)| match word.map(|w| (probe(&at, &w), w)) {
+                None => Some((at, message)),
+
+                // The load takes the word after all.
+                Some((Ok(()), _)) => None,
+
+                // serde's own `unknown variant` names neither key nor line.
+                Some((Err(own), w)) if own.contains(&w) && !own.starts_with("unknown variant") => {
+                    Some((at, own))
+                }
+
+                Some(_) => Some((at, message)),
+            },
+        )
+        .collect();
 
     // Each value the schema refuses reports on the line of its key, the
     // way the editor reports it. The deserializer names only the first,
@@ -98,6 +118,31 @@ pub fn evaluate_source(source: &str, path: &Path) -> Result<toml::Table, String>
 
         _ => Err("the config is no table".to_string()),
     }
+}
+
+/// Loads a config that holds `word` alone, at the key path `at`. A list
+/// item stands in a list of one. The error is the deserializer's own.
+#[cfg(not(target_arch = "wasm32"))]
+fn probe(at: &str, word: &str) -> Result<(), String> {
+    let mut value = toml::Value::String(word.to_string());
+
+    for seg in at.rsplit('.') {
+        let key = match seg.split_once('[') {
+            Some((key, _)) => {
+                value = toml::Value::Array(vec![value]);
+
+                key
+            }
+
+            None => seg,
+        };
+        value = toml::Value::Table(toml::Table::from_iter([(key.to_string(), value)]));
+    }
+
+    value
+        .try_into::<crate::config::Config>()
+        .map(drop)
+        .map_err(|e| e.message().to_string())
 }
 
 /// The line that writes the key `at`, a dotted path such as
@@ -660,16 +705,15 @@ fn write_value(value: &toml::Value, at: &str, depth: usize, notes: &mut Notes, o
 }
 
 /// A Luau value as TOML, shaped by the schema node that describes it.
-/// `at` is the dotted key path, for the report. A value of a type the
-/// schema refuses adds its key and message to `problems`, and the walk
-/// goes on. A word a key does not take is left to the deserializer,
-/// whose message names the word: `` `Sgnal` is no std name ``.
+/// `at` is the dotted key path, for the report. A value the schema
+/// refuses adds its key and message to `refused`, and the walk goes on.
+/// A word the key does not take comes with the word.
 #[cfg(not(target_arch = "wasm32"))]
 fn convert(
     value: &Value,
     schema: Option<&Json>,
     at: &str,
-    problems: &mut Vec<(String, String)>,
+    refused: &mut Vec<(String, String, Option<String>)>,
 ) -> Result<toml::Value, String> {
     let kind = schema.and_then(|s| schema_type(s, value));
     let (got, whole) = match value {
@@ -689,10 +733,21 @@ fn convert(
         _ => ("", false),
     };
 
-    if let Some(node) = schema.filter(|_| !got.is_empty())
-        && let Some(message) = misfit(node, &format!("`{at}`"), got, whole, None)
-    {
-        problems.push((at.to_string(), message));
+    let name = format!("`{at}`");
+    let word = match value {
+        Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
+
+        _ => None,
+    };
+
+    if let Some(node) = schema.filter(|_| !got.is_empty()) {
+        if let Some(message) = misfit(node, &name, got, whole, None) {
+            refused.push((at.to_string(), message, None));
+        } else if let Some(word) = word
+            && let Some(message) = misfit(node, &name, got, whole, Some(&word))
+        {
+            refused.push((at.to_string(), message, Some(word)));
+        }
     }
 
     match value {
@@ -739,7 +794,7 @@ fn convert(
 
                 for i in 1..=len {
                     let v: Value = t.raw_get(i).map_err(lua_error)?;
-                    out.push(convert(&v, items, &format!("{at}[{i}]"), problems)?);
+                    out.push(convert(&v, items, &format!("{at}[{i}]"), refused)?);
                 }
 
                 return Ok(toml::Value::Array(out));
@@ -764,7 +819,7 @@ fn convert(
                     false => format!("{at}.{key}"),
                 };
                 let child = schema.and_then(|s| property(s, &key));
-                out.insert(key, convert(&v, child, &path, problems)?);
+                out.insert(key, convert(&v, child, &path, refused)?);
             }
 
             Ok(toml::Value::Table(out))
@@ -1046,8 +1101,13 @@ mod tests {
         assert_eq!(config.lint.naming.variable, Styles(vec![Style::Camel]));
         assert_eq!(config.lint.naming.r#const, Styles(vec![Style::Screaming]));
 
-        let bad = eval("export const lint = { naming = { variable = \"kebab-case\" } }\n").unwrap();
-        assert!(crate::config::Config::from_table(bad, Path::new(FILE_NAME)).is_err());
+        // The load reports the word with its own message, on its line.
+        let bad =
+            eval("export const lint = { naming = { variable = \"kebab-case\" } }\n").unwrap_err();
+        assert!(
+            bad.starts_with("/tmp/project/.config.aly:1: `\"kebab-case\"` is not a naming style"),
+            "{bad}"
+        );
     }
 
     #[test]
@@ -1139,6 +1199,26 @@ mod tests {
             ]
             .join("\n")
         );
+
+        // A word the key does not take names the key and the line too. A
+        // key with a report of its own keeps it: `Sgnal` is no std name.
+        let words = eval("local q = \"bogus\"\nexport const fmt = { quote_style = q }\nexport const std = {\n    globals = { \"HashMap\", \"Sgnal\" },\n}\nexport const lint = { rules = { unused_variable = \"sometimes\" } }\n").unwrap_err();
+        let lines: Vec<&str> = words.lines().collect();
+        assert_eq!(lines.len(), 3, "{words}");
+        assert_eq!(
+            lines[0],
+            "/tmp/project/.config.aly:2: `fmt.quote_style` takes one of \"auto-prefer-double\", \"auto-prefer-single\", \"force-double\", \"force-single\", \"preserve\"; `\"bogus\"` is none of them"
+        );
+        assert!(
+            lines[1].starts_with("/tmp/project/.config.aly:4: `Sgnal` is no std name;"),
+            "{words}"
+        );
+        assert_eq!(
+            lines[2],
+            "/tmp/project/.config.aly:6: `unused_variable = \"sometimes\"` is not one of allow, warn, deny"
+        );
+        // A word the schema lists loads.
+        assert!(eval("export const fmt = { quote_style = \"preserve\" }\n").is_ok());
     }
 
     #[test]

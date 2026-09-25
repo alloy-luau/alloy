@@ -104,7 +104,7 @@ impl State {
             // says which names are none. Each sits on its key.
             Ok(unknown) => {
                 for name in unknown {
-                    if let Some(at) = key_offset(&doc.source, &name) {
+                    if let Some(at) = key_offset(&doc.source, &name, 0) {
                         let mut d = diagnostic(
                             at,
                             at + name.len(),
@@ -126,23 +126,28 @@ impl State {
                         .strip_prefix(&prefix)
                         .and_then(|rest| rest.split_once(": "))
                         .and_then(|(n, text)| Some((n.parse::<usize>().ok()?, text)));
-                    let (span, shown) = match at_line {
+                    let (line_at, shown) = match at_line {
                         Some((n, text)) => (
-                            offset_of(&doc.source, n.saturating_sub(1) as u32, 0).map(line_span),
+                            offset_of(&doc.source, n.saturating_sub(1) as u32, 0),
                             text.to_string(),
                         ),
 
                         None => (None, message.replace(&format!("{}: ", path.display()), "")),
                     };
                     // A value the load refuses, `Sgnal` in a list of std
-                    // names, sits where the source writes it. The message
-                    // names no line for it.
-                    let span = span.or_else(|| {
-                        let name = shown.split('`').nth(1).filter(|n| !n.is_empty())?;
-                        let at = key_offset(&doc.source, name)?;
+                    // names, sits where the source writes it: from the
+                    // line of its key down, or anywhere with no line.
+                    let named =
+                        shown
+                            .split('`')
+                            .nth(1)
+                            .filter(|n| !n.is_empty())
+                            .and_then(|name| {
+                                let at = key_offset(&doc.source, name, line_at.unwrap_or(0))?;
 
-                        Some((at, at + name.len()))
-                    });
+                                Some((at, at + name.len()))
+                            });
+                    let span = named.or_else(|| line_at.map(line_span));
                     let (start, end) = span.unwrap_or_else(|| {
                         line_span(
                             doc.source
@@ -172,16 +177,18 @@ impl State {
     }
 }
 
-/// The byte offset of the lint name `name` in a config source: a key,
-/// `name =`, or a string, `["name"] =` or an item of `deny = { ... }`.
-fn key_offset(src: &str, name: &str) -> Option<usize> {
+/// The byte offset of the lint name `name` in a config source, at or
+/// after the byte `from`: a key, `name =`, or a string, `["name"] =` or
+/// an item of `deny = { ... }`.
+fn key_offset(src: &str, name: &str, from: usize) -> Option<usize> {
     let toks = alloy_syntax::lexer::lex(src).ok()?.toks;
     let text = |i: usize| {
         toks.get(i)
             .map_or("", |t| &src[t.start as usize..t.end as usize])
     };
+    let first = toks.partition_point(|t| (t.start as usize) < from);
 
-    (0..toks.len()).find_map(|i| {
+    (first..toks.len()).find_map(|i| {
         let start = toks[i].start as usize;
         let t = text(i);
 

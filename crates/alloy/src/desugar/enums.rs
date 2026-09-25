@@ -149,6 +149,7 @@ impl<'s> Desugar<'s> {
     on the lines the declaration used.
     */
     pub(crate) fn enum_decl(&mut self, e: &EnumDecl) {
+        self.reject_type_bounds(e.generics, "an enum");
         let name = self.decl_name(e.name);
         // The `as` token follows the name, or the parameter list,
         // whether or not `export` leads.

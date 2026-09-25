@@ -817,7 +817,7 @@ mod tests {
     /// takes the cast.
     #[test]
     fn a_bound_reaches_a_generic_argument() {
-        let head = "trait Ord as\n    function cmp(self, other: Num): number\nend\nstruct Num as\n    v: number\nend\nimpl Ord for Num as\n    function cmp(self, other: Num): number\n        return self.v - other.v\n    end\nend\nstruct Box<T: Ord> as\n    v: T\nend\nstruct Pair<T: Ord> as\n    a: T\nend\n";
+        let head = "trait Ord as\n    function cmp(self, other: Num): number\nend\nstruct Num as\n    v: number\nend\nimpl Ord for Num as\n    function cmp(self, other: Num): number\n        return self.v - other.v\n    end\nend\nstruct Box<T> as\n    v: T\nend\nstruct Pair<T> as\n    a: T\nend\n";
         let src = format!(
             "{head}function maxb<T: Ord>(a: Box<T>, b: Box<T>): number\n    return a.v:cmp(b.v)\nend\nfunction deep<T: Ord>(p: Box<Pair<T>>): number\n    return p.v.a:cmp(p.v.a)\nend\nfunction many<T: Ord>(xs: Box<T>[]): number\n    return xs[1].v:cmp(xs[1].v)\nend\nfunction plain<T: Ord>(xs: T[]): number\n    return xs[1]:cmp(xs[1])\nend\nprint(maxb, deep, many, plain)\n"
         );

@@ -193,7 +193,14 @@ impl<'s> Desugar<'s> {
             && !self.generic_types.contains(&target_name);
 
         // `impl Box<T>`: the parameters go on each method, so its body
-        // and its signature may name them.
+        // and its signature may name them. They are the parameters of
+        // the declaration, so they take no bound either.
+        let what = match self.enums.contains_key(&target_name) {
+            true => "an enum",
+
+            false => "a struct",
+        };
+        self.reject_type_bounds(i.generics, what);
         let impl_generics = i
             .generics
             .map(|g| strip_bounds(self.text_of(g)))
@@ -204,6 +211,7 @@ impl<'s> Desugar<'s> {
         if i.generics.is_none()
             && let Some(params) = self.struct_generics.get(&target_name).cloned()
         {
+            let params = strip_bounds(&params);
             let kind = if self.enums.contains_key(&target_name) {
                 "enum"
             } else {
@@ -759,6 +767,7 @@ impl<'s> Desugar<'s> {
     pub(crate) fn struct_decl(&mut self, st: &StructDecl) {
         self.check_field_widths(st);
         self.check_serde_attrs(st);
+        self.reject_type_bounds(st.generics, "a struct");
         let name = self.decl_name(st.name);
         let start = self.byte_start(st.span);
         let end_tok = self.toks[st.span.end as usize - 1];
@@ -2243,6 +2252,7 @@ impl<'s> Desugar<'s> {
     // --- interfaces ------------------------------------------------------------
 
     pub(crate) fn interface_decl(&mut self, i: &InterfaceDecl) {
+        self.reject_type_bounds(i.generics, "an interface");
         let name = self.decl_name(i.name);
         let start = self.byte_start(i.span);
         let end_tok = self.toks[i.span.end as usize - 1];
@@ -4045,6 +4055,34 @@ mod tests {
         );
         // The header has no Luau form and never reaches the output.
         assert!(!out.ship.contains("impl"), "{}", out.ship);
+    }
+
+    /// `struct Shelf<T: Named>` wrote `type Shelf<T>`, and nothing read
+    /// the bound: an unknown trait passed, and so did `[1, 2]`. A Luau
+    /// alias takes no bound, so each one reports, and a function takes it.
+    #[test]
+    fn a_bound_on_a_type_parameter_reports() {
+        let src = "trait Named as\n    function name(self): string\nend\nstruct Shelf<T: Named> as\n    items: T[]\nend\nstruct Bin<T: Nothing> as\n    items: T[]\nend\nenum Opt<T: Named> as\n    Some(T)\n    None\nend\ninterface Tagged<T: Named> as\n    tag: T\nend\nimpl Shelf<T: Named> as\n    function first(self): T\n        return self.items[1]\n    end\nend\nprint(Shelf, Bin, Opt)\n";
+        let want = |what: &str, bound: &str| {
+            format!(
+                "a type parameter of {what} takes no bound; write `T` for `T: {bound}`, and put the bound on a function that needs it"
+            )
+        };
+
+        assert_eq!(
+            messages(src),
+            [
+                want("a struct", "Named"),
+                want("a struct", "Nothing"),
+                want("an enum", "Named"),
+                want("an interface", "Named"),
+                want("a struct", "Named"),
+            ]
+        );
+        assert_eq!(
+            crate::docs::kind_for(&want("a struct", "Named")),
+            "StructError"
+        );
     }
 
     /*

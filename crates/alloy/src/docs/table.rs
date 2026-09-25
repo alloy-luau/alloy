@@ -58,7 +58,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "<T: Bound>",
-        "```alloy\nfunction largest<T: Ord>(xs: T[]): T\nfunction show<T: Display & Debug>(v: T)\n```\nA bound on a generic: the argument must have the trait's methods. `&` asks for several. A std shape, `Display`, `Eq`, `Ord`, `Add`, resolves to the runtime's type; a trait the file declares resolves to its own. The bound is the type the parameter carries in the body, and every type the body writes with it carries it too: `local best: T? = nil`, a loop variable `x: T`, a cast `:: T`, and a closure's parameters and return. A closure with a `T` of its own keeps that one bare.",
+        "```alloy\nfunction largest<T: Ord>(xs: T[]): T\nfunction show<T: Display & Debug>(v: T)\n```\nA bound on a generic: the argument must have the trait's methods. `&` asks for several. A std shape, `Display`, `Eq`, `Ord`, `Add`, resolves to the runtime's type; a trait the file declares resolves to its own. The bound is the type the parameter carries in the body, and every type the body writes with it carries it too: `local best: T? = nil`, a loop variable `x: T`, a cast `:: T`, and a closure's parameters and return. A closure with a `T` of its own keeps that one bare. A bound goes on a function or a method: a struct, an enum, or an interface takes none on its parameters, because a Luau type alias checks no bound.",
     ),
     (
         "!",

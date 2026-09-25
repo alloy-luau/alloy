@@ -1458,6 +1458,30 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /*
+    A bound on the type parameter of a declaration: `struct Shelf<T: Named>`.
+
+    A Luau type alias takes no bound, and a field `items: T[]` is
+    invariant, so `T & Named` there accepts no argument. The emit dropped
+    the bound, and nothing checked it. `what` is `a struct`, `an enum`, or
+    `an interface`.
+    */
+    pub(crate) fn reject_type_bounds(&mut self, generics: Option<TokSpan>, what: &str) {
+        let Some(g) = generics else {
+            return;
+        };
+
+        for (name, bound) in generic_bounds(self.text_of(g)) {
+            let at = self.token_named(g, &name).unwrap_or(g);
+            self.diagnose(
+                at,
+                &format!(
+                    "a type parameter of {what} takes no bound; write `{name}` for `{name}: {bound}`, and put the bound on a function that needs it"
+                ),
+            );
+        }
+    }
+
     /// The token inside `span` whose text is `name`.
     fn token_named(&self, span: TokSpan, name: &str) -> Option<TokSpan> {
         (span.start..span.end)

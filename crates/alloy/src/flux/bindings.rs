@@ -291,6 +291,16 @@ impl<'s> Scan<'s> {
             let written = self.slice(f + 1, name_end);
             let block = self.enclosing_block(f, &["function", "struct", "impl", "trait"]);
 
+            // `function one()` in `namespace Ns` is `Ns.one` outside it.
+            // A `local function` there is no member.
+            if name_end == f + 2
+                && self.prev(f) != "local"
+                && let Some((path, exported)) = self.namespace_path(f)
+            {
+                let exported = exported && self.prev(f) != "private";
+                add(format!("{path}.{written}"), make(params, exported));
+            }
+
             if written.contains(':') {
                 // `function Box:value(n)` takes `self` without writing it.
                 let params = params.map(|p| p + 1);
@@ -340,6 +350,28 @@ impl<'s> Scan<'s> {
         }
 
         out
+    }
+
+    /// The namespaces that hold the member at `j`, as `Outer.Inner`,
+    /// and whether the outermost one is exported. `None` when a
+    /// function, a struct, an impl or a trait holds it first.
+    fn namespace_path(&self, j: usize) -> Option<(String, bool)> {
+        const HOLDERS: &[&str] = &["function", "struct", "impl", "trait", "namespace"];
+        let holder = |at: usize| {
+            self.enclosing_block(at, HOLDERS)
+                .filter(|&b| self.at(b, "namespace"))
+        };
+        let mut ns = holder(j)?;
+        let mut names = vec![self.t(ns + 1)];
+
+        while let Some(outer) = holder(ns) {
+            names.push(self.t(outer + 1));
+            ns = outer;
+        }
+
+        names.reverse();
+
+        Some((names.join("."), self.prev(ns) == "export"))
     }
 
     /// The innermost block of one of `kinds` that encloses token `j`.

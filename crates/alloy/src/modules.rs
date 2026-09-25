@@ -3535,6 +3535,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A function in a namespace is `Ns.one` to a call, in its own file
+    /// and through a named import, a rename, or a star path. The count
+    /// read nothing for it, so `Ns.one(1, 2)` passed.
+    #[test]
+    fn a_namespace_function_carries_its_arity() {
+        let dir = std::env::temp_dir().join(format!("alloy-ns-callables-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+        std::fs::write(
+            dir.join("src/lib.aly"),
+            "export namespace Stations\n    function menu(f: number): number\n        return f\n    end\n    private function secret(a: number): number\n        return a\n    end\n    namespace Deep\n        function dig(): number\n            return secret(1)\n        end\n    end\nend\n",
+        )
+        .expect("module");
+        let from = dir.join("src/main.aly");
+        let src = "import { Stations } from \"./lib\"\nimport { Stations as St } from \"./lib\"\nimport * as M from \"./lib\"\n\nnamespace Ns\n    function one(a: number): number\n        return a\n    end\nend\n\nprint(Ns.one(1, 2), Stations.menu(1, 2), St.menu(1, 2), M.Stations.Deep.dig(1), Stations.menu(1))\n";
+        let options = crate::EmitOptions::default().imports(src, &from, &[]);
+        let out = crate::compile_with(src, &options).expect("compile");
+        let messages: Vec<&str> = out
+            .lints
+            .iter()
+            .filter(|l| l.name == "argument_count")
+            .map(|l| l.message.as_str())
+            .collect();
+
+        assert_eq!(
+            messages,
+            vec![
+                "`Ns.one` takes 1 argument; this call passes 2",
+                "`Stations.menu` takes 1 argument; this call passes 2",
+                "`St.menu` takes 1 argument; this call passes 2",
+                "`M.Stations.Deep.dig` takes 0 arguments; this call passes 1",
+            ]
+        );
+        // A private member is no key another module reads.
+        assert!(
+            !options
+                .import_callables
+                .iter()
+                .any(|(k, _)| k.ends_with("secret"))
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Two modules each declare a `Point`, and the file imports both
     /// under aliases. The field index keys the local name too, so each
     /// construction reads its own module.

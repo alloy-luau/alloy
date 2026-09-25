@@ -462,6 +462,22 @@ pub(crate) fn a_nested_case_binding_reads_its_payload() {
     );
 }
 
+/// A struct pattern that names its struct by a path, `N.P { x }`,
+/// reads the fields off the declaration of `P`.
+#[test]
+fn a_qualified_struct_pattern_types_its_fields() {
+    const SRC: &str = "namespace N\n    struct P\n        x: number\n    end\nend\n\nenum Box as\n    Pt(N.P)\n    Empty\nend\n\nlocal function s(b: Box): number\n    return match b with\n        case Box.Pt(N.P { x = px }) then px\n        default 0\n    end\nend\nprint(s)\n";
+    let (st, uri) = one_file(SRC);
+    let doc = st.docs.get(uri).expect("doc");
+    let known = st.known_shapes_at(Some(uri));
+    let at = SRC.find("px }").expect("needle");
+
+    assert_eq!(
+        case_binding_text(doc, position_of(SRC, at).0 as usize, at, "px", &known).as_deref(),
+        Some("```alloy\npx: number\n```\nA binding of field `x` of `N.P`.")
+    );
+}
+
 /// A call of a name a `case` pattern binds: the child names the call
 /// after the path the emit writes, `Item._1`. The label takes the name.
 #[test]

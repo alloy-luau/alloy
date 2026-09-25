@@ -1047,7 +1047,13 @@ fn typed_names(
 
                 false => head,
             };
-            let declared = fields(ty);
+            // `B.Gem { n }` names a struct through a module or a
+            // namespace, and the declarations list it by its own name.
+            let declared = match (fields(ty), ty.rsplit_once('.')) {
+                (d, Some((_, last))) if d.is_empty() => fields(last),
+
+                (d, _) => d,
+            };
 
             for part in parts {
                 let (field, sub) = match part.split_once('=') {

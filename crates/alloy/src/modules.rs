@@ -1329,6 +1329,28 @@ fn keyed_by_local<T: Clone>(
     aliases: &[(String, PathBuf)],
     modules: &[(PathBuf, Vec<(String, T)>)],
 ) -> Vec<(String, T)> {
+    let mut out = keyed_by_binding(source, from, aliases, modules);
+
+    // `default` is a key a bare import reads through, not a name.
+    for (_, decls) in modules {
+        for (name, payload) in decls.iter().filter(|(n, _)| n != "default") {
+            if !out.iter().any(|(n, _)| n == name) {
+                out.push((name.clone(), payload.clone()));
+            }
+        }
+    }
+
+    out
+}
+
+/// `keyed_by_local` with the names this file binds alone, for an index
+/// that must not answer for a name the file never imported.
+fn keyed_by_binding<T: Clone>(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+    modules: &[(PathBuf, Vec<(String, T)>)],
+) -> Vec<(String, T)> {
     let named = named_specs(source, from, aliases);
     let stars = star_locals(source, from, aliases);
     let mut out: Vec<(String, T)> = Vec::new();
@@ -1353,14 +1375,40 @@ fn keyed_by_local<T: Clone>(
         }
     }
 
-    // `default` is a key a bare import reads through, not a name.
-    for (_, decls) in modules {
-        for (name, payload) in decls.iter().filter(|(n, _)| n != "default") {
-            push(name.clone(), payload);
-        }
-    }
-
     out
+}
+
+/// The remotes every module a source imports declares, keyed by the
+/// name this file binds: whether the client fires each one, and whether
+/// the server does. A `.server.aly` file reads it to refuse a fire that
+/// only the client can send.
+pub fn import_remotes(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<(String, (bool, bool))> {
+    let modules = module_decls(source, from, aliases, |text| {
+        let Ok(parsed) = alloy_syntax::parse_lenient(text, Default::default()) else {
+            return Vec::new();
+        };
+
+        parsed
+            .chunk
+            .block
+            .stmts
+            .iter()
+            .filter_map(|s| match s.under_default() {
+                alloy_syntax::ast::Stmt::Remote(d) => Some((
+                    d.name.text(text, &parsed.lexed.toks).to_string(),
+                    (d.from_client, d.from_server),
+                )),
+
+                _ => None,
+            })
+            .collect()
+    });
+
+    keyed_by_binding(source, from, aliases, &modules)
 }
 
 /// The fields of every struct a module the source imports declares,
@@ -1925,6 +1973,7 @@ impl crate::EmitOptions {
     pub fn imports(mut self, source: &str, from: &Path, aliases: &[(String, PathBuf)]) -> Self {
         self.import_types = import_types(source, from, aliases);
         self.import_enums = import_enums(source, from, aliases);
+        self.import_remotes = import_remotes(source, from, aliases);
         self.import_privates = import_privates(source, from, aliases);
         self.import_struct_fields = import_struct_fields(source, from, aliases);
         self.import_struct_ctors = import_struct_ctors(source, from, aliases);

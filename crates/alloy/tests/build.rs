@@ -558,3 +558,69 @@ fn a_private_type_of_the_same_name_leaves_a_wire_layout_alone() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/*
+A `.server.aly` file fired a remote that goes from the client. The shared
+module that declares it types both sides, so the call passed, and the
+server called `FireClient` with the first argument at run time. A file
+with a side runs there alone, so its wrong-side call is an error. A
+shared file may run on either side and gets none.
+*/
+#[test]
+fn a_side_file_cannot_use_a_remote_of_the_other_side() {
+    let dir = temp_project("remote-side");
+    fs::write(dir.join("alloy.toml"), "[build]\nout = \"dist\"\n").unwrap();
+    fs::write(
+        dir.join("src/rem.aly"),
+        "export remote Up(n: number) from client\nexport remote Down(n: number) from server\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/a.server.aly"),
+        "import { Up as U, Down } from \"./rem\"\nimport * as R from \"./rem\"\nU.fire(1)\nR.Down.on(function(n) print(n) end)\nDown.fire_all(1)\nU.on(function(p, n) print(p, n) end)\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/b.client.aly"),
+        "import { Up, Down } from \"./rem\"\nDown.fire(1)\nUp.fire_all(1)\nUp.fire(1)\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/shared.aly"),
+        "import { Up, Down } from \"./rem\"\nlocal function go()\n    Up.fire(1)\n    Down.fire_all(2)\nend\nreturn go\n",
+    )
+    .unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run(&dir, &config.build, &config.emit).unwrap();
+    let got: Vec<(String, &str)> = report
+        .diagnostics
+        .iter()
+        .map(|(file, d)| (file.to_string_lossy().into_owned(), d.message.as_str()))
+        .collect();
+    let at = |file: &str, message| (file.to_string(), message);
+
+    assert_eq!(
+        got,
+        [
+            at(
+                "a.server.aly",
+                "`U` goes from the client; the server cannot fire it"
+            ),
+            at(
+                "a.server.aly",
+                "`R.Down` goes from the server; the server cannot handle it"
+            ),
+            at(
+                "b.client.aly",
+                "`Down` goes from the server; the client cannot fire it"
+            ),
+            at(
+                "b.client.aly",
+                "`Up.fire_all` reaches the clients; only the server calls it"
+            ),
+        ]
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

@@ -1,6 +1,6 @@
 //! Remote declarations and their wire layout.
 
-use alloy_syntax::ast::RemoteDecl;
+use alloy_syntax::ast::{Block, Expr, IndexKey, RemoteDecl, Stmt};
 
 use super::types::{group_len, split_top_level};
 use super::*;
@@ -820,6 +820,84 @@ impl<'s> Desugar<'s> {
         if r.exported {
             self.exports.push((name.clone(), name));
         }
+    }
+
+    /// The remotes this file declares join the imported ones.
+    pub(crate) fn note_remote_sides(&mut self, block: &Block) {
+        for stmt in &block.stmts {
+            if let Stmt::Remote(r) = stmt.under_default() {
+                let name = self.text_of(r.name).to_string();
+                self.remote_sides
+                    .insert(name, (r.from_client, r.from_server));
+            }
+        }
+    }
+
+    /*
+    `Up.fire(1)` in a `.server.aly` file, where `Up` goes from the client.
+    A remote declared in a shared module types both sides, so the checker
+    took the call, and the server called `FireClient(1)` at run time. The
+    other way, `Down.fire(1)` on the client, the checker asked for a
+    `Player` and did not name the side.
+
+    A file with a side runs on that side alone, so the check is sound
+    there. A shared file may run on either side and gets no report.
+    */
+    pub(crate) fn check_remote_side(&mut self, e: &Expr) {
+        use crate::directives::Side;
+
+        let Some(side) = self.file_side else {
+            return;
+        };
+        let Expr::Call {
+            func, method: None, ..
+        } = e
+        else {
+            return;
+        };
+        let Expr::Index {
+            object,
+            key: IndexKey::Field(verb),
+            ..
+        } = func.as_ref()
+        else {
+            return;
+        };
+        let receiver = self.text_of(object.span()).trim().to_string();
+        let Some(&(from_client, from_server)) = self.remote_sides.get(&receiver) else {
+            return;
+        };
+        let verb = self.text_of(*verb).to_string();
+        let (sends, receives) = match side {
+            Side::Client => (from_client, from_server),
+
+            Side::Server => (from_server, from_client),
+        };
+        let other = match side {
+            Side::Client => "server",
+
+            Side::Server => "client",
+        };
+        let here = side.name();
+        let message = match verb.as_str() {
+            "fire" | "call" | "fire_all" | "fire_except" if !sends => {
+                let act = if verb == "call" { "call" } else { "fire" };
+
+                format!("`{receiver}` goes from the {other}; the {here} cannot {act} it")
+            }
+
+            // Only the server reaches every client.
+            "fire_all" | "fire_except" if side == Side::Client => {
+                format!("`{receiver}.{verb}` reaches the clients; only the server calls it")
+            }
+
+            "on" | "once" | "wait" if !receives => {
+                format!("`{receiver}` goes from the {here}; the {here} cannot handle it")
+            }
+
+            _ => return,
+        };
+        self.diagnose(func.span(), &message);
     }
 
     /// The wire layout of each parameter: a width attribute, `@u8`, on a

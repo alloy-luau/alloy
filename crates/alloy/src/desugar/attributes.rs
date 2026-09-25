@@ -1002,6 +1002,7 @@ impl<'s> Desugar<'s> {
                 Child::Expr(e) => {
                     self.check_enum_member(e);
                     self.check_await(e);
+                    self.check_remote_side(e);
                     self.check_children_of(expr_children(e));
                 }
 

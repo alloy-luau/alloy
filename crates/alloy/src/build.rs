@@ -507,6 +507,9 @@ fn run_inner(
     // `[alx]` in alloy.toml, or a `luaux.toml` beside it, picks the UI
     // library for `.alx`.
     let jsx_config = config.markup(root);
+    // A table that does not load is one mistake, in the file that holds
+    // it, however many `.alx` files it stops.
+    let mut markup_reported = false;
     let module_aliases = crate::modules::aliases(root, &tree);
 
     // An alias the project declares wrongly is a failure of the
@@ -611,8 +614,19 @@ fn run_inner(
             (Err(_), false) => None,
 
             (Err(e), true) => {
-                report.skipped.push(rel.clone());
-                report.failures.push((rel, e.clone()));
+                report.skipped.push(rel);
+
+                if !markup_reported {
+                    markup_reported = true;
+                    let (file, at) = config.markup_problem_at(root, e);
+                    // `markup:` gives the report the MarkupError kind.
+                    let message = match at {
+                        Some((line, col)) => format!("{}:{}: markup: {e}", line + 1, col + 1),
+
+                        None => format!("markup: {e}"),
+                    };
+                    report.failures.push((file, message));
+                }
 
                 continue;
             }

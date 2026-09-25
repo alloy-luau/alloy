@@ -129,7 +129,11 @@ fn flux_once(args: &[String]) -> ExitCode {
 
     if !only.is_empty() {
         report.diagnostics.retain(|(r, _)| only.contains(r));
-        report.failures.retain(|(r, _)| only.contains(r));
+        // A failure of the project, an alias or the markup table, names
+        // its file by an absolute path and stops these files too.
+        report
+            .failures
+            .retain(|(r, _)| only.contains(r) || r.is_absolute());
         report.lints.retain(|(r, _)| only.contains(r));
         // `written` holds the emitted `.luau` paths, so a source name
         // never matches one; the run covered these files.

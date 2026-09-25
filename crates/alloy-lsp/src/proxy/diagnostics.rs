@@ -67,30 +67,12 @@ impl State {
             }));
         }
 
-        // A markup config that does not load: the build skips the file
-        // and names the table, and the report here says the same on the
-        // first line. The default backend stands in meanwhile, so its
-        // own stop names a factory the project never chose.
-        if let Some(problem) = self.markup_problem(uri) {
-            let width = doc
-                .source
-                .lines()
-                .next()
-                .map(|l| l.trim_end().encode_utf16().count() as u32)
-                .unwrap_or(0);
-            diagnostics.push(json!({
-                "range": {
-                    "start": { "line": 0, "character": 0 },
-                    "end": { "line": 0, "character": width },
-                },
-                "severity": 1,
-                "source": "Alloy",
-                "message": format!("the markup config does not load: {problem}"),
-            }));
-
-            if doc.error.is_some() {
-                return diagnostics;
-            }
+        // A markup config that does not load: the build skips the file,
+        // and the report sits on the key of the table, in alloy.toml.
+        // The default backend stands in meanwhile, so its own stop
+        // names a factory the project never chose.
+        if self.markup_problem(uri).is_some() && doc.error.is_some() {
+            return diagnostics;
         }
 
         // A compile that stopped leaves no output. Its one error is all
@@ -999,6 +981,34 @@ impl Server {
             if file.is_file() {
                 by_file.insert(file, Vec::new());
             }
+        }
+
+        // A markup table that does not load stops every `.alx` file of
+        // the project. The mistake is in the table, so the report sits
+        // on the key it names.
+        let luaux = base.join("luaux.toml");
+
+        if luaux.is_file() {
+            by_file.insert(luaux, Vec::new());
+        }
+
+        if let Err(problem) = config.markup(&base) {
+            let (file, at) = config.markup_problem_at(&base, &problem);
+            let (line, col) = at.unwrap_or((0, 0));
+            let text = std::fs::read_to_string(&file).unwrap_or_default();
+            let written = text.lines().nth(line).unwrap_or_default().trim_end();
+            let utf16 = |s: &str| s.encode_utf16().count() as u32;
+            let message = format!("markup: {problem}");
+            by_file.entry(file).or_default().push(json!({
+                "range": {
+                    "start": { "line": line, "character": utf16(&written[..col.min(written.len())]) },
+                    "end": { "line": line, "character": utf16(written) },
+                },
+                "severity": 1,
+                "source": "Alloy",
+                "code": alloy::docs::code_for(&message),
+                "message": alloy::docs::labeled(&message),
+            }));
         }
 
         for problem in alloy::modules::alias_problems(&base, &config) {

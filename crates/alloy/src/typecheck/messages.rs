@@ -248,8 +248,28 @@ pub fn unknown_struct_report(
     source: &str,
     line: usize,
 ) -> Option<Resited> {
-    let name = quoted_after(message, "Unknown global '")?;
     let text = source.lines().nth(line.saturating_sub(1))?;
+
+    // `new Ty.Nope { }` reads a key of the module's table, and Luau
+    // reports the key with the whole table printed.
+    if let Some(name) = quoted_after(message, "Key '")
+        && message.contains("' not found in table")
+        && let Some((owner, at)) = dotted_new(text, name)
+    {
+        let verb = if source.contains(&format!("import * as {owner} ")) {
+            "exports"
+        } else {
+            "has"
+        };
+
+        return Some(Resited {
+            kind: "TypeError",
+            message: format!("`{owner}` {verb} no struct `{name}`"),
+            at: Some((line, at)),
+        });
+    }
+
+    let name = quoted_after(message, "Unknown global '")?;
     let at = word_column(text, &format!("new {name}"))? + "new ".len();
 
     if declares_type_only(source, name) {
@@ -268,6 +288,27 @@ pub fn unknown_struct_report(
         kind: "TypeError",
         message: format!("unknown struct `{name}`{hint}"),
         at: Some((line, at)),
+    })
+}
+
+/// `new Ty.Nope` on a line: the path in front of `name`, `Ty`, and the
+/// one-based column of `name`.
+fn dotted_new(line: &str, name: &str) -> Option<(String, usize)> {
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+
+    line.match_indices("new ").find_map(|(at, _)| {
+        if line[..at].ends_with(ident) {
+            return None;
+        }
+
+        let from = at + "new ".len();
+        let rest = &line[from..];
+        let path = &rest[..rest
+            .find(|c: char| !ident(c) && c != '.')
+            .unwrap_or(rest.len())];
+        let owner = path.strip_suffix(name)?.strip_suffix('.')?;
+
+        (!owner.is_empty()).then(|| (owner.to_string(), from + owner.len() + 2))
     })
 }
 
@@ -3048,6 +3089,29 @@ end
         assert!(unknown_struct_report("Unknown global 'Nope'", &path, alias, 2).is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `new Ty.Nope { }` through a star import printed the module's
+    /// whole table: "Key 'Nope' not found in table '{ Blade: Blade }'".
+    #[test]
+    fn a_new_of_a_dotted_unknown_name_names_its_owner() {
+        let src = "import * as Ty from \"./types\"\nconst d = new Ty.Nope {}\nconst e = new Zoo.Deep.Nope {}\n";
+        let path = std::path::Path::new("src/a.aly");
+        let report = |line: usize| {
+            let message = "Key 'Nope' not found in table '{ Blade: Blade, Hit: Hit }'";
+            let r = unknown_struct_report(message, path, src, line).unwrap();
+
+            (r.message, r.at)
+        };
+
+        assert_eq!(
+            report(2),
+            ("`Ty` exports no struct `Nope`".to_string(), Some((2, 18)))
+        );
+        assert_eq!(
+            report(3),
+            ("`Zoo.Deep` has no struct `Nope`".to_string(), Some((3, 24)))
+        );
     }
 
     #[test]

@@ -615,7 +615,16 @@ pub(crate) fn child_cast(doc: &Doc, start: usize) -> Option<String> {
     // The name is a string, so its closing quote ends it.
     let args = name + text[name..].find('"')?;
     let close = args + text[args..].find(')')?;
-    let rest = text[close + 1..].strip_prefix(" :: ")?;
+
+    // A lookup the compiler leaves uncast is the plain call, so Luau's
+    // own signature types it: `FindFirstChild` and a `WaitForChild` with
+    // a timeout give `Instance?`. A sourcemap can narrow it further.
+    let Some(rest) = text[close + 1..].strip_prefix(" :: ") else {
+        let optional =
+            text[..name].ends_with("FindFirstChild(\"") || text[args..close].contains(',');
+
+        return Some(if optional { "Instance?" } else { "Instance" }.to_string());
+    };
     let mut depth = 0i32;
     let end = rest.find(|c: char| {
         match c {

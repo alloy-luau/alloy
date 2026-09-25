@@ -2048,9 +2048,10 @@ fn an_aliased_variant_hovers_as_its_enum_s() {
     assert!(sent.contains("Status.Active"), "{sent}");
 }
 
-/// A child lookup hovers with the type the compiler cast it to, so a
-/// `wait_timeout` makes `=>` optional and a lookup inside a chain reads
-/// `any`, as the check artifact says.
+/// A child lookup hovers with the type the check artifact gives it: the
+/// compiler's cast, or Luau's own signature for a plain call. A
+/// `wait_timeout` makes `=>` optional, and a guarded link inside a chain
+/// is a plain `FindFirstChild`.
 #[test]
 fn a_child_lookup_hovers_with_the_compiler_s_cast() {
     let src = "const a = workspace=>Baseplate\nconst b = workspace->Baseplate\nconst c = workspace->Model->Part\nprint(a, b, c)\n";
@@ -2073,7 +2074,7 @@ fn a_child_lookup_hovers_with_the_compiler_s_cast() {
 
     assert_eq!(cast(&timed, "=>Baseplate").as_deref(), Some("Instance?"));
     assert_eq!(cast(&timed, "->Baseplate").as_deref(), Some("Instance?"));
-    assert_eq!(cast(&timed, "->Model").as_deref(), Some("any"));
+    assert_eq!(cast(&timed, "->Model").as_deref(), Some("Instance?"));
     assert_eq!(cast(&timed, "->Part").as_deref(), Some("Instance?"));
     assert_eq!(cast(&doc(None), "=>Baseplate").as_deref(), Some("Instance"));
 

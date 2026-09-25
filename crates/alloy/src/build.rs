@@ -864,12 +864,23 @@ fn run_inner(
                 .iter()
                 .map(|l| (source[..l.start as usize].matches('\n').count() + 1, l.name))
                 .collect();
+            let line = |at: u32| source[..at as usize].matches('\n').count() + 1;
             let error_lines = compiled
                 .diagnostics
                 .iter()
                 .chain(&data_diagnostics)
                 .filter(|d| !crate::alx::is_attribute_check(&d.message))
-                .map(|d| source[..d.start as usize].matches('\n').count() + 1)
+                // A match with no arm for a variant ends in a nil
+                // fallthrough, and the checker reports that nil at the
+                // last arm. The report on the match already says it, so
+                // it covers every line of the match, as in the editor.
+                .flat_map(
+                    |d| match d.message.starts_with("this match is not exhaustive") {
+                        true => line(d.start)..=line(d.end),
+
+                        false => line(d.start)..=line(d.start),
+                    },
+                )
                 .chain(import_lines)
                 .collect();
             report.checks.push(crate::typecheck::CheckSource {

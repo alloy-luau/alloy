@@ -1372,3 +1372,42 @@ fn a_declaration_file_names_the_types_of_another() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A match with no arm for a variant ends in a nil fallthrough, and the
+/// checker reported that nil at the last arm beside `ExhaustiveMatch`.
+/// The editor showed one report; `flux` now shows the same one.
+#[test]
+fn a_match_that_is_not_exhaustive_reports_once() {
+    let dir = std::env::temp_dir().join(format!("alloy-exhaustive-flux-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n",
+    )
+    .unwrap();
+    let src = "enum Kind\n    Pickaxe\n    Axe\n    Sword\nend\n\nlocal function h(k: Kind): number\n    return match k with\n        case Pickaxe then 1\n        case Axe then 2\n    end\nend\nprint(h(Kind.Axe))\n";
+    std::fs::write(dir.join("src/a.aly"), src).unwrap();
+
+    let config = alloy::config::Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::flux_project(&dir, &config).unwrap();
+
+    // Every line of the match holds the report, not only its first.
+    assert_eq!(report.checks[0].error_lines, vec![8, 9, 10, 11]);
+
+    let Ok(analysis) = alloy::typecheck::analyze(&dir, &config, &report.checks, &[]) else {
+        eprintln!("skipped: luau-lsp is not installed");
+
+        return;
+    };
+    let errors: Vec<String> = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| d.is_error())
+        .map(|d| format!("{}:{} {}", d.line, d.col, d.message))
+        .collect();
+
+    assert!(errors.is_empty(), "{errors:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

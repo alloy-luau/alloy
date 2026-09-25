@@ -1234,10 +1234,14 @@ impl<'s> Desugar<'s> {
     /// payload the variant carries. A name no enum owns is a missing
     /// variant of the enum its place holds: the payload type of a slot,
     /// or at the top the enum the other arms name or the head's type.
+    ///
+    /// `if local`, `while local`, and `local P = e` check one pattern the
+    /// same way, with `in_match` false. Their advice names no `case`.
     pub(crate) fn check_variant_patterns(
         &mut self,
         arms: &[&[Pattern]],
         scrutinees: &[Expr],
+        in_match: bool,
     ) -> bool {
         let mut reported = false;
         // Each variant name, with the payload count the pattern binds,
@@ -1280,7 +1284,8 @@ impl<'s> Desugar<'s> {
 
                     // `case target then` with `target` in scope binds a
                     // new name over it, and the arm takes every value.
-                    Pattern::Bind(name) if self.is_local(self.text_of(*name)) => {
+                    // `if local Some(v) = v` rebinds on purpose.
+                    Pattern::Bind(name) if in_match && self.is_local(self.text_of(*name)) => {
                         let text = self.text_of(*name).to_string();
                         let tok = self.toks[name.start as usize];
                         self.lints.push(Lint {
@@ -1424,13 +1429,22 @@ impl<'s> Desugar<'s> {
                         // below it never runs and nothing says so. A
                         // binding starts lowercase or with `_`, so any
                         // other capital is a variant this file cannot see.
-                        let message = if self.is_local(&vname) {
+                        let guard = match in_match {
+                            true => format!(", or compare in a guard: `case n where n == {vname}`"),
+
+                            false => String::new(),
+                        };
+                        let message = if self.is_local(&vname) && in_match {
                             format!(
                                 "`{vname}` names a value, and a bare name in a pattern binds a new one, so this arm takes every value; compare in a guard: `case n where n == {vname}`"
                             )
+                        } else if self.is_local(&vname) {
+                            format!(
+                                "`{vname}` names a value, and a bare name in a pattern binds a new one that takes every value; bind a lowercase name"
+                            )
                         } else if is_screaming(&vname) {
                             format!(
-                                "`{vname}` is written as a constant's name, and a bare name in a pattern binds a new one that takes every value; bind a lowercase name, or compare in a guard: `case n where n == {vname}`"
+                                "`{vname}` is written as a constant's name, and a bare name in a pattern binds a new one that takes every value; bind a lowercase name{guard}"
                             )
                         } else {
                             format!(
@@ -2220,7 +2234,7 @@ impl<'s> Desugar<'s> {
         let exhaustive = self.match_is_exhaustive(&pats, &guards);
         // A rejected pattern makes the arm list unreliable, so the
         // exhaustiveness message would name the wrong variant.
-        let bad_arm = self.check_variant_patterns(&pats, scrutinees);
+        let bad_arm = self.check_variant_patterns(&pats, scrutinees, true);
 
         // A match the parse recovered in lost the arm it could not
         // read, so what is left proves nothing about coverage.
@@ -2332,7 +2346,7 @@ impl<'s> Desugar<'s> {
         let exhaustive = self.match_is_exhaustive(&pats, &guards);
         // A rejected pattern makes the arm list unreliable, so the
         // exhaustiveness message would name the wrong variant.
-        let bad_arm = self.check_variant_patterns(&pats, &m.scrutinees);
+        let bad_arm = self.check_variant_patterns(&pats, &m.scrutinees, true);
 
         if m.default.is_none() && !exhaustive && !bad_arm && !m.recovered {
             let msg = self.not_exhaustive_message(&pats);
@@ -2448,6 +2462,11 @@ impl<'s> Desugar<'s> {
 
     /// `local Ok(v) = e` and let-else.
     pub(crate) fn pattern_local(&mut self, p: &PatternLocal) {
+        self.check_variant_patterns(
+            &[std::slice::from_ref(&p.pattern)],
+            std::slice::from_ref(&p.value),
+            false,
+        );
         let anchor = self.byte_start(p.span);
         let value = self.render_to_string(&p.value);
         // The check artifact gives each pattern a local of its own. Two
@@ -2560,6 +2579,24 @@ impl<'s> Desugar<'s> {
                 Pattern::Bind(n) if self.unit_variant_of(self.text_of(*n)).is_none() => {
                     let name = self.text_of(*n).to_string();
 
+                    // `if local Idel = job` with `job: Job`: the value is
+                    // never nil, so a capital name there is a misspelt
+                    // variant. `job: Job?` keeps the plain binding.
+                    if is_variant_name(&name)
+                        && let Expr::Name(v) = &b.value
+                        && self
+                            .binding_types
+                            .get(self.text_of(*v))
+                            .is_some_and(|t| !t.contains('?') && !names_word(t, "nil"))
+                        && self.scrutinee_enum(&b.value).is_some()
+                    {
+                        self.check_variant_patterns(
+                            &[std::slice::from_ref(&b.pattern)],
+                            std::slice::from_ref(&b.value),
+                            false,
+                        );
+                    }
+
                     if *negated {
                         tests.push(name.clone());
                         prior.push(name.clone());
@@ -2585,6 +2622,11 @@ impl<'s> Desugar<'s> {
                 }
 
                 pat => {
+                    self.check_variant_patterns(
+                        &[std::slice::from_ref(pat)],
+                        std::slice::from_ref(&b.value),
+                        false,
+                    );
                     self.bump_temp();
                     let temp = format!("_c{}", self.temp_next);
                     let mut c = Compiled::default();
@@ -3717,6 +3759,38 @@ mod tests {
             messages(src),
             ["`Kind` has no variant `Pickax`; its variants are `Pickaxe` and `Axe`"]
         );
+    }
+
+    /// A misspelt variant in `if local`, `while local`, or `local P = e`
+    /// went unchecked, and the emit tested a tag that never matches. Each
+    /// site now checks its pattern the way a match arm does.
+    #[test]
+    fn a_misspelt_variant_outside_a_match_is_an_error() {
+        let decl = "enum Job\n    Idle\n    Build(string)\nend\nenum Phase\n    Wait\n    Running(Job)\nend\n";
+        let src = format!(
+            "{decl}local function f(job: Job, p: Phase): string\n    if local Biuld(model) = job then return model end\n    local Biuld(m2) = job else return \"idle\" end\n    if local Running(Idel) = p then return \"r\" end\n    while local Runing(j) = p do print(j) end\n    if local Idel = job then print(Idel) end\n    if local Build(Model) = job then print(Model) end\n    return m2\nend\nprint(f)\n"
+        );
+        let job = "`Job` has no variant `Idel`; its variants are `Idle` and `Build`";
+
+        assert_eq!(
+            messages(&src),
+            [
+                "`Job` has no variant `Biuld`; its variants are `Idle` and `Build`",
+                "`Job` has no variant `Biuld`; its variants are `Idle` and `Build`",
+                job,
+                "`Phase` has no variant `Runing`; its variants are `Wait` and `Running`",
+                job,
+                "`Model` is no variant of an enum in scope, and a bare name in a pattern binds a new one that takes every value; import the enum that declares it, or bind a name that starts lowercase",
+            ]
+        );
+
+        // A capital name on a value that may be nil, or is no enum, is a
+        // plain binding. A payload name may reuse a local's name.
+        let plain = format!(
+            "{decl}local function g(maybe: Job?, part: Instance?, job: Job)\n    if local Current = maybe then print(Current) end\n    if local Humanoid = part then print(Humanoid) end\n    const model = \"m\"\n    if local Build(model) = job then print(model) end\nend\nprint(g)\n"
+        );
+        assert!(messages(&plain).is_empty(), "{:?}", messages(&plain));
+        assert!(!lint_names(&plain).contains(&"pattern_shadows_local"));
     }
 
     /// A typo in the enum of an inner pattern named the variant as

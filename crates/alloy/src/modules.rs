@@ -3060,11 +3060,37 @@ pub fn import_problems(
         let spec = text(node.path).trim_matches(['"', '\'']).to_string();
 
         // A `.json` or `.toml` import builds a module of its own; the
-        // build reports what is wrong with one. The compile reports a
-        // std import, which names no file.
-        if crate::data::Format::of(&spec).is_some()
-            || crate::std_names::module_of_spec(&spec).is_some()
-        {
+        // build reports what is wrong with one. A module of its stem
+        // beside it builds the same `.luau`, and the build refuses that.
+        if crate::data::Format::of(&spec).is_some() {
+            if let Some(target) = resolve(&spec, from, aliases)
+                && let Some(twin) = crate::data::module_beside(&target)
+            {
+                let data = match spec.starts_with('.') {
+                    true => normalize(&rel.parent().unwrap_or(Path::new("")).join(&spec)),
+
+                    false => PathBuf::from(&spec),
+                };
+                let shown = |p: PathBuf| p.to_string_lossy().replace('\\', "/");
+                let (a, b) = range(node.path);
+                out.push(ImportProblem {
+                    start: a,
+                    end: b,
+                    kind: "DataError",
+                    message: format!(
+                        "data file {} and {} both build {}; rename one",
+                        shown(data.clone()),
+                        shown(data.with_file_name(twin.file_name().unwrap_or_default())),
+                        shown(data.with_extension("luau"))
+                    ),
+                });
+            }
+
+            continue;
+        }
+
+        // The compile reports a std import, which names no file.
+        if crate::std_names::module_of_spec(&spec).is_some() {
             continue;
         }
 
@@ -3638,6 +3664,45 @@ mod tests {
             import_problems(src, Path::new("src/main.aly"), &from, &[]).is_empty(),
             "{:?}",
             import_problems(src, Path::new("src/main.aly"), &from, &[])
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `cfg.json` beside `cfg.aly` builds the module the source builds.
+    /// The project build refused it, but the editor and a check of one
+    /// file said nothing.
+    #[test]
+    fn a_data_import_beside_a_module_of_its_stem_reports() {
+        let dir = std::env::temp_dir().join(format!("alloy-data-twin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+        std::fs::write(dir.join("src/cfg.json"), "{ \"a\": 1 }").expect("data");
+        let from = dir.join("src/cfg.aly");
+        let src = "import data from \"./cfg.json\"\nprint(data.a)\n";
+        std::fs::write(&from, src).expect("module");
+        let problems = import_problems(src, Path::new("src/cfg.aly"), &from, &[]);
+
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(problems[0].kind, "DataError");
+        assert_eq!(
+            problems[0].message,
+            "data file src/cfg.json and src/cfg.aly both build src/cfg.luau; rename one"
+        );
+        assert_eq!(
+            &src[problems[0].start as usize..problems[0].end as usize],
+            "\"./cfg.json\""
+        );
+
+        std::fs::rename(&from, dir.join("src/main.aly")).expect("rename");
+        assert!(
+            import_problems(
+                src,
+                Path::new("src/main.aly"),
+                &dir.join("src/main.aly"),
+                &[]
+            )
+            .is_empty()
         );
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -885,10 +885,11 @@ fn run_inner(
 
         // An import into another project reports once: the report that
         // names the project and its first error, over the module scan's.
+        // The data files below report a data import.
         let taken: Vec<u32> = outside.problems.iter().map(|p| p.start).collect();
         let scanned = crate::modules::import_problems(&source, &source_rel, &path, &module_aliases)
             .into_iter()
-            .filter(|p| !taken.contains(&p.start));
+            .filter(|p| !taken.contains(&p.start) && p.kind != "DataError");
 
         for problem in outside.problems.into_iter().chain(scanned) {
             let at = crate::directives::line_of(&source, problem.start as usize);

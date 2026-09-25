@@ -223,8 +223,10 @@ impl State {
                     "message": format!("{}: {}", problem.kind, problem.message),
                 });
 
-                if let Some(url) = alloy::docs::book_url("3.2") {
-                    item["code"] = json!("3.2");
+                let code = alloy::docs::kind_section(problem.kind).map_or("3.2", |s| s.number);
+
+                if let Some(url) = alloy::docs::book_url(code) {
+                    item["code"] = json!(code);
                     item["codeDescription"] = json!({ "href": url });
                 }
 

@@ -1387,10 +1387,15 @@ mod tests {
         );
 
         // The lint names beside `string` are hints; `rules` names them
-        // all, so it stops at the cap.
+        // all, so it stops at the cap. A naming style is a string or a
+        // list of them.
         let lint = hover(&schema(), src, src.find("lint").unwrap() + 1).unwrap();
         assert!(lint.contains("\n    deny: { string }?,\n"), "{lint}");
-        assert!(lint.contains(" more\n    }?,\n}"), "{lint}");
+        assert!(lint.contains(" more\n    }?,\n    naming: {\n"), "{lint}");
+        assert!(
+            lint.contains("\n        const: (\"snake_case\" | \"camelCase\" | \"PascalCase\" | \"SCREAMING_SNAKE_CASE\" | \"any\" | { \"snake_case\" |"),
+            "{lint}"
+        );
 
         // The completion's detail is one line, with nested tables folded.
         let top = completions(&schema(), &at("return {\n    |\n}\n").unwrap());

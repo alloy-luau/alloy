@@ -208,7 +208,7 @@ fn opens_a_header(src: &str, toks: &[Tok], i: usize) -> bool {
 
 /// How the formatter parses: it lays out every file, so it takes the
 /// syntax each kind of file allows.
-fn parse_options() -> alloy_syntax::parser::ParseOptions {
+pub(crate) fn parse_options() -> alloy_syntax::parser::ParseOptions {
     alloy_syntax::parser::ParseOptions {
         definitions: true,
         reserved_keys: true,
@@ -237,14 +237,20 @@ pub fn parse_error(src: &str) -> Option<String> {
 }
 
 /// Formats a file by its name: markup takes the `.alx` pass, and a
-/// `.config.aly` keeps its config tables as written.
+/// `.config.aly` keeps its config tables as written. A plain source
+/// first takes the renames of the `naming_convention` lint. A `.d.aly`
+/// declares names another program owns, so it keeps them.
 pub fn format_named(name: &str, src: &str, options: &FmtConfig) -> Result<String, String> {
     if name.ends_with(".alx") {
         alx::format_alx_file(src, options)
     } else if name.rsplit(['/', '\\']).next() == Some(crate::config_aly::FILE_NAME) {
         crate::config_aly::format(src, options)
-    } else {
+    } else if name.ends_with(".d.aly") {
         format_file(src, options)
+    } else {
+        let renamed = crate::naming::renamed(src, options);
+
+        format_file(renamed.as_deref().unwrap_or(src), options)
     }
 }
 
@@ -681,7 +687,7 @@ fn block_opener(text: &str) -> bool {
     )
 }
 
-fn is_keyword(text: &str) -> bool {
+pub(crate) fn is_keyword(text: &str) -> bool {
     matches!(
         text,
         "and"

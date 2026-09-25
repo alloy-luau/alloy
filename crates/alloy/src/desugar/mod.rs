@@ -27,7 +27,7 @@ use alloy_syntax::lexer::{Tok, TokKind};
 
 use crate::render::{NewlineInGenerated, Renderer, SpanMap};
 
-mod attributes;
+pub(crate) mod attributes;
 mod awaits;
 pub(crate) mod contracts;
 mod enums;
@@ -177,6 +177,9 @@ pub struct EmitOptions {
     /// expansion of a macro that calls itself has no end, so a depth
     /// of 16 stops it. See `expand_macro`.
     pub macro_depth: usize,
+    /// `[lint.naming]`: the case style of each kind of name, for the
+    /// `naming_convention` lint.
+    pub naming: crate::naming::Naming,
 }
 
 /// One field of a struct or an interface, as the prescan keeps it.
@@ -367,6 +370,7 @@ impl Default for EmitOptions {
             import_attributes: Vec::new(),
             macro_enums: Vec::new(),
             macro_depth: 0,
+            naming: crate::naming::Naming::default(),
         }
     }
 }

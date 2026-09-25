@@ -537,11 +537,12 @@ const FIX_PASSES: usize = 8;
 
 /// The lints of one file's text, for the `--fix` loop. A file that no
 /// longer compiles has none, and the run reports the rewrites it made.
-fn lints_of(path: &Path, source: &str) -> Vec<Lint> {
+fn lints_of(path: &Path, source: &str, config: &LintConfig) -> Vec<Lint> {
     let name = path.to_string_lossy().into_owned();
     let options = alloy::EmitOptions {
         file_name: name.clone(),
         definitions: name.ends_with(".d.aly"),
+        naming: config.naming.clone(),
         ..alloy::EmitOptions::default().imports_for_file(path, source)
     };
     let jsx = markup_near(path).ok();
@@ -732,7 +733,7 @@ pub(crate) fn apply_lint_fixes(
 
             written += n;
             source = text;
-            live = lints_of(&path, &source)
+            live = lints_of(&path, &source, config)
                 .into_iter()
                 .filter(|l| is_fixable(&path, l, config, &mut directives))
                 .collect();
@@ -752,7 +753,7 @@ pub(crate) fn apply_lint_fixes(
             rewrites += written;
             // The lints the run reported came from the old text; the
             // rewritten file answers for itself.
-            lint::after_fix(&mut remaining, rel, lints_of(&path, &source));
+            lint::after_fix(&mut remaining, rel, lints_of(&path, &source, config));
             eprintln!(
                 "{}",
                 p.wrote(&format!("{}: {written} rewrites", path.display()))

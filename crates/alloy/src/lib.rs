@@ -24,6 +24,7 @@ pub mod jsonc;
 pub mod lint;
 pub mod luau_config;
 pub mod modules;
+pub mod naming;
 pub mod net;
 pub mod project;
 pub mod render;
@@ -276,6 +277,15 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         &options.privates(),
     );
     lints.extend(rendered.lints);
+
+    if !options.definitions {
+        lints.extend(naming::lints(
+            src,
+            &parsed.lexed.toks,
+            &parsed.chunk,
+            &options.naming,
+        ));
+    }
 
     // A config names each value once, and the loader's Luau has no
     // `const`, so fmt keeps its locals and the lint says nothing there.

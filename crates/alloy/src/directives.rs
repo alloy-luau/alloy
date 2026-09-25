@@ -423,28 +423,6 @@ fn allow_ranges(src: &str) -> Vec<(usize, usize, String)> {
     out
 }
 
-/// The Alloy lint a rustc or Clippy name means, so `@allow(dead_code)`
-/// reads the way a Rust developer writes it.
-fn rust_name(name: &str) -> &str {
-    match name {
-        "unused_variables" => "unused_variable",
-
-        "unused_imports" => "unused_import",
-
-        "dead_code" => "unused_function",
-
-        "needless_return" => "redundant_return",
-
-        "let_and_return" => "local_then_return",
-
-        "print_stdout" | "dbg_macro" => "print_debug",
-
-        "todo" => "todo_comment",
-
-        other => other,
-    }
-}
-
 /// The names one `@allow` argument quiets. A bare name, or one under
 /// `flux.`, is a lint of the compiler, and a group spreads into its
 /// lints. `luau.X` is a checker kind, `alx.x` a markup lint, and any
@@ -462,7 +440,7 @@ pub fn allowed_names(written: &str) -> Vec<String> {
         None => (None, bare),
     };
 
-    let name = rust_name(name);
+    let name = crate::lint::canonical_name(name);
 
     match tool {
         None | Some("flux") | Some("clippy") => match crate::lint::Group::from_name(name) {
@@ -493,7 +471,7 @@ pub fn allow_check(written: &str) -> Result<(), String> {
 
         None => (None, bare),
     };
-    let name = rust_name(name);
+    let name = crate::lint::canonical_name(name);
     let shaped = !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_');
 
     if !shaped && !bare.contains('/') {
@@ -616,11 +594,12 @@ fn reason_of(rest: &str) -> Option<String> {
     (!text.is_empty()).then(|| text.to_string())
 }
 
-/// The single name after `--@alloy-ignore-start`, or `None`.
+/// The single name after `--@alloy-ignore-start`, or `None`. An old
+/// name reads as the lint that replaced it.
 fn name_argument(rest: &str) -> Option<String> {
     let word = rest.split_whitespace().next()?;
 
-    (!word.is_empty()).then(|| word.to_string())
+    (!word.is_empty()).then(|| crate::lint::canonical_name(word).to_string())
 }
 
 impl Directives {
@@ -651,7 +630,7 @@ impl Directives {
 
                 continue;
             };
-            let name = name.trim();
+            let name = crate::lint::canonical_name(name.trim());
             // A word after the level is the author's note: `warn -- why`.
             let level = level.split_whitespace().next().unwrap_or("");
 

@@ -24,7 +24,6 @@ pub(crate) fn run(s: &Scan) -> Vec<Lint> {
     s.local_then_return(&mut out);
     s.numeric_for_index(&mut out);
     s.unused_variable(&mut out);
-    s.naming(&mut out);
     s.private_access(&mut out);
     s.const_mutation(&mut out);
     s.duplicate_function(&mut out);
@@ -1311,42 +1310,6 @@ mod tests {
             .filter(|l| l.name != "prefer_const")
             .collect();
         assert_eq!(apply_fixes(src, &kept).0, "local _f = function() end\n");
-    }
-
-    #[test]
-    fn the_naming_lints_read_the_case() {
-        let all = |src: &str| -> Vec<&'static str> {
-            lints(src)
-                .iter()
-                .map(|l| l.name)
-                .filter(|n| n.contains("case"))
-                .collect()
-        };
-        assert_eq!(
-            all("local playerCount = 1\nprint(playerCount)\n"),
-            vec!["camel_case_name"]
-        );
-        assert_eq!(
-            all("local Players = 1\nprint(Players)\n"),
-            Vec::<&str>::new()
-        );
-        assert_eq!(
-            all("local function LoadMap() end\nLoadMap()\n"),
-            vec!["pascal_case_function"]
-        );
-        assert_eq!(
-            all("local function f(maxHealth: number) return maxHealth end\nf(1)\n"),
-            vec!["camel_case_name"]
-        );
-        assert_eq!(
-            all("struct player_state as\n    x: number\nend\n"),
-            vec!["type_case"]
-        );
-        assert_eq!(
-            all("struct PlayerState as\n    x: number\nend\n"),
-            Vec::<&str>::new()
-        );
-        assert_eq!(all("function M:Destroy() end\n"), Vec::<&str>::new());
     }
 
     #[test]

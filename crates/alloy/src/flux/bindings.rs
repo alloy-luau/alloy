@@ -1,8 +1,8 @@
 //! Flux: the lints that read declarations and the names bound to them.
 //! A private member read outside its struct's impl, a constant's value
 //! changed through a method, one name given two function bodies, a
-//! local nothing reads, a name in the wrong case. The names and levels
-//! sit in `lint::LINTS`.
+//! local nothing reads. The names and levels sit in `lint::LINTS`, and
+//! the case of names is `crate::naming`.
 
 use alloy_syntax::lexer::TokKind;
 
@@ -32,18 +32,6 @@ const MUTATING_METHODS: &[&str] = &[
 enum ValueWrite<'s> {
     Assign,
     Method(&'s str),
-}
-
-/// `playerCount`: starts lowercase, has a capital, has no underscore.
-fn is_camel_case(name: &str) -> bool {
-    name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
-        && name.chars().any(|c| c.is_ascii_uppercase())
-        && !name.contains('_')
-}
-
-/// `PlayerState`: starts with a capital and has no underscore.
-fn is_pascal_case(name: &str) -> bool {
-    name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) && !name.contains('_')
 }
 
 impl<'s> Scan<'s> {
@@ -1049,113 +1037,5 @@ impl<'s> Scan<'s> {
             .iter()
             .enumerate()
             .any(|(i, e)| e.is_some_and(|e| i < j && j < e) && kinds.contains(&self.t(i)))
-    }
-
-    /// The case of declared names.
-    pub(crate) fn naming(&self, out: &mut Vec<Lint>) {
-        for i in 0..self.toks.len() {
-            match self.t(i) {
-                "local" | "const" if self.statement_start(i) => {
-                    let is_function = self.at(i + 1, "function");
-
-                    for n in self.local_names(i) {
-                        let name = self.t(n);
-
-                        if is_camel_case(name) {
-                            self.lint(
-                                out,
-                                "camel_case_name",
-                                n,
-                                n,
-                                format!("`{name}` is camelCase; Alloy names are snake_case"),
-                                None,
-                            );
-                        } else if is_function && is_pascal_case(name) {
-                            self.lint(
-                                out,
-                                "pascal_case_function",
-                                n,
-                                n,
-                                format!("`{name}` is a local function in PascalCase; write it snake_case"),
-                                None,
-                            );
-                        }
-                    }
-                }
-
-                "function" if !matches!(self.prev(i), "." | ":") => {
-                    // The last name of the path, then the parameters. A
-                    // `local function` had its name read with the `local`.
-                    let is_local = matches!(self.prev(i), "local" | "async" | "const");
-                    let mut j = i + 1;
-                    let mut last = None;
-
-                    while self.is_name(j) || self.at(j, ".") || self.at(j, ":") {
-                        if self.is_name(j) {
-                            last = Some(j);
-                        }
-
-                        j += 1;
-                    }
-
-                    if let Some(n) = last
-                        && !is_local
-                        && is_camel_case(self.t(n))
-                    {
-                        self.lint(
-                            out,
-                            "camel_case_name",
-                            n,
-                            n,
-                            format!("`{}` is camelCase; Alloy names are snake_case", self.t(n)),
-                            None,
-                        );
-                    }
-
-                    if self.at(j, "(")
-                        && let Some(close) = self.matching(j)
-                    {
-                        let mut at_start = true;
-
-                        for k in j + 1..close {
-                            if at_start && self.is_name(k) && is_camel_case(self.t(k)) {
-                                self.lint(
-                                    out,
-                                    "camel_case_name",
-                                    k,
-                                    k,
-                                    format!(
-                                        "parameter `{}` is camelCase; Alloy names are snake_case",
-                                        self.t(k)
-                                    ),
-                                    None,
-                                );
-                            }
-
-                            at_start = self.at(k, ",") && self.matching_depth(j, k) == 1;
-                        }
-                    }
-                }
-
-                w @ ("struct" | "enum" | "trait" | "interface" | "type")
-                    if self.statement_start(i) || matches!(self.prev(i), "export" | "global") =>
-                {
-                    let n = i + 1;
-
-                    if self.is_name(n) && !is_pascal_case(self.t(n)) && !self.at(n, "function") {
-                        self.lint(
-                            out,
-                            "type_case",
-                            n,
-                            n,
-                            format!("`{}` is a {w} name; write it PascalCase", self.t(n)),
-                            None,
-                        );
-                    }
-                }
-
-                _ => {}
-            }
-        }
     }
 }

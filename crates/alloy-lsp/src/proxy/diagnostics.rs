@@ -745,7 +745,20 @@ impl State {
         let lint_config = self.lint_config();
         let directives = alloy::directives::scan(&doc.source);
         let ((from_line, _), (to_line, _)) = range;
-        let mut all_edits: Vec<Value> = Vec::new();
+        let mut all_fixes: Vec<&alloy::lint::Fix> = Vec::new();
+        let edits_of = |fix: &alloy::lint::Fix| -> Vec<Value> {
+            fix.edits()
+                .map(|e| {
+                    let (sl, sc) = position_of(&doc.source, e.start as usize);
+                    let (el, ec) = position_of(&doc.source, e.end as usize);
+
+                    json!({
+                        "range": { "start": { "line": sl, "character": sc }, "end": { "line": el, "character": ec } },
+                        "newText": e.replacement,
+                    })
+                })
+                .collect()
+        };
 
         for l in &out.lints {
             let Some(fix) = &l.fix else { continue };
@@ -761,13 +774,7 @@ impl State {
                 continue;
             }
 
-            let (sl, sc) = position_of(&doc.source, fix.start as usize);
-            let (el, ec) = position_of(&doc.source, fix.end as usize);
-            let edit = json!({
-                "range": { "start": { "line": sl, "character": sc }, "end": { "line": el, "character": ec } },
-                "newText": fix.replacement,
-            });
-            all_edits.push(edit.clone());
+            all_fixes.push(fix);
 
             let (ll, lc) = position_of(&doc.source, l.start as usize);
             let (le, lec) = position_of(&doc.source, l.end.max(l.start) as usize);
@@ -805,33 +812,18 @@ impl State {
                     "code": alloy::docs::LINT_CODE,
                     "message": format!("{}: {}\n`alloy flux --fix` rewrites it.", l.name, l.message),
                 }],
-                "edit": { "changes": { uri: [edit] } },
+                "edit": { "changes": { uri: edits_of(fix) } },
             }));
         }
 
-        if all_edits.len() > 1 {
-            // Two rewrites that overlap keep the first, as `--fix` does.
-            let mut kept: Vec<Value> = Vec::new();
-            let mut last_end: Option<(u64, u64)> = None;
-
-            for e in &all_edits {
-                let start = (
-                    e["range"]["start"]["line"].as_u64().unwrap_or(0),
-                    e["range"]["start"]["character"].as_u64().unwrap_or(0),
-                );
-                let end = (
-                    e["range"]["end"]["line"].as_u64().unwrap_or(0),
-                    e["range"]["end"]["character"].as_u64().unwrap_or(0),
-                );
-
-                if last_end.is_none_or(|l| l <= start) {
-                    kept.push(e.clone());
-                    last_end = Some(end);
-                }
-            }
+        if all_fixes.len() > 1 {
+            // Two rewrites that overlap keep the first, as `--fix` does,
+            // and a rename lands with every edit it makes.
+            let chosen = alloy::lint::compatible(&doc.source, all_fixes);
+            let kept: Vec<Value> = chosen.iter().flat_map(|f| edits_of(f)).collect();
 
             actions.push(json!({
-                "title": format!("Apply every Alloy rewrite in this file ({})", kept.len()),
+                "title": format!("Apply every Alloy rewrite in this file ({})", chosen.len()),
                 "kind": "source.fixAll",
                 "edit": { "changes": { uri: kept } },
             }));

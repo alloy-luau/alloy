@@ -39,6 +39,9 @@ pub struct Fix {
     /// with the file it writes, so a range that came from another text
     /// never lands on the author's source.
     pub saw: String,
+    /// The rewrites that land with this one, all or none. A rename
+    /// writes the new name at each read; the others leave it empty.
+    pub more: Vec<Fix>,
 }
 
 impl Fix {
@@ -52,7 +55,35 @@ impl Fix {
                 .get(start as usize..end as usize)
                 .unwrap_or_default()
                 .to_string(),
+            more: Vec::new(),
         }
+    }
+
+    /// This rewrite and the ones that land with it.
+    pub fn edits(&self) -> impl Iterator<Item = &Fix> {
+        std::iter::once(self).chain(&self.more)
+    }
+
+    /// The rewrite as one range, from its first byte to its last, for a
+    /// reader that takes one range per fix.
+    pub fn as_one(&self, src: &str) -> Fix {
+        let start = self.edits().map(|e| e.start).min().unwrap_or(self.start);
+        let end = self.edits().map(|e| e.end).max().unwrap_or(self.end);
+        let mut edits: Vec<&Fix> = self.edits().collect();
+        edits.sort_by_key(|e| e.start);
+        let mut text = src
+            .get(start as usize..end as usize)
+            .unwrap_or_default()
+            .to_string();
+
+        for e in edits.iter().rev() {
+            text.replace_range(
+                (e.start - start) as usize..(e.end - start) as usize,
+                &e.replacement,
+            );
+        }
+
+        Fix::new(src, start, end, text)
     }
 }
 
@@ -62,7 +93,8 @@ impl Fix {
 /// text. A rewrite whose offsets come from that text points somewhere
 /// else in the author's file, and writing it corrupts the file.
 pub fn fix_applies(src: &str, fix: &Fix) -> bool {
-    src.get(fix.start as usize..fix.end as usize) == Some(fix.saw.as_str())
+    fix.edits()
+        .all(|e| src.get(e.start as usize..e.end as usize) == Some(e.saw.as_str()))
 }
 
 /// Moves the lints of a pass's output back to the text the author
@@ -77,8 +109,12 @@ pub fn to_source(lints: &mut [Lint], src: &str, map: &crate::render::SpanMap) {
         l.end = map.to_source(l.end).max(l.start);
 
         if let Some(f) = &mut l.fix {
-            f.start = map.to_source(f.start);
-            f.end = map.to_source(f.end).max(f.start);
+            let back = |e: &mut Fix| {
+                e.start = map.to_source(e.start);
+                e.end = map.to_source(e.end).max(e.start);
+            };
+            back(f);
+            f.more.iter_mut().for_each(back);
 
             if !fix_applies(src, f) {
                 l.fix = None;
@@ -88,29 +124,44 @@ pub fn to_source(lints: &mut [Lint], src: &str, map: &crate::render::SpanMap) {
 }
 
 /// Applies the fixes of `lints` to `src`, last to first so the offsets
-/// hold. Two fixes that overlap keep the first.
+/// hold. Two fixes that overlap keep the first, and a fix lands with all
+/// its edits or none.
 pub fn apply_fixes(src: &str, lints: &[Lint]) -> (String, usize) {
-    let mut fixes: Vec<&Fix> = lints
-        .iter()
-        .filter_map(|l| l.fix.as_ref())
-        .filter(|f| fix_applies(src, f))
-        .collect();
+    let chosen = compatible(src, lints.iter().filter_map(|l| l.fix.as_ref()));
+    let mut edits: Vec<&Fix> = chosen.iter().flat_map(|f| f.edits()).collect();
+    edits.sort_by_key(|e| (e.start, e.end));
+    let mut out = src.to_string();
+
+    for e in edits.iter().rev() {
+        out.replace_range(e.start as usize..e.end as usize, &e.replacement);
+    }
+
+    (out, chosen.len())
+}
+
+/// The fixes that land together, in source order: each still reads
+/// what its lint read, and none overlaps one before it. The editor's
+/// fix-all takes the same set as `--fix`.
+pub fn compatible<'a>(src: &str, fixes: impl IntoIterator<Item = &'a Fix>) -> Vec<&'a Fix> {
+    let mut fixes: Vec<&Fix> = fixes.into_iter().filter(|f| fix_applies(src, f)).collect();
     fixes.sort_by_key(|f| (f.start, f.end));
     let mut chosen: Vec<&Fix> = Vec::new();
 
     for f in fixes {
-        if chosen.last().is_none_or(|c| c.end <= f.start) {
+        // An edit clears one it follows, and one it inserts before.
+        let clear = f.edits().all(|e| {
+            chosen
+                .iter()
+                .flat_map(|c| c.edits())
+                .all(|c| c.end <= e.start || (e.end <= c.start && e.start < c.start))
+        });
+
+        if clear {
             chosen.push(f);
         }
     }
 
-    let mut out = src.to_string();
-
-    for f in chosen.iter().rev() {
-        out.replace_range(f.start as usize..f.end as usize, &f.replacement);
-    }
-
-    (out, chosen.len())
+    chosen
 }
 
 /// Swaps the lints of one file for the lints of its rewritten text.
@@ -776,27 +827,44 @@ pub const LINTS: &[LintInfo] = &[
     },
     // --- naming ----------------------------------------------------------------
     LintInfo {
-        name: "camel_case_name",
+        name: "naming_convention",
         group: Group::Naming,
-        default: Level::Allow,
-        summary: "a local, function, or parameter in camelCase",
-        detail: "Naming. Alloy code is snake_case: `player_count`, not `playerCount`. Engine members stay PascalCase and Luau builtins lowercase, so the three read as three namespaces. A PascalCase local for a service or a module, `local Players`, is not camelCase and does not fire.",
-    },
-    LintInfo {
-        name: "type_case",
-        group: Group::Naming,
-        default: Level::Allow,
-        summary: "a struct, enum, trait, interface, or type not in PascalCase",
-        detail: "Naming. A type name starts with a capital and has no underscore: `PlayerState`. The name of a type reads as one in a signature that way.",
-    },
-    LintInfo {
-        name: "pascal_case_function",
-        group: Group::Naming,
-        default: Level::Allow,
-        summary: "a `local function` in PascalCase",
-        detail: "Naming. A local function is snake_case, `load_map`, so a call reads as a call and not as a constructor. A method of an engine protocol, `function Drop:Destroy`, keeps the host's case and does not fire.",
+        default: Level::Warn,
+        summary: "a name in a case other than the one `[lint.naming]` sets for its kind",
+        detail: "Naming. `[lint.naming]` gives each kind of name a case style, or a list of styles, and a name passes when it fits one of them. The defaults follow Rust. A local, a function, a method, a parameter, a field, an attribute, and a macro take snake_case. A struct, an enum, a variant, a trait, an interface, a type, a namespace, and a remote take PascalCase. A `const` takes snake_case or SCREAMING_SNAKE_CASE, because Alloy marks any binding that the file never assigns again as `const`.\n\nA name that starts with `_` does not fire. A local bound to `require(...)` or `:GetService(...)` takes the case of its module or service, so `local Players` does not fire. In an `.alx` file a function may also be PascalCase, because a tag calls a component by that name. A method in the `impl` of a trait takes its name from the trait.\n\n`alloy flux --fix` and `alloy fmt` rename the name to the first style of its list, at each place the file reads it. The rename stays in the scope of a local or a parameter, and skips a scope that shadows it. It writes nothing when another file or saved data reads the name, so an export, a field, a variant, a method, a remote, an attribute, a macro, and a namespace member keep the lint alone. So does a declaration under an attribute other than `@allow`, such as `@test`, because the runtime may read its name. It also writes nothing when the new name is already in the file, or is a keyword or a Luau global. `[fmt] fix_naming = false` stops the renames of `alloy fmt`.\n\nThe lint answers to its old names, `camel_case_name`, `type_case`, and `pascal_case_function`, and to rustc's `non_snake_case`, `non_camel_case_types`, and `non_upper_case_globals`. So `@allow(non_snake_case)` quiets it. `alloy doc naming-conventions` lists the keys of `[lint.naming]`.",
     },
 ];
+
+/// The three naming lints that `naming_convention` replaced. An old
+/// name still sets the level of the new lint.
+pub const OLD_NAMING: &[&str] = &["camel_case_name", "type_case", "pascal_case_function"];
+
+/// The lint a name stands for. A rustc or Clippy name reads as the
+/// Alloy lint, so `@allow(dead_code)` reads the way a Rust developer
+/// writes it. An old lint name reads as the lint that replaced it.
+pub fn canonical_name(name: &str) -> &str {
+    match name {
+        "unused_variables" => "unused_variable",
+
+        "unused_imports" => "unused_import",
+
+        "dead_code" => "unused_function",
+
+        "needless_return" => "redundant_return",
+
+        "let_and_return" => "local_then_return",
+
+        "print_stdout" | "dbg_macro" => "print_debug",
+
+        "todo" => "todo_comment",
+
+        "non_snake_case" | "non_camel_case_types" | "non_upper_case_globals" => crate::naming::LINT,
+
+        old if OLD_NAMING.contains(&old) => crate::naming::LINT,
+
+        other => other,
+    }
+}
 
 /// A lint an ingot declares, registered when the ingot loads. Its name
 /// is `<ingot>/<lint>` and its group is the ingot's name, so `[lint]`
@@ -857,15 +925,26 @@ pub fn intern(name: &str) -> &'static str {
 /// The level `[lint]` sets for one key: `[lint.rules]` first, then the
 /// deprecated `deny`, `warn`, and `allow` lists.
 pub fn listed(config: &LintConfig, key: &str) -> Option<Level> {
-    if let Some(level) = config.rules.get(key) {
+    // The lint's own name wins over a name that stands for it.
+    let alias = || {
+        config
+            .rules
+            .iter()
+            .find(|(k, _)| canonical_name(k) == key)
+            .map(|(_, l)| l)
+    };
+
+    if let Some(level) = config.rules.get(key).or_else(alias) {
         return Some(*level);
     }
 
-    if config.deny.iter().any(|n| n == key) {
+    let names = |list: &[String]| list.iter().any(|n| canonical_name(n) == key);
+
+    if names(&config.deny) {
         Some(Level::Deny)
-    } else if config.warn.iter().any(|n| n == key) {
+    } else if names(&config.warn) {
         Some(Level::Warn)
-    } else if config.allow.iter().any(|n| n == key) {
+    } else if names(&config.allow) {
         Some(Level::Allow)
     } else {
         None
@@ -897,6 +976,7 @@ pub fn level_of(config: &LintConfig, name: &str) -> Level {
             });
     }
 
+    let name = canonical_name(name);
     let info = LINTS.iter().find(|l| l.name == name);
     let group = info.map(|l| l.group.name()).unwrap_or(LUAU_GROUP);
 
@@ -997,6 +1077,7 @@ pub fn level_in(
 /// A checker lint has no list here, so a capitalised name passes, the
 /// way `level_of` reads one under the `luau` group.
 pub fn is_known_name(name: &str) -> bool {
+    let name = canonical_name(name);
     let checker_lint = name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
         && name.chars().all(|c| c.is_ascii_alphanumeric());
 

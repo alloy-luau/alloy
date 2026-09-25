@@ -801,6 +801,20 @@ mod tests {
         assert_eq!(t["build"]["exclude"].as_array().map(Vec::len), Some(0));
     }
 
+    /// `lint.naming` takes a style or a list, as `[lint.naming]` does.
+    #[test]
+    fn a_naming_style_is_a_string_or_a_list() {
+        use crate::naming::{Style, Styles};
+
+        let t = eval("export const lint = { naming = { variable = \"camelCase\", const = { \"SCREAMING_SNAKE_CASE\" } } }\n").unwrap();
+        let config = crate::config::Config::from_table(t, Path::new(FILE_NAME)).unwrap();
+        assert_eq!(config.lint.naming.variable, Styles(vec![Style::Camel]));
+        assert_eq!(config.lint.naming.r#const, Styles(vec![Style::Screaming]));
+
+        let bad = eval("export const lint = { naming = { variable = \"kebab-case\" } }\n").unwrap();
+        assert!(crate::config::Config::from_table(bad, Path::new(FILE_NAME)).is_err());
+    }
+
     #[test]
     fn a_reserved_word_is_a_bare_key() {
         let t = eval("export default { build = { in = \"lib\" } }\n").unwrap();

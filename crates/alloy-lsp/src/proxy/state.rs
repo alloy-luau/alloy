@@ -477,13 +477,17 @@ impl State {
     /// The climb starts at the file, not the workspace root, so a
     /// project inside a multi-root workspace keeps its own layout. The
     /// editor formats through this, the way `alloy fmt` does, so
-    /// format on save and the command agree.
+    /// format on save and the command agree. The renames of
+    /// `fix_naming` read the styles and the level from `[lint]`.
     pub(crate) fn fmt_config(&self, uri: &str) -> alloy::config::FmtConfig {
         let path = uri_to_path(uri).unwrap_or_else(|| PathBuf::from(uri));
         let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
 
         self.config_at(&dir)
-            .map(|c| c.1.fmt.clone())
+            .map(|c| alloy::config::FmtConfig {
+                lint: c.1.lint.clone(),
+                ..c.1.fmt.clone()
+            })
             .unwrap_or_default()
     }
 
@@ -571,6 +575,7 @@ impl State {
                     test_runner: config.test.lest,
                     extensions: self.extensions.clone(),
                     std_globals: config.std.globals.clone(),
+                    naming: config.lint.naming.clone(),
                     ..EmitOptions::default()
                 }
             }

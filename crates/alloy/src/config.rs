@@ -305,11 +305,19 @@ pub struct FmtConfig {
     pub exclude: Vec<String>,
     /// The markup of `.alx` files.
     pub alx: AlxFmt,
+    /// Rename a name that breaks its `[lint.naming]` style, as `alloy
+    /// flux --fix` does, while the `naming_convention` lint is on.
+    pub fix_naming: bool,
     /// Read the indent of each file from the file itself. Set by
     /// `recommended = false` when the project names no indent, and
     /// never a key of the table.
     #[serde(skip)]
     pub detect_indent: bool,
+    /// The project's `[lint]` table: the styles `fix_naming` writes, and
+    /// the level that turns the renames on. The caller copies it in, and
+    /// it is never a key of `[fmt]`.
+    #[serde(skip)]
+    pub lint: LintConfig,
 }
 
 impl Default for FmtConfig {
@@ -339,7 +347,9 @@ impl Default for FmtConfig {
             prefer_const: true,
             exclude: Vec::new(),
             alx: AlxFmt::default(),
+            fix_naming: true,
             detect_indent: false,
+            lint: LintConfig::default(),
         }
     }
 }
@@ -645,6 +655,8 @@ pub struct LintConfig {
     pub warn: Vec<String>,
     /// Deprecated: lints that stay silent.
     pub allow: Vec<String>,
+    /// `[lint.naming]`: the case style of each kind of name.
+    pub naming: crate::naming::Naming,
 }
 
 /// The `[lint.rules]` table: a name to a level.
@@ -760,6 +772,7 @@ impl Default for LintConfig {
             deny: Vec::new(),
             warn: Vec::new(),
             allow: Vec::new(),
+            naming: crate::naming::Naming::default(),
         }
     }
 }
@@ -1102,6 +1115,21 @@ impl Config {
                     "`[lint] {level}` is deprecated; write `[lint.rules] {name} = \"{level}\"`"
                 ));
             }
+        }
+
+        let lint = &self.lint;
+
+        for name in lint
+            .rules
+            .keys()
+            .chain(&lint.deny)
+            .chain(&lint.warn)
+            .chain(&lint.allow)
+            .filter(|n| crate::lint::OLD_NAMING.contains(&n.as_str()))
+        {
+            out.push(format!(
+                "`{name}` is now `naming_convention`; write `[lint.rules] naming_convention`, and set the case of each kind of name in `[lint.naming]`"
+            ));
         }
 
         if let Some(level) = &self.alx.lints.static_conditional_child {

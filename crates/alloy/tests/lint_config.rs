@@ -22,7 +22,7 @@ fn a_rule_names_a_lint_a_group_or_a_markup_lint() {
     assert_eq!(level_of(&c.lint, "optional_access"), Level::Deny);
     // A name beats its group, and a group covers every lint in it.
     assert_eq!(level_of(&c.lint, "manual_safe_access"), Level::Allow);
-    assert_eq!(level_of(&c.lint, "camel_case_name"), Level::Warn);
+    assert_eq!(level_of(&c.lint, "naming_convention"), Level::Warn);
     assert_eq!(
         alloy::lint::alx_level_of(&c.lint, "static_conditional_child"),
         Level::Deny
@@ -68,7 +68,7 @@ fn the_old_lists_still_read_and_name_the_key_that_replaces_them() {
     let c = parse("[lint]\nstrict = true\ndeny = [\"correctness\"]\nwarn = [\"naming\"]\n");
 
     assert_eq!(level_of(&c.lint, "optional_access"), Level::Deny);
-    assert_eq!(level_of(&c.lint, "camel_case_name"), Level::Warn);
+    assert_eq!(level_of(&c.lint, "naming_convention"), Level::Warn);
     assert_eq!(
         c.deprecations(),
         vec![
@@ -112,6 +112,73 @@ fn the_old_markup_table_still_reads_and_names_its_replacement() {
             .unwrap()
             .static_conditional_child,
         alloy::luaux::config::LintLevel::Off
+    );
+}
+
+/// The three naming lints became `naming_convention`. An old name, and
+/// rustc's name, still set its level in the table and in a file, and
+/// the config names the new lint.
+#[test]
+fn an_old_naming_lint_name_sets_the_new_lint() {
+    let c = parse("[lint.rules]\ncamel_case_name = \"deny\"\n");
+    assert_eq!(level_of(&c.lint, "naming_convention"), Level::Deny);
+    assert!(alloy::lint::unknown_names(&c.lint).is_empty());
+    assert_eq!(
+        c.deprecations(),
+        vec![
+            "`camel_case_name` is now `naming_convention`; write `[lint.rules] naming_convention`, and set the case of each kind of name in `[lint.naming]`"
+        ]
+    );
+
+    // The new name wins over the old one.
+    let both = parse("[lint.rules]\ntype_case = \"deny\"\nnaming_convention = \"warn\"\n");
+    assert_eq!(level_of(&both.lint, "naming_convention"), Level::Warn);
+
+    for directive in [
+        "--@alloy-lint pascal_case_function=warn",
+        "--@alloy-lint non_snake_case=warn",
+    ] {
+        let d = alloy::directives::scan(&format!("{directive}\nlocal x = 1\n"));
+        assert!(d.problems().is_empty(), "{directive}");
+        assert_eq!(
+            alloy::lint::level_in(&Config::default().lint, &d, "naming_convention"),
+            Level::Warn,
+            "{directive}"
+        );
+    }
+}
+
+/// `@allow` with rustc's names, the old names, and the new one quiets
+/// the lint on the item it sits on, and a region names it too.
+#[test]
+fn an_allow_with_a_rust_name_quiets_the_naming_lint() {
+    let hits = |src: &str| -> usize {
+        alloy::compile(src)
+            .unwrap()
+            .lints
+            .iter()
+            .filter(|l| l.name == "naming_convention")
+            .count()
+    };
+    assert_eq!(hits("local playerCount = 1\nprint(playerCount)\n"), 1);
+
+    for allow in [
+        "@allow(non_snake_case)",
+        "@allow(non_upper_case_globals)",
+        "@allow(clippy.non_snake_case)",
+        "@allow(camel_case_name)",
+        "@allow(naming_convention)",
+        "@allow(naming)",
+    ] {
+        let src = format!("{allow}\nlocal playerCount = 1\nprint(playerCount)\n");
+        assert_eq!(hits(&src), 0, "{allow}");
+    }
+
+    assert_eq!(
+        hits(
+            "--@alloy-ignore-start non_camel_case_types\nstruct point_list as\n    x: number\nend\n--@alloy-ignore-end\n"
+        ),
+        0
     );
 }
 
@@ -220,6 +287,63 @@ fn a_written_key_applies_over_the_preserving_layout() {
         alloy::fmt::format_file(src, &c.fmt.for_source(src)).unwrap(),
         "local s = \"one\"\nprint(s)\n"
     );
+}
+
+/// `alloy fmt` renames a name that breaks its `[lint.naming]` style
+/// while the lint is on, and `[fmt] fix_naming = false` stops it. The
+/// CLI and the editor copy `[lint]` into the options.
+#[test]
+fn fmt_renames_while_the_naming_lint_is_on() {
+    // The local takes a second write, so `prefer_const` leaves it be.
+    let src = "local playerCount = 1\nplayerCount += 1\nprint(playerCount)\n";
+    let renamed = "local player_count = 1\nplayer_count += 1\nprint(player_count)\n";
+    let options = |toml: &str| {
+        let c = parse(toml);
+        let mut fmt = c.fmt.for_source(src);
+        fmt.lint = c.lint;
+        fmt
+    };
+    let fmt = |name: &str, text: &str, toml: &str| {
+        alloy::fmt::format_named(name, text, &options(toml)).unwrap()
+    };
+
+    // The lint is on by default, so a project with no word on it takes
+    // the Rust styles, and one that turns the group off keeps its names.
+    assert_eq!(fmt("a.aly", src, ""), renamed);
+    assert_eq!(fmt("a.aly", src, "[lint.rules]\nnaming = \"allow\"\n"), src);
+
+    let on = "[lint.rules]\nnaming = \"warn\"\n";
+    assert_eq!(fmt("a.aly", src, on), renamed);
+    assert_eq!(
+        fmt(
+            "a.aly",
+            src,
+            "[lint.rules]\nnaming = \"warn\"\n\n[lint.naming]\nvariable = \"camelCase\"\n"
+        ),
+        src
+    );
+    assert_eq!(
+        fmt(
+            "a.aly",
+            "local total_count = 1\ntotal_count += 1\nprint(total_count)\n",
+            "[lint.rules]\nnaming = \"warn\"\n\n[lint.naming]\nvariable = [\"camelCase\", \"PascalCase\"]\n"
+        ),
+        "local totalCount = 1\ntotalCount += 1\nprint(totalCount)\n"
+    );
+
+    // `fix_naming = false`, a file that turns the lint off, and a
+    // `.d.aly` keep the names.
+    assert_eq!(
+        fmt(
+            "a.aly",
+            src,
+            "[fmt]\nfix_naming = false\n\n[lint.rules]\nnaming = \"warn\"\n"
+        ),
+        src
+    );
+    let quiet = format!("--@alloy-lint naming=allow\n{src}");
+    assert_eq!(fmt("a.aly", &quiet, on), quiet);
+    assert!(fmt("a.d.aly", "declare function loadMap(): ()\n", on).contains("loadMap"));
 }
 
 /// A markup lint fires under the table backend, so a project of one
@@ -426,7 +550,7 @@ fn the_projects_that_exist_still_load() {
     let saber = parse(SABER_SIMULATOR);
     assert_eq!(saber.project.name, "SaberSimulator");
     assert_eq!(level_of(&saber.lint, "optional_access"), Level::Deny);
-    assert_eq!(level_of(&saber.lint, "camel_case_name"), Level::Warn);
+    assert_eq!(level_of(&saber.lint, "naming_convention"), Level::Warn);
     assert_eq!(level_of(&saber.lint, "implicit_any"), Level::Warn);
     assert_eq!(
         saber.deprecations(),

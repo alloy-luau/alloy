@@ -348,6 +348,43 @@ pub(crate) fn a_fix_that_deletes_names_what_it_removes() {
         "  match p with"
     );
 }
+/// A rename writes the new name at each read in one quick fix, and the
+/// fix-all takes every edit of it beside the other rewrites.
+#[test]
+pub(crate) fn a_rename_fix_edits_every_read() {
+    let source = "--@alloy-lint naming=warn\nconst playerCount = 1\nprint(playerCount)\nprint(p and p.Name)\n";
+    let (st, uri) = one_file(source);
+    let actions = st.lint_actions(uri, ((0, 0), (4, 0)));
+    let rename = actions
+        .iter()
+        .find(|a| {
+            a["title"]
+                .as_str()
+                .is_some_and(|t| t.contains("naming_convention"))
+        })
+        .expect("the name offers a rename");
+
+    assert_eq!(
+        rename["title"],
+        json!("Rewrite as `player_count` (naming_convention)")
+    );
+    let lines: Vec<u64> = rename["edit"]["changes"][uri]
+        .as_array()
+        .expect("the edits")
+        .iter()
+        .map(|e| e["range"]["start"]["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(lines, vec![1, 2]);
+
+    let all = actions
+        .iter()
+        .find(|a| a["kind"] == "source.fixAll")
+        .expect("the fix-all");
+    assert_eq!(
+        all["edit"]["changes"][uri].as_array().map(Vec::len),
+        Some(3)
+    );
+}
 #[test]
 pub(crate) fn preserve_keeps_the_quick_fix_off_a_line() {
     let plain = "local n = p and p.Name\n";

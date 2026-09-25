@@ -68,6 +68,32 @@ const fn unset(name: &'static str, ty: Ty, doc: &'static str) -> Key {
     }
 }
 
+/// The naming styles, as `[lint.naming]` spells them.
+const STYLES: &[&str] = &[
+    "snake_case",
+    "camelCase",
+    "PascalCase",
+    "SCREAMING_SNAKE_CASE",
+    "any",
+];
+const SNAKE: &str = r#""snake_case""#;
+const PASCAL: &str = r#""PascalCase""#;
+
+fn style_names() -> Vec<String> {
+    STYLES.iter().map(|s| s.to_string()).collect()
+}
+
+/// One key of `[lint.naming]`: a style, or a list of them.
+const fn style_key(name: &'static str, default: &'static str, doc: &'static str) -> Key {
+    Key {
+        name,
+        ty: Ty::ChoiceOrList(STYLES),
+        default: Some(default),
+        doc,
+        suggest: Some(style_names),
+    }
+}
+
 const fn lint_list(name: &'static str, doc: &'static str) -> Key {
     Key {
         name,
@@ -364,6 +390,33 @@ pub const TABLES: &[Table] = &[
         open: Some(rule_value),
     },
     Table {
+        name: "lint.naming",
+        doc: "The case style of each kind of name, for the `naming_convention` lint. A value is `snake_case`, `camelCase`, `PascalCase`, `SCREAMING_SNAKE_CASE`, `any`, or a list of them. A name passes when it fits one style of its list, and `alloy flux --fix` and `alloy fmt` rename it to the first. `alloy doc naming-conventions` explains it.",
+        keys: &[
+            style_key("variable", SNAKE, "A local, and a loop variable."),
+            style_key(
+                "const",
+                r#"["snake_case", "SCREAMING_SNAKE_CASE"]"#,
+                "A `const` binding. Alloy marks any binding that the file never assigns again as `const`, so both cases pass by default.",
+            ),
+            style_key("function", SNAKE, "A free function and a `local function`."),
+            style_key("method", SNAKE, "A function in an `impl` or a `trait`."),
+            style_key("parameter", SNAKE, "A parameter of a function."),
+            style_key("field", SNAKE, "A field of a struct or an interface."),
+            style_key("struct", PASCAL, "A struct."),
+            style_key("enum", PASCAL, "An enum."),
+            style_key("variant", PASCAL, "A variant of an enum."),
+            style_key("trait", PASCAL, "A trait."),
+            style_key("interface", PASCAL, "An interface."),
+            style_key("type", PASCAL, "A type alias."),
+            style_key("namespace", PASCAL, "A namespace."),
+            style_key("attribute", SNAKE, "An attribute declaration."),
+            style_key("macro", SNAKE, "A macro."),
+            style_key("remote", PASCAL, "A remote."),
+        ],
+        open: None,
+    },
+    Table {
         name: "flux",
         doc: "What `alloy flux` runs beyond the lints, and the limits of the complexity lints. The levels of the lints stay in `[lint]`. `alloy doc flux` explains it.",
         keys: &[
@@ -612,6 +665,12 @@ pub const TABLES: &[Table] = &[
                 Ty::StrList,
                 "[]",
                 "Paths the formatter leaves alone. A `*` matches any run of characters: `\"vendor/*\"`, `\"*.gen.aly\"`.",
+            ),
+            key(
+                "fix_naming",
+                BOOL,
+                "true",
+                "Rename a name that breaks its `[lint.naming]` style, as `alloy flux --fix` does, while the `naming_convention` lint is on. The rename skips a name that another file reads.",
             ),
         ],
         open: None,

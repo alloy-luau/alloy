@@ -93,9 +93,16 @@ pub fn set_source(source: &str) -> String {
                         alloy::lint::Level::Warn => "warning",
                         alloy::lint::Level::Deny => "error",
                     };
-                    let fix = l.fix.as_ref().filter(|f| {
-                        !directives.preserves(alloy::directives::line_of(source, f.start as usize))
-                    });
+                    // The page takes one range per fix, so a rename that
+                    // writes several places goes as the span over them.
+                    let fix = l
+                        .fix
+                        .as_ref()
+                        .filter(|f| {
+                            !directives
+                                .preserves(alloy::directives::line_of(source, f.start as usize))
+                        })
+                        .map(|f| f.as_one(source));
 
                     Some(json!({
                         "name": l.name,

@@ -284,6 +284,7 @@ fn run_inner(
             .unwrap_or_else(|| "@alloy".to_string()),
         erase_type_imports: emit.erase_type_imports,
         thresholds: config.flux.thresholds(),
+        naming: config.lint.naming.clone(),
         test_runner: config.test.lest,
         std_globals: config.std.globals.clone(),
         ..EmitOptions::default()

@@ -63,7 +63,16 @@ pub fn compile_alx(
     let lowering = lowering_map(src, &compiled);
     let preamble = compiled.preamble;
     let lowered = compiled.output;
-    let mut output = crate::compile_with(&lowered, options)?;
+    // A component is a function a tag names, `<Row />`, so its name
+    // may be PascalCase by the markup's own rule.
+    let mut options = options.clone();
+    let functions = &mut options.naming.function.0;
+
+    if !functions.contains(&crate::naming::Style::Pascal) {
+        functions.push(crate::naming::Style::Pascal);
+    }
+
+    let mut output = crate::compile_with(&lowered, &options)?;
     let back = |offset: u32| lowering.to_source(offset);
 
     // The lowering prepends its helpers in front of the file. They are
@@ -81,10 +90,6 @@ pub fn compile_alx(
         d.start = back(d.start);
         d.end = back(d.end);
     }
-
-    // A component is a function a tag names, `<Row />`, so its name
-    // is PascalCase by the markup's own rule.
-    output.lints.retain(|l| l.name != "pascal_case_function");
 
     // A lint message may quote the lowered text. Where it quotes a
     // markup region, the reader sees the markup they wrote instead.
@@ -119,7 +124,7 @@ pub fn compile_alx(
         output.diagnostics.push(d);
     }
 
-    for d in struct_props_problems(&blanked, &spans, options) {
+    for d in struct_props_problems(&blanked, &spans, &options) {
         output.diagnostics.push(d);
     }
 

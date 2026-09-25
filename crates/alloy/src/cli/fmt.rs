@@ -82,8 +82,10 @@ pub(crate) fn fmt_cmd(args: &[String]) -> ExitCode {
         };
 
         // Under `[fmt] recommended = false` the indent is the file's
-        // own, so the options are settled per file.
-        let options = config.fmt.for_source(&source);
+        // own, so the options are settled per file. The renames of
+        // `fix_naming` read the styles and the level from `[lint]`.
+        let mut options = config.fmt.for_source(&source);
+        options.lint = config.lint.clone();
         let formatted = match alloy::fmt::format_named(&name, &source, &options) {
             Ok(f) => f,
 

@@ -2376,7 +2376,7 @@ impl<'s> Desugar<'s> {
 
 /// The names a Luau or Roblox program already has. An attribute
 /// argument may name one of them.
-const LUAU_GLOBALS: &[&str] = &[
+pub(crate) const LUAU_GLOBALS: &[&str] = &[
     "_G",
     "_VERSION",
     "assert",

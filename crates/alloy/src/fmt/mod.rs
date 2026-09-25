@@ -1151,6 +1151,17 @@ mod tests {
         );
     }
 
+    /// A struct pattern in a `local` is no call either: `Pt({ x })`
+    /// would be a variant pattern. A call in the value still takes its
+    /// parentheses.
+    #[test]
+    fn a_struct_pattern_in_a_local_is_not_a_call() {
+        let src = "if local Seg { a = Pt { x } } = s then\n  print(x)\nend\nlocal Pt { x = y } = f { 1 }\nconst N.P { x = z } = p\n";
+        let want = "if local Seg { a = Pt { x } } = s then\n  print(x)\nend\nlocal Pt { x = y } = f({ 1 })\nconst N.P { x = z } = p\n";
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want);
+    }
+
     /// `enum Opt<T>` keeps its parameter list, and the body indents
     /// the way a struct's does. A second pass changes nothing.
     #[test]

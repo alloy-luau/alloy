@@ -1137,32 +1137,25 @@ pub fn import_private_views(
 }
 
 /// The struct and enum shapes of every module the source imports, for
-/// a hover that names an imported struct by its fields.
+/// a hover that names an imported struct by its fields. A shape a
+/// barrel passes on reads from the module that declares it.
 pub fn import_shapes(
     source: &str,
     from: &Path,
     aliases: &[(String, PathBuf)],
 ) -> Vec<crate::declarations::Shape> {
-    let mut seen: Vec<PathBuf> = Vec::new();
-    let mut out = Vec::new();
+    let read = |text: &str| {
+        crate::declarations::shapes(text)
+            .into_iter()
+            .map(|s| (s.name().to_string(), s))
+            .collect()
+    };
 
-    for spec in import_specs(source) {
-        let Some(path) = resolve(&spec, from, aliases) else {
-            continue;
-        };
-
-        if seen.contains(&path) {
-            continue;
-        }
-
-        seen.push(path.clone());
-
-        if let Ok(text) = module_text(&path) {
-            out.extend(crate::declarations::shapes(&text));
-        }
-    }
-
-    out
+    module_decls(source, from, aliases, read)
+        .into_iter()
+        .flat_map(|(_, shapes)| shapes)
+        .map(|(_, s)| s)
+        .collect()
 }
 
 /// Every `import { Name }` and `import { Name as Local }` of a source:
@@ -3914,6 +3907,39 @@ mod tests {
         let src = "import { Tier } from \"./barrel\"\nprint(Tier.Low)\n";
         let imported = import_summaries_for_file(&dir.join("src/use.aly"), src);
         assert_eq!(hover(&imported, "Tier"), Some(tier));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A struct a barrel passes on keeps its fields. The editor read the
+    /// barrel's shapes alone, found no `SaveState`, and left `cp.stag`
+    /// as the checker's "does not have key" with no field to suggest.
+    #[test]
+    fn a_barrel_passes_the_shape_on() {
+        let dir = std::env::temp_dir().join(format!("alloy-barrel-shape-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/obby")).expect("temp dir");
+        std::fs::write(
+            dir.join("src/obby/checkpoint.aly"),
+            "export struct SaveState\n    stage: number = 1\nend\n",
+        )
+        .expect("module");
+        std::fs::write(
+            dir.join("src/obby/init.aly"),
+            "export { SaveState } from \"./checkpoint\"\n",
+        )
+        .expect("module");
+        let src = "import { SaveState } from \"./obby\"\nprint(new SaveState {})\n";
+
+        let shapes = import_shapes_for_file(&dir.join("src/use.aly"), src);
+        assert!(
+            shapes.iter().any(|s| matches!(
+                s,
+                crate::declarations::Shape::Struct { name, fields, .. }
+                    if name == "SaveState" && fields.iter().any(|(f, _)| f == "stage")
+            )),
+            "{shapes:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

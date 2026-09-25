@@ -388,6 +388,47 @@ impl State {
         }))
     }
 
+    /// Replaces the help around a struct constructor, and says whether
+    /// it did. `new Row { n = 1 }` lowers to `Row.__new({ n = 1 })`, and
+    /// the child answers for that call, which the source never writes.
+    /// Inside the braces no call is open, so the help is empty. Before
+    /// them, as in `add(new Row`, the call the source opens answers.
+    pub(crate) fn mend_constructor_signature(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        result: &mut Value,
+    ) -> bool {
+        let Some(doc) = self.docs.get(uri) else {
+            return false;
+        };
+        let Some(at) = offset_of(&doc.source, line, character) else {
+            return false;
+        };
+
+        if in_constructor_braces(&doc.source, at) {
+            *result = Value::Null;
+
+            return true;
+        }
+
+        let lowered = result
+            .pointer("/signatures")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|s| s["label"].as_str().is_some_and(|l| l.contains(".__new(")));
+
+        if lowered {
+            *result = self
+                .declared_signature_help(uri, line, character)
+                .unwrap_or(Value::Null);
+        }
+
+        lowered
+    }
+
     /// Completion items for the extensions on a primitive. The child does
     /// not know them, so the proxy adds them when the receiver is a
     /// string: after `:` when the child listed the string methods, and
@@ -1044,10 +1085,47 @@ pub(crate) fn open_call(src: &str, offset: usize) -> Option<(String, u32)> {
 /// commas that level has taken: the byte range of the word and the
 /// active parameter. `None` with no `(` open, or with no word before it.
 pub(crate) fn open_paren_word(src: &str, offset: usize) -> Option<(usize, usize, u32)> {
+    let (open, _, active) = open_brackets(src, offset)
+        .into_iter()
+        .rev()
+        .find(|(_, c, _)| *c == '(')?;
+    let before = src[..open].trim_end();
+
+    if !before.ends_with(|c: char| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+
+    let (start, end) = keywords::word_range(src, before.len() - 1);
+
+    Some((start, end, active))
+}
+
+/// Whether `offset` sits in the braces of `new Row { ... }` with no call
+/// open inside them. A `[` or a `{` nested in the braces counts too.
+pub(crate) fn in_constructor_braces(src: &str, offset: usize) -> bool {
+    let opens = open_brackets(src, offset);
+    let after_call = opens.iter().rposition(|b| b.1 == '(').map_or(0, |i| i + 1);
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+
+    opens[after_call..].iter().any(|&(at, bracket, _)| {
+        let before = src[..at].trim_end();
+        let head = before.trim_end_matches(|c: char| is_word(c) || c == '.');
+
+        bracket == '{'
+            && head.len() < before.len()
+            && head
+                .trim_end()
+                .strip_suffix("new")
+                .is_some_and(|rest| !rest.ends_with(is_word))
+    })
+}
+
+/// The brackets still open at `offset`, the innermost last: where each
+/// one opened, the bracket, and how many commas its level has taken.
+/// A string or a comment opens none.
+pub(crate) fn open_brackets(src: &str, offset: usize) -> Vec<(usize, char, u32)> {
     let head = &src[..offset.min(src.len())];
-    // One frame per open bracket: where a `(` opened, and how many
-    // commas the level has taken.
-    let mut opens: Vec<(Option<usize>, u32)> = Vec::new();
+    let mut opens: Vec<(usize, char, u32)> = Vec::new();
     let mut quote: Option<char> = None;
     let mut chars = head.char_indices();
 
@@ -1072,15 +1150,14 @@ pub(crate) fn open_paren_word(src: &str, offset: usize) -> Option<(usize, usize,
                     }
                 }
 
-                '(' => opens.push((Some(i), 0)),
-                '[' | '{' => opens.push((None, 0)),
+                '(' | '[' | '{' => opens.push((i, c, 0)),
 
                 ')' | ']' | '}' => {
                     opens.pop();
                 }
 
                 ',' => {
-                    if let Some((_, count)) = opens.last_mut() {
+                    if let Some((_, _, count)) = opens.last_mut() {
                         *count += 1;
                     }
                 }
@@ -1090,19 +1167,7 @@ pub(crate) fn open_paren_word(src: &str, offset: usize) -> Option<(usize, usize,
         }
     }
 
-    let (open, active) = opens
-        .iter()
-        .rev()
-        .find_map(|(open, count)| open.map(|o| (o, *count)))?;
-    let before = head[..open].trim_end();
-
-    if !before.ends_with(|c: char| c.is_alphanumeric() || c == '_') {
-        return None;
-    }
-
-    let (start, end) = keywords::word_range(src, before.len() - 1);
-
-    Some((start, end, active))
+    opens
 }
 
 /// Whether the name starting at `start` is the one a declaration

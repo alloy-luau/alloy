@@ -1912,6 +1912,10 @@ impl Server {
                             restyle_signatures(result, doc, line, character);
                         }
 
+                        let mended = position.is_some_and(|(line, character)| {
+                            st.mend_constructor_signature(uri, line, character, result)
+                        });
+
                         // The child answered nothing: a macro call is
                         // gone from the emit, and a file with an
                         // unclosed call has no compile at all, so the
@@ -1923,6 +1927,7 @@ impl Server {
                             .is_none_or(Vec::is_empty);
 
                         if empty
+                            && !mended
                             && let Some((line, character)) = position
                             && let Some(help) = st.declared_signature_help(uri, line, character)
                         {

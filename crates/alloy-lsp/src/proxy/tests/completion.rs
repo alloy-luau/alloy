@@ -3866,3 +3866,39 @@ fn a_child_name_takes_its_class_from_the_sourcemap() {
     // A name the sourcemap does not hold shows no detail.
     assert_eq!(details(&["Nope"]), [None]);
 }
+
+/// `new Row { n = 1 }` lowers to `Row.__new({ n = 1 })`, and the child
+/// answered for that call. Before the braces the call the source opens
+/// answers, with its active parameter. Inside them no call is open.
+#[test]
+fn a_struct_constructor_shows_the_call_around_it() {
+    use super::super::completion::in_constructor_braces;
+
+    let src = "struct Row\n  n: number\nend\n\nlocal function add(r: Row, k: number): number\n  return r.n + k\nend\n\nprint(add(new Row { n = 1 }, 2))\n";
+    let (st, uri) = one_file(src);
+    let help = |character: u32| {
+        let mut result =
+            json!({ "signatures": [{ "label": "function Row.__new(f: { n: number }): Row" }] });
+        let mended = st.mend_constructor_signature(uri, 8, character, &mut result);
+
+        (mended, result)
+    };
+
+    for character in [10, 14] {
+        let (mended, at_call) = help(character);
+        assert!(mended);
+        assert_eq!(
+            at_call["signatures"][0]["label"],
+            json!("function add(r: Row, k: number): number")
+        );
+        assert_eq!(at_call["activeParameter"], json!(0));
+    }
+    assert_eq!(help(20), (true, Value::Null));
+    assert_eq!(help(26), (true, Value::Null));
+
+    // A call inside the braces is open, and a plain table is no struct.
+    assert!(in_constructor_braces("f(new A.B { x = [", 17));
+    assert!(!in_constructor_braces("f(new Row { n = g(", 18));
+    assert!(!in_constructor_braces("f({ ", 4));
+    assert!(!in_constructor_braces("f(renew { ", 10));
+}

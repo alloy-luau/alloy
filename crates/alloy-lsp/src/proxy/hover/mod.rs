@@ -663,8 +663,16 @@ pub(crate) fn child_cast(doc: &Doc, start: usize) -> Option<String> {
 
         return Some(if optional { "Instance?" } else { "Instance" }.to_string());
     };
+
+    Some(rest[..cast_end(rest)?].trim().to_string())
+}
+
+/// The byte of the `)` that closes the group of a cast, in the text
+/// after its ` :: `.
+fn cast_end(cast: &str) -> Option<usize> {
     let mut depth = 0i32;
-    let end = rest.find(|c: char| {
+
+    cast.find(|c: char| {
         match c {
             '(' | '{' | '<' | '[' => depth += 1,
 
@@ -674,9 +682,33 @@ pub(crate) fn child_cast(doc: &Doc, start: usize) -> Option<String> {
         }
 
         depth < 0
-    })?;
+    })
+}
 
-    Some(rest[..end].trim().to_string())
+/// The shadow position where the child types the child lookup whose
+/// name starts at `start`. A name that holds the whole value answers
+/// first. Else the `)` that closes the value of the lookup: a link in
+/// the middle of a chain has no name of its own, and a temp that the
+/// block assigns again types as the union of its values.
+pub(crate) fn child_value_home(doc: &Doc, start: usize) -> Option<(u32, u32)> {
+    bound_home(doc, start).or_else(|| value_close(doc, start))
+}
+
+/// The shadow position of the `)` that closes the value of a child
+/// lookup: the call, or the group of the cast that the compiler writes
+/// around it, `(x:WaitForChild("a", 5) :: typeof(...)?)`. The child
+/// types the expression that ends there.
+fn value_close(doc: &Doc, start: usize) -> Option<(u32, u32)> {
+    let (line, text, name) = child_call(doc, start)?;
+    let args = name + text[name..].find('"')?;
+    let close = args + text[args..].find(')')?;
+    let end = match text[close + 1..].strip_prefix(" :: ") {
+        Some(cast) => close + 1 + " :: ".len() + cast_end(cast)?,
+
+        None => close,
+    };
+
+    Some((line, text[..end].chars().count() as u32))
 }
 
 /// The shadow position of the name that holds the whole value of the
@@ -685,7 +717,7 @@ pub(crate) fn child_cast(doc: &Doc, start: usize) -> Option<String> {
 /// of the source with the lookup as its whole value. The child types
 /// that name from the sourcemap, as it types the lookup. `None` when
 /// the lookup is part of a larger value.
-pub(crate) fn child_value_home(doc: &Doc, start: usize) -> Option<(u32, u32)> {
+fn bound_home(doc: &Doc, start: usize) -> Option<(u32, u32)> {
     let (line, text, name) = child_call(doc, start)?;
     let call = text[..name].rfind(':')?;
     let args = name + text[name..].find('"')?;
@@ -776,9 +808,12 @@ pub(crate) fn child_lookup_hover(
     let offset = offset_of(&doc.source, line, character)?;
     let (start, _, _) = keywords::child_hover(&doc.source, offset, |_| None)?;
     child_value_home(doc, start)?;
-    // `local katana: Tool?`: the type follows the name.
+    // `local katana: Tool?` at a name, where the type follows the name,
+    // or `Tool?` alone at the `)` that closes the lookup.
     let head = answer.lines().find(|l| !l.starts_with("```"))?;
-    let (_, ty) = head.split_once(": ")?;
+    let ty = head
+        .strip_prefix("local ")
+        .map_or(Some(head), |h| h.split_once(": ").map(|(_, ty)| ty))?;
     let (start, end, text) =
         keywords::child_hover(&doc.source, offset, |_| Some(ty.trim().to_string()))?;
     let (sl, sc) = position_of(&doc.source, start);

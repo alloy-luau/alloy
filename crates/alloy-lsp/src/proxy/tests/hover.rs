@@ -2334,15 +2334,18 @@ fn a_child_lookup_hovers_with_the_compiler_s_cast() {
 
 /// A child name hovers with the type luau-lsp gives the name that holds
 /// the lookup: a temp of the chain, or a binding whose whole value it
-/// is. A sourcemap then names the class, so the hover drops the note
-/// that no source names one.
+/// is. With no such name, the child types the expression at the `)`
+/// that closes the lookup: the call, or the group of its cast. A
+/// sourcemap then names the class, so the hover drops the note that no
+/// source names one.
 #[test]
 fn a_child_name_asks_the_name_that_holds_its_lookup() {
-    let options = EmitOptions {
-        wait_timeout: Some(5.0),
-        ..EmitOptions::default()
-    };
-    let doc = |src: &str| {
+    let doc = |src: &str, wait_timeout| {
+        let options = EmitOptions {
+            wait_timeout,
+            ..EmitOptions::default()
+        };
+
         Doc::new(
             src.to_string(),
             1,
@@ -2351,8 +2354,8 @@ fn a_child_name_asks_the_name_that_holds_its_lookup() {
             None,
         )
     };
-    let home = |src: &str, needle: &str| {
-        let d = doc(src);
+    let home_with = |src: &str, needle: &str, wait_timeout| {
+        let d = doc(src, wait_timeout);
         let at = src.find(needle).expect("the lookup") + 2;
 
         child_value_home(&d, at).map(|(l, c)| {
@@ -2361,6 +2364,7 @@ fn a_child_name_asks_the_name_that_holds_its_lookup() {
             text.chars().skip(c as usize).take(2).collect::<String>()
         })
     };
+    let home = |src: &str, needle: &str| home_with(src, needle, Some(5.0));
     let chain = "const k = ReplicatedStorage=>Assets->Swords->Katana\nprint(k)\n";
 
     // `_1` holds `=>Assets`, `_2` holds `->Swords`, and `k` the rest.
@@ -2370,28 +2374,49 @@ fn a_child_name_asks_the_name_that_holds_its_lookup() {
 
     // A value that goes on past the lookup, an annotation, and a field
     // after it hold something else. A temp the block assigns again
-    // types as the union of its values.
-    for (src, needle) in [
-        ("const n = workspace->A == nil\nprint(n)\n", "->A"),
-        ("const m: Model = workspace=>A\nprint(m)\n", "=>A"),
-        ("const d = workspace=>A.Size\nprint(d)\n", "=>A"),
+    // types as the union of its values. Each one asks at the `)`.
+    for (src, needle, at) in [
+        ("const n = workspace->A == nil\nprint(n)\n", "->A", "))"),
+        ("const m: Model = workspace=>A\nprint(m)\n", "=>A", ")"),
+        ("const d = workspace=>A.Size\nprint(d)\n", "=>A", ") "),
         (
             "const a = workspace=>A->B\nconst b = workspace=>C->D\nprint(a, b)\n",
             "=>A",
+            ") ",
         ),
     ] {
-        assert_eq!(home(src, needle), None, "{src}");
+        assert_eq!(home(src, needle).as_deref(), Some(at), "{src}");
     }
 
+    // With no timeout a chain holds no temp: the middle link is the
+    // call that the next link calls a method of.
+    let untimed = "const b = ReplicatedStorage=>Shared=>net\nprint(b)\n";
+    assert_eq!(home_with(untimed, "=>Shared", None).as_deref(), Some("):"));
+
     let at = chain.find("->Katana").unwrap() + 2;
-    let hover = child_lookup_hover("```luau\nlocal k: Tool?\n```", &doc(chain), 0, at as u32)
-        .expect("a hover")
-        .0;
+    let hover = child_lookup_hover(
+        "```luau\nlocal k: Tool?\n```",
+        &doc(chain, Some(5.0)),
+        0,
+        at as u32,
+    )
+    .expect("a hover")
+    .0;
     assert!(
         hover.starts_with("```alloy\nReplicatedStorage=>Assets->Swords->Katana: Tool?\n```"),
         "{hover}"
     );
     assert!(!hover.contains("names no class"), "{hover}");
+
+    // At a `)` the child prints the type alone.
+    let at = untimed.find("=>Shared").unwrap() + 2;
+    let hover = child_lookup_hover("```luau\nFolder\n```", &doc(untimed, None), 0, at as u32)
+        .expect("a hover")
+        .0;
+    assert!(
+        hover.starts_with("```alloy\nReplicatedStorage=>Shared: Folder\n```"),
+        "{hover}"
+    );
 }
 
 /// A completion after `->` asks inside the string the lookup lowers to,

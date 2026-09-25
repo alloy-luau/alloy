@@ -1166,8 +1166,8 @@ fn copied_spans(src: &str, node: &luaux::markup::Node, out: &mut Vec<(usize, usi
                 };
                 let open = span.start + src[span.start..span.end].find('{').unwrap_or(0);
 
-                if let Some(range) = hole_range(src, open, span.end, expression) {
-                    out.push(range);
+                if !markup_hole_spans(src, open, span.end, out) {
+                    out.extend(hole_range(src, open, span.end, expression));
                 }
             }
 
@@ -1182,14 +1182,52 @@ fn copied_spans(src: &str, node: &luaux::markup::Node, out: &mut Vec<(usize, usi
             Child::Node(node) => copied_spans(src, node, out),
 
             Child::Expression { expression, span } => {
-                if let Some(range) = hole_range(src, span.start, span.end, expression) {
-                    out.push(range);
+                if !markup_hole_spans(src, span.start, span.end, out) {
+                    out.extend(hole_range(src, span.start, span.end, expression));
                 }
             }
 
             Child::Text { .. } | Child::Comment { .. } => {}
         }
     }
+}
+
+/// The copied ranges of a hole that holds markup of its own,
+/// `{xs:map(function(x) return <Row n={x} /> end)}`. The lowering copies
+/// the code around each tag, and each tag copies what any tag does.
+/// Without them the whole hole maps as generated text, and the editor
+/// loses every token on the line. `false` for a hole with no tag.
+fn markup_hole_spans(src: &str, open: usize, close: usize, out: &mut Vec<(usize, usize)>) -> bool {
+    let Some(inner) = src.get(open + 1..close.saturating_sub(1)) else {
+        return false;
+    };
+    let tags = match luaux::compile::markup_spans(inner) {
+        Ok(tags) if !tags.is_empty() => tags,
+
+        _ => return false,
+    };
+    let base = open + 1;
+    let code = |start: usize, end: usize, out: &mut Vec<(usize, usize)>| {
+        if !src[start..end].trim().is_empty() {
+            out.push((start, end));
+        }
+    };
+    let mut at = base;
+
+    for (start, end) in tags {
+        let (start, end) = (base + start, base + end);
+        code(at, start, out);
+
+        if let Ok((node, _)) = luaux::markup::parse_node(src, start) {
+            copied_spans(src, &node, out);
+        }
+
+        at = end;
+    }
+
+    code(at, base + inner.len(), out);
+
+    true
 }
 
 /// Where `expression` sits inside the hole that spans `open..close`.
@@ -1742,6 +1780,24 @@ return Panel\n";
         // The call the lowering wrote is no one's text.
         let call = compiled.output.find("create(").expect("the call") as u32;
         assert!(map.is_generated(call));
+    }
+
+    /// A hole that holds a tag of its own is still the author's code
+    /// around the tag, and the tag's own hole is too. The map read the
+    /// whole hole as generated text, and the editor drew no token on
+    /// the line.
+    #[test]
+    fn a_hole_with_a_tag_keeps_the_code_around_it() {
+        let src = "local create = f\nlocal xs = {}\nlocal e = <Frame>{xs:map(function(s) return <Row n={s.id} /> end)}</Frame>\n";
+        let (compiled, map) = lower(src);
+
+        for needle in ["xs:map(function(s) return ", "s.id", " end)"] {
+            let at = src.find(needle).expect(needle) as u32;
+            let out = map.to_output(at).expect(needle) as usize;
+            assert!(compiled.output[out..].starts_with(needle), "{needle}");
+            assert_eq!(map.to_source(out as u32), at, "{needle}");
+            assert!(!map.is_generated(out as u32), "{needle}");
+        }
     }
 
     /// Every position the map answers stays on the line the author

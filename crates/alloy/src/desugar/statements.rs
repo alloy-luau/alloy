@@ -269,6 +269,10 @@ impl<'s> Desugar<'s> {
             }
 
             self.keep_lines(stmt.span(), before);
+            // A macro expansion may open with `(`, as `(function() ...
+            // end)()` does. After `f(x)` on the line above, Luau reads
+            // that as a call of `f(x)`.
+            self.r.end_stmt_since(before);
             cursor = self.byte_end(stmt.span());
         }
 

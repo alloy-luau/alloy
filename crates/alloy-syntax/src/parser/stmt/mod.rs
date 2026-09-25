@@ -41,6 +41,11 @@ impl<'a> Parser<'a> {
                 None
             };
             let stmt_start = self.pos;
+
+            if stmts.last().is_some_and(|s| !matches!(s, Stmt::Empty(_))) {
+                self.stmt_breaks.push(stmt_start);
+            }
+
             let parsed = self.stmt();
 
             // The last thing in a value block may be an expression, not

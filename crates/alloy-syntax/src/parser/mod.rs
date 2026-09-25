@@ -142,6 +142,7 @@ pub fn parse_with(src: &str, toks: &[Tok], options: ParseOptions) -> Result<Chun
         global_keywords: Vec::new(),
         reserved_keys: Vec::new(),
         angle_calls: Vec::new(),
+        stmt_breaks: Vec::new(),
         no_method_call: 0,
         in_match_arm: 0,
         pattern_arg: 0,
@@ -163,6 +164,7 @@ pub fn parse_with(src: &str, toks: &[Tok], options: ParseOptions) -> Result<Chun
         global_keywords: p.global_keywords,
         reserved_keys: p.reserved_keys,
         angle_calls: p.angle_calls,
+        stmt_breaks: p.stmt_breaks,
     })
 }
 
@@ -206,6 +208,7 @@ pub fn parse_lenient(src: &str, toks: &[Tok], options: ParseOptions) -> (Chunk, 
         global_keywords: Vec::new(),
         reserved_keys: Vec::new(),
         angle_calls: Vec::new(),
+        stmt_breaks: Vec::new(),
         no_method_call: 0,
         in_match_arm: 0,
         pattern_arg: 0,
@@ -252,6 +255,7 @@ pub fn parse_lenient(src: &str, toks: &[Tok], options: ParseOptions) -> (Chunk, 
         global_keywords: p.global_keywords,
         reserved_keys: p.reserved_keys,
         angle_calls: p.angle_calls,
+        stmt_breaks: p.stmt_breaks,
     };
 
     (chunk, p.diagnostics)
@@ -280,6 +284,8 @@ struct Parser<'a> {
     reserved_keys: Vec<TokSpan>,
     /// See `Chunk::angle_calls`.
     angle_calls: Vec<(TokSpan, String)>,
+    /// See `Chunk::stmt_breaks`.
+    stmt_breaks: Vec<usize>,
     /// Above zero inside the then-branch of a ternary, where `:` closes
     /// the branch instead of opening a method call.
     no_method_call: u32,

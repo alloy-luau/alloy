@@ -529,6 +529,7 @@ impl<'a> Parser<'a> {
         let reports = self.diagnostics.len();
         let edits = self.type_edits.len();
         let names = self.type_names.len();
+        let breaks = self.stmt_breaks.len();
         self.value_lines += 1;
         let one = self.expr().is_ok()
             && (self.at_end() || matches!(self.text(), "case" | "default" | "end"));
@@ -538,6 +539,7 @@ impl<'a> Parser<'a> {
         self.diagnostics.truncate(reports);
         self.type_edits.truncate(edits);
         self.type_names.truncate(names);
+        self.stmt_breaks.truncate(breaks);
 
         one
     }
@@ -619,12 +621,14 @@ impl<'a> Parser<'a> {
         let reports = self.diagnostics.len();
         let edits = self.type_edits.len();
         let names = self.type_names.len();
+        let breaks = self.stmt_breaks.len();
         let value = matches!(self.expr(), Ok(e) if !stands_alone(&e)) && self.arm_ends();
 
         self.pos = save;
         self.diagnostics.truncate(reports);
         self.type_edits.truncate(edits);
         self.type_names.truncate(names);
+        self.stmt_breaks.truncate(breaks);
 
         value
     }

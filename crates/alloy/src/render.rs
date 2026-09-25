@@ -371,6 +371,18 @@ impl<'s> Renderer<'s> {
         self.open_stmt = true;
     }
 
+    /// Marks the end of the statement written since the output was
+    /// `from` bytes long, as [`Renderer::end_stmt`] does. A statement
+    /// that wrote no code keeps the mark of the one in front, and one
+    /// that ends in `;` needs no mark.
+    pub fn end_stmt_since(&mut self, from: u32) {
+        let text = &self.out[(from as usize).min(self.out.len())..];
+
+        if first_code_char(text).is_some() && !text.trim_end().ends_with(';') {
+            self.open_stmt = true;
+        }
+    }
+
     /// Writes the `;` that [`Renderer::end_stmt`] asks for, when `text`
     /// is the code after the statement and starts with `(`. Spaces and
     /// comments leave the statement open.

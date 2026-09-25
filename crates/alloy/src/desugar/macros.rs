@@ -472,6 +472,13 @@ impl<'s> Desugar<'s> {
             let mut out = String::new();
             let parts = body_parts(text);
             let mut open: Vec<&str> = Vec::new();
+            let breaks = alloy_syntax::lexer::lex(text)
+                .map(|l| {
+                    alloy_syntax::parser::parse_lenient(text, &l.toks, Default::default())
+                        .0
+                        .stmt_breaks
+                })
+                .unwrap_or_default();
 
             for (i, &(gap, word)) in parts.iter().enumerate() {
                 out.push_str(gap);
@@ -517,6 +524,14 @@ impl<'s> Desugar<'s> {
                     if is_simple_text(a) {
                         out.push_str(a);
                     } else {
+                        // The body is one line, so `local n = 0 f()` with
+                        // `f` a function literal reads `0 (function() ...
+                        // end)()`. Luau takes that `(` as a call of the
+                        // statement in front, and a `;` ends it first.
+                        if breaks.contains(&i) {
+                            out.insert(out.len() - gap.len(), ';');
+                        }
+
                         out.push_str(&format!("({a})"));
                     }
                 } else if let Some(r) = renames.get(word) {
@@ -1195,6 +1210,31 @@ mod tests {
 
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         assert!(out.ship.contains("print(\"x here\", 1)"), "{}", out.ship);
+    }
+
+    /// A macro body travels as one line, so `f() f()` with `f` a
+    /// function literal read `(function() ... end)() (...)()`. Luau
+    /// took that as one call chain: it ran `f` once, then called nil.
+    /// An expansion that opens with `(` after `print(hits)` read as a
+    /// call too. A `;` now ends the statement in front of each one.
+    #[test]
+    fn a_macro_ends_the_statement_in_front_of_a_paren() {
+        let src = "macro thrice(f)\n    f()\n    if true then\n        f()\n        f()\n    end\nend\n\nlocal hits = 0\nprint(hits)\n$thrice(function() hits += 1 end)\nreturn hits\n";
+        let out = crate::compile(src).unwrap();
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.ship.contains("print(hits)\n;(function()"),
+            "{}",
+            out.ship
+        );
+
+        let hits: i64 = mlua::Lua::new()
+            .load(out.ship.as_str())
+            .eval()
+            .unwrap_or_else(|e| panic!("{e}\n{}", out.ship));
+
+        assert_eq!(hits, 3, "{}", out.ship);
     }
 
     /// A macro substitutes; there is no call for the checker to count.

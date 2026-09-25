@@ -777,26 +777,71 @@ fn literal_argument(value: &str) -> Option<&'static str> {
     }
 }
 
+/// The keys at the top level of a printed table type. The `>` of a
+/// `->` closes no bracket. The checker cuts a long type short, so the
+/// closing `}` may be gone.
+fn top_level_keys(table: &str) -> Vec<&str> {
+    let body = table.trim_end_matches('\'').trim();
+    let Some(body) = body.strip_prefix('{') else {
+        return Vec::new();
+    };
+    let body = body.strip_suffix('}').unwrap_or(body);
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    let mut prev = ' ';
+
+    for (i, c) in body.char_indices() {
+        match c {
+            '>' if prev == '-' => {}
+
+            '(' | '{' | '[' | '<' => depth += 1,
+
+            ')' | '}' | ']' | '>' => depth = depth.saturating_sub(1),
+
+            ',' if depth == 0 => {
+                parts.push(&body[start..i]);
+                start = i + 1;
+            }
+
+            _ => {}
+        }
+
+        prev = c;
+    }
+
+    parts.push(&body[start..]);
+
+    parts
+        .into_iter()
+        .filter_map(|part| part.split_once(':').map(|(k, _)| k.trim()))
+        .filter(|k| !k.is_empty() && k.chars().all(|c| c.is_alphanumeric() || c == '_'))
+        .collect()
+}
+
 /// A remote's whole surface reaches a missing-member message. The
 /// reader knows it by the name they declared.
 fn rewrite_remote_key(message: &str, line: &str) -> Option<String> {
     let key = message.strip_prefix("Key '")?.split('\'').next()?;
     let table = message.split_once("' not found in table '")?.1;
+    let members = top_level_keys(table);
     // Every side of a remote carries `instance`, typed by the kind, and
     // at least one of the verbs; the fold may have named the whole
     // surface already.
-    let surface = [
-        "instance: RemoteEvent?",
-        "instance: UnreliableRemoteEvent?",
-        "instance: RemoteFunction?",
-    ]
-    .iter()
-    .any(|marker| table.contains(marker))
-        && ["on:", "fire", "call:", "wait:"]
-            .iter()
-            .any(|verb| table.contains(verb));
+    let surface = table.starts_with("Remote'")
+        || (members.contains(&"instance") && members.iter().any(|m| REMOTE_VERBS.contains(m)));
+    // A module that exports remotes prints each one inside its own
+    // table. The reader missed a name of the module, not of a remote.
+    let module = !surface
+        && [
+            "instance: RemoteEvent?",
+            "instance: UnreliableRemoteEvent?",
+            "instance: RemoteFunction?",
+        ]
+        .iter()
+        .any(|marker| table.contains(marker));
 
-    if !(table.starts_with("Remote'") || surface) {
+    if !surface && !module {
         return None;
     }
 
@@ -818,26 +863,21 @@ fn rewrite_remote_key(message: &str, line: &str) -> Option<String> {
         return None;
     }
 
-    let members: Vec<&str> = table
-        .trim_start_matches('{')
-        .split(',')
-        .filter_map(|part| part.split_once(':').map(|(k, _)| k.trim()))
-        .filter(|k| !k.is_empty() && k.chars().all(|c| c.is_alphanumeric() || c == '_'))
-        .collect();
     // `Ping.cal(1)` calls, and `calls`, `spec`, and `instance` are data:
     // a call names a verb, and at a tie the verb wins over the data.
-    let called = line.contains(&format!("{key}("));
+    let called = !module && line.contains(&format!("{key}("));
     let near = members
         .iter()
         .filter(|m| !called || REMOTE_VERBS.contains(m))
         .map(|m| (edit_distance(m, key), !REMOTE_VERBS.contains(m), *m))
         .filter(|(d, ..)| *d <= 2)
         .min();
+    let noun = if module { "module" } else { "remote" };
 
     Some(match near {
-        Some((.., m)) => format!("remote `{receiver}` has no `{key}`; did you mean `{m}`?"),
+        Some((.., m)) => format!("{noun} `{receiver}` has no `{key}`; did you mean `{m}`?"),
 
-        None => format!("remote `{receiver}` has no `{key}`"),
+        None => format!("{noun} `{receiver}` has no `{key}`"),
     })
 }
 
@@ -2161,6 +2201,37 @@ mod tests {
         assert_eq!(
             rewrite_remote_key(&message, "    print(#Ping.cal)"),
             Some("remote `Ping` has no `cal`; did you mean `calls`?".to_string())
+        );
+    }
+
+    /// A module that exports remotes prints each one inside its own
+    /// table, and the report called the module a remote: "remote `N`
+    /// has no `Nope`". The report now names a module. A `->` inside a
+    /// member closes no bracket, so the keys stay at the top level.
+    #[test]
+    fn a_module_of_remotes_is_no_remote() {
+        let surface = "{ calls: RemoteCalls, fire: (Holder) -> (), instance: RemoteEvent?, on: ((Player, Holder) -> ()) -> RBXScriptConnection, spec: RemoteSpec, wait: () -> Awaitable<Player> }";
+        let table = format!("{{ R1: {surface}, R2: {surface} }}");
+        let message = format!("Key 'Nope' not found in table '{table}'");
+
+        assert_eq!(
+            rewrite_remote_key(&message, "print(N.Nope)"),
+            Some("module `N` has no `Nope`".to_string())
+        );
+
+        let message = format!("Key 'R3' not found in table '{table}'");
+        assert_eq!(
+            rewrite_remote_key(&message, "N.R3.fire(h)"),
+            Some("module `N` has no `R3`; did you mean `R1`?".to_string())
+        );
+
+        // The checker cuts a long type short; a remote still reads as
+        // one.
+        let cut = "{ calls: RemoteCalls, fire: (n: number) -> (), instance: RemoteEvent?, on: ((Player, n";
+        let message = format!("Key 'fira' not found in table '{cut}'");
+        assert_eq!(
+            rewrite_remote_key(&message, "Ping.fira(1)"),
+            Some("remote `Ping` has no `fira`; did you mean `fire`?".to_string())
         );
     }
 

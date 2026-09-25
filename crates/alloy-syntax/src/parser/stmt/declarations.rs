@@ -778,6 +778,27 @@ impl<'a> Parser<'a> {
             // `let mut x`: a `local` can change, so the `mut` goes. Kept,
             // `local mut x` declares `mut` and assigns a global `x`.
             let from = self.pos + usize::from(self.at("mut") && self.name_at(1));
+            // A line can hold more than the one statement, as in `do let
+            // y = v * 2 print(y) end`. The quote ends where a `local` in
+            // the place of `let` ends, and never past the line.
+            let saved = (
+                self.pos,
+                self.diagnostics.len(),
+                self.type_edits.len(),
+                self.type_names.len(),
+                self.reserved_keys.len(),
+            );
+            self.pos = from - 1;
+            let local_end = self
+                .local_stmt(start)
+                .ok()
+                .map(|_| self.toks[self.pos - 1].end);
+            self.pos = saved.0;
+            self.diagnostics.truncate(saved.1);
+            self.type_edits.truncate(saved.2);
+            self.type_names.truncate(saved.3);
+            self.reserved_keys.truncate(saved.4);
+            let end = local_end.map_or(end, |at| at.min(end));
             let rest = &self.src[self.toks[from].start as usize..end as usize];
 
             return Err(ParseError {

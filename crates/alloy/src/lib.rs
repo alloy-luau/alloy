@@ -587,6 +587,11 @@ mod tests {
             vec!["Alloy has no `let`; write `local x = 5` or `const x = 5`"]
         );
         assert_eq!(docs::kind_for(&messages(let_)[0]), "SyntaxError");
+        // The quote holds the one statement, not the rest of its line.
+        assert_eq!(
+            messages("for _, v in { 1 } do let y = v * 2 print(y) end\n")[0],
+            "Alloy has no `let`; write `local y = v * 2` or `const y = v * 2`"
+        );
         assert_eq!(compile(let_).unwrap().diagnostics[0].start, 0);
         // `let` stays a name.
         assert!(messages("local let = 1\nprint(let)\n").is_empty());

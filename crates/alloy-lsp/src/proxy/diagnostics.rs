@@ -423,24 +423,9 @@ impl State {
                     }]),
                 ))
             } else if d.message.starts_with("type arguments at a call take")
-                && let Some(close) = angle_close(&doc.source, start)
+                && let Some(edits) = angle_call_edits(&doc.source, start)
             {
-                // The report sits on the `<`; each bracket doubles.
-                let (cl, cc) = position_of(&doc.source, close);
-
-                Some((
-                    "Write `<<...>>`".to_string(),
-                    json!([
-                        {
-                            "range": { "start": { "line": sl, "character": sc }, "end": { "line": sl, "character": sc } },
-                            "newText": "<",
-                        },
-                        {
-                            "range": { "start": { "line": cl, "character": cc }, "end": { "line": cl, "character": cc } },
-                            "newText": ">",
-                        },
-                    ]),
-                ))
+                Some(("Write `<<...>>`".to_string(), edits))
             } else if let Some(found) = self.missing_arm_fix(doc, &d.message, (start, end)) {
                 Some(found)
             } else if let Some(name) = alloy::std_names::missing_name(&d.message) {
@@ -858,6 +843,34 @@ impl State {
         };
 
         for l in &out.lints {
+            // The `<<...>>` form turns two comparisons into a call, so
+            // the lint carries no rewrite for `--fix`. The editor offers
+            // it here, as it does for the compiler's error.
+            if l.name == "single_angle_call"
+                && alloy::lint::level_in(&lint_config, &directives, l.name)
+                    != alloy::lint::Level::Allow
+                && let Some(edits) = angle_call_edits(&doc.source, l.start as usize)
+            {
+                let (ll, lc) = position_of(&doc.source, l.start as usize);
+                let (le, lec) = position_of(&doc.source, l.end as usize);
+
+                if le >= from_line && ll <= to_line {
+                    actions.push(json!({
+                        "title": "Write `<<...>>`",
+                        "kind": "quickfix",
+                        "isPreferred": true,
+                        "diagnostics": [{
+                            "range": { "start": { "line": ll, "character": lc }, "end": { "line": le, "character": lec } },
+                            "severity": 2,
+                            "source": "Alloy",
+                            "code": alloy::docs::LINT_CODE,
+                            "message": format!("{}: {}", l.name, l.message),
+                        }],
+                        "edit": { "changes": { uri: edits } },
+                    }));
+                }
+            }
+
             let Some(fix) = &l.fix else { continue };
 
             if alloy::lint::level_in(&lint_config, &directives, l.name) == alloy::lint::Level::Allow
@@ -2810,6 +2823,25 @@ fn edit_count(edit: &Value) -> usize {
         );
 
     lists.filter_map(Value::as_array).map(Vec::len).sum()
+}
+
+/// The edits that double the `<` at `at` and the `>` that closes it:
+/// `id<number>(5)` becomes `id<<number>>(5)`.
+fn angle_call_edits(source: &str, at: usize) -> Option<Value> {
+    let close = angle_close(source, at)?;
+    let (sl, sc) = position_of(source, at);
+    let (cl, cc) = position_of(source, close);
+
+    Some(json!([
+        {
+            "range": { "start": { "line": sl, "character": sc }, "end": { "line": sl, "character": sc } },
+            "newText": "<",
+        },
+        {
+            "range": { "start": { "line": cl, "character": cc }, "end": { "line": cl, "character": cc } },
+            "newText": ">",
+        },
+    ]))
 }
 
 /// The offset of the `>` that closes the `<` at `at`. The walk reads

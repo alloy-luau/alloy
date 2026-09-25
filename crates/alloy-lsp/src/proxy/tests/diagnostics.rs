@@ -1186,6 +1186,34 @@ pub(crate) fn the_compiler_errors_carry_their_quick_fixes() {
     );
 }
 
+/// `id<number>(5)` is valid Luau, so it is a `single_angle_call` warning
+/// and no error. The lint has no `--fix` rewrite, because the call form
+/// changes what the program does, and the editor still offers it.
+#[test]
+fn a_single_angle_call_lint_offers_the_double_brackets() {
+    let (st, uri) = one_file("local number = 1\nlocal id = print\nlocal v = id<number>(5)\n");
+    let actions = st.lint_actions(uri, ((2, 0), (2, 22)));
+    let fix = actions
+        .iter()
+        .find(|a| a["title"] == "Write `<<...>>`")
+        .expect("the lint offers the call form");
+
+    assert_eq!(
+        fix["edit"]["changes"][uri],
+        json!([
+            {
+                "range": { "start": { "line": 2, "character": 12 }, "end": { "line": 2, "character": 12 } },
+                "newText": "<",
+            },
+            {
+                "range": { "start": { "line": 2, "character": 19 }, "end": { "line": 2, "character": 19 } },
+                "newText": ">",
+            },
+        ])
+    );
+    assert!(st.compiler_actions(uri, ((2, 0), (2, 22))).is_empty());
+}
+
 /// The checker's report on a `.` call of a method, in the compiler's
 /// words, carries the edit that writes the `:`.
 #[test]

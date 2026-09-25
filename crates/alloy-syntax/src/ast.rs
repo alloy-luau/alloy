@@ -64,6 +64,11 @@ pub struct Chunk {
     /// Each table key that is a reserved word, `{ in = 1 }`. Only a
     /// parse with `reserved_keys` reads one, and emit quotes it.
     pub reserved_keys: Vec<TokSpan>,
+    /// Each call that writes its type arguments in one `<...>` where the
+    /// tokens also read as Luau comparisons, `id<number>(5)`: the span
+    /// from the `<` to its `>`, with the report. The parse keeps the
+    /// comparisons, and the `single_angle_call` lint names the call.
+    pub angle_calls: Vec<(TokSpan, String)>,
 }
 
 /// A piece of Alloy syntax inside a type span. Types stay spans, so the

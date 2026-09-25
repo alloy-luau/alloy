@@ -424,6 +424,37 @@ fn turbofish_type_arguments() {
     round_trip("local a = f<<number>>()<<string>>()\n");
 }
 
+/// `id<number>(5)` is valid Luau, two comparisons, and every valid Luau
+/// file compiles. The parse keeps the comparisons and records the spot
+/// for the lint. Where the tokens read as no Luau, the error stays: an
+/// empty `()`, a type no expression spells, or a statement.
+#[test]
+fn a_single_angle_call_that_reads_as_luau_parses() {
+    let angle_calls = |src: &str| -> Result<Vec<String>, String> {
+        let lexed = lexer::lex(src).unwrap();
+
+        match parser::parse(src, &lexed.toks) {
+            Ok(chunk) => Ok(chunk.angle_calls.into_iter().map(|(_, m)| m).collect()),
+
+            Err(e) => Err(e.message),
+        }
+    };
+    let call = |c: &str| format!("type arguments at a call take `<<...>>`: write `{c}`");
+
+    assert_eq!(
+        angle_calls("local v = id<number>(5)\nprint(f(a<b, c>(a)))\n"),
+        Ok(vec![call("id<<number>>(5)"), call("a<<b, c>>(a)")])
+    );
+
+    for (src, c) in [
+        ("local s = Signal.new<string>()\n", "Signal.new<<string>>()"),
+        ("local v = id<string?>(x)\n", "id<<string?>>(x)"),
+        ("id<number>(5)\n", "id<<number>>(5)"),
+    ] {
+        assert_eq!(angle_calls(src), Err(call(c)), "{src}");
+    }
+}
+
 /// Inside a list a type is spelled `Box<number>`; a turbofish there
 /// reports once, at the inner `<<`, and names the spelling.
 #[test]

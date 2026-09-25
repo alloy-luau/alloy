@@ -496,6 +496,13 @@ pub const LINTS: &[LintInfo] = &[
     },
     // --- suspicious ------------------------------------------------------------
     LintInfo {
+        name: "single_angle_call",
+        group: Group::Suspicious,
+        default: Level::Warn,
+        summary: "a call that writes its type arguments in one `<...>`",
+        detail: "A call takes its type arguments in `<<...>>`: `id<<number>>(5)`. Luau reads `id<number>(5)` as two comparisons, `(id < number) > 5`, and so does Alloy, because every valid Luau file compiles. Where the tokens read as no Luau, `Signal.new<string>()`, the compiler reports an error instead. The editor offers the `<<...>>` form as a quick fix; `alloy flux --fix` leaves the line, because the rewrite changes what the program does.",
+    },
+    LintInfo {
         name: "deprecated_namespace",
         group: Group::Suspicious,
         default: Level::Warn,

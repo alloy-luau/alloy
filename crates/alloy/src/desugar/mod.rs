@@ -758,6 +758,18 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     // `global` left the language; each one the file wrote reports.
     d.report_globals(src, toks, chunk);
 
+    // `id<number>(5)` is valid Luau, two comparisons, and compiles as
+    // that. The author most likely meant a call; see `angle_calls`.
+    for (span, message) in &chunk.angle_calls {
+        d.lints.push(Lint {
+            name: "single_angle_call",
+            start: toks[span.start as usize].start,
+            end: toks[span.end as usize - 1].end,
+            message: message.clone(),
+            fix: None,
+        });
+    }
+
     // A namespace names its members before the prescan reads them: a
     // member renders under the namespace's prefix, and every table the
     // prescan fills is keyed by that rendered name.

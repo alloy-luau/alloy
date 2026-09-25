@@ -810,6 +810,21 @@ impl<'a> Parser<'a> {
             });
         }
 
+        // `id<number>(5)` as a statement reads as no Luau either: a
+        // comparison is no statement. The call form is the report.
+        if let Some(i) = self
+            .angle_calls
+            .iter()
+            .position(|(s, _)| s.start as usize == self.pos)
+        {
+            let (_, message) = self.angle_calls.remove(i);
+
+            return Err(ParseError {
+                offset: self.toks[self.pos].start as usize,
+                message,
+            });
+        }
+
         match &first {
             Expr::Call { .. } => Ok(Stmt::Call(first, TokSpan::new(start, self.pos))),
 

@@ -954,7 +954,14 @@ impl<'a> Parser<'a> {
     no type list, and a comparison has spaces around its operator. The
     probe restores the cursor and the type records, so a miss parses
     on as a comparison.
+
+    Every valid Luau file compiles, so where the tokens also read as
+    Luau the parse keeps the comparisons and records the spot for the
+    `single_angle_call` lint. The error stays for the rest. The probe
+    keeps its frame out of `suffix_chain`, which each level of nesting
+    holds.
     */
+    #[inline(never)]
     fn single_angle_call(&mut self, start: usize) -> Option<ParseError> {
         let lt = self.pos;
 
@@ -1003,12 +1010,65 @@ impl<'a> Parser<'a> {
             false => written,
         };
 
+        let message =
+            format!("type arguments at a call take `<<...>>`: write `{callee}<<{types}>>{args}`");
+
+        if self.reads_as_comparisons(lt, gt) {
+            let span = TokSpan::new(lt, gt + 1);
+
+            // A probe of a match arm reads the same tokens again.
+            if !self.angle_calls.iter().any(|(s, _)| *s == span) {
+                self.angle_calls.push((span, message));
+            }
+
+            return None;
+        }
+
         Some(ParseError {
             offset: self.toks[lt].start as usize,
-            message: format!(
-                "type arguments at a call take `<<...>>`: write `{callee}<<{types}>>{args}`"
-            ),
+            message,
         })
+    }
+
+    /// Whether `<...>(...)` after a callee also reads as Luau, the way
+    /// `id < number > (5)` does: an operand of a comparison up to each
+    /// comma and to the `>`, and one after it. `()` and `string?` read
+    /// as no value. The probe restores the cursor and every record.
+    fn reads_as_comparisons(&mut self, lt: usize, gt: usize) -> bool {
+        let saved = (
+            self.pos,
+            self.depth,
+            self.type_edits.len(),
+            self.type_names.len(),
+            self.diagnostics.len(),
+            self.angle_calls.len(),
+        );
+        let limit = binop_priority("<").map_or(0, |(_, right)| right);
+        self.pos = lt + 1;
+
+        let mut reads = loop {
+            if self.sub_expr(limit).is_err() {
+                break false;
+            }
+
+            if self.pos >= gt || !self.eat(",") {
+                break self.pos == gt;
+            }
+        };
+
+        if reads {
+            self.pos = gt + 1;
+            reads = self.sub_expr(limit).is_ok();
+        }
+
+        reads &= self.diagnostics.len() == saved.4;
+        (self.pos, self.depth) = (saved.0, saved.1);
+        self.type_edits.truncate(saved.2);
+        self.type_names.truncate(saved.3);
+        self.diagnostics.truncate(saved.4);
+        self.angle_calls.truncate(saved.5);
+
+        reads
     }
 
     /// Reports if the token at the cursor touches the one before it.

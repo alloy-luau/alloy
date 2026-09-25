@@ -631,18 +631,43 @@ mod tests {
             ]
         );
 
-        // A call's type arguments in one `<...>` read as two comparisons,
-        // or did not parse. The report sits on the `<` and writes the
-        // call out.
-        let single =
-            "local function id<T>(x: T): T return x end\nlocal v = id<number>(5)\nprint(v)\n";
+        // A call's type arguments in one `<...>`. Where the tokens also
+        // read as Luau, `id<number>(5)` is two comparisons, and a valid
+        // Luau file compiles: the `single_angle_call` lint writes the
+        // call out on the `<...>`, with no `--fix` rewrite. The same
+        // holds for `f(a<b, c>(a))`, two values to Luau.
+        let single = "local function id<T>(x: T): T return x end\nlocal v = id<number>(5)\nlocal a, b, c = 1, 2, 3\nprint(v, id(a<b, c>(a)))\n";
+        assert!(messages(single).is_empty(), "{:?}", messages(single));
+        let out = compile(single).unwrap();
+        let hits: Vec<(&str, &str)> = out
+            .lints
+            .iter()
+            .filter(|l| l.name == "single_angle_call" && l.fix.is_none())
+            .map(|l| {
+                (
+                    &single[l.start as usize..l.end as usize],
+                    l.message.as_str(),
+                )
+            })
+            .collect();
         assert_eq!(
-            messages(single),
-            vec!["type arguments at a call take `<<...>>`: write `id<<number>>(5)`"]
+            hits,
+            [
+                (
+                    "<number>",
+                    "type arguments at a call take `<<...>>`: write `id<<number>>(5)`"
+                ),
+                (
+                    "<b, c>",
+                    "type arguments at a call take `<<...>>`: write `a<<b, c>>(a)`"
+                ),
+            ]
         );
-        assert_eq!(docs::kind_for(&messages(single)[0]), "SyntaxError");
-        let at = compile(single).unwrap().diagnostics[0].start as usize;
-        assert_eq!(&single[at..at + 8], "<number>");
+        // Where the tokens read as no Luau, the parse error stays.
+        assert_eq!(
+            docs::kind_for(&messages("local s = Signal.new<string>()\n")[0]),
+            "SyntaxError"
+        );
         assert_eq!(
             messages(
                 "local s = Signal.new<string>()\nlocal m = HashMap.new<string, Array<number>>()\n"

@@ -41,6 +41,43 @@ pub fn segments(mount: &str) -> Option<Vec<String>> {
     if parts.is_empty() { None } else { Some(parts) }
 }
 
+/// Where the runtime lands when `[project] runtime` names no place:
+/// where a node already mounts `out/alloy.luau`, else inside the node
+/// that mounts the output folder, or the input folder, which the build
+/// project points at the output. That folder carries the file, and a
+/// node of its own would put a second copy beside it. Else the default
+/// place.
+fn runtime_place(mounts: &[Mounted], input: &Path, out: &Path) -> Vec<String> {
+    let at = |disk: &Path| {
+        mounts
+            .iter()
+            .find(|m| m.disk == disk)
+            .map(|m| m.place.clone())
+    };
+
+    at(&out.join("alloy.luau"))
+        .or_else(|| {
+            at(out).or_else(|| at(input)).map(|mut place| {
+                place.push("alloy".to_string());
+                place
+            })
+        })
+        .or_else(|| segments(crate::config::DEFAULT_RUNTIME))
+        .unwrap_or_default()
+}
+
+/// Whether a folder of `disks` already carries the runtime at
+/// `runtime`: `alloy` inside the node that mounts one of them. A
+/// project file that writes a node for it too holds two copies.
+pub(crate) fn carries_runtime(mounts: &[Mounted], disks: &[&Path], runtime: &[String]) -> bool {
+    runtime.split_last().is_some_and(|(last, parent)| {
+        last == "alloy"
+            && mounts
+                .iter()
+                .any(|m| m.place == parent && disks.contains(&m.disk.as_path()))
+    })
+}
+
 /// The tree of one project, read once per build.
 #[derive(Debug, Clone, Default)]
 pub struct Tree {
@@ -97,19 +134,26 @@ impl Tree {
         // An alias-only entry names no place, so a table of those alone
         // is not a tree: the project file at the root still is.
         if config.mount.values().any(|m| !m.alias_only()) {
+            let mounts: Vec<Mounted> = config
+                .mount
+                .values()
+                .filter_map(|m| {
+                    Some(Mounted {
+                        place: segments(&m.1)?,
+                        disk: PathBuf::from(m.0.replace('\\', "/")),
+                    })
+                })
+                .collect();
+            let runtime = match &config.project.runtime {
+                Some(r) => segments(r).unwrap_or_default(),
+
+                None => runtime_place(&mounts, &input, &out),
+            };
+
             return Self {
                 name: config.project.name.clone(),
-                mounts: config
-                    .mount
-                    .values()
-                    .filter_map(|m| {
-                        Some(Mounted {
-                            place: segments(&m.1)?,
-                            disk: PathBuf::from(m.0.replace('\\', "/")),
-                        })
-                    })
-                    .collect(),
-                runtime: segments(config.project.runtime()).unwrap_or_default(),
+                mounts,
+                runtime,
                 aliases,
                 project: None,
                 source_of_truth: config.project.source_of_truth,
@@ -123,24 +167,12 @@ impl Tree {
             .as_ref()
             .map(ProjectFile::mounts)
             .unwrap_or_default();
-        // The runtime lands where the project says, else where the tree
-        // already puts `alloy.luau`, else inside the node that mounts
-        // the output folder, else at the default place.
-        let runtime = match (&config.project.runtime, &project) {
-            (Some(r), _) => segments(r).unwrap_or_default(),
+        // The runtime lands where the project says, else as
+        // `runtime_place` finds it.
+        let runtime = match &config.project.runtime {
+            Some(r) => segments(r).unwrap_or_default(),
 
-            (None, Some(p)) => p
-                .place_of(&out.join("alloy.luau"))
-                .or_else(|| {
-                    p.place_of(&out).map(|mut place| {
-                        place.push("alloy".to_string());
-                        place
-                    })
-                })
-                .or_else(|| segments(crate::config::DEFAULT_RUNTIME))
-                .unwrap_or_default(),
-
-            (None, None) => segments(crate::config::DEFAULT_RUNTIME).unwrap_or_default(),
+            None => runtime_place(&mounts, &input, &out),
         };
 
         Self {
@@ -471,8 +503,18 @@ pub fn rojo_project(tree: &Tree, root: &Path, base: &Path, compiled: bool) -> Va
         insert(&mut out, &m.place, leaf);
     }
 
-    if !tree.runtime.is_empty() {
-        let runtime = tree.out.join("alloy.luau");
+    // The build project points a mount of `[build] in` at the output,
+    // so that folder carries the runtime there too.
+    let carriers: &[&Path] = match compiled {
+        true => &[&tree.out, &tree.input],
+
+        false => &[&tree.out],
+    };
+    let runtime = tree.out.join("alloy.luau");
+    let mounted = tree.mounts.iter().any(|m| m.disk == runtime)
+        || carries_runtime(&tree.mounts, carriers, &tree.runtime);
+
+    if !tree.runtime.is_empty() && !mounted {
         insert(
             &mut out,
             &tree.runtime,
@@ -1141,6 +1183,19 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
         );
         let t = Tree::load(&dir, &Config::default());
         assert_eq!(t.runtime, vec!["ReplicatedStorage", "Build", "alloy"]);
+        // The folder carries the file, so the build project adds no
+        // second node for it.
+        let built = t.project.as_ref().unwrap().build_tree(
+            &dir,
+            &dir.join(".alloy"),
+            &t.input,
+            &t.out,
+            &t.runtime,
+        );
+        assert_eq!(
+            built["tree"]["ReplicatedStorage"]["Build"],
+            json!({ "$path": "../build" })
+        );
 
         // `[project] runtime` wins over the tree.
         let config = Config::parse(
@@ -1151,6 +1206,61 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
         assert_eq!(
             Tree::load(&dir, &config).runtime,
             vec!["ServerStorage", "Rt"]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A node that mounts `[build] in` mounts the output in the build
+    /// project, and so carries `build/alloy.luau`. The runtime went to
+    /// `ReplicatedStorage/Alloy` too, so Rojo made two copies of it,
+    /// and nothing required the one under the node.
+    #[test]
+    fn the_runtime_lands_once_under_a_node_that_mounts_the_input() {
+        let dir = temp("runtime-in");
+        write(
+            &dir,
+            "default.project.json",
+            r#"{ "name": "p", "tree": { "$className": "DataModel",
+                 "ReplicatedStorage": { "$className": "ReplicatedStorage",
+                   "Game": { "$path": "src" } } } }"#,
+        );
+        let t = Tree::load(&dir, &Config::default());
+        assert_eq!(t.runtime, vec!["ReplicatedStorage", "Game", "alloy"]);
+        assert_eq!(
+            std_require_for(&t, Path::new("src/a.aly")).unwrap(),
+            "@game/ReplicatedStorage/Game/alloy"
+        );
+        let built = t.project.as_ref().unwrap().build_tree(
+            &dir,
+            &dir.join(".alloy"),
+            &t.input,
+            &t.out,
+            &t.runtime,
+        );
+        assert_eq!(
+            built["tree"]["ReplicatedStorage"],
+            json!({ "$className": "ReplicatedStorage", "Game": { "$path": "../build/" } })
+        );
+
+        // A mount table does the same.
+        let config = Config::parse(
+            "[mount]\ngame = [\"src\", \"@game/ReplicatedStorage/Game\"]\n",
+            Path::new("alloy.toml"),
+        )
+        .unwrap();
+        let t = Tree::load(&dir, &config);
+        assert_eq!(t.runtime, vec!["ReplicatedStorage", "Game", "alloy"]);
+        let built = rojo_project(&t, &dir, &dir.join(".alloy"), true);
+        assert_eq!(
+            built["tree"]["ReplicatedStorage"]["Game"],
+            json!({ "$path": "../build/" })
+        );
+        // The source project mounts `src`, which holds no runtime.
+        let source = rojo_project(&t, &dir, &dir, false);
+        assert_eq!(
+            source["tree"]["ReplicatedStorage"]["Game"]["alloy"],
+            json!({ "$path": "build/alloy.luau" })
         );
 
         let _ = std::fs::remove_dir_all(&dir);

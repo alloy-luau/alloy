@@ -149,6 +149,23 @@ pub(crate) fn a_bound_on_a_local_reads_as_the_parameter() {
     assert_eq!(hints[0]["label"], json!(": T"));
     assert_eq!(hints[0]["textEdits"][0]["newText"], json!(": T"));
 }
+
+/// A hint that spells out how the runtime lays out an enum names
+/// nothing the source wrote. The hover names the type, and the gutter
+/// stays empty.
+#[test]
+fn a_hint_of_a_runtime_layout_goes() {
+    let src = "import { Err } from \"./errors\"\nconst short = missing(1)\nprint(short)\n";
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let mut hints = vec![json!({
+        "position": { "line": 1, "character": 11 },
+        "label": ": (\"Full\" | { _1: \"Junk\" | { @metatable Item, { _1: number } }, _2: number })?",
+    })];
+    clean_hints(&mut hints, doc);
+
+    assert!(hints.is_empty(), "{hints:?}");
+}
 #[test]
 pub(crate) fn a_union_keeps_the_order_the_source_wrote() {
     let src = concat!(

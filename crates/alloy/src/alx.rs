@@ -543,6 +543,29 @@ fn check_element(
 /// property takes another type, and a literal on an event, which takes
 /// a function. A property the class does not have is luaux's report.
 /// Each other value of a typed property goes to `typed`, when given.
+/// A property type as Luau code names it. The class list writes an
+/// enum as `EnumSortOrder`, and a script names it `Enum.SortOrder`. A
+/// string-backed type is a `string`. `None` for a type the Roblox
+/// definitions do not declare, so its value goes unchecked.
+fn luau_property_type(ty: &str) -> Option<String> {
+    match ty {
+        "BinaryString" | "ContentId" | "ProtectedString" => Some("string".to_string()),
+
+        "QDir" | "QFont" | "UniqueId" | "EnumLanguage" | "EnumSolidPrimitiveType" => None,
+
+        _ => Some(
+            match ty
+                .strip_prefix("Enum")
+                .filter(|r| r.starts_with(char::is_uppercase))
+            {
+                Some(rest) => format!("Enum.{rest}"),
+
+                None => ty.to_string(),
+            },
+        ),
+    }
+}
+
 fn check_intrinsic(
     element: &luaux::markup::Element,
     class: &str,
@@ -567,7 +590,8 @@ fn check_intrinsic(
             // a binding reads through `getValue`.
             if let (Some(typed), AttributeValue::Expression(_)) = (typed.as_mut(), value)
                 && !luaux::roblox::is_event(class, name)
-                && let Some(want) = crate::roblox_props::property_type(class, name)
+                && let Some(want) =
+                    crate::roblox_props::property_type(class, name).and_then(luau_property_type)
                 && let Some((start, end)) = value_bytes(src, *span)
             {
                 typed.push((start, end, format!("({want} | {{ getValue: any }})?")));
@@ -1350,6 +1374,19 @@ mod tests {
     /// of that type and passes the value through it. The ship artifact
     /// keeps it bare. A literal against a primitive stays with the text
     /// check, and a reactive library keeps a Roblox tag's values bare.
+    /// The class list names an enum `EnumSortOrder`, which no script can
+    /// write, so a check of an enum property read "Unknown type".
+    #[test]
+    fn a_property_type_takes_the_name_luau_code_writes() {
+        assert_eq!(
+            luau_property_type("EnumSortOrder").as_deref(),
+            Some("Enum.SortOrder")
+        );
+        assert_eq!(luau_property_type("ContentId").as_deref(), Some("string"));
+        assert_eq!(luau_property_type("UDim2").as_deref(), Some("UDim2"));
+        assert_eq!(luau_property_type("QFont"), None);
+    }
+
     #[test]
     fn an_attribute_value_checks_its_type() {
         let src = "local function create(k: any, p: any): any return p end\ntype Props = { item: Item, count: number }\nlocal function Row(props: Props) return nil end\nlocal n = 1\nreturn <Frame><TextLabel Text={n} Visible /><Row item={5} count={1} /></Frame>\n";

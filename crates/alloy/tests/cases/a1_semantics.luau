@@ -9,7 +9,7 @@ do
     function Shape.area(self): number
         return (
             if type(self) == "table" and self.tag == "Circle" then self._1 * self._1
-            else self._1 * self._2
+            elseif type(self) == "table" and self.tag == "Rect" then self._1 * self._2 else error("match: no arm covers this value", 2)
         )
     end
 end

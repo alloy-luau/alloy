@@ -113,6 +113,28 @@ function alloy.map_values(t: any, f: (any) -> any): any
 	return out
 end
 
+--- An enum value that `@derive(Deserialize)` reads from a table with no
+--- types, a save or JSON. `tags` gives each variant's payload count, as
+--- the wire layout does. A unit variant is its name, and a payload
+--- variant is a table whose tag has a payload; the table gets `enum` as
+--- its metatable again. Any other value raises and names `at`, the
+--- struct and the field, so an old "Uncommon" never reads as a variant.
+function alloy.serde_variant(v: any, tags: { [string]: number }, enum: any, name: string, at: string): any
+	if type(v) == "string" then
+		if tags[v] ~= 0 then
+			error(`{at}: "{v}" is no variant of {name}`, 0)
+		end
+		return v
+	end
+	if type(v) ~= "table" then
+		error(`{at}: {tostring(v)} is no variant of {name}`, 0)
+	end
+	if type(v.tag) ~= "string" or (tags[v.tag] or 0) == 0 then
+		error(`{at}: a table with the tag {tostring(v.tag)} is no variant of {name}`, 0)
+	end
+	return if enum ~= nil then setmetatable(v, enum) else v
+end
+
 --- Equality by content, for `@derive(Eq)` over a field that holds a
 --- table: an array, a map, a set, or a plain record. A value with an
 --- `__eq` of its own, a struct or an enum, answers through `==`.

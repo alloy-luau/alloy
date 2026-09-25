@@ -25,7 +25,7 @@ do
         return (
             if type(self) == "table" and self.tag == "Join" then self._1
             elseif type(self) == "table" and self.tag == "Chat" then self._1
-            else self._1
+            elseif type(self) == "table" and self.tag == "Leave" then self._1 else error("match: no arm covers this value", 2)
         )
     end
 end
@@ -38,7 +38,7 @@ local function describe(msg: Msg): string
         -- A guard is `and <expr>` after the pattern.
         elseif type(msg) == "table" and msg.tag == "Chat" and (#msg._2 > 200) then `{msg._1.Name} sent a wall of text`
         elseif type(msg) == "table" and msg.tag == "Chat" then `{msg._1.Name}: {msg._2}`
-        else `{msg._1.Name} left`
+        elseif type(msg) == "table" and msg.tag == "Leave" then `{msg._1.Name} left` else error("match: no arm covers this value", 2)
     )
 end
 

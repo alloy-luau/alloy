@@ -1623,9 +1623,10 @@ impl<'s> Desugar<'s> {
                     };
                     let field = format!("{this}.{fname}");
                     let ty = self.text_of(f.ty).trim().to_string();
+                    let at = luau_string(&format!("{}.{fname}", self.display_name(name)));
                     let (out, back) = (
-                        self.serde_of("Serialize", &ty, &field, 0),
-                        self.serde_of("Deserialize", &ty, &read, 0),
+                        self.serde_of("Serialize", &ty, &field, &at, 0),
+                        self.serde_of("Deserialize", &ty, &read, &at, 0),
                     );
                     // A key an older save lacks reads nil, and the
                     // constructor then writes the field's default; a
@@ -1789,13 +1790,20 @@ impl<'s> Desugar<'s> {
     through its own function, an array maps its items, and a map or a set
     is rebuilt. A table from JSON or a DataStore has no metatable, so
     without this a loaded array had no `push` and a loaded struct no
-    methods.
+    methods. `at` names the struct and the field for a report.
     */
-    fn serde_of(&mut self, which: &str, ty: &str, x: &str, depth: usize) -> Option<String> {
+    fn serde_of(
+        &mut self,
+        which: &str,
+        ty: &str,
+        x: &str,
+        at: &str,
+        depth: usize,
+    ) -> Option<String> {
         let ty = ty.trim();
 
         if let Some(inner) = ty.strip_suffix('?') {
-            let value = self.serde_of(which, inner, x, depth)?;
+            let value = self.serde_of(which, inner, x, at, depth)?;
 
             return Some(format!("if {x} == nil then nil else {value}"));
         }
@@ -1816,17 +1824,30 @@ impl<'s> Desugar<'s> {
             return Some(format!("{ty}.{f}({x})"));
         }
 
-        // A payload variant is a table under the enum's metatable, which
-        // carries the enum's methods; a unit variant is its own string.
-        let payload_enum = self
-            .enum_decls
-            .get(ty)
-            .is_some_and(|vs| vs.iter().any(|(_, n)| *n > 0));
+        // A unit variant is its own string, and a payload variant is a
+        // table under the enum's metatable, which carries its methods.
+        // The std checks the value as the wire reader does: an old save's
+        // "Uncommon" typed `Rarity` ran the last arm of every match.
+        if which == "Deserialize"
+            && let Some(e) = self.enum_named(ty)
+            && let Some(variants) = self.enum_decls.get(&e)
+        {
+            let tags: Vec<String> = variants
+                .iter()
+                .map(|(v, n)| format!("{} = {n}", crate::data::luau_key(v)))
+                .collect();
+            let meta = match variants.iter().any(|(_, n)| *n > 0) {
+                true => e.clone(),
 
-        if payload_enum && which == "Deserialize" {
-            let text = format!("if type({x}) == \"table\" then setmetatable({x}, {ty}) else {x}");
+                false => "nil".to_string(),
+            };
+            let shown = luau_string(&self.display_name(&e));
+            let std = self.std();
 
-            return Some(self.any_cast(&format!("({text})")));
+            return Some(format!(
+                "{std}.serde_variant({x}, {{ {} }}, {meta}, {shown}, {at})",
+                tags.join(", ")
+            ));
         }
 
         let std = self.std();
@@ -1838,7 +1859,7 @@ impl<'s> Desugar<'s> {
 
         if let Some(element) = element {
             let v = format!("_v{depth}");
-            let text = match self.serde_of(which, element, &v, depth + 1) {
+            let text = match self.serde_of(which, element, &v, at, depth + 1) {
                 Some(item) => format!("{std}.Array.map({x}, function({v}) return {item} end)"),
 
                 // An array of plain values keeps its items; the way back
@@ -1870,7 +1891,7 @@ impl<'s> Desugar<'s> {
         let each = value_ty.and_then(|v| {
             let v_var = format!("_e{depth}");
 
-            self.serde_of(which, &v, &v_var, depth + 1)
+            self.serde_of(which, &v, &v_var, at, depth + 1)
                 .map(|item| format!("function({v_var}) return {item} end"))
         });
 

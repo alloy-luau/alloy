@@ -2397,12 +2397,26 @@ impl<'s> Desugar<'s> {
 
         let mut cursor = with_end;
         let last_index = m.arms.len().saturating_sub(1);
+        let mut raise = false;
 
         for (i, arm) in m.arms.iter().enumerate() {
             let arm_start = self.byte_start(arm.span);
             self.copy(cursor, arm_start);
             let (test, c) = self.arm_test(&arm.patterns, &paths, arm.guard.as_ref());
-            let is_last_without_default = m.default.is_none() && i == last_index && exhaustive;
+            let mut is_last_without_default = m.default.is_none() && i == last_index && exhaustive;
+
+            // The ship tests the last arm of an exhaustive match too, and
+            // a value no arm names raises. An `else` there gave an old
+            // save's "Uncommon" the value of the last variant. The check
+            // artifact keeps the `else`, which the checker reads as total.
+            if is_last_without_default
+                && !self.options.check
+                && !(arm.guard.is_none() && matches!(&arm.patterns[..], [p] if self.irrefutable(p)))
+            {
+                is_last_without_default = false;
+                raise = true;
+            }
+
             // One arm that covers every value has nothing to branch on.
             // `(else v)` is not Luau, so the value stands alone.
             let keyword = if is_last_without_default && i == 0 {
@@ -2445,6 +2459,11 @@ impl<'s> Desugar<'s> {
             self.copy(cursor, vs);
             self.expr_lazy(true, d);
             cursor = self.byte_end(d.span());
+        } else if raise {
+            self.generate(
+                cursor,
+                " else error(\"match: no arm covers this value\", 2)",
+            );
         } else if !exhaustive {
             self.generate(cursor, " else nil");
         }
@@ -3575,11 +3594,17 @@ mod tests {
 
     #[test]
     fn one_arm_that_covers_every_value_needs_no_branch() {
-        // `(else v)` is not Luau, so a match expression with one arm and
-        // no default writes the value alone.
+        // `(else v)` is not Luau, so the check artifact writes the value
+        // alone. The ship tests the one arm and raises for another value.
         let src = "enum Msg as\n    Join(number)\nend\nlocal function h(m: Msg): number\n    return match m with\n        case Join(n) then n\n    end\nend\nprint(h)\n";
         let out = crate::compile(src).unwrap();
-        assert!(!out.ship.contains("else"), "{}", out.ship);
+        assert!(
+            out.ship.contains(
+                "if type(m) == \"table\" and m.tag == \"Join\" then m._1 else error(\"match: no arm covers this value\", 2)"
+            ),
+            "{}",
+            out.ship
+        );
         assert!(!out.check.contains("else"), "{}", out.check);
     }
 
@@ -3589,9 +3614,14 @@ mod tests {
         let out = crate::compile(src).unwrap();
         assert!(!out.diagnostics.is_empty());
         assert!(
-            out.ship.contains("return (\n         0\n    )"),
+            out.ship.contains("return (\n        if type(m) == \"table\" and m.tag == \"Join\" then 0 else error(\"match: no arm covers this value\", 2)\n    )"),
             "{}",
             out.ship
+        );
+        assert!(
+            out.check.contains("return (\n         0\n    )"),
+            "{}",
+            out.check
         );
     }
 
@@ -3936,6 +3966,39 @@ mod tests {
             "{}",
             out.ship
         );
+    }
+
+    /// A save loaded "Uncommon" as a `Rarity`, and the `else` of the
+    /// last arm gave it Mythic's weight. The ship now tests the last arm
+    /// and raises; the check artifact keeps the `else` for the checker.
+    /// A last arm that takes every value stays an `else`.
+    #[test]
+    fn an_exhaustive_match_expression_tests_its_last_arm() {
+        let src = "enum Tier as\n    Low\n    High\nend\nlocal function w(t: Tier): number\n    return match t with\n        case Tier.Low then 1\n        case Tier.High then 99\n    end\nend\nprint(w)\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.ship.contains(
+                "elseif t == Tier.High then 99 else error(\"match: no arm covers this value\", 2)"
+            ),
+            "{}",
+            out.ship
+        );
+        assert!(out.check.contains("else 99"), "{}", out.check);
+
+        let one = "enum One as\n    Only\nend\nlocal function w(o: One): number\n    return match o with\n        case One.Only then 1\n    end\nend\nprint(w)\n";
+        let out = crate::compile(one).unwrap();
+        assert!(
+            out.ship.contains(
+                "if o == One.Only then 1 else error(\"match: no arm covers this value\", 2)"
+            ),
+            "{}",
+            out.ship
+        );
+
+        let bound = "local function w(n: number): number\n    return match n with\n        case 1 then 1\n        case m then m\n    end\nend\nprint(w)\n";
+        let out = crate::compile(bound).unwrap();
+        assert!(!out.ship.contains("error("), "{}", out.ship);
     }
 
     /// A literal arm covers part of the value, so a `case _` or a

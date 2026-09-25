@@ -177,13 +177,22 @@ pub fn child_hover(
             "finds it with `FindFirstChild`, and gives nil when there is none",
         ),
     };
-    let ty = ty(start).map(|t| format!(": {t}")).unwrap_or_default();
+    let ty = ty(start);
+    // A sourcemap names the class; with none, the lookup is an `Instance`.
+    let unnamed = match ty.as_deref().map(|t| t.trim_end_matches('?')) {
+        None | Some("Instance" | "any") => {
+            " The source names no class, so `is` or a cast says which one it is."
+        }
+
+        Some(_) => "",
+    };
+    let ty = ty.map(|t| format!(": {t}")).unwrap_or_default();
 
     Some((
         start,
         end,
         format!(
-            "```alloy\n{receiver}{arrow}{name}{ty}\n```\nThe child of `{receiver}` named `{name}`. `{arrow}` {how}. The source names no class, so `is` or a cast says which one it is."
+            "```alloy\n{receiver}{arrow}{name}{ty}\n```\nThe child of `{receiver}` named `{name}`. `{arrow}` {how}.{unnamed}"
         ),
     ))
 }

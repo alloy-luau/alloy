@@ -1454,6 +1454,16 @@ impl Server {
                                 text = optional;
                             }
 
+                            // A child name asked at the name that holds
+                            // the lookup: the child hover, with the type
+                            // the sourcemap gives.
+                            if let Some((child, range)) =
+                                child_lookup_hover(&value, doc, line, character)
+                            {
+                                text = child;
+                                result["range"] = range;
+                            }
+
                             // A key of a table literal asked at its
                             // binding: the entry the key names is the
                             // hover, and a record with no such entry

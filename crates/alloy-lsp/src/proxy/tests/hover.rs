@@ -1,6 +1,6 @@
 use super::super::hover::{
-    child_cast, impl_self_type, intrinsic_code_home, member_doc, shadow_home, shadows_an_import,
-    source_type, star_module_hover,
+    child_cast, child_value_home, impl_self_type, intrinsic_code_home, member_doc, shadow_home,
+    shadows_an_import, source_type, star_module_hover,
 };
 use super::super::*;
 use super::support::one_file;
@@ -2201,6 +2201,68 @@ fn a_child_lookup_hovers_with_the_compiler_s_cast() {
         "{}",
         hover.2
     );
+}
+
+/// A child name hovers with the type luau-lsp gives the name that holds
+/// the lookup: a temp of the chain, or a binding whose whole value it
+/// is. A sourcemap then names the class, so the hover drops the note
+/// that no source names one.
+#[test]
+fn a_child_name_asks_the_name_that_holds_its_lookup() {
+    let options = EmitOptions {
+        wait_timeout: Some(5.0),
+        ..EmitOptions::default()
+    };
+    let doc = |src: &str| {
+        Doc::new(
+            src.to_string(),
+            1,
+            &options,
+            &alloy::luaux::Config::default(),
+            None,
+        )
+    };
+    let home = |src: &str, needle: &str| {
+        let d = doc(src);
+        let at = src.find(needle).expect("the lookup") + 2;
+
+        child_value_home(&d, at).map(|(l, c)| {
+            let text = d.shadow.lines().nth(l as usize).expect("the line");
+
+            text.chars().skip(c as usize).take(2).collect::<String>()
+        })
+    };
+    let chain = "const k = ReplicatedStorage=>Assets->Swords->Katana\nprint(k)\n";
+
+    // `_1` holds `=>Assets`, `_2` holds `->Swords`, and `k` the rest.
+    assert_eq!(home(chain, "=>Assets").as_deref(), Some("_1"));
+    assert_eq!(home(chain, "->Swords").as_deref(), Some("_2"));
+    assert_eq!(home(chain, "->Katana").as_deref(), Some("k "));
+
+    // A value that goes on past the lookup, an annotation, and a field
+    // after it hold something else. A temp the block assigns again
+    // types as the union of its values.
+    for (src, needle) in [
+        ("const n = workspace->A == nil\nprint(n)\n", "->A"),
+        ("const m: Model = workspace=>A\nprint(m)\n", "=>A"),
+        ("const d = workspace=>A.Size\nprint(d)\n", "=>A"),
+        (
+            "const a = workspace=>A->B\nconst b = workspace=>C->D\nprint(a, b)\n",
+            "=>A",
+        ),
+    ] {
+        assert_eq!(home(src, needle), None, "{src}");
+    }
+
+    let at = chain.find("->Katana").unwrap() + 2;
+    let hover = child_lookup_hover("```luau\nlocal k: Tool?\n```", &doc(chain), 0, at as u32)
+        .expect("a hover")
+        .0;
+    assert!(
+        hover.starts_with("```alloy\nReplicatedStorage=>Assets->Swords->Katana: Tool?\n```"),
+        "{hover}"
+    );
+    assert!(!hover.contains("names no class"), "{hover}");
 }
 
 /// A completion after `->` asks inside the string the lookup lowers to,

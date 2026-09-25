@@ -62,8 +62,8 @@ use hints::{
 #[allow(unused_imports)]
 use hover::{
     OPEN_ATTRIBUTES, attach_std_member_docs, binds_a_value, case_arm_of_binding, case_binding_span,
-    case_binding_text, child_call, close_empty_packs, close_item_packs, declared_annotation,
-    declared_attribute_targets, declared_field_hover, declared_field_owner,
+    case_binding_text, child_call, child_lookup_hover, close_empty_packs, close_item_packs,
+    declared_annotation, declared_attribute_targets, declared_field_hover, declared_field_owner,
     declared_parameter_hover, declared_signature, declares_a_name_at, drop_bound_intersections,
     empty_parameter_names, field_key, fold_std_shapes, foreign_method_hover, import_alias_source,
     invents_a_type, is_byte_count, keep_annotation, let_else_binding, literal_key,

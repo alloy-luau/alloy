@@ -300,6 +300,17 @@ impl Server {
             return false;
         }
 
+        // A child name: the child types the name that holds the lookup
+        // from the sourcemap, and the answer becomes the child hover.
+        if let Some((start, _, _)) = keywords::child_hover(&doc.source, offset, |_| None)
+            && let Some(home) = child_value_home(doc, start)
+        {
+            drop(st);
+            self.forward_request_at(message.clone(), Some("textDocument/hover"), home);
+
+            return true;
+        }
+
         // A std name the file binds itself, through an import or a
         // declaration, is the file's: the child answers for that one.
         let owned = keywords::attribute_argument_hover(&doc.source, offset)
@@ -644,6 +655,120 @@ pub(crate) fn child_cast(doc: &Doc, start: usize) -> Option<String> {
     })?;
 
     Some(rest[..end].trim().to_string())
+}
+
+/// The shadow position of the name that holds the whole value of the
+/// child lookup whose name starts at `start`: a temp the emit hoists
+/// it into, `local _1 = x:WaitForChild("a")`, or a `local` or a `const`
+/// of the source with the lookup as its whole value. The child types
+/// that name from the sourcemap, as it types the lookup. `None` when
+/// the lookup is part of a larger value.
+pub(crate) fn child_value_home(doc: &Doc, start: usize) -> Option<(u32, u32)> {
+    let (line, text, name) = child_call(doc, start)?;
+    let call = text[..name].rfind(':')?;
+    let args = name + text[name..].find('"')?;
+    let close = args + text[args..].find(')')?;
+    let head = &text[..call];
+    let is_temp = |w: &str| {
+        w.strip_prefix('_')
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    };
+    // The last `name = ` before the call that starts a statement: a
+    // `local` or a `const` of one name, or a temp the block assigns
+    // again. An annotation types the name as the source wrote it, and a
+    // list of names holds more than the lookup, so neither is one.
+    let (bind, eq) = head.rmatch_indices(" = ").find_map(|(eq, _)| {
+        let bind = head[..eq]
+            .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .map_or(0, |i| i + 1);
+        let before = &head[..bind];
+        let declared = before.ends_with("local ") || before.ends_with("const ");
+        let reused = is_temp(&head[bind..eq]) && (before.is_empty() || before.ends_with(' '));
+
+        (bind < eq && (declared || reused)).then_some((bind, eq))
+    })?;
+    let binding = &text[bind..eq];
+    // A name assigned twice types as the union of its values.
+    let assign = format!("{binding} = ");
+    let assigned = doc
+        .shadow
+        .lines()
+        .flat_map(|l| {
+            l.match_indices(&assign)
+                .filter(move |(i, _)| *i == 0 || l.as_bytes()[i - 1] == b' ')
+        })
+        .count();
+
+    if assigned > 1 {
+        return None;
+    }
+
+    let value = &text[eq + 3..call];
+    let rest = &text[close + 1..];
+    // The receiver alone, or behind the guard of an optional link.
+    let guarded = value
+        .strip_prefix("(if ")
+        .and_then(|v| v.split_once(" == nil then nil else "))
+        .is_some_and(|(a, b)| a == b && !a.contains(' '));
+    let rest = match guarded {
+        true => rest.strip_prefix(')')?,
+
+        false if value.contains(' ') => return None,
+
+        false => rest,
+    };
+    // A timed wait carries a cast to its own type made optional.
+    let rest = match rest.strip_prefix(" :: typeof(") {
+        Some(cast) => &cast[cast.find(")?)")? + 3..],
+
+        None => rest,
+    };
+    // A temp holds a prefix of the chain and nothing more. A name of the
+    // source holds the lookup alone when nothing follows it on its line.
+    let ends = match is_temp(binding) {
+        true => rest.is_empty() || rest.starts_with(' ') && !rest.starts_with(" ::"),
+
+        false => {
+            let after = &doc.source[start..];
+            let word = after
+                .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .unwrap_or(after.len());
+            let tail = after[word..].lines().next().unwrap_or("").trim();
+
+            tail.is_empty() || tail.starts_with("--")
+        }
+    };
+
+    ends.then(|| (line, text[..bind].chars().count() as u32))
+}
+
+/// The hover of a child name from the child's answer at the name that
+/// holds the lookup, see `child_value_home`: the child hover with the
+/// type that answer gives, and the range of the name.
+pub(crate) fn child_lookup_hover(
+    answer: &str,
+    doc: &Doc,
+    line: u32,
+    character: u32,
+) -> Option<(String, Value)> {
+    let offset = offset_of(&doc.source, line, character)?;
+    let (start, _, _) = keywords::child_hover(&doc.source, offset, |_| None)?;
+    child_value_home(doc, start)?;
+    // `local katana: Tool?`: the type follows the name.
+    let head = answer.lines().find(|l| !l.starts_with("```"))?;
+    let (_, ty) = head.split_once(": ")?;
+    let (start, end, text) =
+        keywords::child_hover(&doc.source, offset, |_| Some(ty.trim().to_string()))?;
+    let (sl, sc) = position_of(&doc.source, start);
+    let (el, ec) = position_of(&doc.source, end);
+
+    Some((
+        text,
+        json!({
+            "start": { "line": sl, "character": sc },
+            "end": { "line": el, "character": ec }
+        }),
+    ))
 }
 
 /// Maps positions and ranges in request params into the shadow.

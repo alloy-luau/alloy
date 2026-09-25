@@ -1436,6 +1436,7 @@ pub fn resite_report(
         .or_else(|| variant_call_report(message, shapes, text, line, col))
         .or_else(|| array_element_report(message, text, line, col))
         .or_else(|| unmet_bound_report(message, source, text, line, col))
+        .or_else(|| unit_enum_bound_report(message, shapes))
         .or_else(|| covered_arm_report(message, text, line))
         .or_else(|| destroy_report(message, text))
         .or_else(|| contains_report(message, text))
@@ -1762,6 +1763,37 @@ fn unmet_bound_report(
         kind: "BoundError",
         message: format!("`{got}` does not implement `{want}`{tail}"),
         at: Some((line, col + open + 1 + lead)),
+    })
+}
+
+/*
+An enum with a unit variant given for a trait bound, `<T: Named>`. The
+checker says "`Mode` does not satisfy the bound `Named`", which reads as
+a missing impl, and `impl Named for Mode` is right there.
+
+The error itself holds: a bound reaches the trait's methods through the
+value, and a unit variant is a string, which carries none of them. So
+the report stays and says why.
+*/
+fn unit_enum_bound_report(message: &str, shapes: &[crate::declarations::Shape]) -> Option<Resited> {
+    let text = crate::shapes::friendly_text(message);
+    let (head, tail) = text.split_once("` does not satisfy the bound `")?;
+    let got = head.rsplit_once('`')?.1;
+    let bound = tail.split_once('`')?.0;
+    let unit = shapes.iter().any(|s| match s {
+        crate::declarations::Shape::Enum { name, variants, .. } => {
+            name == got && variants.iter().any(|(_, payload)| payload.is_empty())
+        }
+
+        _ => false,
+    });
+
+    unit.then(|| Resited {
+        kind: "BoundError",
+        message: format!(
+            "`{got}` has a unit variant, a string at runtime, so it cannot meet the bound `{bound}`: a bound reaches the trait's methods through the value, and a string carries none of them"
+        ),
+        at: None,
     })
 }
 
@@ -2822,6 +2854,30 @@ end
         );
         assert_eq!(got.kind, "BoundError");
         assert_eq!(got.at, Some((9, 16)));
+    }
+
+    /// `announce(Mode.On)` under `<T: Named>` read "`Mode` does not
+    /// satisfy the bound `Named`" beside `impl Named for Mode`. A bound
+    /// reaches the methods through the value, which a string cannot
+    /// answer, so the report stays and names the unit variant. A struct
+    /// keeps the checker's words.
+    #[test]
+    fn a_unit_enum_under_a_trait_bound_names_the_unit_variant() {
+        let source = "trait Named as\n    function hi(self): string\n        return \"hi\"\n    end\nend\nenum Mode as On, Off end\nimpl Named for Mode as\nend\nstruct Plain as\n    n: number\nend\n";
+        let shapes = crate::declarations::shapes(source);
+        let raw = |got: &str| {
+            format!(
+                "Expected this to be '{got} & Named', but got '{got}'; this is because the 2nd component of the intersection is `Named`, which is not a subtype of `{got}`"
+            )
+        };
+        let got = resite_report(&raw("Mode"), &shapes, source, 6, 1).expect("a rewrite");
+
+        assert_eq!(
+            got.message,
+            "`Mode` has a unit variant, a string at runtime, so it cannot meet the bound `Named`: a bound reaches the trait's methods through the value, and a string carries none of them"
+        );
+        assert_eq!(got.kind, "BoundError");
+        assert_eq!(resite_report(&raw("Plain"), &shapes, source, 6, 1), None);
     }
 
     #[test]

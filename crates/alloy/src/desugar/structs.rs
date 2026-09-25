@@ -575,12 +575,37 @@ impl<'s> Desugar<'s> {
                     .map(|f| self.text_of(f.path[0]).to_string())
                     .collect();
 
+                // A unit variant is a string, and the default types `self`
+                // as the trait's table, which no string meets. On an enum
+                // with a unit variant the default takes the enum as
+                // `self` and keeps the rest of its type. A struct and a
+                // payload enum keep the trait's `self`.
+                let as_enum = self
+                    .enums
+                    .get(&target_name)
+                    .is_some_and(|vs| vs.iter().any(|(_, n)| *n == 0));
+                let self_ty = match self.generic_types.contains(&target_name) {
+                    true => "any",
+
+                    false => target.as_str(),
+                };
+
                 for m in defaults {
                     if self.options.check {
                         // The impl's own method keeps its type.
-                        if !written.contains(&m) {
-                            tail.push_str(&format!(" {target}.{m} = {trait_name}.{m}"));
+                        if written.contains(&m) {
+                            continue;
                         }
+
+                        let value = format!("{trait_name}.{m}");
+                        let value = match as_enum {
+                            true => format!(
+                                "(function<A..., R...>(f: (any, A...) -> R...): ({self_ty}, A...) -> R... return f :: any end)({value})"
+                            ),
+
+                            false => value,
+                        };
+                        tail.push_str(&format!(" {target}.{m} = {value}"));
                     } else {
                         tail.push_str(&format!(
                             " if rawget({target}, \"{m}\") == nil then {target}.{m} = {trait_name}.{m} end"
@@ -4433,5 +4458,31 @@ mod tests {
         ] {
             assert!(out.check.contains(want), "{want}\n{}", out.check);
         }
+    }
+
+    /// A trait default types `self` as the trait's table, and a unit
+    /// variant is a string, so `Mode.hi(Mode.On)` did not check. On an
+    /// enum with a unit variant the check artifact passes the default
+    /// through a cast that takes the enum as `self` and keeps the rest.
+    /// A struct and a payload enum take the default as it is, and the
+    /// ship artifact does not change.
+    #[test]
+    fn a_trait_default_on_a_unit_enum_takes_the_enum_as_self() {
+        let src = "trait Named as\n    function hi(self): string\n        return \"hi\"\n    end\nend\nenum Mode as On, Off end\nimpl Named for Mode as\nend\nenum Shape as\n    Dot(number)\nend\nimpl Named for Shape as\nend\nstruct Dog as\n    n: number\nend\nimpl Named for Dog as\nend\n";
+        let out = crate::compile(src).unwrap();
+        let cast = |ty: &str| {
+            format!(
+                "(function<A..., R...>(f: (any, A...) -> R...): ({ty}, A...) -> R... return f :: any end)(Named.hi)"
+            )
+        };
+
+        assert!(
+            out.check.contains(&format!("Mode.hi = {}", cast("Mode"))),
+            "{}",
+            out.check
+        );
+        assert!(out.check.contains("Shape.hi = Named.hi"), "{}", out.check);
+        assert!(out.check.contains("Dog.hi = Named.hi"), "{}", out.check);
+        assert!(!out.ship.contains("function<A..."), "{}", out.ship);
     }
 }

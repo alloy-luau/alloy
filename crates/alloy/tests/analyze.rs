@@ -1663,3 +1663,26 @@ fn a_binding_on_a_roblox_tag_checks_its_value_in_either_solver() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// `impl Named for Mode` gives a unit enum the trait's default `hi`, and
+/// `Mode.hi(Mode.On)` gave "Expected this to be 'Named', but got 'Mode'":
+/// the default typed `self` as the trait's table, and a unit variant is
+/// a string. On an enum with a unit variant the default now takes the
+/// enum as `self`. A struct and a payload enum keep the trait's `self`,
+/// and the return type stays.
+#[test]
+fn a_trait_default_takes_a_unit_enum_as_self() {
+    let src = "trait Named as\n    function hi(self, n: number): string\n        return \"hi\"\n    end\nend\nenum Mode as On, Off end\nimpl Named for Mode as\nend\nenum Opt as\n    Some(number)\n    Nil\nend\nimpl Named for Opt as\nend\nstruct Dog as\n    n: number\nend\nimpl Named for Dog as\nend\nlocal a: string = Mode.hi(Mode.On, 1)\nlocal b: string = Opt.hi(Opt.Nil, 2)\nlocal c: string = Opt.hi(Opt.Some(1), 3)\nlocal d: string = Dog.hi(new Dog { n = 1 }, 4)\nprint(a, b, c, d)\n";
+    analyze(src, "trait-unit-enum");
+
+    let bad = "trait Named as\n    function hi(self): string\n        return \"hi\"\n    end\nend\nenum Mode as On, Off end\nimpl Named for Mode as\nend\nstruct Dog as\n    n: number\nend\nimpl Named for Dog as\nend\nlocal n: number = Mode.hi(Mode.On)\nprint(Mode.hi(5))\nprint(Dog.hi(5))\nprint(n)\n";
+    let Some(reported) = reports(bad, "trait-unit-enum-bad") else {
+        return;
+    };
+
+    assert_eq!(reported.len(), 3, "{}", reported.join("\n"));
+    assert!(reported[0].contains("Expected this to be 'number', but got 'string'"));
+    // The raw checker names the union; `flux` names it `Mode`.
+    assert!(reported[1].contains("Expected this to be '\"Off\" | \"On\"', but got 'number'"));
+    assert!(reported[2].contains("Expected this to be 'Named', but got 'number'"));
+}

@@ -31,13 +31,26 @@ fn global_types() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/types/globalTypes.d.luau")
 }
 
-struct KillOnDrop(std::process::Child);
+/// The server, and the folder of its mirrors. The drop kills the server
+/// and removes the folder, so a test run leaves no mirror behind.
+struct KillOnDrop(std::process::Child, PathBuf);
 
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
+        let _ = std::fs::remove_dir_all(&self.1);
     }
+}
+
+/// Starts the server with its mirrors in a folder of its own.
+fn serve(command: &mut Command) -> KillOnDrop {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mirrors = std::env::temp_dir().join(format!("alloy-lsp-test-{}-{n}", std::process::id()));
+    let child = command.env("ALLOY_LSP_MIRRORS", &mirrors).spawn().unwrap();
+
+    KillOnDrop(child, mirrors)
 }
 
 fn write(w: &mut impl Write, v: &Value) {
@@ -339,7 +352,7 @@ fn start_env(child: &Path, init_params: Value, env: &[(&str, &str)]) -> Session 
         command.env(name, value);
     }
 
-    let mut server = KillOnDrop(
+    let mut server = serve(
         command
             .arg("--luau-lsp")
             .arg(child)
@@ -351,9 +364,7 @@ fn start_env(child: &Path, init_params: Value, env: &[(&str, &str)]) -> Session 
                 Stdio::inherit()
             } else {
                 Stdio::null()
-            })
-            .spawn()
-            .unwrap(),
+            }),
     );
     let stdin = server.0.stdin.take().unwrap();
     let rx = messages(server.0.stdout.take().unwrap());

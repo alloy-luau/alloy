@@ -1468,8 +1468,16 @@ pub(crate) fn mirror_above(root: Option<&Path>) -> usize {
     deepest.clamp(ABOVE, ABOVE_MAX)
 }
 
+/// The folder that holds the mirror of every root. `ALLOY_LSP_MIRRORS`
+/// moves it, so a test run keeps its mirrors in a folder it removes.
+fn mirror_parent() -> PathBuf {
+    std::env::var_os("ALLOY_LSP_MIRRORS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("alloy-lsp"))
+}
+
 pub(crate) fn mirror_dir(root: Option<&Path>, above: usize) -> PathBuf {
-    let mut dir = std::env::temp_dir().join("alloy-lsp").join(root_key(root));
+    let mut dir = mirror_parent().join(root_key(root));
 
     for _ in 0..above {
         dir.push("up");
@@ -1478,11 +1486,25 @@ pub(crate) fn mirror_dir(root: Option<&Path>, above: usize) -> PathBuf {
     dir.join("root")
 }
 
-/// Removes the mirrors of other roots that no server touched for a
-/// week. A server that was killed leaves its mirror behind, and a
-/// probe that opens thousands of roots leaves one each.
+/// The file in the base of a mirror that names the server that uses it.
+const OWNER: &str = "server.pid";
+
+/// Writes the pid of this server into its mirror. The purge of another
+/// server then keeps the mirror while this server runs.
+pub(crate) fn claim_mirror(mirror: &Path) {
+    let _ = std::fs::write(
+        mirror_base(mirror).join(OWNER),
+        std::process::id().to_string(),
+    );
+}
+
+/// Removes the mirrors of other roots that no server touched for a day
+/// and no live server owns. A server that was killed leaves its mirror
+/// behind, and a test or a probe that opens many roots leaves one each.
+/// Only a folder named like a root key goes, so a parent set by hand
+/// loses nothing else.
 pub(crate) fn purge_stale_mirrors(mirror: &Path) {
-    const WEEK: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+    const DAY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
     let own = mirror_base(mirror).to_path_buf();
     let Some(parent) = own.parent() else {
         return;
@@ -1490,26 +1512,46 @@ pub(crate) fn purge_stale_mirrors(mirror: &Path) {
     let Ok(entries) = std::fs::read_dir(parent) else {
         return;
     };
-    let now = std::time::SystemTime::now();
 
     for entry in entries.flatten() {
         let path = entry.path();
+        let keyed = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| n.len() == 16 && n.chars().all(|c| c.is_ascii_hexdigit()));
 
-        if path == own {
+        if path == own || !keyed {
             continue;
         }
 
-        let stale = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| now.duration_since(t).ok())
-            .is_some_and(|age| age > WEEK);
-
-        if stale {
+        if age(&path).is_some_and(|a| a > DAY) && !owner_alive(&path) {
             let _ = std::fs::remove_dir_all(&path);
         }
     }
+}
+
+/// How long ago a file or a folder last changed.
+fn age(path: &Path) -> Option<std::time::Duration> {
+    let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+
+    std::time::SystemTime::now().duration_since(modified).ok()
+}
+
+/// Whether the server in the pid file of a mirror still runs. Linux
+/// lists each live process under `/proc`. Other systems give std no
+/// such check, so there a pid file younger than a week counts as live.
+fn owner_alive(base: &Path) -> bool {
+    const WEEK: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+    let file = base.join(OWNER);
+
+    if cfg!(target_os = "linux") {
+        return std::fs::read_to_string(&file)
+            .ok()
+            .and_then(|t| t.trim().parse::<u32>().ok())
+            .is_some_and(|pid| Path::new("/proc").join(pid.to_string()).exists());
+    }
+
+    age(&file).is_some_and(|a| a < WEEK)
 }
 
 /// How many folders above its root a mirror keeps: the `up` folders

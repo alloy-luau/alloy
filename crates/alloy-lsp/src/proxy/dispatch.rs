@@ -144,6 +144,7 @@ impl Server {
                 let _ = std::fs::remove_dir_all(mirror_base(&st.mirror));
                 purge_stale_mirrors(&st.mirror);
                 let _ = std::fs::create_dir_all(&st.mirror);
+                claim_mirror(&st.mirror);
                 st.root = root;
                 st.initialize_id = message.get("id").map(id_key);
                 st.snippets = message

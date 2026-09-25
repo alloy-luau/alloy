@@ -1047,29 +1047,54 @@ pub(crate) fn a_range_in_a_macro_expansion_covers_the_call() {
     assert_eq!(range, range_value((4, 10), (4, 26)), "{}", doc.shadow);
 }
 
-/// A mirror another root left behind a week ago goes at initialize; a
-/// fresh one and the session's own stay.
+/// A mirror another root left behind two days ago goes at initialize.
+/// A fresh one, one a live server owns, the session's own, and a
+/// folder that is no mirror stay. A week was too long: killed servers
+/// and test runs left thousands of mirrors.
 #[test]
 pub(crate) fn stale_mirrors_of_other_roots_are_purged() {
     let base = std::env::temp_dir().join(format!("alloy-lsp-purge-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
-    let own = base.join("own").join("root");
-    let old = base.join("old");
-    let fresh = base.join("fresh");
+    let own = base.join("0000000000000000").join("root");
+    let [old, dead, live, fresh, other] = [
+        "1111111111111111",
+        "2222222222222222",
+        "3333333333333333",
+        "4444444444444444",
+        "not-a-mirror",
+    ]
+    .map(|n| base.join(n));
     std::fs::create_dir_all(&own).expect("own");
-    std::fs::create_dir_all(&old).expect("old");
-    std::fs::create_dir_all(&fresh).expect("fresh");
-    let week_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 24 * 60 * 60);
-    std::fs::File::open(&old)
-        .expect("old dir")
-        .set_modified(week_ago)
-        .expect("mtime");
+
+    for dir in [&old, &dead, &live, &fresh, &other] {
+        std::fs::create_dir_all(dir).expect("dir");
+    }
+
+    std::fs::write(dead.join("server.pid"), u32::MAX.to_string()).expect("dead pid");
+    claim_mirror(&live.join("root"));
+    let two_days_ago =
+        std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 24 * 60 * 60);
+
+    for dir in [&old, &dead, &live, &other] {
+        std::fs::File::open(dir)
+            .expect("dir")
+            .set_modified(two_days_ago)
+            .expect("mtime");
+    }
 
     purge_stale_mirrors(&own);
 
     assert!(own.exists());
     assert!(fresh.exists());
+    assert!(live.exists(), "a live server owns it");
+    assert!(other.exists(), "no mirror");
     assert!(!old.exists());
+
+    // Only Linux can tell that the pid names no process.
+    if cfg!(target_os = "linux") {
+        assert!(!dead.exists());
+    }
+
     let _ = std::fs::remove_dir_all(&base);
 }
 

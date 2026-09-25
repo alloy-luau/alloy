@@ -2,6 +2,8 @@
 //! bracket groups, which groups must break, and the rendering of the
 //! tree into lines.
 
+use alloy_syntax::lexer::TokKind;
+
 use super::{Formatter, ItemKind, Node, closer_of, closes, expression_context, opens};
 
 impl<'s> Formatter<'s> {
@@ -47,9 +49,10 @@ impl<'s> Formatter<'s> {
             // `): number?` ends a signature line; the `if` that opens
             // the next line is a statement, not a ternary.
             "if" => {
-                !prev.is_some_and(expression_context)
-                    || (self.first_on_line(i)
-                        && matches!(prev, Some("?") | Some("!") | Some(">") | Some(">>")))
+                !self.expr_ifs.contains(&self.items[i].start)
+                    && (!prev.is_some_and(expression_context)
+                        || (self.first_on_line(i)
+                            && matches!(prev, Some("?") | Some("!") | Some(">") | Some(">>"))))
             }
 
             "do" => !self.for_header_before(i),
@@ -187,8 +190,9 @@ impl<'s> Formatter<'s> {
             Contract,
             Match,
             Arm,
-            /// An `if` expression, with the bracket depth it opened at.
-            ExprIf(usize),
+            /// An `if` expression, with the bracket depth it opened at and
+            /// whether its `else` came yet.
+            ExprIf(usize, bool),
             /// The body of a `declare class` or of an extern type's
             /// `with`. Its methods are signatures and open nothing.
             Class,
@@ -200,10 +204,18 @@ impl<'s> Formatter<'s> {
         let level = |stack: &Vec<Frame>| {
             stack
                 .iter()
-                .filter(|f| !matches!(f, Frame::ExprIf(_)))
+                .filter(|f| !matches!(f, Frame::ExprIf(..)))
                 .count()
         };
-        let in_expr_if = |stack: &Vec<Frame>| matches!(stack.last(), Some(Frame::ExprIf(_)));
+        let in_expr_if = |stack: &Vec<Frame>| matches!(stack.last(), Some(Frame::ExprIf(..)));
+        // A line that continues an `if` expression sits one level in per
+        // open `if` expression, so a nested one indents under its parent.
+        let expr_ifs = |stack: &Vec<Frame>| {
+            stack
+                .iter()
+                .filter(|f| matches!(f, Frame::ExprIf(..)))
+                .count()
+        };
         // The open brackets before the item. A closer ends only an `if`
         // expression that opened inside its group, so the `)` of a call
         // in a branch leaves the `if` open.
@@ -233,14 +245,32 @@ impl<'s> Formatter<'s> {
                 || (text == "then" && in_expr_if(&stack))
                 || opens_expr_branch;
 
+            // A newline inside a group that opened in the `if` expression
+            // is the group's, so it ends no `if` outside the group.
             if it.newlines_before > 0 && !continues_expr_if {
-                while in_expr_if(&stack) {
+                while matches!(stack.last(), Some(Frame::ExprIf(b, _)) if *b >= brackets) {
+                    stack.pop();
+                }
+            }
+
+            // An `if` expression whose `else` came is whole, so the next
+            // `else` or `elseif` at its depth belongs to the one around it.
+            if matches!(text, "else" | "elseif") {
+                while matches!(stack.last(), Some(Frame::ExprIf(b, true)) if *b == brackets) {
                     stack.pop();
                 }
             }
 
             if opens(text) {
                 brackets += 1;
+            }
+
+            // An `end` or an `until` closes a block, so an `if` expression
+            // before it on its line is whole.
+            if matches!(text, "end" | "until") {
+                while in_expr_if(&stack) {
+                    stack.pop();
+                }
             }
 
             match text {
@@ -285,8 +315,13 @@ impl<'s> Formatter<'s> {
                         stack.push(Frame::Block);
                     } else if in_expr_if(&stack) || (mid_line && self.line_has_before(i, "if")) {
                         // A `then` or `else` that opens a line inside an
-                        // `if` expression continues it, one level in.
-                        depths[i] = level(&stack) + usize::from(!mid_line);
+                        // `if` expression continues it, one level in for
+                        // each open `if` expression.
+                        depths[i] = level(&stack) + if mid_line { 0 } else { expr_ifs(&stack) };
+
+                        if let Some(Frame::ExprIf(_, has_else)) = stack.last_mut() {
+                            *has_else |= text == "else";
+                        }
                     } else if stack.last() == Some(&Frame::Block) {
                         depths[i] = level(&stack).saturating_sub(1);
                     } else {
@@ -311,25 +346,31 @@ impl<'s> Formatter<'s> {
                     brackets = brackets.saturating_sub(1);
 
                     // An expression `if` ends at the closer of its group.
-                    while matches!(stack.last(), Some(Frame::ExprIf(b)) if *b > brackets) {
+                    while matches!(stack.last(), Some(Frame::ExprIf(b, _)) if *b > brackets) {
                         stack.pop();
                     }
                 }
 
                 "then" if in_expr_if(&stack) && it.newlines_before > 0 => {
-                    depths[i] = level(&stack) + 1;
+                    depths[i] = level(&stack) + expr_ifs(&stack);
                 }
 
                 _ => {
-                    depths[i] = level(&stack) + usize::from(opens_expr_branch);
+                    depths[i] = level(&stack)
+                        + if opens_expr_branch {
+                            expr_ifs(&stack)
+                        } else {
+                            0
+                        };
 
                     if text == "if"
                         && ((prev.is_some_and(expression_context)
                             && !(self.first_on_line(i)
                                 && matches!(prev, Some("?") | Some("!") | Some(">") | Some(">>"))))
-                            || (matches!(prev, Some("then") | Some("else")) && in_expr_if(&stack)))
+                            || (matches!(prev, Some("then") | Some("else")) && in_expr_if(&stack))
+                            || self.expr_ifs.contains(&it.start))
                     {
-                        stack.push(Frame::ExprIf(brackets));
+                        stack.push(Frame::ExprIf(brackets, false));
                     } else if text == "match" && !it.name_here && self.starts_block(i) {
                         stack.push(Frame::Match);
                     } else if text == "trait" && self.starts_block(i) {
@@ -555,6 +596,12 @@ impl<'s> Formatter<'s> {
     pub(crate) fn hard_breaks(&self, tree: &[Node]) -> Vec<bool> {
         let mut hard = vec![false; self.items.len()];
         self.mark_hard(tree, &mut hard, false, 0);
+
+        // An interpolation hole keeps its line, so a newline in one joins.
+        for (h, inside) in hard.iter_mut().zip(&self.hole) {
+            *h &= !inside;
+        }
+
         hard
     }
 
@@ -748,6 +795,10 @@ impl<'s> Formatter<'s> {
         hard: &[bool],
         open: usize,
     ) -> bool {
+        if self.hole[open] {
+            return false;
+        }
+
         if magic && self.options.magic_trailing_comma {
             return true;
         }
@@ -803,6 +854,12 @@ impl<'s> Formatter<'s> {
 
         if has_forced {
             return true;
+        }
+
+        // The `if` expression around the group breaks at its keywords
+        // before the group breaks, the way StyLua lays one out.
+        if self.held[open] {
+            return false;
         }
 
         let mut width = self.items[open].width();
@@ -987,19 +1044,21 @@ impl<'s> Formatter<'s> {
     /// Breaks every `if` expression the last render left on one line past
     /// `column_width`. True when one broke, so the caller renders again.
     ///
-    /// The shape is the one a hand-broken `if` expression already takes:
-    /// each branch on its own line one level in, with `else` and `elseif`
-    /// opening a line of their own. The two forms then read the same, and
-    /// a second run changes nothing.
+    /// The shape is StyLua's: the condition stays after the `if`, and the
+    /// first `then` and each `elseif` and `else` open a line one level in,
+    /// each with its value. An `if` inside one that breaks here waits for
+    /// the next pass, so it breaks only when its own line is too long.
     pub(crate) fn force_long_expr_ifs(&mut self) -> bool {
         let mut changed = false;
+        // The end of the last `if` that broke in this pass.
+        let mut broke_until = 0;
 
         for i in 0..self.items.len() {
-            if !self.items[i].is("if") || self.starts_block(i) {
+            if i < broke_until || self.hole[i] || !self.items[i].is("if") || self.starts_block(i) {
                 continue;
             }
 
-            let breaks = self.expr_if_breaks(i);
+            let (breaks, end) = self.expr_if_breaks(i);
 
             if breaks.is_empty() || breaks.iter().any(|b| self.forced[*b]) {
                 continue;
@@ -1023,19 +1082,24 @@ impl<'s> Formatter<'s> {
                 self.items[b].newlines_before = self.items[b].newlines_before.max(1);
             }
 
+            broke_until = end;
             changed = true;
         }
 
         changed
     }
 
-    /// The items an `if` expression breaks before: the value after each
-    /// `then`, and each `else` or `elseif` with the value after `else`.
-    /// Empty for an expression this rule leaves alone, which is one that
-    /// holds another `if` expression.
-    fn expr_if_breaks(&self, start: usize) -> Vec<usize> {
+    /// The items an `if` expression breaks before, the first `then` and
+    /// each `elseif` and `else`, and the index past its last item. An `if`
+    /// inside it keeps its own keywords. No breaks for an expression the
+    /// parser would refuse.
+    fn expr_if_breaks(&self, start: usize) -> (Vec<usize>, usize) {
         let mut out = Vec::new();
         let mut depth = 0i32;
+        // The `if` expressions open inside this one. Each takes the next
+        // `else`, and an `elseif` before it.
+        let mut inner = 0usize;
+        let mut has_else = false;
         let mut i = start + 1;
 
         while i < self.items.len() {
@@ -1068,27 +1132,22 @@ impl<'s> Formatter<'s> {
                 depth -= 1;
             } else if depth == 0 {
                 match text {
-                    "then" => match self.next_code(i) {
-                        Some(n) => out.push(n),
+                    "if" => inner += 1,
 
-                        None => break,
-                    },
+                    // A keyword after this expression's own `else`
+                    // belongs to an `if` around it.
+                    "then" | "elseif" | "else" if inner == 0 && has_else => break,
 
-                    "elseif" => out.push(i),
+                    "then" if inner == 0 && out.is_empty() => out.push(i),
+
+                    "elseif" if inner == 0 => out.push(i),
+
+                    "else" if inner > 0 => inner -= 1,
 
                     "else" => {
+                        has_else = true;
                         out.push(i);
-
-                        match self.next_code(i) {
-                            Some(n) => out.push(n),
-
-                            None => break,
-                        }
                     }
-
-                    // Another `if` expression: the shape has no room for
-                    // one, so this expression keeps its line.
-                    "if" => return Vec::new(),
 
                     "," | ";" | "end" | "do" | "return" => break,
 
@@ -1099,7 +1158,52 @@ impl<'s> Formatter<'s> {
             i += 1;
         }
 
-        out
+        (out, i)
+    }
+
+    /// The items of each `if` expression that has no hard break inside it
+    /// yet. See `held`.
+    pub(crate) fn held_items(&self, hard: &[bool]) -> Vec<bool> {
+        let mut held = vec![false; self.items.len()];
+
+        for i in 0..self.items.len() {
+            if !self.items[i].is("if") || self.starts_block(i) {
+                continue;
+            }
+
+            let (breaks, end) = self.expr_if_breaks(i);
+
+            if !breaks.is_empty() && !hard[i + 1..end].contains(&true) {
+                held[i..end].fill(true);
+            }
+        }
+
+        held
+    }
+
+    /// Whether each item sits inside an interpolation hole. The `}` that
+    /// closes a hole counts, so no line breaks before it either.
+    pub(crate) fn holes(&self) -> Vec<bool> {
+        let mut depth = 0usize;
+
+        self.items
+            .iter()
+            .map(|it| match it.kind {
+                ItemKind::Tok(TokKind::InterpHead) => {
+                    depth += 1;
+
+                    depth > 1
+                }
+
+                ItemKind::Tok(TokKind::InterpTail) => {
+                    depth = depth.saturating_sub(1);
+
+                    true
+                }
+
+                _ => depth > 0,
+            })
+            .collect()
     }
 
     // --- the `match` block ---------------------------------------------------------

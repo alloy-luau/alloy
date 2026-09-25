@@ -624,3 +624,42 @@ fn a_side_file_cannot_use_a_remote_of_the_other_side() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/*
+An imported struct gives its derives to this file: a field of it clones
+and serializes through it. The lookup took the first project struct of
+the name. A private `Inner` in another file then decided it: a clone
+shared the imported value, or called an `Inner.clone` that was nil.
+*/
+#[test]
+fn a_private_struct_of_the_same_name_gives_no_derives() {
+    let dir = temp_project("derive-scope");
+    fs::create_dir_all(dir.join("src/shared")).unwrap();
+    fs::write(dir.join("alloy.toml"), "[build]\nout = \"dist\"\n").unwrap();
+    // `a.aly` sorts first, so its private structs came first.
+    fs::write(
+        dir.join("src/a.aly"),
+        "struct Real\n    n: number\nend\n@derive(Clone)\nstruct Bare\n    n: number\nend\nprint(new Real { n = 0 }, new Bare { n = 0 })\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/shared/inner.aly"),
+        "@derive(Clone)\nexport struct Real\n    n: number\nend\nexport struct Bare\n    n: number\nend\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/main.aly"),
+        "import { Real } from \"./shared/inner\"\nimport * as I from \"./shared/inner\"\n@derive(Clone)\nstruct Bag\n    real: Real\n    bare: I.Bare\nend\nprint(Bag)\n",
+    )
+    .unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run(&dir, &config.build, &config.emit).unwrap();
+    assert!(report.is_clean(), "{report:?}");
+
+    let main = fs::read_to_string(dir.join("dist/main.luau")).unwrap();
+    assert!(main.contains("v.real = Real.clone(v.real)"), "{main}");
+    assert!(!main.contains("I.Bare.clone"), "{main}");
+
+    let _ = fs::remove_dir_all(&dir);
+}

@@ -401,7 +401,7 @@ impl<'s> Desugar<'s> {
     /// The module this file is, as the project shapes name it: the
     /// longest one its path ends with. A test build names the file
     /// `src/types.aly`, and the module is `types.aly`.
-    fn own_module(&self) -> Option<&str> {
+    pub(crate) fn own_module(&self) -> Option<&str> {
         let path = std::path::Path::new(&self.options.file_name);
 
         self.options
@@ -421,7 +421,12 @@ impl<'s> Desugar<'s> {
     the same name in an unrelated file then made the name ambiguous, and
     the layout lost its struct, its enum slots, or its registration.
     */
-    fn project_type(&self, module: &str, ty: &str, hops: usize) -> Option<&crate::StructShape> {
+    pub(crate) fn project_type(
+        &self,
+        module: &str,
+        ty: &str,
+        hops: usize,
+    ) -> Option<&crate::StructShape> {
         // Two modules that import a name from each other would loop.
         if hops > 8 {
             return None;
@@ -455,7 +460,7 @@ impl<'s> Desugar<'s> {
     /// never imports is not the type the parameter names: a `Player`
     /// struct elsewhere made `target: Player` a table layout, and the
     /// remote then refused every real Player.
-    fn imported_type(&self, ty: &str) -> Option<&crate::StructShape> {
+    pub(crate) fn imported_type(&self, ty: &str) -> Option<&crate::StructShape> {
         let bound = match ty.split_once('.') {
             Some((star, _)) => self.star_modules.contains(star),
 

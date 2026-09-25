@@ -1780,13 +1780,16 @@ impl<'s> Desugar<'s> {
 
             // A struct another file declares derives for this file too:
             // a field of it clones, defaults, and serializes through it.
-            if let Some(shape) = self
-                .options
-                .shapes
-                .iter()
-                .find(|s| s.name == name && s.variants.is_empty())
-            {
-                for d in &shape.derives {
+            // The import says which struct: a private one of the same
+            // name elsewhere gave its derives, and a clone shared a table.
+            let derives = self
+                .own_module()
+                .and_then(|m| self.project_type(m, &local, 0))
+                .filter(|s| s.variants.is_empty())
+                .map(|s| s.derives.clone());
+
+            if let Some(derives) = derives {
+                for d in &derives {
                     let set = match d.as_str() {
                         "Clone" => &mut self.cloneable,
 

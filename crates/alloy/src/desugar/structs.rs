@@ -1872,16 +1872,10 @@ impl<'s> Desugar<'s> {
     /// Whether `ty` names a struct through a star import, `I.Item`, and
     /// that struct derives `which` in the file that declares it.
     fn star_derives(&self, ty: &str, which: &str) -> bool {
-        let Some((module, name)) = ty.split_once('.') else {
-            return false;
-        };
-
-        self.star_modules.contains(module)
+        ty.contains('.')
             && self
-                .options
-                .shapes
-                .iter()
-                .any(|s| s.name == name && s.derives.iter().any(|d| d == which))
+                .imported_type(ty)
+                .is_some_and(|s| s.derives.iter().any(|d| d == which))
     }
 
     /// The copy `Clone` writes for a field of type `ty` read at `field`,

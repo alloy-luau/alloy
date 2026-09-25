@@ -680,7 +680,7 @@ impl<'s> Desugar<'s> {
     /// The type name a scrutinee casts to. A generic enum's alias asks
     /// for arguments the arms do not spell, so the scrutinee keeps the
     /// type it has.
-    fn castable_enum(&self, e: &str) -> Option<String> {
+    pub(crate) fn castable_enum(&self, e: &str) -> Option<String> {
         let name = self.enum_type_name(e);
         // `Result` is the runtime's generic enum. The file binds no
         // table of that name, so it has no constructor to read.
@@ -3673,6 +3673,34 @@ mod tests {
         // The ship artifact keeps the untyped constructor.
         assert!(
             out.ship.contains("function Shape.Rect(_1, _2) return"),
+            "{}",
+            out.ship
+        );
+    }
+
+    /// `local one: Kind[] = [Kind.Slide(1)]` gave "the type arguments of
+    /// `Kind` differ": the list took the variant's own type, and a list
+    /// is invariant. The check artifact casts each item that constructs
+    /// a variant to its enum. The ship artifact stays as it was.
+    #[test]
+    fn a_variant_in_a_list_literal_is_cast_to_its_enum() {
+        let src = "enum Kind as\n    Slide(number)\n    Spin(number)\n    Idle\nend\nlocal one: Kind[] = [Kind.Slide(1), Kind.Idle]\nlocal t: { Kind } = { Kind.Spin(2), n = Kind.Spin(3) }\nprint(one, t)\n";
+        let out = crate::compile(src).unwrap();
+
+        assert!(
+            out.check
+                .contains("Array.from({(Kind.Slide(1) :: Kind), Kind.Idle})"),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check
+                .contains("{ (Kind.Spin(2) :: Kind), n = Kind.Spin(3) }"),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.ship.contains("{Kind.Slide(1), Kind.Idle}"),
             "{}",
             out.ship
         );

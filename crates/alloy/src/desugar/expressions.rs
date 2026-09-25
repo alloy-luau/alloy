@@ -212,6 +212,57 @@ impl<'s> Desugar<'s> {
     }
 
     /*
+    `[Kind.Slide(1)]` in the check artifact. A payload constructor returns
+    its own variant, so the solver typed the list `{ Slide }`, and a list
+    is invariant: `Kind[]` refused it. Each item that constructs a variant
+    is cast to its enum, `(Kind.Slide(1) :: Kind)`, in an array literal
+    and in the list part of a table literal.
+    */
+    fn note_variant_items(&mut self, e: &Expr) {
+        let items: Vec<&Expr> = match e {
+            Expr::Array { items, .. } => items.iter().collect(),
+
+            Expr::Table { fields, .. } => fields
+                .iter()
+                .filter_map(|f| match f {
+                    TableField::Positional(v) => Some(v),
+
+                    _ => None,
+                })
+                .collect(),
+
+            _ => return,
+        };
+
+        for item in items {
+            let Expr::Call {
+                func, method: None, ..
+            } = item
+            else {
+                continue;
+            };
+            let Expr::Index {
+                object,
+                key: IndexKey::Field(v),
+                ..
+            } = func.as_ref()
+            else {
+                continue;
+            };
+            let variant = self.text_of(*v);
+
+            if let Some(name) = self.dotted_name(object)
+                && let Some(variants) = self.enum_decls.get(&name)
+                && variants.iter().any(|(n, k)| n == variant && *k > 0)
+                && let Some(ty) = self.castable_enum(&name)
+            {
+                self.variant_casts
+                    .insert(std::ptr::from_ref(item) as usize, ty);
+            }
+        }
+    }
+
+    /*
     Renders an expression. A hoist goes in front of the statement, so it
     runs first. That is wrong when `e` runs on some paths only, when the
     statement has called code already, and when `e` calls code after the
@@ -228,6 +279,21 @@ impl<'s> Desugar<'s> {
             self.generate(end, &format!(" :: any) :: {cast})"));
 
             return;
+        }
+
+        // An item of a list literal that constructs a variant; see
+        // `note_variant_items`.
+        if let Some(ty) = self.variant_casts.remove(&(std::ptr::from_ref(e) as usize)) {
+            let (start, end) = (self.byte_start(e.span()), self.byte_end(e.span()));
+            self.generate(start, "(");
+            self.expr(e);
+            self.generate(end, &format!(" :: {ty})"));
+
+            return;
+        }
+
+        if self.options.check {
+            self.note_variant_items(e);
         }
 
         // A field of `new S { }` constructs under its declared type.

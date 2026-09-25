@@ -3193,7 +3193,7 @@ pub fn import_problems(
 }
 
 /// The quoted path of every `import ... from "..."` and `export ... from "..."`.
-fn import_specs(source: &str) -> Vec<String> {
+pub(crate) fn import_specs(source: &str) -> Vec<String> {
     let mut out = Vec::new();
 
     for line in source.lines() {

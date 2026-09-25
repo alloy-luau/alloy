@@ -163,128 +163,191 @@ pub fn struct_shapes(
         let Ok(src) = std::fs::read_to_string(path) else {
             continue;
         };
-        let module = module_of(path);
-        let Ok(parsed) = alloy_syntax::parse_one(&src) else {
-            continue;
-        };
-        // A barrel's `export { Inner } from "./inner"` binds the name
-        // for an importer the way an import does.
-        let passed =
-            crate::modules::reexports(&src)
-                .into_iter()
-                .filter_map(|(name, exported, spec)| {
-                    let target = crate::modules::resolve(&spec, path, aliases)?;
+        // The key holds all the result reads: the text, the base, the
+        // aliases, and the file each import names now.
+        let key = {
+            use std::hash::{Hash, Hasher};
 
-                    Some((exported, module_of(&target), name))
-                });
-        scopes.push(crate::WireScope {
-            module: module.clone(),
-            names: crate::modules::named_specs(&src, path, aliases)
-                .into_iter()
-                .map(|(target, name, local)| (local, module_of(&target), name))
-                .chain(passed)
-                .collect(),
-            stars: crate::modules::star_locals(&src, path, aliases)
-                .into_iter()
-                .map(|(target, local)| (local, module_of(&target)))
-                .collect(),
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (&src, &base, aliases).hash(&mut h);
+
+            for spec in crate::modules::import_specs(&src) {
+                crate::modules::resolve(&spec, path, aliases).hash(&mut h);
+            }
+
+            h.finish()
+        };
+        let held = shape_cache().lock().ok().and_then(|c| {
+            c.get(path)
+                .filter(|(k, _)| *k == key)
+                .map(|(_, own)| own.clone())
         });
-        let text =
-            |span: alloy_syntax::ast::TokSpan| span.text(&src, &parsed.lexed.toks).to_string();
-        // A field type may name an alias of this file, which an
-        // importer cannot see, so it reads as its value.
-        let mut type_aliases = std::collections::HashMap::new();
+        let own = match held {
+            Some(own) => own,
 
-        for stmt in &parsed.chunk.block.stmts {
-            if let alloy_syntax::ast::Stmt::TypeAlias(t) = stmt.under_default()
-                && let Some((_, value)) = text(t.span).split_once('=')
-            {
-                type_aliases.insert(text(t.name), value.trim().to_string());
-            }
-        }
+            None => {
+                let own = file_shapes(path, &src, &module_of(path), &module_of, aliases);
 
-        let resolve = |ty: String| -> String {
-            let base = ty.trim_end_matches('?').trim();
-            let optional = &ty[base.len()..];
-
-            if let Some(value) = type_aliases.get(base) {
-                match optional.is_empty() {
-                    true => value.clone(),
-
-                    false => format!("({value}){optional}"),
+                if let Ok(mut c) = shape_cache().lock() {
+                    c.insert(path.clone(), (key, own.clone()));
                 }
-            } else {
-                ty
+
+                own
             }
         };
 
-        for stmt in &parsed.chunk.block.stmts {
-            if let alloy_syntax::ast::Stmt::Enum(e) = stmt.under_default() {
-                let variants = e.variants.iter().map(|v| {
-                    let types = v
-                        .payload
-                        .iter()
-                        .map(|t| resolve(text(*t).trim().to_string()))
-                        .collect();
-
-                    (text(v.name), types)
-                });
-                shapes.push(crate::StructShape {
-                    name: text(e.name),
-                    module: module.clone(),
-                    variants: variants.collect(),
-                    ..Default::default()
-                });
-            }
-
-            let alloy_syntax::ast::Stmt::Struct(st) = stmt.under_default() else {
-                continue;
-            };
-            // A `@skip` field stays off the wire, as it stays out of
-            // the derived table.
-            let fields = st
-                .fields
-                .iter()
-                .filter(|f| {
-                    !f.attributes
-                        .iter()
-                        .any(|a| a.name.map(&text).as_deref() == Some("skip"))
-                })
-                .map(|f| crate::WireField {
-                    name: text(f.name),
-                    ty: resolve(text(f.ty).trim().to_string()),
-                    width: f.attributes.iter().find_map(|a| {
-                        let n = text(a.name?);
-
-                        crate::desugar::WIRE_WIDTHS
-                            .contains(&n.as_str())
-                            .then_some(n)
-                    }),
-                })
-                .collect();
-            let derives = st
-                .attributes
-                .iter()
-                .filter(|a| a.name.map(&text).as_deref() == Some("derive"))
-                .flat_map(|a| a.args.iter().map(|x| text(x.span())))
-                // `serde.Serialize` through a star import of the std.
-                .map(|d: String| match d.rsplit_once('.') {
-                    Some((_, n)) if crate::std_names::is_std_name(n) => n.to_string(),
-
-                    _ => d,
-                })
-                .collect();
-            shapes.push(crate::StructShape {
-                name: text(st.name),
-                fields,
-                derives,
-                module: module.clone(),
-                variants: Vec::new(),
-            });
+        if let Some((own, scope)) = own {
+            shapes.extend(own);
+            scopes.push(scope);
         }
     }
 
     (shapes, scopes)
+}
+
+/// The shapes one source declares and its scope, `None` for a source
+/// that does not parse.
+type FileShapes = Option<(Vec<crate::StructShape>, crate::WireScope)>;
+
+/*
+The shapes of each source, by path, with the key they came from. The
+editor reads the chain of a file's imports on each edit, and most of
+those modules did not change: 31 modules took about 4 ms a read, and a
+held one costs the read of its text and the lookup of its imports.
+*/
+fn shape_cache() -> &'static std::sync::Mutex<HashMap<PathBuf, (u64, FileShapes)>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, (u64, FileShapes)>>> =
+        std::sync::OnceLock::new();
+
+    CACHE.get_or_init(Default::default)
+}
+
+/// The shapes one source declares, and the imports that say what a
+/// name in it means. `module` is the source's own module.
+fn file_shapes(
+    path: &Path,
+    src: &str,
+    module: &str,
+    module_of: &dyn Fn(&Path) -> String,
+    aliases: &[(String, PathBuf)],
+) -> FileShapes {
+    let mut shapes = Vec::new();
+    let parsed = alloy_syntax::parse_one(src).ok()?;
+    // A barrel's `export { Inner } from "./inner"` binds the name
+    // for an importer the way an import does.
+    let passed = crate::modules::reexports(src)
+        .into_iter()
+        .filter_map(|(name, exported, spec)| {
+            let target = crate::modules::resolve(&spec, path, aliases)?;
+
+            Some((exported, module_of(&target), name))
+        });
+    let scope = crate::WireScope {
+        module: module.to_string(),
+        names: crate::modules::named_specs(src, path, aliases)
+            .into_iter()
+            .map(|(target, name, local)| (local, module_of(&target), name))
+            .chain(passed)
+            .collect(),
+        stars: crate::modules::star_locals(src, path, aliases)
+            .into_iter()
+            .map(|(target, local)| (local, module_of(&target)))
+            .collect(),
+    };
+    let text = |span: alloy_syntax::ast::TokSpan| span.text(src, &parsed.lexed.toks).to_string();
+    // A field type may name an alias of this file, which an
+    // importer cannot see, so it reads as its value.
+    let mut type_aliases = std::collections::HashMap::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        if let alloy_syntax::ast::Stmt::TypeAlias(t) = stmt.under_default()
+            && let Some((_, value)) = text(t.span).split_once('=')
+        {
+            type_aliases.insert(text(t.name), value.trim().to_string());
+        }
+    }
+
+    let resolve = |ty: String| -> String {
+        let base = ty.trim_end_matches('?').trim();
+        let optional = &ty[base.len()..];
+
+        if let Some(value) = type_aliases.get(base) {
+            match optional.is_empty() {
+                true => value.clone(),
+
+                false => format!("({value}){optional}"),
+            }
+        } else {
+            ty
+        }
+    };
+
+    for stmt in &parsed.chunk.block.stmts {
+        if let alloy_syntax::ast::Stmt::Enum(e) = stmt.under_default() {
+            let variants = e.variants.iter().map(|v| {
+                let types = v
+                    .payload
+                    .iter()
+                    .map(|t| resolve(text(*t).trim().to_string()))
+                    .collect();
+
+                (text(v.name), types)
+            });
+            shapes.push(crate::StructShape {
+                name: text(e.name),
+                module: module.to_string(),
+                variants: variants.collect(),
+                ..Default::default()
+            });
+        }
+
+        let alloy_syntax::ast::Stmt::Struct(st) = stmt.under_default() else {
+            continue;
+        };
+        // A `@skip` field stays off the wire, as it stays out of
+        // the derived table.
+        let fields = st
+            .fields
+            .iter()
+            .filter(|f| {
+                !f.attributes
+                    .iter()
+                    .any(|a| a.name.map(&text).as_deref() == Some("skip"))
+            })
+            .map(|f| crate::WireField {
+                name: text(f.name),
+                ty: resolve(text(f.ty).trim().to_string()),
+                width: f.attributes.iter().find_map(|a| {
+                    let n = text(a.name?);
+
+                    crate::desugar::WIRE_WIDTHS
+                        .contains(&n.as_str())
+                        .then_some(n)
+                }),
+            })
+            .collect();
+        let derives = st
+            .attributes
+            .iter()
+            .filter(|a| a.name.map(&text).as_deref() == Some("derive"))
+            .flat_map(|a| a.args.iter().map(|x| text(x.span())))
+            // `serde.Serialize` through a star import of the std.
+            .map(|d: String| match d.rsplit_once('.') {
+                Some((_, n)) if crate::std_names::is_std_name(n) => n.to_string(),
+
+                _ => d,
+            })
+            .collect();
+        shapes.push(crate::StructShape {
+            name: text(st.name),
+            fields,
+            derives,
+            module: module.to_string(),
+            variants: Vec::new(),
+        });
+    }
+
+    Some((shapes, scope))
 }
 
 /// The Alloy sources under `input`, sorted.

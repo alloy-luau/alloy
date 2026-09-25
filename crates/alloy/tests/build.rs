@@ -714,3 +714,51 @@ fn a_private_struct_of_the_same_name_gives_no_derives() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/*
+The shapes of each module stay in memory between reads, keyed by the
+text and by the file each import names. A module whose import names a
+file that did not exist yet reads again once the file is there, and a
+changed text reads again.
+*/
+#[test]
+fn a_held_shape_reads_again_when_its_import_resolves() {
+    let dir = temp_project("shape-cache");
+    let base = dir.join("src");
+    let main = base.join("main.aly");
+    fs::write(
+        &main,
+        "import { Late } from \"./late\"\nexport struct Box\n    late: Late\nend\n",
+    )
+    .unwrap();
+
+    let names = || {
+        let (_, scopes) = alloy::build::struct_shapes(std::slice::from_ref(&main), &base, &[]);
+
+        scopes[0].names.clone()
+    };
+    let bound = |local: &str| {
+        vec![(
+            local.to_string(),
+            "late.aly".to_string(),
+            "Late".to_string(),
+        )]
+    };
+    assert!(names().is_empty());
+
+    fs::write(
+        base.join("late.aly"),
+        "export struct Late\n    n: number\nend\n",
+    )
+    .unwrap();
+    assert_eq!(names(), bound("Late"));
+
+    fs::write(
+        &main,
+        "import { Late as L } from \"./late\"\nexport struct Box\n    late: L\nend\n",
+    )
+    .unwrap();
+    assert_eq!(names(), bound("L"));
+
+    let _ = fs::remove_dir_all(&dir);
+}

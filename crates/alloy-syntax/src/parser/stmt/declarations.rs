@@ -236,6 +236,12 @@ impl<'a> Parser<'a> {
             return self.local_function(start, attributes, is_const);
         }
 
+        // `local mut x = 0` is Rust's binding. Luau reads a local named
+        // `mut`, then an assignment to a global `x`.
+        if self.at("mut") && self.name_at(1) && !self.newline_after(0) {
+            return Err(self.err("Alloy has no `mut`; a `local` can change, a `const` cannot"));
+        }
+
         // `local Ok(v) = e [else ... end]` and `local P { x } = e`: a
         // pattern binding.
         if self.pattern_local_follows() {
@@ -769,7 +775,10 @@ impl<'a> Parser<'a> {
                 })
                 .last()
                 .map_or(self.toks[self.pos].end, |t| t.end);
-            let rest = &self.src[self.toks[self.pos].start as usize..end as usize];
+            // `let mut x`: a `local` can change, so the `mut` goes. Kept,
+            // `local mut x` declares `mut` and assigns a global `x`.
+            let from = self.pos + usize::from(self.at("mut") && self.name_at(1));
+            let rest = &self.src[self.toks[from].start as usize..end as usize];
 
             return Err(ParseError {
                 offset: self.toks[start].start as usize,

@@ -385,13 +385,40 @@ impl State {
                 && doc.source.get(start..start + 3) == Some("let")
             {
                 // The report sits on `let`; the rest of the line stands.
-                let (el, ec) = position_of(&doc.source, start + 3);
+                // When the report drops a `mut`, the edit takes it too.
+                let after = &doc.source[start + 3..];
+                let cut = match after.trim_start().strip_prefix("mut") {
+                    Some(tail)
+                        if tail.starts_with(char::is_whitespace)
+                            && !d.message.contains("write `local mut") =>
+                    {
+                        after.len() - tail.len()
+                    }
+
+                    _ => 0,
+                };
+                let (el, ec) = position_of(&doc.source, start + 3 + cut);
 
                 Some((
                     "Write `local`".to_string(),
                     json!([{
                         "range": { "start": { "line": sl, "character": sc }, "end": { "line": el, "character": ec } },
                         "newText": "local",
+                    }]),
+                ))
+            } else if d.message.starts_with("Alloy has no `mut`")
+                && doc.source.get(start..start + 3) == Some("mut")
+            {
+                // `local mut x`: the word and the space after it go.
+                let after = &doc.source[start + 3..];
+                let gap = after.len() - after.trim_start().len();
+                let (el, ec) = position_of(&doc.source, start + 3 + gap);
+
+                Some((
+                    "Remove `mut`".to_string(),
+                    json!([{
+                        "range": { "start": { "line": sl, "character": sc }, "end": { "line": el, "character": ec } },
+                        "newText": "",
                     }]),
                 ))
             } else if d.message.starts_with("type arguments at a call take")

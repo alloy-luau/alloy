@@ -1122,6 +1122,31 @@ pub(crate) fn the_compiler_errors_carry_their_quick_fixes() {
         }])
     );
 
+    // `let mut x` gives `local x`: `local mut x` declares `mut` and
+    // assigns a global `x`.
+    let (st, uri) = one_file("let mut x = 0\nprint(x)\n");
+    let actions = st.compiler_actions(uri, whole);
+    assert_eq!(title(&actions), "Write `local`");
+    assert_eq!(
+        edit(&actions, uri),
+        json!([{
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 7 } },
+            "newText": "local",
+        }])
+    );
+
+    // `local mut x` loses the word.
+    let (st, uri) = one_file("local mut x = 0\nprint(x)\n");
+    let actions = st.compiler_actions(uri, whole);
+    assert_eq!(title(&actions), "Remove `mut`");
+    assert_eq!(
+        edit(&actions, uri),
+        json!([{
+            "range": { "start": { "line": 0, "character": 6 }, "end": { "line": 0, "character": 10 } },
+            "newText": "",
+        }])
+    );
+
     // A call's `<...>` doubles each bracket; the `>` of a function
     // type inside the list is not the close.
     let (st, uri) = one_file("local s = Signal.new<(number) -> ()>()\nprint(s)\n");

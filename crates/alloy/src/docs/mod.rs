@@ -159,6 +159,7 @@ const KIND_RULES: &[(&[&str], &str)] = &[
         &[
             "has no `++`",
             "has no `let`",
+            "has no `mut`",
             "type arguments at a call take",
         ],
         "SyntaxError",

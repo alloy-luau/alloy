@@ -591,6 +591,23 @@ mod tests {
         // `let` stays a name.
         assert!(messages("local let = 1\nprint(let)\n").is_empty());
 
+        // `let mut x` wrote `local mut x`, which declares `mut` and
+        // assigns a global `x`. The line drops the `mut`, and `local mut
+        // x` reports on its own.
+        assert_eq!(
+            messages("let mut x = 0\nprint(x)\n"),
+            vec!["Alloy has no `let`; write `local x = 0` or `const x = 0`"]
+        );
+        let mut_ = "local mut x = 0\nprint(x)\n";
+        assert_eq!(
+            messages(mut_),
+            vec!["Alloy has no `mut`; a `local` can change, a `const` cannot"]
+        );
+        assert_eq!(docs::kind_for(&messages(mut_)[0]), "SyntaxError");
+        assert_eq!(compile(mut_).unwrap().diagnostics[0].start, 6);
+        // `mut` stays a name.
+        assert!(messages("local mut = 1\nlocal mut2, y = mut, 2\nprint(mut2, y)\n").is_empty());
+
         // `export *` said only that the line was not a statement. The
         // report names the forms Alloy takes, with the path written.
         let star = "export * from \"./kinds\"\n";

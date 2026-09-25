@@ -1106,6 +1106,20 @@ pub fn unknown_module_message(
     };
     let shown = |p: &Path| p.to_string_lossy().replace('\\', "/");
 
+    // An `init` file is the module of its folder, and the tree holds no
+    // instance named `init`, so the require names the folder.
+    if let Some(dir) = spec.strip_suffix("/init") {
+        let folder = match dir {
+            "." | ".." => format!("{dir}/"),
+
+            _ => dir.to_string(),
+        };
+
+        return format!(
+            "\"{spec}\" names no module; an `init` file is the module of its folder, so write \"{folder}\""
+        );
+    }
+
     if let Some(rest) = spec.strip_prefix('@') {
         let alias = rest.split('/').next().unwrap_or(rest);
 
@@ -2738,6 +2752,16 @@ end
         assert_eq!(
             unknown_module_message("./data.json", Path::new("src/app/main.aly"), None),
             "\"./data.json\" names no module; no JSON file at src/app/data.json"
+        );
+        // The file is there: the tree names it by its folder. The report
+        // said no file stood at `src/init`.
+        assert_eq!(
+            unknown_module_message("./init", Path::new("src/main.aly"), None),
+            "\"./init\" names no module; an `init` file is the module of its folder, so write \"./\""
+        );
+        assert_eq!(
+            unknown_module_message("../ui/init", Path::new("src/app/main.aly"), None),
+            "\"../ui/init\" names no module; an `init` file is the module of its folder, so write \"../ui\""
         );
         assert_eq!(
             quoted_on_line("import { a } from \"./x\"\nlocal y = 1\n", 0),

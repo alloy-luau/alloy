@@ -4,6 +4,10 @@ use super::*;
 /// drops the answer: the editor already has its own.
 pub(crate) const CHILD_SHUTDOWN_ID: i64 = -900_001;
 
+/// The end of the name of a shadow copy one request reads, beside the
+/// shadow. The child's reports on it reach no one.
+pub(crate) const SCRATCH_SUFFIX: &str = ".__member.luau";
+
 pub struct Server {
     pub(crate) state: Mutex<State>,
     pub(crate) child_in: Mutex<Box<dyn Write + Send>>,
@@ -751,6 +755,18 @@ impl Server {
                     return true;
                 }
 
+                // `player->leaderstats?.`: the check artifact casts the
+                // child to `any`, so the child lists no member of it. A
+                // copy of the shadow without the cast answers instead.
+                if m == "textDocument/completion"
+                    && let Some(text) = self.child_member_scratch(&uri, &message)
+                {
+                    let home = self.member_home(&uri, &message);
+                    self.forward_request_with(message, method.as_deref(), home, Some(text));
+
+                    return true;
+                }
+
                 if m == "textDocument/completion"
                     && let Some(id) = message.get("id").cloned()
                     && self.context_completion(&uri, &message, &id)
@@ -934,7 +950,7 @@ impl Server {
     /// Maps a request about an Alloy document into its shadow and
     /// forwards it, remembering what it was about.
     pub(crate) fn forward_request(&self, message: Value, method: Option<&str>) {
-        self.forward_request_with(message, method, None);
+        self.forward_request_with(message, method, None, None);
     }
 
     /// Forwards a request whose shadow position is already known.
@@ -944,14 +960,17 @@ impl Server {
         method: Option<&str>,
         shadow: (u32, u32),
     ) {
-        self.forward_request_with(message, method, Some(shadow));
+        self.forward_request_with(message, method, Some(shadow), None);
     }
 
+    /// `scratch` is a copy of the shadow the child answers from instead,
+    /// with every byte in its place, so the answer maps the same way.
     pub(crate) fn forward_request_with(
         &self,
         mut message: Value,
         method: Option<&str>,
         shadow: Option<(u32, u32)>,
+        scratch: Option<String>,
     ) {
         let uri = text_document_uri(&message);
 
@@ -1037,7 +1056,33 @@ impl Server {
 
         map_uris_into_mirror(&mut message, &st);
         drop(st);
+
+        let Some(text) = scratch else {
+            self.to_child(&message);
+
+            return;
+        };
+        // The child reads its messages in order, so the copy is open for
+        // the request alone, and no other answer reads it.
+        let shadow_uri = message
+            .pointer("/params/textDocument/uri")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let uri = format!("{}{SCRATCH_SUFFIX}", shadow_uri.trim_end_matches(".luau"));
+        message["params"]["textDocument"]["uri"] = json!(uri);
+        self.to_child(&json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": { "uri": uri, "languageId": "luau", "version": 0, "text": text }
+            }
+        }));
         self.to_child(&message);
+        self.to_child(&json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didClose",
+            "params": { "textDocument": { "uri": uri } }
+        }));
     }
 
     /// Handles one message from the child.
@@ -1068,7 +1113,8 @@ impl Server {
                     .to_string();
                 let st = self.state.lock().expect("state");
 
-                if st.runtime_uri.as_deref() == Some(uri.as_str()) {
+                if st.runtime_uri.as_deref() == Some(uri.as_str()) || uri.ends_with(SCRATCH_SUFFIX)
+                {
                     return;
                 }
 

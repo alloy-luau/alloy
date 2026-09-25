@@ -122,6 +122,27 @@ impl Server {
             .or_else(|| past_index_base(&doc.shadow, shadow))
     }
 
+    /// The shadow text a member completion after a child lookup reads,
+    /// `player->leaderstats?.`: the shadow with the lookups uncast.
+    /// `None` for any other completion.
+    pub(crate) fn child_member_scratch(&self, uri: &str, message: &Value) -> Option<String> {
+        if !is_alloy_uri(uri) {
+            return None;
+        }
+
+        let (line, character) = position_of_message(message)?;
+        let st = self.state.lock().expect("state");
+        let doc = st.docs.get(uri)?;
+        let offset = offset_of(&doc.source, line, character)?;
+        let (base, _, sep, word) = context::member_at(&doc.source, offset)?;
+        let head = doc.source[..offset - word]
+            .strip_suffix(sep)?
+            .trim_end_matches(['?', '!'])
+            .strip_suffix(base.as_str())?;
+
+        (head.ends_with("->") || head.ends_with("=>")).then(|| uncast_children(&doc.shadow))
+    }
+
     /// The shadow position a member completion belongs at. `a?.b` and
     /// `a!.b` lower to text the compiler wrote, and `await X.m()` moves
     /// the receiver into a call, so the member the author is typing maps
@@ -867,32 +888,7 @@ pub(crate) fn past_index_base(shadow: &str, (line, character): (u32, u32)) -> Op
     let column = |end: usize| (line, text[..end].encode_utf16().count() as u32);
 
     if text[..at].ends_with(".__new(") {
-        let mut depth = 1;
-        let mut quote: Option<char> = None;
-
-        for (i, c) in text[at..].char_indices() {
-            match (quote, c) {
-                (Some(q), _) if c == q => quote = None,
-
-                (Some(_), _) => {}
-
-                (None, '"' | '\'' | '`') => quote = Some(c),
-
-                (None, '(') => depth += 1,
-
-                (None, ')') => {
-                    depth -= 1;
-
-                    if depth == 0 {
-                        return Some(column(at + i + 1));
-                    }
-                }
-
-                _ => {}
-            }
-        }
-
-        return None;
+        return closing_paren(text, at - 1).map(|close| column(close + 1));
     }
 
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
@@ -903,6 +899,61 @@ pub(crate) fn past_index_base(shadow: &str, (line, character): (u32, u32)) -> Op
     let base = rest.starts_with(['.', ':']) && !rest.starts_with("..") && !rest.starts_with("::");
 
     (base && end > at).then(|| column(end))
+}
+
+/// The `)` that closes the `(` at `open`. A quoted `)` closes nothing.
+fn closing_paren(text: &str, open: usize) -> Option<usize> {
+    let mut depth = 0;
+    let mut quote: Option<char> = None;
+
+    for (i, c) in text[open..].char_indices() {
+        match (quote, c) {
+            (Some(q), _) if c == q => quote = None,
+
+            (Some(_), _) => {}
+
+            (None, '"' | '\'' | '`') => quote = Some(c),
+
+            (None, '(') => depth += 1,
+
+            (None, ')') => {
+                depth -= 1;
+
+                if depth == 0 {
+                    return Some(open + i);
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    None
+}
+
+/// The shadow with the `any` cast of each child lookup blanked:
+/// `(p:FindFirstChild("x") :: any)` reads `(p:FindFirstChild("x")       )`.
+/// The check casts a child that a member follows, since `Instance` has
+/// no `CFrame`, and the cast leaves the child no member to list. Every
+/// byte keeps its place, so a position in one is a position in both.
+pub(crate) fn uncast_children(shadow: &str) -> String {
+    const CAST: &str = " :: any)";
+    let mut out = shadow.to_string();
+
+    for call in [":FindFirstChild(", ":WaitForChild("] {
+        for (at, _) in shadow.match_indices(call) {
+            let Some(close) = closing_paren(shadow, at + call.len() - 1) else {
+                continue;
+            };
+
+            if shadow[close + 1..].starts_with(CAST) {
+                let cast = close + 1..close + CAST.len();
+                out.replace_range(cast.clone(), &" ".repeat(cast.len()));
+            }
+        }
+    }
+
+    out
 }
 
 /// Where a caret inside a call in an intrinsic's argument stands in

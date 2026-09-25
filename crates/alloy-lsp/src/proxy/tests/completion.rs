@@ -3226,6 +3226,29 @@ fn a_signature_caret_leaves_an_index_base_and_a_lowered_constructor() {
     assert_eq!(past_index_base(shadow, (1, 26)), Some((1, 36)));
 }
 
+/// `player->leaderstats?.` listed no member: the check casts a child
+/// that a member follows to `any`. The copy the completion reads drops
+/// the cast and keeps every other byte in its place.
+#[test]
+fn a_child_lookup_loses_its_cast_for_a_member_completion() {
+    use super::super::hover::uncast_children;
+
+    let shadow = concat!(
+        "local _1 = (if p == nil then nil else (p:FindFirstChild(\"a)\") :: any)) print(_1.Name)\n",
+        "local w = (p:WaitForChild(\"Hud\") :: any).Size\n",
+        "local k = (x :: any)\n",
+    );
+    let copy = uncast_children(shadow);
+
+    assert_eq!(copy.len(), shadow.len());
+    assert!(copy.contains("(p:FindFirstChild(\"a)\")       )"), "{copy}");
+    assert!(
+        copy.contains("(p:WaitForChild(\"Hud\")       ).Size"),
+        "{copy}"
+    );
+    assert!(copy.contains("(x :: any)"), "{copy}");
+}
+
 /// A declaration's parameter list is no call: `remote test(` shows no
 /// `function test()` while the reader writes the parameters, whether
 /// the list is still open or closed. A call of the remote answers.

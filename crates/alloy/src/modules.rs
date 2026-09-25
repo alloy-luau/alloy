@@ -786,10 +786,19 @@ pub fn aliases(root: &Path, tree: &crate::project::Tree) -> Vec<(String, PathBuf
         .collect()
 }
 
-/// The file an import spec names from a source file: `./x`, `../x`, or
-/// `@alias/x`, with `.aly`, `.alx`, `.luau`, `.lua`, or an `init` file.
+/// The file an import spec names from a source file: `./x`, `../x`,
+/// `@self/x`, or `@alias/x`, with `.aly`, `.alx`, `.luau`, `.lua`, or an
+/// `init` file.
 pub fn resolve(spec: &str, from: &Path, aliases: &[(String, PathBuf)]) -> Option<PathBuf> {
-    let base = if let Some(rest) = spec.strip_prefix('@') {
+    let base = if let Some(tail) = spec.strip_prefix("@self/") {
+        // `@self` is the folder of an `init` file. Any other file has no
+        // folder of its own, so the spec names no module there.
+        if !crate::build::is_init(from) {
+            return None;
+        }
+
+        from.parent()?.join(tail)
+    } else if let Some(rest) = spec.strip_prefix('@') {
         let (alias, tail) = rest.split_once('/').unwrap_or((rest, ""));
         let (_, dir) = aliases.iter().find(|(a, _)| a == alias)?;
 

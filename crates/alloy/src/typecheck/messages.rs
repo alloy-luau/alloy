@@ -1123,6 +1123,24 @@ pub fn unknown_module_message(
     if let Some(rest) = spec.strip_prefix('@') {
         let alias = rest.split('/').next().unwrap_or(rest);
 
+        // `@self` is no alias: it names the folder of an `init` file.
+        if alias == "self" {
+            let tail = rest.strip_prefix("self/").unwrap_or("");
+            let dir = source_rel.parent().unwrap_or(Path::new(""));
+
+            return match crate::build::is_init(source_rel) {
+                true => format!(
+                    "\"{spec}\" names no module; {what} at {}",
+                    shown(&dir.join(tail))
+                ),
+
+                false => format!(
+                    "\"{spec}\" names no module; `@self` is the folder of an `init` file, and {} is no `init`, so write \"./{tail}\"",
+                    shown(source_rel)
+                ),
+            };
+        }
+
         // `@game` is reserved, so "declare the alias" is the wrong
         // advice here: the path is a service or a place in the tree.
         if alias == "game" {

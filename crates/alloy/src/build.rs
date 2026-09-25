@@ -84,11 +84,19 @@ pub(crate) fn relative_require(from: &Path, to: &Path) -> String {
     out
 }
 
+/// Whether a file is the `init` of its folder: `init.luau`, and also a
+/// script like `init.server.luau`. Rojo makes the folder that module or
+/// script, and the other files of the folder its children.
+pub fn is_init(path: &Path) -> bool {
+    path.file_stem()
+        .is_some_and(|s| s == "init" || s == "init.server" || s == "init.client")
+}
+
 /// The path a module requires its siblings from: the file itself, and
 /// its folder for an `init.luau`. Luau reads `x/init.luau` as the
 /// module `x`, so its `./y` names a file beside `x`, not one inside it.
 pub(crate) fn module_base(path: &Path) -> PathBuf {
-    match path.file_stem().is_some_and(|s| s == "init") {
+    match is_init(path) {
         true => path.parent().unwrap_or(Path::new("")).to_path_buf(),
 
         false => path.to_path_buf(),

@@ -76,7 +76,7 @@ impl<'s> Desugar<'s> {
 
         let rel = std::path::Path::new(&self.options.module_rel);
 
-        if !rel.file_stem().is_some_and(|s| s == "init") {
+        if !crate::build::is_init(rel) {
             return None;
         }
 

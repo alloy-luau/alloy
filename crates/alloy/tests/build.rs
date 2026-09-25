@@ -481,6 +481,72 @@ fn an_init_module_requires_a_sibling_from_the_folder_above_it() {
 }
 
 /*
+An `init.server.aly` or `init.client.aly` is the script of its folder,
+as `init.aly` is the module of its folder. The emit kept `./util` in
+such a script, and Roblox read it from the folder above, so the script
+found no module or the wrong one. `@self/util` names the script's own
+child. An author may write `@self` in an `init` file; in any other file
+it is an error that says what to write.
+*/
+#[test]
+fn an_init_script_requires_a_file_of_its_folder_by_self() {
+    let dir = temp_project("init-script");
+    fs::write(dir.join("alloy.toml"), "[build]\nout = \"build\"\n").unwrap();
+    fs::create_dir_all(dir.join("src/server")).unwrap();
+    fs::create_dir_all(dir.join("src/client/ui")).unwrap();
+    fs::write(dir.join("src/server/util.aly"), "export const X = 1\n").unwrap();
+    fs::write(dir.join("src/server/more.aly"), "export const Y = 2\n").unwrap();
+    fs::write(
+        dir.join("src/server/init.server.aly"),
+        "import { X } from \"./util\"\nimport { Y } from \"@self/more\"\n\nprint(X, Y)\n",
+    )
+    .unwrap();
+    fs::write(dir.join("src/client/panel.aly"), "export const P = 1\n").unwrap();
+    fs::write(dir.join("src/client/ui/panel.aly"), "export const P = 2\n").unwrap();
+    fs::write(
+        dir.join("src/client/ui/init.client.aly"),
+        "import { P } from \"./panel\"\n\nprint(P)\n",
+    )
+    .unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run(&dir, &config.build, &config.emit).unwrap();
+
+    assert!(report.is_clean(), "{report:?}");
+
+    for (out, spec) in [
+        ("build/server/init.server.luau", "@self/util"),
+        ("build/server/init.server.luau", "@self/more"),
+        ("build/client/ui/init.client.luau", "@self/panel"),
+    ] {
+        let text = fs::read_to_string(dir.join(out)).unwrap();
+
+        assert!(
+            text.contains(&format!("require(\"{spec}\")")),
+            "{out}: {text}"
+        );
+    }
+
+    // A file that is no `init` has no folder for `@self` to name.
+    fs::write(
+        dir.join("src/client/other.client.aly"),
+        "import { P } from \"@self/panel\"\n\nprint(P)\n",
+    )
+    .unwrap();
+    let report = alloy::build::run(&dir, &config.build, &config.emit).unwrap();
+    let messages: Vec<_> = report.diagnostics.iter().map(|(_, d)| &d.message).collect();
+
+    assert!(
+        messages.iter().any(|m| m.contains(
+            "`@self` is the folder of an `init` file, and src/client/other.client.aly is no `init`, so write \"./panel\""
+        )),
+        "{messages:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/*
 A remote's wire layout reads a type name through the imports of the file
 that writes it. The layout took "the one project type of this name", so
 a private `Inner` in a file nothing imports stripped the layout: the enum

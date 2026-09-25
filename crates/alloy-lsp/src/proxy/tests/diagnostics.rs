@@ -1085,6 +1085,25 @@ pub(crate) fn the_compiler_errors_carry_their_quick_fixes() {
         }])
     );
 
+    // A match that gives a value: an empty arm reads "this arm gives
+    // no value", so each new arm holds `$todo()`.
+    for head in ["return match m with", "local n = match m with"] {
+        let src = format!(
+            "enum M as\n    Walk\n    Run\nend\n\nlocal function speed(m: M): number\n    {head}\n        case Walk then 16\n    end\nend\n\nprint(speed(M.Run))\n"
+        );
+        let (st, uri) = one_file(&src);
+        let actions = st.compiler_actions(uri, whole);
+        assert_eq!(title(&actions), "Add the missing arm", "{head}");
+        assert_eq!(
+            edit(&actions, uri),
+            json!([{
+                "range": { "start": { "line": 8, "character": 0 }, "end": { "line": 8, "character": 0 } },
+                "newText": "        case M.Run then\n            $todo()\n",
+            }]),
+            "{head}"
+        );
+    }
+
     // A variant one edit away from a name the enum has.
     let (st, uri) = one_file(
         "enum Color as\n    Red\n    Green\n    Blue\nend\n\nlocal c = Color.Gren\nprint(c)\n",

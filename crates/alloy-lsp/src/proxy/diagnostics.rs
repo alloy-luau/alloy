@@ -586,7 +586,8 @@ impl State {
     The report names the enum and every variant the arms leave out, and
     the range it points at is the whole statement, so its last three
     bytes are the `end` the arms go above. A variant with a payload
-    takes one, written `_`.
+    takes one, written `_`. An arm of a match that gives a value needs
+    a value, so its body there is `$todo()`, which fits any type.
     */
     fn missing_arm_fix(
         &self,
@@ -628,6 +629,17 @@ impl State {
             .map(|l| l[..l.len() - l.trim_start().len()].to_string())
             .unwrap_or_else(|| format!("{closing}    "));
         let payloads = self.variant_payloads(&owner);
+        // The report starts on `match`. After `return`, an `=`, an open
+        // bracket, or a comma, the match gives a value.
+        let before = doc.source[..start].trim_end();
+        let body = match ["return", "=", "(", "[", "{", ","]
+            .iter()
+            .any(|w| before.ends_with(w))
+        {
+            true => "$todo()",
+
+            false => "",
+        };
         let mut text = String::new();
 
         for name in &missing {
@@ -642,7 +654,7 @@ impl State {
                 n => format!("({})", vec!["_"; n].join(", ")),
             };
             text.push_str(&format!(
-                "{arm}case {owner}.{name}{holes} then\n{arm}    \n"
+                "{arm}case {owner}.{name}{holes} then\n{arm}    {body}\n"
             ));
         }
 

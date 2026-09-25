@@ -660,7 +660,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Style,
         default: Level::Warn,
         summary: "`local x = v` followed by `return x`",
-        detail: "The local is read once, on the next line, by the `return`. `return v` says the same in one statement; a call goes in parentheses, `return (f())`, so the return keeps one value as the local did. `alloy flux --fix` rewrites it.",
+        detail: "The local is read once, on the next line, by the `return`. `return v` says the same in one statement; a call goes in parentheses, `return (f())`, so the return keeps one value as the local did. A `const x = v` reads the same. `alloy flux --fix` rewrites it.",
     },
     LintInfo {
         name: "numeric_for_index",

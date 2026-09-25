@@ -749,10 +749,13 @@ impl<'s> Scan<'s> {
         }
     }
 
-    /// `local x = v` then `return x`.
+    /// `local x = v` then `return x`, and the same with `const`.
+    /// `prefer_const` writes `const` over the same `local`, and `--fix`
+    /// takes that rewrite first, so a `const` has to fire too: the
+    /// second pass then applies this one.
     fn local_then_return(&self, out: &mut Vec<Lint>) {
         for i in 0..self.toks.len() {
-            if !self.at(i, "local")
+            if !(self.at(i, "local") || self.at(i, "const"))
                 || !self.statement_start(i)
                 || !self.is_name(i + 1)
                 || !self.at(i + 2, "=")
@@ -775,6 +778,7 @@ impl<'s> Scan<'s> {
                 continue;
             }
 
+            let word = self.t(i);
             let name = self.t(i + 1);
             let value = self.slice(i + 3, v_end).trim();
             // A call or `...` may yield several values; the local kept
@@ -789,7 +793,7 @@ impl<'s> Scan<'s> {
                 "local_then_return",
                 i,
                 v_end + 1,
-                format!("`local {name} = ...` followed by `return {name}` is `return {value}`"),
+                format!("`{word} {name} = ...` followed by `return {name}` is `return {value}`"),
                 Some(format!("return {value}")),
             );
         }
@@ -1476,6 +1480,40 @@ mod tests {
     /// A compound write into a field is a write into the value: the
     /// const draws `const_mutation`, and the local stays `local`. A
     /// `local` of the name in an inner block holds its own writes.
+    /// `prefer_const` and `local_then_return` both rewrite one `local`.
+    /// `--fix` took `const` first, and `local_then_return` then read
+    /// nothing, so flux offered two rewrites and applied one.
+    #[test]
+    fn a_const_then_return_fires_so_both_rewrites_land() {
+        let src = "local function total(): number\n    local x = math.random()\n    return x\nend\nprint(total())\n";
+        let fixable = |text: &str| -> Vec<crate::lint::Lint> {
+            crate::compile(text)
+                .unwrap()
+                .lints
+                .into_iter()
+                .filter(|l| matches!(l.name, "prefer_const" | "local_then_return"))
+                .collect()
+        };
+        let offered = fixable(src).len();
+        let mut text = src.to_string();
+        let mut applied = 0;
+
+        // The passes of `--fix`: each applies what does not overlap.
+        for _ in 0..4 {
+            let (next, n) = crate::lint::apply_fixes(&text, &fixable(&text));
+
+            if n == 0 {
+                break;
+            }
+
+            applied += n;
+            text = next;
+        }
+
+        assert_eq!((offered, applied), (2, 2));
+        assert!(text.contains("    return (math.random())\n"), "{text}");
+    }
+
     #[test]
     fn a_compound_field_write_writes_into_the_value() {
         // The lines one lint fires on.

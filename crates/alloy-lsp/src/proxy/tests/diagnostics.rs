@@ -1412,6 +1412,24 @@ fn a_config_file_names_a_wrong_lint_and_the_line_that_failed() {
             "the config does not load: attempt to index nil with 'x'".to_string()
         )]
     );
+
+    // Code builds these values, so only the load sees their types. It
+    // reports each one on the line of its key.
+    assert_eq!(
+        reports("local w = \"two\"\nexport default {\n    lint = { strict = w },\n    fmt = { indent_width = w },\n}\n"),
+        [
+            (
+                2,
+                "the config does not load: `lint.strict` takes a boolean; this is a string"
+                    .to_string()
+            ),
+            (
+                3,
+                "the config does not load: `fmt.indent_width` takes a whole number; this is a string"
+                    .to_string()
+            ),
+        ]
+    );
 }
 
 /// A std name the load refuses sits on its string. The message names no

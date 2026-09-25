@@ -118,51 +118,53 @@ impl State {
 
             // A run that failed names the line: `<path>:<line>: <message>`.
             // The report sits there, else on the statement that gives the
-            // config.
-            Err(message) => {
-                let prefix = format!("{}:", path.display());
-                let at_line = message
-                    .strip_prefix(&prefix)
-                    .and_then(|rest| rest.split_once(": "))
-                    .and_then(|(n, text)| Some((n.parse::<usize>().ok()?, text)));
-                let (span, shown) = match at_line {
-                    Some((n, text)) => (
-                        offset_of(&doc.source, n.saturating_sub(1) as u32, 0).map(line_span),
-                        text.to_string(),
-                    ),
+            // config. A load that refuses several values gives a line each.
+            Err(messages) => {
+                for message in messages.lines() {
+                    let prefix = format!("{}:", path.display());
+                    let at_line = message
+                        .strip_prefix(&prefix)
+                        .and_then(|rest| rest.split_once(": "))
+                        .and_then(|(n, text)| Some((n.parse::<usize>().ok()?, text)));
+                    let (span, shown) = match at_line {
+                        Some((n, text)) => (
+                            offset_of(&doc.source, n.saturating_sub(1) as u32, 0).map(line_span),
+                            text.to_string(),
+                        ),
 
-                    None => (None, message.replace(&format!("{}: ", path.display()), "")),
-                };
-                // A value the load refuses, `Sgnal` in a list of std
-                // names, sits where the source writes it. The message
-                // names no line for it.
-                let span = span.or_else(|| {
-                    let name = shown.split('`').nth(1).filter(|n| !n.is_empty())?;
-                    let at = key_offset(&doc.source, name)?;
+                        None => (None, message.replace(&format!("{}: ", path.display()), "")),
+                    };
+                    // A value the load refuses, `Sgnal` in a list of std
+                    // names, sits where the source writes it. The message
+                    // names no line for it.
+                    let span = span.or_else(|| {
+                        let name = shown.split('`').nth(1).filter(|n| !n.is_empty())?;
+                        let at = key_offset(&doc.source, name)?;
 
-                    Some((at, at + name.len()))
-                });
-                let (start, end) = span.unwrap_or_else(|| {
-                    line_span(
-                        doc.source
-                            .lines()
-                            .scan(0usize, |at, line| {
-                                let here = *at;
-                                *at += line.len() + 1;
+                        Some((at, at + name.len()))
+                    });
+                    let (start, end) = span.unwrap_or_else(|| {
+                        line_span(
+                            doc.source
+                                .lines()
+                                .scan(0usize, |at, line| {
+                                    let here = *at;
+                                    *at += line.len() + 1;
 
-                                Some((here, line))
-                            })
-                            .find(|(_, line)| {
-                                line.starts_with("export") || line.starts_with("return")
-                            })
-                            .map_or(0, |(at, _)| at),
-                    )
-                });
-                out.push(diagnostic(
-                    start,
-                    end,
-                    &format!("the config does not load: {shown}"),
-                ));
+                                    Some((here, line))
+                                })
+                                .find(|(_, line)| {
+                                    line.starts_with("export") || line.starts_with("return")
+                                })
+                                .map_or(0, |(at, _)| at),
+                        )
+                    });
+                    out.push(diagnostic(
+                        start,
+                        end,
+                        &format!("the config does not load: {shown}"),
+                    ));
+                }
             }
         }
 

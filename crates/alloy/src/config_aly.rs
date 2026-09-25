@@ -68,12 +68,65 @@ pub fn evaluate_source(source: &str, path: &Path) -> Result<toml::Table, String>
     let value = run_module(&lua, source, path)?;
     let config = pick(value)?;
     let schema = crate::schema::project(&[]);
+    let mut problems = Vec::new();
+    let table = convert(&Value::Table(config), Some(&schema), "", &mut problems)?;
 
-    match convert(&Value::Table(config), Some(&schema), "")? {
+    // Each value the schema refuses reports on the line of its key, the
+    // way the editor reports it. The deserializer names only the first,
+    // and neither its key nor its line.
+    if !problems.is_empty() {
+        let mut lines: Vec<(Option<usize>, &str)> = problems
+            .iter()
+            .map(|(at, message)| (key_line(source, at), message.as_str()))
+            .collect();
+        // A table gives its keys in no order, so the lines give it.
+        lines.sort_by_key(|(line, _)| line.unwrap_or(usize::MAX));
+        let shown: Vec<String> = lines
+            .iter()
+            .map(|(line, message)| match line {
+                Some(line) => format!("{}:{line}: {message}", path.display()),
+
+                None => format!("{}: {message}", path.display()),
+            })
+            .collect();
+
+        return Err(shown.join("\n"));
+    }
+
+    match table {
         toml::Value::Table(table) => Ok(table),
 
         _ => Err("the config is no table".to_string()),
     }
+}
+
+/// The line that writes the key `at`, a dotted path such as
+/// `lint.strict`: each key is the first one after the key before it.
+/// `None` when the source writes no such key, since code builds it.
+#[cfg(not(target_arch = "wasm32"))]
+fn key_line(source: &str, at: &str) -> Option<usize> {
+    let toks = alloy_syntax::lexer::lex(source).ok()?.toks;
+    let text = |i: usize| {
+        toks.get(i)
+            .map_or("", |t| &source[t.start as usize..t.end as usize])
+    };
+    // `key =`, or `["key"] =`.
+    let names = |i: usize, key: &str| {
+        text(i) == key && text(i + 1) == "="
+            || text(i).get(1..text(i).len().saturating_sub(1)) == Some(key)
+                && matches!(toks[i].kind, alloy_syntax::lexer::TokKind::Str { .. })
+                && text(i + 1) == "]"
+                && text(i + 2) == "="
+    };
+    let mut from = 0;
+
+    for key in at.split('.').map(|k| k.split('[').next().unwrap_or(k)) {
+        from = (from..toks.len()).find(|&i| names(i, key))? + 1;
+    }
+
+    let start = toks[from - 1].start as usize;
+
+    Some(source[..start].matches('\n').count() + 1)
 }
 
 /// The configuration a module gives: its default export, else its
@@ -607,10 +660,40 @@ fn write_value(value: &toml::Value, at: &str, depth: usize, notes: &mut Notes, o
 }
 
 /// A Luau value as TOML, shaped by the schema node that describes it.
-/// `at` is the dotted key path, for the report.
+/// `at` is the dotted key path, for the report. A value of a type the
+/// schema refuses adds its key and message to `problems`, and the walk
+/// goes on. A word a key does not take is left to the deserializer,
+/// whose message names the word: `` `Sgnal` is no std name ``.
 #[cfg(not(target_arch = "wasm32"))]
-fn convert(value: &Value, schema: Option<&Json>, at: &str) -> Result<toml::Value, String> {
+fn convert(
+    value: &Value,
+    schema: Option<&Json>,
+    at: &str,
+    problems: &mut Vec<(String, String)>,
+) -> Result<toml::Value, String> {
     let kind = schema.and_then(|s| schema_type(s, value));
+    let (got, whole) = match value {
+        Value::Boolean(_) => ("boolean", false),
+
+        Value::Integer(_) => ("number", true),
+
+        Value::Number(n) => ("number", n.fract() == 0.0),
+
+        Value::String(_) => ("string", false),
+
+        Value::Table(_) if kind == Some("array") => ("array", false),
+
+        Value::Table(_) => ("object", false),
+
+        // No config holds it, and the match below says so.
+        _ => ("", false),
+    };
+
+    if let Some(node) = schema.filter(|_| !got.is_empty())
+        && let Some(message) = misfit(node, &format!("`{at}`"), got, whole, None)
+    {
+        problems.push((at.to_string(), message));
+    }
 
     match value {
         Value::Boolean(b) => Ok(toml::Value::Boolean(*b)),
@@ -651,12 +734,12 @@ fn convert(value: &Value, schema: Option<&Json>, at: &str) -> Result<toml::Value
             };
 
             if is_list {
-                let items = schema.and_then(|s| s.get("items"));
+                let items = schema.and_then(item_schema);
                 let mut out = Vec::with_capacity(len);
 
                 for i in 1..=len {
                     let v: Value = t.raw_get(i).map_err(lua_error)?;
-                    out.push(convert(&v, items, &format!("{at}[{i}]"))?);
+                    out.push(convert(&v, items, &format!("{at}[{i}]"), problems)?);
                 }
 
                 return Ok(toml::Value::Array(out));
@@ -681,7 +764,7 @@ fn convert(value: &Value, schema: Option<&Json>, at: &str) -> Result<toml::Value
                     false => format!("{at}.{key}"),
                 };
                 let child = schema.and_then(|s| property(s, &key));
-                out.insert(key, convert(&v, child, &path)?);
+                out.insert(key, convert(&v, child, &path, problems)?);
             }
 
             Ok(toml::Value::Table(out))
@@ -700,6 +783,158 @@ pub fn property<'a>(node: &'a Json, key: &str) -> Option<&'a Json> {
     node.get("properties")
         .and_then(|p| p.get(key))
         .or_else(|| node.get("additionalProperties").filter(|a| a.is_object()))
+}
+
+/// The schema of the items of a list node, directly or through the one
+/// `anyOf` branch that is a list.
+pub fn item_schema(node: &Json) -> Option<&Json> {
+    node.get("items").or_else(|| {
+        branches(node)
+            .iter()
+            .find(|b| b.get("type").and_then(Json::as_str) == Some("array"))
+            .and_then(|b| b.get("items"))
+    })
+}
+
+/// The `anyOf` and `oneOf` branches of a node.
+pub fn branches(node: &Json) -> Vec<&Json> {
+    ["anyOf", "oneOf"]
+        .iter()
+        .filter_map(|k| node.get(*k).and_then(Json::as_array))
+        .flatten()
+        .collect()
+}
+
+/// The JSON types a node takes, its own or its branches'.
+pub fn types(node: &Json) -> Vec<&str> {
+    match node.get("type") {
+        Some(Json::String(t)) => vec![t.as_str()],
+
+        Some(Json::Array(ts)) => ts.iter().filter_map(Json::as_str).collect(),
+
+        _ => branches(node).into_iter().flat_map(types).collect(),
+    }
+}
+
+/// The values a node takes by name: its own `enum`, else those of its
+/// `oneOf` or `anyOf` branches, so a level that may also be a table
+/// still lists its words.
+pub fn enum_values(node: &Json) -> Vec<&Json> {
+    match node.get("enum").and_then(Json::as_array) {
+        Some(values) => values.iter().collect(),
+
+        None => branches(node)
+            .into_iter()
+            .filter_map(|b| b.get("enum").and_then(Json::as_array))
+            .flatten()
+            .collect(),
+    }
+}
+
+/// How a type reads in a report: `string`, `"a" | "b"`, `table`.
+pub fn type_label(node: &Json) -> String {
+    let values = enum_values(node);
+
+    if !values.is_empty() {
+        return values
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(" | ");
+    }
+
+    let words: Vec<String> = types(node)
+        .into_iter()
+        .map(|t| match t {
+            "object" => "table".to_string(),
+
+            "array" => match item_schema(node).map(types).as_deref() {
+                Some([one]) => format!("{{ {one} }}"),
+
+                _ => "list".to_string(),
+            },
+
+            "integer" => "number".to_string(),
+
+            other => other.to_string(),
+        })
+        .collect();
+
+    match words.is_empty() {
+        true => "any".to_string(),
+
+        false => words.join(" | "),
+    }
+}
+
+/// A value as Alloy writes it: a string in quotes, the rest as JSON.
+pub fn alloy_value(v: &Json) -> String {
+    match v {
+        Json::String(s) => format!("\"{s}\""),
+
+        Json::Array(items) if items.is_empty() => "{}".to_string(),
+
+        Json::Object(map) if map.is_empty() => "{}".to_string(),
+
+        other => other.to_string(),
+    }
+}
+
+/// Why a value does not fit its schema node, or `None` when it fits.
+/// `got` is its JSON kind: `string`, `number`, `boolean`, `array`, or
+/// `object`. `whole` says a number has no fraction, and `string` is the
+/// text of a string; `None` skips the check of the words a key takes.
+/// `name` is the key as the report writes it.
+pub fn misfit(
+    node: &Json,
+    name: &str,
+    got: &str,
+    whole: bool,
+    string: Option<&str>,
+) -> Option<String> {
+    let kinds = types(node);
+    let fits = kinds.iter().any(|k| match *k {
+        "integer" => got == "number" && whole,
+
+        "number" => got == "number",
+
+        other => other == got,
+    });
+
+    if !kinds.is_empty() && !fits {
+        let wanted = match kinds.as_slice() {
+            ["integer"] => "whole number".to_string(),
+
+            _ => type_label(node),
+        };
+        let a = crate::desugar::article(&wanted);
+        let got = match got {
+            "array" | "object" => "table",
+
+            other => other,
+        };
+
+        return Some(format!("{name} takes {a} {wanted}; this is a {got}"));
+    }
+
+    let values = enum_values(node);
+    // A branch that takes any string makes the list a set of hints: a
+    // lint name lists the known ones and still takes an ingot's.
+    let open = branches(node)
+        .iter()
+        .any(|b| b.get("type").and_then(Json::as_str) == Some("string") && b.get("enum").is_none());
+    let s = string?;
+
+    if open || values.is_empty() || values.iter().any(|v| v.as_str() == Some(s)) {
+        return None;
+    }
+
+    let list: Vec<String> = values.iter().map(|v| alloy_value(v)).collect();
+
+    Some(format!(
+        "{name} takes one of {}; `\"{s}\"` is none of them",
+        list.join(", ")
+    ))
 }
 
 /// The JSON type a node names for a value: its own `type`, or the one
@@ -890,6 +1125,19 @@ mod tests {
         assert_eq!(
             runtime,
             "/tmp/project/.config.aly:2: attempt to index nil with 'x'"
+        );
+
+        // A value of the wrong type named neither its key nor its line,
+        // and only the first one showed. Each one reports, in line order.
+        let typed = eval("local w = \"two\"\nexport const lint = { strict = \"yes\" }\nexport const fmt = {\n    quote_style = \"force-double\",\n    indent_width = w,\n    column_width = { 1 },\n}\n").unwrap_err();
+        assert_eq!(
+            typed,
+            [
+                "/tmp/project/.config.aly:2: `lint.strict` takes a boolean; this is a string",
+                "/tmp/project/.config.aly:5: `fmt.indent_width` takes a whole number; this is a string",
+                "/tmp/project/.config.aly:6: `fmt.column_width` takes a whole number; this is a table",
+            ]
+            .join("\n")
         );
     }
 

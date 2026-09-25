@@ -957,14 +957,33 @@ fn module_types(path: &Path, aliases: &[(String, PathBuf)], depth: u8) -> Vec<St
     }
 
     let mut inner: HashMap<String, Vec<String>> = HashMap::new();
+    let mut types_of = |spec: &str| -> Vec<String> {
+        inner
+            .entry(spec.to_string())
+            .or_insert_with(|| {
+                resolve(spec, path, aliases)
+                    .filter(|target| target != path)
+                    .map(|target| module_types(&target, aliases, depth - 1))
+                    .unwrap_or_default()
+            })
+            .clone()
+    };
+    let (named, stars) = passes(&source);
 
-    for (name, exported, spec) in reexports(&source) {
-        let types = inner.entry(spec.clone()).or_insert_with(|| {
-            resolve(&spec, path, aliases)
-                .filter(|target| target != path)
-                .map(|target| module_types(&target, aliases, depth - 1))
-                .unwrap_or_default()
-        });
+    // A module passed on whole sends each type out under one flat name,
+    // `Leaf_Box`, and the export table holds no value of that name.
+    for (exported, spec) in stars {
+        for entry in types_of(&spec) {
+            out.push(format!(
+                "{exported}_{}{}=",
+                type_head(&entry),
+                type_args(&entry)
+            ));
+        }
+    }
+
+    for (name, exported, spec) in named {
+        let types = types_of(&spec);
         // A namespace sends its members on too, `Geo_Vec` as `G_Vec`.
         let members = format!("{name}_");
 
@@ -995,10 +1014,19 @@ fn module_types(path: &Path, aliases: &[(String, PathBuf)], depth: u8) -> Vec<St
 /// barrel writes `export { Point } from "./model"`, or imports `Point`
 /// and names it in an `export { ... }` list of its own.
 pub(crate) fn reexports(source: &str) -> Vec<(String, String, String)> {
+    passes(source).0
+}
+
+/// A module a barrel passes on whole: `import * as Leaf from "./leaf"`
+/// and then `export { Leaf }`. The name it goes out under, and the spec.
+type StarPass = (String, String);
+
+/// `reexports`, and the modules the source passes on whole.
+fn passes(source: &str) -> (Vec<(String, String, String)>, Vec<StarPass>) {
     use alloy_syntax::ast::{ImportKind, Stmt};
 
     if !source.contains("export") {
-        return Vec::new();
+        return Default::default();
     }
 
     let options = alloy_syntax::parser::ParseOptions {
@@ -1006,7 +1034,7 @@ pub(crate) fn reexports(source: &str) -> Vec<(String, String, String)> {
         ..Default::default()
     };
     let Ok(parsed) = alloy_syntax::parse_lenient(source, options) else {
-        return Vec::new();
+        return Default::default();
     };
     let toks = &parsed.lexed.toks;
     let text = |span: TokSpan| span.text(source, toks).to_string();
@@ -1016,6 +1044,11 @@ pub(crate) fn reexports(source: &str) -> Vec<(String, String, String)> {
     let mut bound: Vec<(String, String, String)> = Vec::new();
 
     for i in crate::desugar::imports_in(&parsed.chunk.block) {
+        // `*` stands for the whole module the local binds.
+        if let ImportKind::Namespace(n, _) = &i.kind {
+            bound.push((text(*n), bare(i.path), "*".to_string()));
+        }
+
         let specs = match &i.kind {
             ImportKind::Named(v)
             | ImportKind::TypeOnly(v)
@@ -1034,6 +1067,7 @@ pub(crate) fn reexports(source: &str) -> Vec<(String, String, String)> {
     }
 
     let mut out = Vec::new();
+    let mut stars = Vec::new();
 
     for stmt in &parsed.chunk.block.stmts {
         let Stmt::ExportList(list) = stmt else {
@@ -1047,16 +1081,22 @@ pub(crate) fn reexports(source: &str) -> Vec<(String, String, String)> {
             match list.from {
                 Some(from) => out.push((name, exported, bare(from))),
 
-                None => {
-                    if let Some((_, spec, from_name)) = bound.iter().find(|(l, _, _)| *l == name) {
+                None => match bound.iter().find(|(l, _, _)| *l == name) {
+                    Some((_, spec, from_name)) if from_name == "*" => {
+                        stars.push((exported, spec.clone()));
+                    }
+
+                    Some((_, spec, from_name)) => {
                         out.push((from_name.clone(), exported, spec.clone()));
                     }
-                }
+
+                    None => {}
+                },
             }
         }
     }
 
-    out
+    (out, stars)
 }
 
 /// Per import spec, the structs the module declares whose check

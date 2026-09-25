@@ -644,6 +644,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         imported_names: HashSet::new(),
         import_renames: HashMap::new(),
         star_modules: HashSet::new(),
+        star_specs: HashMap::new(),
         private_view_names: HashSet::new(),
         ret_types: Vec::new(),
         try_targets: Vec::new(),
@@ -1307,6 +1308,9 @@ struct Desugar<'s> {
     /// `import * as M`: the locals that stand for a whole module, so
     /// `new M.Box { }` names the struct `Box` the module declares.
     star_modules: HashSet<String>,
+    /// `import * as M from "./m"`: each such local with the spec it
+    /// names, so `export { M }` sends the module's types on.
+    star_specs: HashMap<String, String>,
     /// Imported structs whose full view this file aliases as
     /// `Name__all`. An `impl` of one types `self` as the view.
     private_view_names: HashSet<String>,

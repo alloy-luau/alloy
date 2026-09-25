@@ -272,6 +272,30 @@ impl<'s> Desugar<'s> {
             .collect()
     }
 
+    /// `export type Leaf_Box = Leaf.Box` for each type of the module a
+    /// star import binds as `name`, sent out as `exported`. Luau reads
+    /// no type path two modules deep, `B.Leaf.Box`, so the module's types
+    /// go out under one flat name each, as a namespace's do.
+    fn star_member_types(&self, name: &str, exported: &str) -> Vec<String> {
+        let Some(spec) = self.star_specs.get(name) else {
+            return Vec::new();
+        };
+
+        self.options
+            .import_types
+            .iter()
+            .filter(|(s, _)| s == spec)
+            .flat_map(|(_, types)| types.iter())
+            .map(|entry| {
+                let full = crate::modules::type_head(entry);
+                let args = crate::modules::type_args(entry);
+                let type_args = type_arguments(args);
+
+                format!("export type {exported}_{full}{args} = {name}.{full}{type_args}")
+            })
+            .collect()
+    }
+
     /// Whether a quoted spec names a module Alloy does not compile. Such
     /// a module returns one value and has no export table, so its value
     /// is what a default import binds. A spec that carries the
@@ -964,6 +988,7 @@ impl<'s> Desugar<'s> {
                             types.extend(self.imported_member_types(&name, &exported));
                         }
 
+                        types.extend(self.star_member_types(&name, &exported));
                         self.exports.push((exported, name));
                     }
                 }

@@ -678,6 +678,55 @@ fn an_import_and_a_reexport_of_one_type_write_one_alias() {
 }
 
 /*
+A barrel wrote `import * as Leaf from "./leaf"` and `export { Leaf }`.
+`B.Leaf.Box` through `import * as B` of the barrel emitted as it was
+written, and Luau reads no type path two modules deep, so the output did
+not parse. The barrel now sends each type of `Leaf` out under one flat
+name, `Leaf_Box`, as a namespace does, and the path writes that name.
+*/
+#[test]
+fn a_type_path_through_a_module_a_barrel_passes_on_writes_one_name() {
+    let dir = temp_project("barrel-star");
+    fs::write(dir.join("alloy.toml"), "[build]\n").unwrap();
+    fs::write(
+        dir.join("src/leaf.aly"),
+        "export struct Box\n    n: number\nend\n\nexport struct Cell<T>\n    v: T\nend\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/barrel.aly"),
+        "import * as Leaf from \"./leaf\"\nexport { Leaf }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/use.aly"),
+        "import * as B from \"./barrel\"\nimport { Leaf } from \"./barrel\"\n\nconst b: B.Leaf.Box = new B.Leaf.Box { n = 1 }\nconst c: Leaf.Cell<number> = new Leaf.Cell { v = 2 }\nprint(b.n, c.v)\n",
+    )
+    .unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run_project(&dir, &config).unwrap();
+
+    assert!(report.is_clean(), "{report:?}");
+
+    let barrel = fs::read_to_string(dir.join("build/barrel.luau")).unwrap();
+
+    for alias in [
+        "export type Leaf_Box = Leaf.Box",
+        "export type Leaf_Cell<T> = Leaf.Cell<T>",
+    ] {
+        assert!(barrel.contains(alias), "{barrel}");
+    }
+
+    let text = fs::read_to_string(dir.join("build/use.luau")).unwrap();
+
+    assert!(text.contains("const b: B.Leaf_Box ="), "{text}");
+    assert!(text.contains("const c: Leaf_Cell<number> ="), "{text}");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/*
 A remote's wire layout reads a type name through the imports of the file
 that writes it. The layout took "the one project type of this name", so
 a private `Inner` in a file nothing imports stripped the layout: the enum

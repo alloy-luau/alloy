@@ -1212,6 +1212,8 @@ impl<'s> Desugar<'s> {
 
             ImportKind::Namespace(n, specs) => {
                 let module = self.text_of(*n).to_string();
+                let spec = self.text_of(i.path).trim_matches(['"', '\'']).to_string();
+                self.star_specs.insert(module.clone(), spec);
                 self.star_modules.insert(module.clone());
                 self.imported_names.insert(module);
                 self.note_specs(specs);

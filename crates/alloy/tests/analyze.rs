@@ -448,6 +448,25 @@ fn in_on_a_value_that_is_no_container_reports() {
     analyze(good, "in-good");
 }
 
+/// A name that a nested variant pattern binds read as `never`, so a
+/// wrong use of it went through. It takes the payload type, `number`.
+#[test]
+fn a_nested_variant_binding_takes_its_payload_type() {
+    let src = "enum Item as\n    Sword(number)\n    Nothing\nend\nenum Purchase as\n    Bought(Item)\n    Denied(string)\nend\nlocal function show(r: Purchase): string\n    return match r with\n        case Purchase.Bought(Item.Sword(d)) then d:upper()\n        default \"x\"\n    end\nend\nlocal function label(r: Purchase): string\n    match r with\n        case Purchase.Bought(Item.Sword(d)) then\n            local s: string = d\n            return s\n        default\n            return \"x\"\n    end\nend\nprint(show(Purchase.Bought(Item.Sword(4))), label)\n";
+    let Some(reported) = reports(src, "nested-variant") else {
+        return;
+    };
+    assert_eq!(reported.len(), 2, "{reported:?}");
+    assert!(
+        reported[0].contains("'number' does not have key 'upper'"),
+        "{reported:?}"
+    );
+    assert!(
+        reported[1].contains("Expected this to be 'string', but got 'number'"),
+        "{reported:?}"
+    );
+}
+
 /// A `for` over an `Iter`, a `Queue`, or a `Heap` reported "Cannot
 /// iterate over a table without indexer": the checker reads an
 /// `__iter` from the type's metatable, and the std types had none.

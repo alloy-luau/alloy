@@ -860,9 +860,25 @@ impl<'s> Desugar<'s> {
                 out.tests.push(format!(
                     "type({path}) == \"table\" and {path}.tag == \"{vname}\""
                 ));
+                // The checker reads a second `type(x) == "table"` in one
+                // chain as `never` for the payload under it. A name that a
+                // nested variant binds takes the type its constructor gives.
+                let nested = self.options.check && path.contains(['.', '[']);
 
                 for (i, a) in args.iter().enumerate() {
                     let sub = format!("{path}._{}", i + 1);
+
+                    if let Pattern::Bind(n) = a
+                        && nested
+                        && self.unit_variant_of(self.text_of(*n)).is_none()
+                        && let Some(ty) = self.payload_type(*name, args.len(), i + 1)
+                    {
+                        let value = format!("({} :: {ty})", self.cast_root(&sub));
+                        out.binds.push((*n, value, None));
+
+                        continue;
+                    }
+
                     self.compile_pattern(a, &sub, out);
                 }
             }
@@ -944,6 +960,38 @@ impl<'s> Desugar<'s> {
                 }
             }
         }
+    }
+
+    /// Whether a name stands for something here: a local, an import, a
+    /// namespace, or an enum.
+    fn names_a_value(&self, name: &str) -> bool {
+        self.is_local(name)
+            || self.imported_names.contains(name)
+            || self.star_modules.contains(name)
+            || self.std_namespaces.contains_key(name)
+            || self.namespaces.contains_key(name)
+            || self.enums.contains_key(name)
+    }
+
+    /// The type of one payload slot of a variant pattern, read off the
+    /// constructor: `typeof(Item.Sword(nil :: any)._1)`. `None` when no
+    /// one enum owns the variant, or the enum is generic.
+    fn payload_type(&self, name: TokSpan, arity: usize, slot: usize) -> Option<String> {
+        let (vname, path_enum) = self.pattern_variant(name);
+        let mut owners = self.enums.iter().filter(|(e, vs)| {
+            path_enum.as_ref().is_none_or(|p| p == *e)
+                && vs.iter().any(|(v, n)| *v == vname && *n == arity)
+        });
+        let (e, _) = owners.next()?;
+
+        if owners.next().is_some() {
+            return None;
+        }
+
+        let ty = self.castable_enum(e)?;
+        let args = vec!["nil :: any"; arity].join(", ");
+
+        Some(format!("typeof({ty}.{vname}({args})._{slot})"))
     }
 
     /// The test text for several patterns against several paths, plus a
@@ -1072,6 +1120,33 @@ impl<'s> Desugar<'s> {
 
         for (name, binds) in flat {
             let (vname, path_enum) = self.pattern_variant(name);
+
+            // `Itme.Sword(d)`: the head of the path names nothing in
+            // scope. The report names the head, not the enum of the match.
+            let text: String = self.text_of(name).split_whitespace().collect();
+
+            if path_enum.is_none()
+                && let Some((head, _)) = text.rsplit_once('.')
+                && !self.names_a_value(head.split('.').next().unwrap_or(head))
+            {
+                let owners: Vec<&String> = self
+                    .enums
+                    .iter()
+                    .filter(|(_, vs)| vs.iter().any(|(v, _)| *v == vname))
+                    .map(|(e, _)| e)
+                    .collect();
+                let owner = match owners.as_slice() {
+                    [e] => format!("; `{}` has the variant `{vname}`", self.display_name(e)),
+
+                    _ => String::new(),
+                };
+                let message = format!("`{head}` is not an enum in scope{owner}");
+                self.diagnose(name, &message);
+                reported = true;
+
+                continue;
+            }
+
             let found = self
                 .enums
                 .iter()
@@ -3209,6 +3284,39 @@ mod tests {
             got[0],
             "`Msg` has no variant `Quit`; its variants are `Join` and `Chat`"
         );
+    }
+
+    /// A typo in the enum of an inner pattern named the variant as
+    /// missing from the outer enum. The report names the typo.
+    #[test]
+    fn a_misspelt_enum_in_an_inner_pattern_names_the_head() {
+        let src = "enum Item as\n    Sword(number)\n    Nothing\nend\nenum Purchase as\n    Bought(Item)\n    Denied(string)\nend\nlocal function show(r: Purchase): string\n    return match r with\n        case Purchase.Bought(Itme.Sword(d)) then tostring(d)\n        default \"x\"\n    end\nend\nprint(show)\n";
+        assert_eq!(
+            messages(src),
+            ["`Itme` is not an enum in scope; `Item` has the variant `Sword`"]
+        );
+    }
+
+    /// A name that a nested variant binds takes the payload type in the
+    /// check artifact; the checker reads the refined path as `never`.
+    #[test]
+    fn a_nested_variant_types_its_binding() {
+        let src = "enum Item as\n    Sword(number)\n    Nothing\nend\nenum Purchase as\n    Bought(Item)\n    Denied(string)\nend\nlocal r = Purchase.Denied(\"no\")\nmatch r with\n    case Purchase.Bought(Item.Sword(d)) then print(d)\n    default print(0)\nend\n";
+        let options = EmitOptions {
+            check: true,
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(src, &options).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.check
+                .contains("local d = ((_m1 :: any)._1._1 :: typeof(Item.Sword(nil :: any)._1))"),
+            "{}",
+            out.check
+        );
+        // The ship artifact reads the path as it is.
+        let ship = crate::compile(src).unwrap().ship;
+        assert!(ship.contains("local d = _m1._1._1"), "{ship}");
     }
 
     #[test]

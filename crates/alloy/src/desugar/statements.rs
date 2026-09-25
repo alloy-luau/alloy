@@ -1298,6 +1298,7 @@ impl<'s> Desugar<'s> {
                     .is_some_and(|ts| ts.iter().any(|t| t == want));
 
                 if !met {
+                    let want = self.display_name(want);
                     hits.push((
                         arg.span(),
                         format!("`{target}` does not implement `{want}`; `{name}` asks for it"),

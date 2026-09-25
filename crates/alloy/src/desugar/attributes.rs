@@ -1237,7 +1237,26 @@ impl<'s> Desugar<'s> {
             return None;
         }
 
-        let bounds = super::types::generic_bounds(self.text_of(body.generics?));
+        // A trait of a namespace is keyed by its flat name, `Zoo_Named`,
+        // and the call check reads the bound after the body closes.
+        let bounds: Vec<(String, String)> =
+            super::types::generic_bounds(self.text_of(body.generics?))
+                .into_iter()
+                .map(|(n, b)| {
+                    let parts: Vec<String> = b
+                        .split('&')
+                        .map(|p| {
+                            let p = p.trim();
+
+                            self.ns_member_name(p)
+                                .or_else(|| self.ns_path_name(p))
+                                .unwrap_or_else(|| p.to_string())
+                        })
+                        .collect();
+
+                    (n, parts.join(" & "))
+                })
+                .collect();
         let asks: Vec<Option<String>> = body
             .params
             .iter()
@@ -1555,7 +1574,7 @@ impl<'s> Desugar<'s> {
                     // solver names the type argument. A trait impl adds
                     // methods this scan cannot see, and closes that door.
                     if let Some(t) = i.trait_name {
-                        let met = self.text_of(t).to_string();
+                        let met = self.impl_target_name(t);
                         self.impl_traits
                             .entry(target.clone())
                             .or_default()
@@ -1875,7 +1894,14 @@ impl<'s> Desugar<'s> {
                     return format!("__neg<{}>", negated.trim());
                 }
 
-                if BUILTIN.contains(&name) && !self.traits.contains_key(name) {
+                // A trait of a namespace renders under one flat name,
+                // `Zoo_Named`, and Luau has no `Zoo.Named` type path.
+                if let Some(flat) = self
+                    .ns_member_name(name)
+                    .or_else(|| self.ns_path_name(name))
+                {
+                    format!("{flat}{}", &part[name.len()..])
+                } else if BUILTIN.contains(&name) && !self.traits.contains_key(name) {
                     format!("{}.{part}", self.std())
                 } else {
                     part.to_string()
@@ -1929,7 +1955,9 @@ impl<'s> Desugar<'s> {
             return self.knows_type(base);
         }
 
-        self.structs.contains(head)
+        // Inside a namespace a member reads by its own name.
+        self.ns_member_name(head).is_some()
+            || self.structs.contains(head)
             || self.enums.contains_key(head)
             || self.enum_decls.contains_key(head)
             || self.traits.contains_key(head)

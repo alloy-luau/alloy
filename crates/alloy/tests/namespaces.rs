@@ -1456,3 +1456,19 @@ fn a_path_past_a_struct_names_no_struct() {
     assert!(ship.contains("construct(N.X.Z, { a = 1 })"), "{ship}");
     assert!(!ship.contains("N_X({"), "{ship}");
 }
+
+/// A trait of a namespace bounds a generic: by its own name inside the
+/// namespace, and by its path outside. Inside, the bound read no trait;
+/// outside, the check artifact wrote `T & Zoo.Named`, a type path Luau
+/// does not have.
+#[test]
+fn a_namespace_trait_bounds_a_generic() {
+    let src = "namespace Zoo\n    trait Named\n        function name(self): string\n    end\n    function first<T: Named>(xs: T[]): string\n        return xs[1]:name()\n    end\nend\nstruct Cat\n    n: string\nend\nimpl Zoo.Named for Cat\n    function name(self): string\n        return self.n\n    end\nend\nstruct Rock\n    w: number\nend\nlocal function outer<T: Zoo.Named>(x: T): string\n    return x:name()\nend\nprint(Zoo.first, outer(new Cat { n = \"c\" }), outer(new Rock { w = 1 }))\n";
+    let (_, check, messages) = compile(src);
+    assert_eq!(
+        messages,
+        ["`Rock` does not implement `Zoo.Named`; `outer` asks for it"]
+    );
+    assert!(check.contains("(xs[1] :: (T & Zoo_Named))"), "{check}");
+    assert!(check.contains("outer<T>(x: (T & Zoo_Named))"), "{check}");
+}

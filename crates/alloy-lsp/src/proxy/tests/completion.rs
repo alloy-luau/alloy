@@ -3459,6 +3459,42 @@ pub(crate) fn an_import_list_with_no_module_lists_the_project() {
     assert_eq!(cog["textEdit"]["newText"], json!("Cog"));
 }
 
+/// `@self/x` in an `init` script names `x` in its own folder, as the
+/// compiler reads it. The list gave only `type` there, where `./x`
+/// gave the exports. Any other file has no `@self`.
+#[test]
+fn an_init_script_lists_the_exports_of_a_self_import() {
+    let src = "import {  } from '@self/wheel'\n";
+    let at = src.find(" }").expect("the braces") + 1;
+
+    for (file, listed) in [
+        ("file:///s/init.server.aly", true),
+        ("file:///s/main.aly", false),
+    ] {
+        let st = files(&[
+            (file, src),
+            ("file:///s/wheel.aly", "export const Cog = 1\n"),
+        ]);
+        let ctx = context::detect(src, at).expect("a context");
+        let labels: Vec<Value> = st
+            .context_items(file, at, &ctx)
+            .iter()
+            .map(|i| i["label"].clone())
+            .collect();
+
+        assert_eq!(labels.contains(&json!("Cog")), listed, "{file}: {labels:?}");
+    }
+
+    // An empty path offers `@self/` in the same files alone.
+    let offers_self = |own: &str| {
+        module_entries(Path::new("/s"), None, "", "", Some(Path::new(own)))
+            .iter()
+            .any(|(label, _, _)| label == "@self/")
+    };
+    assert!(offers_self("/s/init.server.aly"));
+    assert!(!offers_self("/s/main.aly"));
+}
+
 /// A generated import takes the project's `[fmt] quote_style`. The
 /// auto-import quick fix and the `from` clause of an import list both
 /// write it. A project that names no style writes the single quote,

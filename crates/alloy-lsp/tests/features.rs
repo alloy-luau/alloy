@@ -630,16 +630,16 @@ fn hover_completion_and_extensions() {
         "init: {h}"
     );
 
-    // Inside an import string: the modules beside this file, and `@self`.
-    // The file being edited is not among them: a module never imports
-    // itself.
+    // Inside an import string: the modules beside this file. The file
+    // being edited is not among them: a module never imports itself.
+    // `@self` names the folder of an `init` file, so `main` has none.
     let labels = s.completion_labels(&uri, 80, 24);
     assert!(
         labels.iter().any(|l| l == "ext") && !labels.iter().any(|l| l == "main"),
         "{labels:?}"
     );
     let labels = s.completion_labels(&uri, 80, 22);
-    assert!(labels.iter().any(|l| l == "@self/"), "{labels:?}");
+    assert!(!labels.iter().any(|l| l == "@self/"), "{labels:?}");
 
     let h = s.hover(&uri, 70, 12);
     assert!(

@@ -480,14 +480,24 @@ pub(crate) fn import_spec(line: &str) -> Option<String> {
     Some(body[..end].to_string())
 }
 
-/// The file a spec names: an `@alias/tail` through the project's
-/// aliases, anything else relative to the importing file.
+/// The file a spec names: `@self/tail` in the folder of an `init` file,
+/// an `@alias/tail` through the project's aliases, anything else
+/// relative to the importing file.
 pub(crate) fn module_target(
     spec: &str,
     from: Option<&Path>,
     aliases: &[(String, PathBuf)],
 ) -> Option<PathBuf> {
     let dir = from.and_then(Path::parent);
+
+    if let Some(tail) = spec.strip_prefix("@self/") {
+        if !alloy::build::is_init(from?) {
+            return None;
+        }
+
+        return imports::module_file(&imports::lexical(dir?, tail));
+    }
+
     let target = match spec.strip_prefix('@') {
         Some(rest) => {
             let (name, tail) = rest.split_once('/').unwrap_or((rest, ""));

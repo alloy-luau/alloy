@@ -736,7 +736,7 @@ pub(crate) fn child_details(tree: &Value, items: &mut [Value]) {
 }
 
 /// The entries a module path can continue with: the project's aliases
-/// and `@self` when nothing is typed, the children of
+/// when nothing is typed, and `@self` in an `init` file, the children of
 /// the sourcemap under `@game/`, and otherwise the directories and the
 /// modules of the resolved directory. Each is `(label, kind, detail)`.
 pub(crate) fn module_entries(
@@ -747,13 +747,17 @@ pub(crate) fn module_entries(
     own: Option<&Path>,
 ) -> Vec<(String, u64, String)> {
     let mut out = Vec::new();
+    // The compiler reads `@self` only in an `init` file.
+    let has_self = own.is_some_and(alloy::build::is_init);
 
     if head.is_empty() {
-        out.push((
-            "@self/".to_string(),
-            19,
-            "this file's directory".to_string(),
-        ));
+        if has_self {
+            out.push((
+                "@self/".to_string(),
+                19,
+                "this file's directory".to_string(),
+            ));
+        }
         out.push(("../".to_string(), 19, "the parent directory".to_string()));
 
         for (name, target) in project_aliases(dir, root) {
@@ -835,7 +839,7 @@ pub(crate) fn module_entries(
 
     // A directory to list: relative, `@self`, or an alias.
     let base = if let Some(rest) = head.strip_prefix("@self/") {
-        Some(imports::lexical(dir, rest))
+        has_self.then(|| imports::lexical(dir, rest))
     } else if let Some(rest) = head.strip_prefix('@') {
         let (alias, tail) = rest.split_once('/').unwrap_or((rest, ""));
 

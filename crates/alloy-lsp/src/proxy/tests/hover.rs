@@ -390,6 +390,26 @@ fn a_star_alias_of_an_alloy_module_hovers_as_the_module() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// `@self/x` names `x` in the folder of an `init` script, as the
+/// compiler reads it, so its star alias hovers as the module. Any other
+/// file has no `@self`, and the child answers there.
+#[test]
+fn a_star_alias_of_a_self_import_hovers_in_an_init_script() {
+    let dir = std::env::temp_dir().join(format!("alloy-self-hover-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(dir.join("a.aly"), "export const A = 1\n").expect("module");
+    let src = "import * as M from '@self/a'\n";
+    let hover = |file: &str| star_module_hover(src, "M", 12, Some(&dir.join(file)), &[]);
+
+    assert_eq!(
+        hover("init.server.aly").as_deref(),
+        Some("```alloy\nimport * as M from '@self/a'\n```\nExports: `A`")
+    );
+    assert_eq!(hover("main.aly"), None);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
 /// A hover on a std member reads the member's own section, not the
 /// type's whole page. The receiver resolves from the source: an
 /// annotation, an initializer, or the type name itself.

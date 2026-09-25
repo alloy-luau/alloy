@@ -817,24 +817,8 @@ impl State {
                     return items;
                 }
 
-                if let Some(spec) = spec
-                    && let Some(path) = uri_to_path(uri)
-                    && let Some(dir) = path.parent()
-                {
-                    // `@alias/x` goes through the project's aliases; a
-                    // relative spec is path arithmetic.
-                    let resolved = match spec.strip_prefix('@') {
-                        Some(rest) => {
-                            let (alias, tail) = rest.split_once('/').unwrap_or((rest, ""));
-
-                            project_aliases(dir, self.root.as_deref())
-                                .into_iter()
-                                .find(|(a, _)| a == alias)
-                                .map(|(_, base)| imports::lexical(&base, tail))
-                        }
-
-                        None => Some(imports::lexical(dir, spec)),
-                    };
+                if let Some(spec) = spec {
+                    let resolved = self.resolve_spec(uri, spec);
                     // A data file lists its top-level keys, each with
                     // the type its value reads as.
                     if let Some(format) = data_format {
@@ -1769,11 +1753,16 @@ impl State {
         alloy::modules::plain_modules_for_file(&path, &doc.source)
     }
 
-    /// through the project's aliases, and a relative spec is path
-    /// arithmetic.
+    /// The module path an import spec names from a file. `@self/x` is
+    /// `x` in the folder of an `init` file, `@alias/x` goes through the
+    /// project's aliases, and a relative spec is path arithmetic.
     pub(crate) fn resolve_spec(&self, uri: &str, spec: &str) -> Option<PathBuf> {
         let path = uri_to_path(uri)?;
         let dir = path.parent()?;
+
+        if let Some(tail) = spec.strip_prefix("@self/") {
+            return alloy::build::is_init(&path).then(|| imports::lexical(dir, tail));
+        }
 
         match spec.strip_prefix('@') {
             Some(rest) => {

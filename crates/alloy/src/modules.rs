@@ -2242,19 +2242,24 @@ impl crate::EmitOptions {
             None => from.parent().unwrap_or(&from).to_path_buf(),
         };
         let (shapes, wire_scopes) = crate::build::struct_shapes(&files, &base, &aliases);
-        let mount_requires = match &config {
+        let (mount_requires, mount_side) = match &config {
             Some((root, c)) => {
                 let root = normalize(&std::env::current_dir().unwrap_or_default().join(root));
                 let rel = from.strip_prefix(&root).unwrap_or(&from);
+                let tree = crate::project::Tree::load(&root, c);
 
-                crate::project::mount_requires(&crate::project::Tree::load(&root, c), rel, source)
+                (
+                    crate::project::mount_requires(&tree, rel, source),
+                    crate::project::place_side(&tree, rel),
+                )
             }
 
-            None => Vec::new(),
+            None => (Vec::new(), None),
         };
 
         Self {
             mount_requires,
+            mount_side,
             std_globals: config.map(|(_, c)| c.std.globals).unwrap_or_default(),
             shapes,
             wire_scopes,

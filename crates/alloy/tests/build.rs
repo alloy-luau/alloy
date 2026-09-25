@@ -595,6 +595,65 @@ fn a_relative_import_across_mounts_writes_the_game_path_in_the_check() {
 }
 
 /*
+`src/server/mod.aly` has no `.server` in its name, so the remote check
+read it as shared and let it fire a remote that goes from the client.
+Under `ServerScriptService` it runs on the server alone. A module now
+takes the side of its mount's place. One under `ReplicatedStorage`
+stays shared.
+*/
+#[test]
+fn a_module_takes_the_side_of_its_mount() {
+    let dir = temp_project("mount-side");
+    fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nout = \"build\"\n\n[mount]\nclient = [\"src/client\", \"@game/StarterPlayer/StarterPlayerScripts/Client\"]\nserver = [\"src/server\", \"@game/ServerScriptService/Server\"]\nshared = [\"src/shared\", \"@game/ReplicatedStorage/Shared\"]\n",
+    )
+    .unwrap();
+
+    for folder in ["src/client", "src/server", "src/shared"] {
+        fs::create_dir_all(dir.join(folder)).unwrap();
+    }
+
+    fs::write(
+        dir.join("src/shared/net.aly"),
+        "export remote Ping(n: number) from client\nexport remote Pong(n: number) from server\n",
+    )
+    .unwrap();
+
+    for (file, spec, fires) in [
+        ("src/server/mod.aly", "../shared/net", "Ping"),
+        ("src/client/mod.aly", "../shared/net", "Pong"),
+        ("src/shared/mod.aly", "./net", "Ping"),
+    ] {
+        fs::write(
+            dir.join(file),
+            format!("import {{ {fires} }} from \"{spec}\"\n{fires}.fire(1)\n"),
+        )
+        .unwrap();
+    }
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run_project(&dir, &config).unwrap();
+    let mut found: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|(path, d)| format!("{}: {}", path.display(), d.message))
+        .collect();
+    found.sort();
+
+    assert_eq!(
+        found,
+        [
+            "client/mod.aly: `Pong` goes from the server; the client cannot fire it",
+            "server/mod.aly: `Ping` goes from the client; the server cannot fire it",
+        ],
+        "{report:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/*
 An `init.server.aly` or `init.client.aly` is the script of its folder,
 as `init.aly` is the module of its folder. The emit kept `./util` in
 such a script, and Roblox read it from the folder above, so the script

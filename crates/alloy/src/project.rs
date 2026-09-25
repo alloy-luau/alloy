@@ -326,6 +326,25 @@ pub fn instance_path(tree: &Tree, rel: &Path) -> Option<Vec<String>> {
     place_of(tree, rel)
 }
 
+/// The side the place of a file gives it. Code under
+/// `ServerScriptService` or `ServerStorage` runs on the server alone, and
+/// code under `StarterPlayerScripts` or `StarterGui` on the client alone.
+/// Any other place is shared.
+pub fn place_side(tree: &Tree, rel: &Path) -> Option<crate::directives::Side> {
+    let place = place_of(tree, rel)?;
+    let names: Vec<&str> = place.iter().map(String::as_str).collect();
+
+    match names.as_slice() {
+        ["ServerScriptService" | "ServerStorage", ..] => Some(crate::directives::Side::Server),
+
+        ["StarterGui", ..] | ["StarterPlayer", "StarterPlayerScripts", ..] => {
+            Some(crate::directives::Side::Client)
+        }
+
+        _ => None,
+    }
+}
+
 /// The require string for the runtime in the ship artifact of a file in
 /// the tree: the runtime's own `@game/...` path, which Luau takes as it
 /// is. `None` when the file is outside the tree, or the tree names no

@@ -71,6 +71,9 @@ pub struct EmitOptions {
     /// `@game/...` place its `require` writes. See
     /// `crate::project::mount_requires`.
     pub mount_requires: Vec<(String, String)>,
+    /// The side the file's place in the game gives it, for a name with
+    /// no `.server` or `.client`. See `crate::project::place_side`.
+    pub mount_side: Option<crate::directives::Side>,
     /// The string passed to `require` for the runtime.
     pub std_require: String,
     /// The ship artifact's runtime require when it differs: under a
@@ -414,6 +417,7 @@ impl Default for EmitOptions {
             file_name: "<input>".to_string(),
             module_rel: String::new(),
             mount_requires: Vec::new(),
+            mount_side: None,
             std_require: "@alloy".to_string(),
             ship_std_require: None,
             definitions: false,
@@ -634,8 +638,9 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         uses_std: false,
         top_scope: 1,
         // `ui.client.aly` sees the client half of a remote, and
-        // `main.server.aly` the server half.
-        file_side: crate::directives::file_side(&options.file_name),
+        // `main.server.aly` the server half. A module under
+        // `ServerScriptService` runs on the server alone.
+        file_side: crate::directives::file_side(&options.file_name).or(options.mount_side),
         remote_sides: options.import_remotes.iter().cloned().collect(),
         remote_shadows: Vec::new(),
         remote_aliases: HashMap::new(),

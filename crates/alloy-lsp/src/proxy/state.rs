@@ -269,13 +269,23 @@ impl State {
     }
 
     /// The side a document sees: `ui.client.aly` is the client's and
-    /// `main.server.aly` the server's. Every other name is shared.
+    /// `main.server.aly` the server's. Any other name takes the side of
+    /// its place in the game, as the compile does.
     pub(crate) fn side_at(&self, uri: &str) -> Option<alloy::directives::Side> {
-        let name = uri_to_path(uri)
+        let path = uri_to_path(uri);
+        let name = path
+            .as_ref()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| uri.to_string());
 
-        alloy::directives::file_side(&name)
+        alloy::directives::file_side(&name).or_else(|| {
+            let path = path?;
+            let project = self.config_at(path.parent()?)?;
+            let root = project.0.parent()?;
+            let tree = alloy::project::Tree::load(root, &project.1);
+
+            alloy::project::place_side(&tree, path.strip_prefix(root).ok()?)
+        })
     }
 
     /// Writes the mirror's Luau configuration for a project root once.

@@ -755,6 +755,7 @@ fn run_inner(
             file_name: rel.to_string_lossy().into_owned(),
             module_rel: build.out.join(&rel_out).to_string_lossy().into_owned(),
             mount_requires,
+            mount_side: crate::project::place_side(&tree, &source_rel),
             definitions: rel.to_string_lossy().ends_with(".d.aly"),
             std_require,
             ship_std_require,

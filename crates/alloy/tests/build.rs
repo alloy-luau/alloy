@@ -4,7 +4,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use alloy::config::{Build, Config, Emit};
+use alloy::config::{Artifact, Build, Config, Emit};
 
 fn temp_project(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("alloy-build-{name}-{}", std::process::id()));
@@ -527,6 +527,11 @@ siblings, so `alloy flux` and the editor reported `UnknownModule`.
 
 The check artifact now writes the place, as the ship does. A relative
 path inside one mount stays.
+
+`"../shared/net"` in `src/shared/c.aly` climbs out of its own mount and
+back in. Both artifacts kept it, and `Shared` has no `shared` beside it,
+so the require missed at run time. The path inside the mount replaces
+it.
 */
 #[test]
 fn a_relative_import_across_mounts_writes_the_game_path_in_the_check() {
@@ -549,25 +554,41 @@ fn a_relative_import_across_mounts_writes_the_game_path_in_the_check() {
         "import { X } from \"../net\"\nprint(X)\n",
     )
     .unwrap();
+    fs::write(
+        dir.join("src/shared/c.aly"),
+        "import { X } from \"../shared/net\"\nprint(X)\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/shared/sub/d.aly"),
+        "import { X } from \"../../shared/net\"\nprint(X)\n",
+    )
+    .unwrap();
 
-    let config = Config::load(&dir.join("alloy.toml")).unwrap();
-    let report = alloy::build::run_project(&dir, &config).unwrap();
+    let mut config = Config::load(&dir.join("alloy.toml")).unwrap();
 
-    assert!(report.is_clean(), "{report:?}");
+    for artifact in [Artifact::Check, Artifact::Ship] {
+        config.build.artifact = artifact;
+        let report = alloy::build::run_project(&dir, &config).unwrap();
 
-    for (out, spec) in [
-        (
-            "build/server/a.server.luau",
-            "@game/ReplicatedStorage/Shared/net",
-        ),
-        ("build/shared/sub/b.luau", "../net"),
-    ] {
-        let text = fs::read_to_string(dir.join(out)).unwrap();
+        assert!(report.is_clean(), "{report:?}");
 
-        assert!(
-            text.contains(&format!("require(\"{spec}\")")),
-            "{out}: {text}"
-        );
+        for (out, spec) in [
+            (
+                "build/server/a.server.luau",
+                "@game/ReplicatedStorage/Shared/net",
+            ),
+            ("build/shared/sub/b.luau", "../net"),
+            ("build/shared/c.luau", "./net"),
+            ("build/shared/sub/d.luau", "../net"),
+        ] {
+            let text = fs::read_to_string(dir.join(out)).unwrap();
+
+            assert!(
+                text.contains(&format!("require(\"{spec}\")")),
+                "{artifact:?} {out}: {text}"
+            );
+        }
     }
 
     let _ = fs::remove_dir_all(&dir);

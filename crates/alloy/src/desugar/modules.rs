@@ -50,14 +50,24 @@ impl<'s> Desugar<'s> {
 
         let written = literal.trim_matches(['"', '\'']);
 
-        if let Some((_, place)) = self
+        let moved = self
             .options
             .mount_requires
             .iter()
             .find(|(s, _)| s == written)
-        {
+            .map(|(_, path)| path);
+
+        if let Some(place) = moved.filter(|p| p.starts_with('@')) {
             return format!("{q}{place}{q}");
         }
+
+        // A spec that climbs out of its mount and back in takes the path
+        // inside the mount, and the steps below finish it.
+        let quoted = match moved {
+            Some(path) => format!("{q}{path}{q}"),
+
+            None => quoted,
+        };
 
         // The build writes `thing.aly` as `thing.luau`, and a require
         // names a module with no extension: `./thing.aly` is `./thing`.

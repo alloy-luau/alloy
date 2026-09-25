@@ -393,46 +393,66 @@ pub fn rewrite_requires(tree: &Tree, source: &Path, text: &str) -> String {
                 resolve_alias(tree, alias, tail)
             }
 
-            None => cross_mount(tree, source, path),
+            None => cross_mount(tree, source, &crate::build::module_base(source), path),
         };
 
         Some(crate::data::strip_spec(replaced.as_deref().unwrap_or(path)).to_string())
     })
 }
 
-/// The `@game/...` place of a relative require that leaves the mount of
-/// the file at `source`. `None` for any other path.
-fn cross_mount(tree: &Tree, source: &Path, path: &str) -> Option<String> {
+/// The require path of a relative spec that leaves the mount of the
+/// file at `source`. The spec starts from the folder of `from`. A target
+/// in another mount takes its `@game/...` place. A spec that climbs out
+/// of its own mount and back in takes the path inside the mount. The
+/// instance of a mount has another name than its folder, `Shared` for
+/// `src/shared`, so the spec as written finds nothing. `None` for any
+/// other path.
+fn cross_mount(tree: &Tree, source: &Path, from: &Path, path: &str) -> Option<String> {
     if !path.starts_with("./") && !path.starts_with("../") {
         return None;
     }
 
-    let from = crate::build::module_base(source);
-    let target = normalize(
-        &from
-            .parent()
-            .unwrap_or(Path::new(""))
-            .join(crate::data::strip_spec(path)),
-    );
-    let home = tree.holder(source).map(|(m, _)| m as *const Mounted)?;
-    let there = tree.holder(&target).map(|(m, _)| m as *const Mounted)?;
+    let spec = crate::data::strip_spec(path);
+    let dir = from.parent().unwrap_or(Path::new(""));
+    let target = normalize(&dir.join(spec));
+    let home = tree.holder(source)?.0;
+    let there = tree.holder(&target)?.0;
 
-    match home != there {
-        true => place_of(tree, &target).map(|p| format!("@game/{}", p.join("/"))),
-
-        false => None,
+    if !std::ptr::eq(home, there) {
+        return place_of(tree, &target).map(|p| format!("@game/{}", p.join("/")));
     }
+
+    let mut depth = dir.strip_prefix(&home.disk).ok()?.components().count();
+    let climbs_out = Path::new(spec).components().any(|c| match c {
+        Component::ParentDir if depth == 0 => true,
+
+        Component::ParentDir => {
+            depth -= 1;
+
+            false
+        }
+
+        Component::Normal(_) => {
+            depth += 1;
+
+            false
+        }
+
+        _ => false,
+    });
+
+    climbs_out.then(|| crate::build::relative_require(from, &target))
 }
 
 /// Each import spec of `text` that leaves the mount of the file at
-/// `source`, with its `@game/...` place. The check artifact writes the
-/// place, as the ship does: luau-lsp reads a relative path in a file the
-/// sourcemap holds as a place in the tree, where two mounts are no
-/// siblings.
+/// `source`, with the path its `require` writes: see `cross_mount`. The
+/// check artifact writes that path, as the ship does: luau-lsp reads a
+/// relative path in a file the sourcemap holds as a place in the tree,
+/// where two mounts are no siblings.
 pub fn mount_requires(tree: &Tree, source: &Path, text: &str) -> Vec<(String, String)> {
     crate::modules::import_specs(text)
         .into_iter()
-        .filter_map(|spec| cross_mount(tree, source, &spec).map(|place| (spec, place)))
+        .filter_map(|spec| cross_mount(tree, source, source, &spec).map(|place| (spec, place)))
         .collect()
 }
 

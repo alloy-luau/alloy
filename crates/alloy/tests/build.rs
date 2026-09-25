@@ -519,6 +519,61 @@ fn an_init_module_requires_a_sibling_from_the_folder_above_it() {
 }
 
 /*
+`import { X } from "../shared/net"` in `src/server/a.server.aly` crosses
+from one mount into another. The ship wrote the `@game/...` place, but
+the check artifact kept the relative path. luau-lsp reads that path
+from the file's place in the sourcemap, where the two mounts are no
+siblings, so `alloy flux` and the editor reported `UnknownModule`.
+
+The check artifact now writes the place, as the ship does. A relative
+path inside one mount stays.
+*/
+#[test]
+fn a_relative_import_across_mounts_writes_the_game_path_in_the_check() {
+    let dir = temp_project("cross-mount");
+    fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nout = \"build\"\nartifact = \"check\"\n\n[mount]\nserver = [\"src/server\", \"@game/ServerScriptService/Server\"]\nshared = [\"src/shared\", \"@game/ReplicatedStorage/Shared\"]\n",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("src/server")).unwrap();
+    fs::create_dir_all(dir.join("src/shared/sub")).unwrap();
+    fs::write(dir.join("src/shared/net.aly"), "export const X = 1\n").unwrap();
+    fs::write(
+        dir.join("src/server/a.server.aly"),
+        "import { X } from \"../shared/net\"\nprint(X)\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/shared/sub/b.aly"),
+        "import { X } from \"../net\"\nprint(X)\n",
+    )
+    .unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run_project(&dir, &config).unwrap();
+
+    assert!(report.is_clean(), "{report:?}");
+
+    for (out, spec) in [
+        (
+            "build/server/a.server.luau",
+            "@game/ReplicatedStorage/Shared/net",
+        ),
+        ("build/shared/sub/b.luau", "../net"),
+    ] {
+        let text = fs::read_to_string(dir.join(out)).unwrap();
+
+        assert!(
+            text.contains(&format!("require(\"{spec}\")")),
+            "{out}: {text}"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/*
 An `init.server.aly` or `init.client.aly` is the script of its folder,
 as `init.aly` is the module of its folder. The emit kept `./util` in
 such a script, and Roblox read it from the folder above, so the script

@@ -67,6 +67,10 @@ pub struct EmitOptions {
     /// Empty when the compile has no output path, and a relative path
     /// then stays as the source wrote it.
     pub module_rel: String,
+    /// Each relative spec that leaves the file's mount, with the
+    /// `@game/...` place its `require` writes. See
+    /// `crate::project::mount_requires`.
+    pub mount_requires: Vec<(String, String)>,
     /// The string passed to `require` for the runtime.
     pub std_require: String,
     /// The ship artifact's runtime require when it differs: under a
@@ -405,6 +409,7 @@ impl Default for EmitOptions {
             wait_timeout: None,
             file_name: "<input>".to_string(),
             module_rel: String::new(),
+            mount_requires: Vec::new(),
             std_require: "@alloy".to_string(),
             ship_std_require: None,
             definitions: false,

@@ -743,9 +743,17 @@ fn run_inner(
 
             None => (by_file, ship_by_tree),
         };
+        // A project an import leads into sits outside the sourcemap, so
+        // its check artifact keeps the file path, as for the runtime.
+        let mount_requires = match deps.stack.len() {
+            1 => crate::project::mount_requires(&tree, &source_rel, &source),
+
+            _ => Vec::new(),
+        };
         let options = EmitOptions {
             file_name: rel.to_string_lossy().into_owned(),
             module_rel: build.out.join(&rel_out).to_string_lossy().into_owned(),
+            mount_requires,
             definitions: rel.to_string_lossy().ends_with(".d.aly"),
             std_require,
             ship_std_require,

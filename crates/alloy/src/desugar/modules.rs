@@ -48,6 +48,17 @@ impl<'s> Desugar<'s> {
             return quoted;
         }
 
+        let written = literal.trim_matches(['"', '\'']);
+
+        if let Some((_, place)) = self
+            .options
+            .mount_requires
+            .iter()
+            .find(|(s, _)| s == written)
+        {
+            return format!("{q}{place}{q}");
+        }
+
         // The build writes `thing.aly` as `thing.luau`, and a require
         // names a module with no extension: `./thing.aly` is `./thing`.
         let inner = &quoted[1..quoted.len() - 1];

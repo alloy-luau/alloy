@@ -1459,8 +1459,20 @@ impl<'s> Desugar<'s> {
         let casts: Vec<Option<&'static str>> = (0..links.len())
             .map(|i| Self::child_cast(&links, i, target, bare, timed_waits))
             .collect();
-        // A timed `WaitForChild` can return nil, so the link after it guards.
-        let mut pending_guard = false;
+        // A timed `WaitForChild` can return nil, so the link after it
+        // guards. The first link guards an optional name, `gui=>Hud`,
+        // the way `gui->Hud` does: the doc says `=>` under a timeout
+        // guards as `->` does.
+        let mut pending_guard = timed_waits
+            && !bare
+            && matches!(
+                links.first(),
+                Some(Link::Plain(Step::Child { wait: true, .. }))
+            )
+            && matches!(base, Expr::Name(n) if self
+                .binding_types
+                .get(self.text_of(*n))
+                .is_some_and(|t| t.ends_with('?')));
 
         // What the chain has called or read when a prefix becomes a temp
         // runs in front of the statement, see `render_hoisted`.
@@ -2331,6 +2343,41 @@ mod tests {
             out.contains("local m = require(p:WaitForChild(\"A\", 5):WaitForChild(\"B\", 5))"),
             "{out}"
         );
+    }
+
+    /// Under a timeout, `=>` on a name that may be nil guards it, as `->`
+    /// does. `const gui = player=>PlayerGui` holds an `Instance?`, and
+    /// `gui=>Hud` called `WaitForChild` on it with no check.
+    #[test]
+    fn a_timed_wait_guards_an_optional_name() {
+        let ship = |src: &str, wait_timeout: Option<f64>| {
+            let options = EmitOptions {
+                wait_timeout,
+                ..EmitOptions::default()
+            };
+
+            crate::compile_with(src, &options).unwrap().ship
+        };
+        let src = "const gui = p=>Gui\nconst a = gui=>Hud\nconst f = p->Gui\nconst b = f=>Hud\nlocal function g(o: Instance?, s: Instance)\n    print(o=>Hud, s=>Hud)\nend\n";
+        let out = ship(src, Some(5.0));
+
+        for want in [
+            "const gui = p:WaitForChild(\"Gui\", 5)\n",
+            "const a = (if gui == nil then nil else gui:WaitForChild(\"Hud\", 5))\n",
+            "const b = (if f == nil then nil else f:WaitForChild(\"Hud\", 5))\n",
+            "    print((if o == nil then nil else o:WaitForChild(\"Hud\", 5)), s:WaitForChild(\"Hud\", 5))\n",
+        ] {
+            assert!(out.contains(want), "{want}\n{out}");
+        }
+
+        // With no timeout, `=>` gives an `Instance`, and the checker
+        // names a receiver that may be nil.
+        let out = ship(src, None);
+        assert!(
+            out.contains("const a = gui:WaitForChild(\"Hud\")\n"),
+            "{out}"
+        );
+        assert!(out.contains("const b = f:WaitForChild(\"Hud\")\n"), "{out}");
     }
 
     #[test]

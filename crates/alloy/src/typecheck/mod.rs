@@ -1203,6 +1203,8 @@ pub fn analyze(
         !(d.message.starts_with("Key '") && nil_lines.contains(&(d.rel.clone(), d.line)))
     });
 
+    drop_nil_echo(&mut analysis.diagnostics);
+
     // The checker gave up on the line: what else it says there comes
     // from a solve it did not finish.
     let limit_lines: Vec<(PathBuf, usize)> = analysis

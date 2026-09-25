@@ -46,7 +46,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "=>",
-        "```alloy\na=>b\n```\nBlocking child lookup: `a:WaitForChild(\"b\")`. With no `wait_timeout` the call waits forever and cannot return nil, so the result is an `Instance`. With `wait_timeout` under `[emit]` in alloy.toml the call takes that timeout, so it can return nil and `=>` guards the rest of the chain the way `->` does. The file `alloy init` writes sets five seconds; a project that wants the non-optional form removes the key.",
+        "```alloy\na=>b\n```\nBlocking child lookup: `a:WaitForChild(\"b\")`. With no `wait_timeout` the call waits forever and cannot return nil, so the result is an `Instance`. With `wait_timeout` under `[emit]` in alloy.toml the call takes that timeout, so it can return nil and `=>` guards the rest of the chain the way `->` does. A name that may be nil, such as `gui` in `const gui = player=>PlayerGui`, is guarded too: `gui=>Hud` is nil when `gui` is. The file `alloy init` writes sets five seconds; a project that wants the non-optional form removes the key.",
     ),
     (
         "[",

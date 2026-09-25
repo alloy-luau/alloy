@@ -441,8 +441,21 @@ impl<'s> Desugar<'s> {
         // Declarations come first so a later statement sees them.
         match stmt {
             Stmt::Local(l) => {
-                for b in &l.names {
-                    self.declare_binding(b);
+                for (i, b) in l.names.iter().enumerate() {
+                    // `->` gives an `Instance?`, and so does `=>` under
+                    // a timeout, so a later `=>` on the name guards it.
+                    let child = matches!(
+                        l.values.get(i),
+                        Some(Expr::Child { wait, .. })
+                            if !wait || self.options.wait_timeout.is_some()
+                    );
+
+                    if child && b.ty.is_none() && b.destructure.is_none() {
+                        self.record_type_text(b.name, Some("Instance?"));
+                        self.declare_name(b.name);
+                    } else {
+                        self.declare_binding(b);
+                    }
                 }
             }
 

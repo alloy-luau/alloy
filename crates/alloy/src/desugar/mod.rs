@@ -3067,14 +3067,19 @@ impl<'s> Desugar<'s> {
     /// both bindings write the same one. A binding with no annotation
     /// blanks it: the name then stands for a type no reader knows.
     fn record_binding_type(&mut self, name: TokSpan, ty: Option<TokSpan>) {
-        let Some(ty) = ty else {
-            let key = self.text_of(name).to_string();
+        let text = ty.map(|ty| self.text_of(ty).trim().trim_start_matches(':').trim());
+        self.record_type_text(name, text);
+    }
+
+    /// `record_binding_type` with the type as text, for a type that the
+    /// value gives and no annotation writes.
+    pub(crate) fn record_type_text(&mut self, name: TokSpan, text: Option<&str>) {
+        let key = self.text_of(name).to_string();
+        let Some(text) = text else {
             self.binding_types.insert(key, String::new());
 
             return;
         };
-        let key = self.text_of(name).to_string();
-        let text = self.text_of(ty).trim().trim_start_matches(':').trim();
 
         match self.binding_types.get(&key) {
             Some(old) if old != text => {

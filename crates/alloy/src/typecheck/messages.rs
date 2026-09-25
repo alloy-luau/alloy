@@ -1089,6 +1089,23 @@ pub(crate) fn keep_innermost(diagnostics: &mut Vec<TypeDiag>) {
     });
 }
 
+/// A method call on an optional value draws `could be nil` and then
+/// `Expected this to be 'T', but got 'nil'` at the same spot. The first
+/// names the problem; the second says it again, so it goes.
+pub(crate) fn drop_nil_echo(diagnostics: &mut Vec<TypeDiag>) {
+    let nil_spots: Vec<(PathBuf, usize, usize)> = diagnostics
+        .iter()
+        .filter(|d| d.message.contains("could be nil"))
+        .map(|d| (d.rel.clone(), d.line, d.col))
+        .collect();
+
+    diagnostics.retain(|d| {
+        !(d.message.starts_with("Expected this to be ")
+            && d.message.ends_with(", but got 'nil'")
+            && nil_spots.contains(&(d.rel.clone(), d.line, d.col)))
+    });
+}
+
 /// The `UnknownModule` report for a require the checker could not
 /// resolve, from the module path the source wrote and the source's own
 /// path relative to the root: what was asked for, and where it was
@@ -3364,5 +3381,36 @@ end
         keep_innermost(&mut diagnostics);
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].col, 55);
+    }
+
+    /// `gui:WaitForChild("Hud")` on an `Instance?` drew two errors at one
+    /// spot. The echo goes; one at another spot stays.
+    #[test]
+    fn a_nil_call_reports_once() {
+        let diag = |col: usize, message: &str| TypeDiag {
+            rel: PathBuf::from("a.aly"),
+            line: 5,
+            col,
+            kind: "TypeError".into(),
+            message: message.into(),
+        };
+        let mut diagnostics = vec![
+            diag(12, "Value of type 'Instance?' could be nil"),
+            diag(12, "Expected this to be 'Instance', but got 'nil'"),
+            diag(30, "Expected this to be 'number', but got 'nil'"),
+        ];
+        drop_nil_echo(&mut diagnostics);
+        let got: Vec<(usize, &str)> = diagnostics
+            .iter()
+            .map(|d| (d.col, d.message.as_str()))
+            .collect();
+
+        assert_eq!(
+            got,
+            [
+                (12, "Value of type 'Instance?' could be nil"),
+                (30, "Expected this to be 'number', but got 'nil'"),
+            ]
+        );
     }
 }

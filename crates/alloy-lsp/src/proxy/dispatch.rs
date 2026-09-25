@@ -2205,7 +2205,7 @@ impl Server {
                             // A trait has no table in the emit, so the
                             // child answers nothing for `self` inside a
                             // default method.
-                            extra.extend(st.trait_self_members(uri, line, character));
+                            extra.extend(st.trait_self_members(uri, line, character, result));
                             // An `impl` of a struct another file declares
                             // writes its methods on the imported table,
                             // and the child types that table from the

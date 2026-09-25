@@ -3,8 +3,15 @@ use super::*;
 impl State {
     /// `self:` inside a trait's default method. A trait has no table in
     /// the emit, so the child has no type for `self` there; the trait's
-    /// own signatures are the list.
-    pub(crate) fn trait_self_members(&self, uri: &str, line: u32, character: u32) -> Vec<Value> {
+    /// own signatures are the list. A default on an enum types `self`,
+    /// and the child lists those methods itself; each one stays once.
+    pub(crate) fn trait_self_members(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        result: &Value,
+    ) -> Vec<Value> {
         let Some(doc) = self.docs.get(uri) else {
             return Vec::new();
         };
@@ -19,21 +26,23 @@ impl State {
             return Vec::new();
         };
         let snippets = self.snippets;
+        let taken = labels_of(result);
 
         methods
             .into_iter()
-            .map(|(label, detail)| {
+            .filter(|(label, _)| !taken.contains(label))
+            .map(|(label, signature)| {
                 let mut item = json!({
                     "label": label,
                     "kind": 2,
-                    "detail": detail,
+                    "detail": format!("function {label}{signature}"),
                     "sortText": format!("0{label}"),
                     "documentation": {
                         "kind": "markdown",
                         "value": format!("A method of `trait {name}`."),
                     },
                 });
-                set_call(&mut item, &label, &detail, snippets);
+                set_call(&mut item, &label, &as_type(&signature), snippets);
 
                 item
             })
@@ -61,17 +70,7 @@ impl State {
             .filter(|(_, _, takes_self)| *takes_self)
             .map(|(label, detail, _)| (label, detail))
             .collect();
-        let mut taken: Vec<String> = result
-            .get("items")
-            .and_then(Value::as_array)
-            .or_else(|| result.as_array())
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|i| i["label"].as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut taken = labels_of(result);
         let mut items = Vec::new();
 
         for (label, detail) in methods {
@@ -1089,11 +1088,26 @@ pub(crate) fn enclosing_trait(source: &str, line: u32) -> Option<(String, Vec<(S
             continue;
         }
 
-        let detail = format!("function {name}{}", &rest[label.len()..]);
-        methods.push((label, detail));
+        let signature = rest[label.len()..].to_string();
+        methods.push((label, signature));
     }
 
     (!methods.is_empty()).then_some((name, methods))
+}
+
+/// The labels a completion answer already holds.
+fn labels_of(result: &Value) -> Vec<String> {
+    result
+        .get("items")
+        .and_then(Value::as_array)
+        .or_else(|| result.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|i| i["label"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Whether the caret takes a member of `self`, after a `.` or a `:`.

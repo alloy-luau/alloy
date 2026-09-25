@@ -149,8 +149,41 @@ impl State {
             // a `Name(` in the file wants the value, which is the type
             // too, so one fix resolves the file.
             let as_type = message.contains("Unknown type '") && !uses_as_value(&doc.source, name);
-            let offers =
-                imports::auto_import_candidates(&doc.source, &path, &files, name, &bound, &aliases);
+            // The report names the module when it knows one: an import
+            // the file writes that reaches the name, such as a barrel,
+            // or else a module of the project. The fix names the same
+            // one, and a name through an import joins that import.
+            let named =
+                alloy::modules::import_that_exports(&path, &doc.source, name).or_else(|| {
+                    message
+                        .contains(" exports it: `import")
+                        .then(|| alloy::modules::module_that_exports(&path, name))
+                        .flatten()
+                });
+            let offers: Vec<(String, imports::Export)> = match named {
+                Some(spec) => vec![(
+                    spec,
+                    imports::Export {
+                        name: name.to_string(),
+                        is_type: as_type,
+                        is_default: false,
+                        is_attribute: false,
+                        kind: 0,
+                    },
+                )],
+
+                None => imports::auto_import_candidates(
+                    &doc.source,
+                    &path,
+                    &files,
+                    name,
+                    &bound,
+                    &aliases,
+                )
+                .into_iter()
+                .map(|(spec, export)| (spec, export.clone()))
+                .collect(),
+            };
 
             for (spec, export) in offers {
                 // The prefix walk answers every name that starts with
@@ -162,7 +195,7 @@ impl State {
                 let typed = as_type && !export.is_default && matches!(export.kind, 7 | 8 | 13);
                 let export = imports::Export {
                     is_type: export.is_type || typed,
-                    ..export.clone()
+                    ..export
                 };
                 let shape = imports::import_shape(&spec, &export, quote);
 

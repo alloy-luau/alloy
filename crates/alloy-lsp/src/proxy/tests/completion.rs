@@ -2810,6 +2810,98 @@ pub(crate) fn an_unresolved_name_offers_the_import_that_binds_it() {
     );
 }
 
+/// The report said "add it to that import `./obby`", and the fix wrote
+/// `import { STAGES } from "./obby/stages"`. The report on `new Stage`
+/// named `"./obby/init"`, which is no module. The fix now names the
+/// module the report names, and a name that comes through an import of
+/// the file joins that import.
+#[test]
+fn the_import_fix_names_the_module_the_report_names() {
+    let dir = std::env::temp_dir().join(format!("alloy-fix-barrel-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src/obby")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"out\"\n",
+    )
+    .expect("toml");
+    std::fs::write(
+        dir.join("src/obby/stages.aly"),
+        "export const STAGES = 1\nexport const OTHER = 2\nexport struct Stage as\n    id: number\nend\n",
+    )
+    .expect("module");
+    std::fs::write(
+        dir.join("src/obby/init.aly"),
+        "export { STAGES, OTHER, Stage } from \"./stages\"\n",
+    )
+    .expect("barrel");
+
+    let mut st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        ..State::default()
+    };
+    let mut fix = |file: &str, src: &str, name: &str| -> Value {
+        let path = dir.join("src").join(file);
+        std::fs::write(&path, src).expect("source");
+        let uri = format!("file://{}", path.display());
+        let options = EmitOptions {
+            file_name: path.to_string_lossy().into_owned(),
+            ..EmitOptions::default()
+        };
+        st.docs.insert(
+            uri.clone(),
+            Doc::new(
+                src.to_string(),
+                1,
+                &options,
+                &alloy::luaux::Config::default(),
+                None,
+            ),
+        );
+        let message = alloy::modules::missing_import_message(
+            &format!("Unknown global '{name}'"),
+            &path,
+            src,
+        )
+        .or_else(|| {
+            alloy::modules::module_that_exports(&path, name).map(|spec| {
+                format!("unknown struct `{name}`; \"{spec}\" exports it: `import {{ {name} }} from \"{spec}\"`")
+            })
+        })
+        .expect("a report");
+        let actions = st.import_actions(
+            &uri,
+            &[json!({ "message": format!("TypeError: {message}") })],
+        );
+
+        assert_eq!(actions.len(), 1, "{actions:?}");
+
+        json!([message, actions[0]["edit"]["changes"][&uri][0]["newText"]])
+    };
+
+    assert_eq!(
+        fix(
+            "use.aly",
+            "import { OTHER } from \"./obby\"\nprint(OTHER, STAGES)\n",
+            "STAGES"
+        ),
+        json!([
+            "`STAGES` is not imported; \"./obby\" exports it, so add it to that import",
+            "import { OTHER, STAGES } from \"./obby\""
+        ])
+    );
+    assert_eq!(
+        fix("make.aly", "print(new Stage { id = 1 })\n", "Stage"),
+        json!([
+            "unknown struct `Stage`; \"./obby\" exports it: `import { Stage } from \"./obby\"`",
+            "import { Stage } from './obby'\n"
+        ])
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `Unknown type 'Point'` on an annotation: the quick fix imports the
 /// name as a type, joins an `import { ... }` line the file already has
 /// for the module, and keeps the value form where the file also writes

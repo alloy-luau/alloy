@@ -2414,10 +2414,18 @@ pub fn module_that_exports(path: &Path, name: &str) -> Option<String> {
             std::fs::read_to_string(p)
                 .is_ok_and(|text| exported_names(&text).iter().any(|n| n == name))
         })?;
+    let target = target.strip_prefix(&input).ok()?;
+    // An `init` file is the module of its folder, so the import names
+    // the folder. `"./obby/init"` names no module.
+    let module = match crate::build::is_init(target) {
+        true => target.parent()?.to_path_buf(),
+
+        false => target.with_extension(""),
+    };
 
     Some(crate::build::relative_require(
         from.strip_prefix(&input).ok()?,
-        &target.strip_prefix(&input).ok()?.with_extension(""),
+        &module,
     ))
 }
 

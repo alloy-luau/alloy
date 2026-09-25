@@ -907,18 +907,20 @@ function Future.any<E>(futures: { [number]: E }): Future<index<E, "__value">>
 	return (winner :: any) :: Future<any>
 end
 
--- The element is `Result2`, the one-table Result: `Result<T, any>` here
--- is a union of two intersections under an Array under a Future, and
--- `await` on that reaches the solver's step limit. The error side is
--- `any`, since a rejection carries whatever it was rejected with.
-function Future.all_settled<T>(futures: { Future<T> }): Future<Array<Result2<T, any>>>
-	return (alloy.future(function()
+-- The elements are `any`. An Array of `Result<T, any>` or of `Result2`
+-- under a Future reaches the solver's step limit at every call, an
+-- annotated one too. An annotation types the elements:
+-- `local f: Future<Array<Result<number, any>>> = Future.all_settled(xs)`.
+-- The list takes any element, so `resolve` beside `reject` fits; a
+-- `{ Future<T> }` refused that mix.
+function Future.all_settled(futures: { [number]: any }): Future<Array<any>>
+	return alloy.future(function()
 		local out = {}
 		for i, f in futures do
 			out[i] = alloy.try_await(f)
 		end
 		return setmetatable(out, alloy.Array)
-	end) :: any) :: Future<Array<Result2<T, any>>>
+	end) :: any
 end
 
 local STATE_NAMES = { [PENDING] = "pending", [RESOLVED] = "resolved", [REJECTED] = "rejected", [CANCELLED] = "cancelled" }

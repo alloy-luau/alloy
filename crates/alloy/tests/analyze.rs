@@ -1471,6 +1471,24 @@ fn a_rest_pattern_over_a_plain_table_analyzes() {
     analyze(RESTS, "rests");
 }
 
+/// `Future.all_settled` reached the checker's limit at every call, an
+/// annotated one too, so its own doc example failed. The elements read
+/// as `any`, and an annotation types them.
+#[test]
+fn all_settled_analyzes_and_an_annotation_types_it() {
+    let body = "local a = Future.resolve(1)\nlocal f: Future<Result<number, any>[]> = Future.all_settled([a])\nlocal g = Future.all_settled([a])\nasync do\n    local rs = await Future.all_settled([Future.resolve(1), Future.reject(\"no\")])\n    local typed = await f\n    local n: TYPE = typed[1]:unwrap_or(0)\n    print(rs:len(), g, n)\nend\n";
+    analyze(&body.replace("TYPE", "number"), "all-settled-good");
+
+    let Some(reported) = reports(&body.replace("TYPE", "string"), "all-settled-bad") else {
+        return;
+    };
+    assert_eq!(reported.len(), 1, "{reported:?}");
+    assert!(
+        reported[0].contains("Expected this to be 'string'"),
+        "{reported:?}"
+    );
+}
+
 /// An `is` test on a struct or an enum narrowed the name in an `if`
 /// statement alone. The right side of `and` and the branch of an `if`
 /// expression read it as `unknown`: "Type 'unknown' does not have key

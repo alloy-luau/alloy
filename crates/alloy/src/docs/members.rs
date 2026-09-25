@@ -673,8 +673,8 @@ pub const MEMBERS: &[(&str, &[Member])] = &[
             Member {
                 name: "all_settled",
                 kind: MemberKind::Static,
-                signature: "Future.all_settled<T>(futures: Future<T>[]): Future<Result<T, any>[]>",
-                doc: "One Result per Future, in order. No failure fails it. The error side is `any`, since a rejection carries whatever it was rejected with.",
+                signature: "Future.all_settled(futures: Future<any>[]): Future<any[]>",
+                doc: "One Result per Future, in order. No failure fails it. The checker reads each Result as `any`, since a list of Results under a Future reaches its limit. Annotate the local to type them: `local f: Future<Result<number, any>[]> = Future.all_settled(xs)`. The error side is `any`, since a rejection carries whatever it was rejected with.",
                 example: "async do\n    local rs = await Future.all_settled([Future.resolve(1), Future.reject(\"no\")])\n    print(rs:len())\nend",
             },
             Member {

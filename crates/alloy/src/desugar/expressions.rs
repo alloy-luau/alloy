@@ -414,9 +414,12 @@ impl<'s> Desugar<'s> {
                 else_value,
                 ..
             } => {
+                let mut narrowed = self.guarded_narrowings(e);
                 let c = self.render_to_string(cond);
-                let a = self.render_lazy(then_value);
-                let b = self.render_lazy(else_value);
+                let a =
+                    self.with_narrowing(then_value, &mut narrowed, |d| d.render_lazy(then_value));
+                let b =
+                    self.with_narrowing(else_value, &mut narrowed, |d| d.render_lazy(else_value));
                 self.generate(anchor, &format!("(if {c} then {a} else {b})"));
             }
 
@@ -716,6 +719,8 @@ impl<'s> Desugar<'s> {
 
                         _ => None,
                     };
+                    // The part an `is` test guards reads the name narrowed.
+                    let mut narrowed = self.guarded_narrowings(e);
                     let mut at = 0;
                     self.stitch(e.span(), &children, |d, child| {
                         at += 1;
@@ -727,11 +732,11 @@ impl<'s> Desugar<'s> {
                                 d.reads = reads;
                             }
 
-                            Child::Expr(c) => {
+                            Child::Expr(c) => d.with_narrowing(c, &mut narrowed, |d| {
                                 d.require_arg = required == Some(std::ptr::from_ref::<Expr>(c));
                                 d.expr_lazy(at > lazy_from, c);
                                 d.require_arg = false;
-                            }
+                            }),
 
                             Child::Block(b) => d.block(b),
 

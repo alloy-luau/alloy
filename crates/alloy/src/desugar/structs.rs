@@ -2849,6 +2849,108 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /*
+    The parts of an expression that an `is` test guards, each with the
+    names it narrows, for the check artifact: the right side of `and`,
+    the right side of `or` after `x is not T`, and the value of an `if`
+    expression or a ternary branch.
+
+    An expression holds no statement, so the `local` an `if` statement
+    opens with has no place here. Each read of the name in the part
+    casts instead: `v is P and v.x` reads `((v :: any) :: P).x`.
+    */
+    pub(crate) fn guarded_narrowings(
+        &self,
+        e: &Expr,
+    ) -> Vec<(*const Expr, HashMap<String, String>)> {
+        let mut out = Vec::new();
+
+        if !self.options.check {
+            return out;
+        }
+
+        let mut guard = |part: &Expr, tests: Vec<(String, String)>| {
+            if !tests.is_empty() {
+                let casts = tests
+                    .into_iter()
+                    .map(|(name, ty)| {
+                        let cast = format!("(({name} :: any) :: {ty})");
+
+                        (name, cast)
+                    })
+                    .collect();
+                out.push((std::ptr::from_ref(part), casts));
+            }
+        };
+        let positive = |c: &Expr| {
+            let mut tests = Vec::new();
+            self.positive_tests(c, &mut tests);
+
+            tests
+        };
+        let negative = |c: &Expr| self.negative_test(c).into_iter().collect::<Vec<_>>();
+
+        match e {
+            Expr::Binary { op, lhs, rhs, .. } => match self.text_of(*op) {
+                "and" => guard(rhs, positive(lhs)),
+
+                "or" => guard(rhs, negative(lhs)),
+
+                _ => {}
+            },
+
+            Expr::IfElse {
+                branches,
+                else_value,
+                ..
+            } => {
+                for (cond, value) in branches {
+                    if let Cond::Expr(c) = cond {
+                        guard(value, positive(c));
+                    }
+                }
+
+                if let [(Cond::Expr(c), _)] = branches.as_slice() {
+                    guard(else_value, negative(c));
+                }
+            }
+
+            Expr::Ternary {
+                cond,
+                then_value,
+                else_value,
+                ..
+            } => {
+                guard(then_value, positive(cond));
+                guard(else_value, negative(cond));
+            }
+
+            _ => {}
+        }
+
+        out
+    }
+
+    /// Runs `render` with the names that `narrowings` holds for `part`.
+    pub(crate) fn with_narrowing<R>(
+        &mut self,
+        part: &Expr,
+        narrowings: &mut Vec<(*const Expr, HashMap<String, String>)>,
+        render: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let at = narrowings
+            .iter()
+            .position(|(p, _)| *p == std::ptr::from_ref(part));
+        let pushed = at.map(|i| self.renames.push(narrowings.swap_remove(i).1));
+        let out = render(self);
+
+        if pushed.is_some() {
+            self.renames.pop();
+        }
+
+        out
+    }
+
     /// The type an `is` narrows `value` to when Luau cannot: a struct,
     /// an enum, an imported type, or a datatype the definitions declare
     /// as an alias. A class, a primitive, and a datatype class refine on

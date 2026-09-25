@@ -1471,6 +1471,38 @@ fn a_rest_pattern_over_a_plain_table_analyzes() {
     analyze(RESTS, "rests");
 }
 
+/// An `is` test on a struct or an enum narrowed the name in an `if`
+/// statement alone. The right side of `and` and the branch of an `if`
+/// expression read it as `unknown`: "Type 'unknown' does not have key
+/// 'x'". Each read there casts now, and a wrong use still reports.
+#[test]
+fn an_is_test_narrows_the_expression_it_guards() {
+    let head = "struct P as\n    x: number\nend\n\nenum Species as\n    Cat\n    Dog\nend\n\n";
+    let good = format!(
+        "{head}local function g(v: unknown, name: string): Species\n    local a = v is P and v.x > 0\n    local b = if v is P then v.x else 0\n    local c = v is not P or v.x > 0\n    local d = if v is not P then 0 else v.x\n    local e = v is P ? v.x : 0\n    print(a, b, c, d, e)\n    return if name is Species then name else Species.Cat\nend\nprint(g(1, \"Cat\"))\n"
+    );
+    let out = alloy::compile(&good).unwrap();
+    assert!(
+        out.check
+            .contains("(getmetatable((v :: any)) == P) and ((v :: any) :: P).x > 0"),
+        "{}",
+        out.check
+    );
+    assert!(!out.ship.contains(":: P)"), "{}", out.ship);
+    analyze(&good, "is-in-expression-good");
+
+    let bad = format!(
+        "{head}local function g(v: unknown): string\n    return if v is P then v.x else \"\"\nend\nprint(g(1))\n"
+    );
+    let Some(reported) = reports(&bad, "is-in-expression-bad") else {
+        return;
+    };
+    assert!(
+        reported.iter().any(|l| l.contains("got 'number'")),
+        "{reported:?}"
+    );
+}
+
 /// `f is function` cast `f` to two function types in an intersection,
 /// an overload, so `f()` and `f(1)` were ambiguous. One function type
 /// takes every call, and passes where a callback is asked.

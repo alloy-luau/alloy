@@ -1472,3 +1472,31 @@ fn a_namespace_trait_bounds_a_generic() {
     assert!(check.contains("(xs[1] :: (T & Zoo_Named))"), "{check}");
     assert!(check.contains("outer<T>(x: (T & Zoo_Named))"), "{check}");
 }
+
+/// `==` on a fresh value of a namespace's struct or enum compares by
+/// identity, as it does for a top-level one: inside the namespace, by
+/// the path outside, and through `$assert_eq`, which compares with `==`.
+#[test]
+fn a_namespace_type_warns_of_an_identity_compare() {
+    let src = "namespace G\n    struct P\n        x: number\n    end\n    enum Inner\n        A\n        B(number)\n    end\n    @derive(Eq)\n    struct Q\n        x: number\n    end\n    function test(i: Inner): boolean\n        return i == Inner.B(1)\n    end\nend\nprint(new G.P { x = 1 } == new G.P { x = 1 }, new G.Q { x = 1 } == new G.Q { x = 1 })\n$assert_eq(G.Inner.B(1), G.Inner.B(1))\n";
+    let options = alloy::EmitOptions {
+        file_name: "t.aly".to_string(),
+        ..alloy::EmitOptions::default()
+    };
+    let out = alloy::compile_with(src, &options).unwrap();
+    let got: Vec<&str> = out
+        .lints
+        .iter()
+        .filter(|l| l.name == "identity_compare")
+        .map(|l| l.message.as_str())
+        .collect();
+
+    assert_eq!(
+        got,
+        [
+            "this `==` compares identity, and a value built here equals no other; `@derive(Eq)` on `G.Inner` compares the payload",
+            "this `==` compares identity, and a value built here equals no other; `@derive(Eq)` on `G.P` compares the fields",
+            "`$assert_eq` compares with `==`, which compares identity, and a value built here equals no other; `@derive(Eq)` on `G.Inner` compares the payload",
+        ]
+    );
+}

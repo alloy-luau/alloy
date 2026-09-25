@@ -930,8 +930,8 @@ impl<'s> Desugar<'s> {
     /// content. A type this file cannot see the derives of stays quiet.
     pub(crate) fn check_identity_compares(&mut self, block: &Block) {
         let mut hits: Vec<(TokSpan, String)> = Vec::new();
-        let stmts = block.stmts.iter().flat_map(stmt_children).collect();
-        self.identity_compares_in(stmts, &mut hits);
+        let stmts: Vec<&Stmt> = block.stmts.iter().collect();
+        self.identity_compares_at(&stmts, &mut hits);
 
         for (span, message) in hits {
             let (start, end) = (
@@ -945,6 +945,28 @@ impl<'s> Desugar<'s> {
                 message,
                 fix: None,
             });
+        }
+    }
+
+    /// The top-level statements, and the members of each namespace under
+    /// its scope, so a member reads by its own name: `Inner.B(1)`.
+    fn identity_compares_at(&mut self, stmts: &[&Stmt], hits: &mut Vec<(TokSpan, String)>) {
+        for stmt in stmts {
+            if let Stmt::Namespace(ns) = stmt.under_default() {
+                let key = namespaces::key_of(
+                    self.ns_stack.last().map(|f| f.key.as_str()),
+                    self.text_of(ns.name),
+                );
+                self.ns_stack.push(namespaces::NsFrame {
+                    key,
+                    scope: self.scope_depth(),
+                });
+                let members: Vec<&Stmt> = ns.members.iter().map(|m| &m.stmt).collect();
+                self.identity_compares_at(&members, hits);
+                self.ns_stack.pop();
+            }
+
+            self.identity_compares_in(stmt_children(stmt), hits);
         }
     }
 
@@ -976,6 +998,19 @@ impl<'s> Desugar<'s> {
                         ));
                     }
 
+                    // `$assert_eq` compares with `==` at run time.
+                    if let Expr::Macro { name, args, span } = e
+                        && self.text_of(*name) == "assert_eq"
+                        && let Some((ty, part)) = args.iter().find_map(|a| self.built_without_eq(a))
+                    {
+                        hits.push((
+                            *span,
+                            format!(
+                                "`$assert_eq` compares with `==`, which compares identity, and a value built here equals no other; `@derive(Eq)` on `{ty}` compares the {part}"
+                            ),
+                        ));
+                    }
+
                     super::expr_children(e)
                 }
             };
@@ -1003,7 +1038,12 @@ impl<'s> Desugar<'s> {
                 (ty, "payload")
             }
 
-            Expr::New { name, .. } => (self.dotted_name(name)?, "fields"),
+            // `new G.P { }` builds the struct this file declares as `G_P`.
+            Expr::New { name, .. } => {
+                let ty = self.dotted_name(name)?;
+
+                (self.own_ns_type(&ty).unwrap_or(ty), "fields")
+            }
 
             _ => return None,
         };

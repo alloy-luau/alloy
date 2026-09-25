@@ -26,6 +26,12 @@ local function sorted_keys(t: { [any]: any }): { any }
 	return keys
 end
 
+--- The `Text` of a lone `{expr}` in markup. Only the check artifact
+--- calls it: the parameter type makes any other value a type error.
+function alloy.text(v: string | number): string
+	return tostring(v)
+end
+
 local function show_list(values: { any }, open: string, close: string): string
 	if #values == 0 then
 		return open .. close

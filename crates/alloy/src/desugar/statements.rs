@@ -725,6 +725,21 @@ impl<'s> Desugar<'s> {
             return true;
         }
 
+        // The check artifact wraps a lone `{expr}` that markup gives as
+        // `Text`, so the walk has to reach the statement that holds one.
+        if self.options.check {
+            let (start, end) = (self.byte_start(s.span()), self.byte_end(s.span()));
+
+            if self
+                .options
+                .text_holes
+                .iter()
+                .any(|&(a, b)| start <= a && b <= end)
+            {
+                return true;
+            }
+        }
+
         // An `export type { T }` list below the alias adds the word.
         if let Stmt::TypeAlias(t) = s
             && self.export_listed_types.contains(self.text_of(t.name))

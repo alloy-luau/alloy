@@ -156,6 +156,17 @@ impl<'s> Desugar<'s> {
             return;
         }
 
+        // A lone `{expr}` that markup gives as `Text` must be a string or
+        // a number. The check artifact passes it through `__alloy.text`,
+        // typed `(string | number) -> string`, so another value reports.
+        let (start, end) = (self.byte_start(e.span()), self.byte_end(e.span()));
+        let text_hole = self.options.check && self.options.text_holes.contains(&(start, end));
+
+        if text_hole {
+            let std = self.std();
+            self.generate(start, &format!("{std}.text("));
+        }
+
         // A table literal runs nothing before its fields, so each field
         // keeps its own hoists instead. A closure around the whole literal
         // types it `{ x: number }`, and Luau rejects that where `{ x:
@@ -167,6 +178,10 @@ impl<'s> Desugar<'s> {
             self.expr_in_place(e, |d| d.expr_node(e));
         } else {
             self.expr_node(e);
+        }
+
+        if text_hole {
+            self.generate(end, ")");
         }
 
         if calls_code(e) {

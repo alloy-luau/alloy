@@ -67,6 +67,25 @@ pub fn compile_alx(
     // component, which `[lint.naming] component` styles.
     let mut options = options.clone();
     options.markup = crate::naming::Markup::of(src, &compiled.regions);
+    // A lone `{expr}` that the markup gives as `Text`, as bytes of the
+    // lowered text. A hole that held markup of its own has no copied
+    // bytes to map, and goes unchecked.
+    options.text_holes = compiled
+        .text_holes
+        .iter()
+        .filter_map(|&(open, close)| {
+            let inner = src.get(open + 1..close.checked_sub(1)?)?;
+            let start = open + 1 + inner.len() - inner.trim_start().len();
+            let end = open + 1 + inner.trim_end().len();
+
+            (start < end).then_some(())?;
+
+            Some((
+                lowering.to_output(start as u32)?,
+                lowering.to_output(end as u32 - 1)? + 1,
+            ))
+        })
+        .collect();
 
     let mut output = crate::compile_with(&lowered, &options)?;
     let back = |offset: u32| lowering.to_source(offset);
@@ -1190,6 +1209,42 @@ mod tests {
             "{:?}",
             out.lints.iter().map(|l| &l.message).collect::<Vec<_>>()
         );
+    }
+
+    /// A lone `{expr}` that becomes `Text` must be a string or a number.
+    /// With no reactivity, the check artifact passes it through
+    /// `__alloy.text`, and the ship artifact keeps it bare. Text with
+    /// holes is a string already. A reactive library takes a source
+    /// there, so its hole stays bare in both.
+    #[test]
+    fn a_lone_text_hole_checks_its_type() {
+        let src = "local function create(n: string): any return n end\nlocal function Corner(): any return 1 end\nreturn <Frame><TextLabel>{Corner()}</TextLabel><TextBox>n: {Corner()}</TextBox></Frame>\n";
+        let mut config = luaux::Config::bare();
+        config.create = "create".to_string();
+        config.interpolate = luaux::config::Interpolate::Plain;
+        let out = compile_alx(src, &EmitOptions::default(), config.clone())
+            .expect("the markup compiles")
+            .output;
+
+        assert!(
+            out.check.contains("Text = __alloy.text(Corner())"),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check.contains("Text = `n: {Corner()}`"),
+            "{}",
+            out.check
+        );
+        assert!(out.ship.contains("Text = Corner()"), "{}", out.ship);
+        assert!(!out.ship.contains("__alloy"), "{}", out.ship);
+
+        config.interpolate = luaux::config::Interpolate::Wrap;
+        let out = compile_alx(src, &EmitOptions::default(), config)
+            .expect("the markup compiles")
+            .output;
+
+        assert!(!out.check.contains("__alloy.text"), "{}", out.check);
     }
 
     /// A warn-level markup lint is a lint. As a diagnostic it was an

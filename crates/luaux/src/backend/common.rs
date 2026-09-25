@@ -567,6 +567,20 @@ pub(super) fn plan_text(
         (Interpolate::Wrap, None) => TextMode::Thunk,
     };
 
+    // Alloy patch: with no reactivity, a lone `{expr}` is the `Text` value
+    // as it stands, so the caller can check its type. A reactive library
+    // takes a source there too, and a source is no string.
+    if let (TextMode::Plain, [TextPart::Expression(_)]) = (mode, parts.as_slice()) {
+        let hole = element.children.iter().find_map(|child| match child {
+            Child::Expression { span, .. } => Some(*span),
+            _ => None,
+        });
+
+        if let Some(span) = hole {
+            context.text_hole(span.start, span.end);
+        }
+    }
+
     let (text, references) = encode_text(&parts, mode);
 
     // Only a wrapped emission names anything. A plain literal, a bare single

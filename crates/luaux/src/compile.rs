@@ -124,6 +124,10 @@ pub struct Compiled {
     /// Alloy patch: the output offset the helper preamble went to and
     /// its length, when the file needed one.
     pub preamble: Option<(usize, usize)>,
+    /// Alloy patch: the source span of each lone `{expr}` that became the
+    /// `Text` property as a plain value, braces included. A hole inside
+    /// another hole is left out.
+    pub text_holes: Vec<(usize, usize)>,
 }
 
 /// Alloy patch: one markup region and the text it became: the byte
@@ -189,6 +193,7 @@ fn compile_inner(
     let mut errors = Vec::new();
     let mut helpers = crate::backend::Helpers::default();
     let mut regions = Vec::new();
+    let mut text_holes = Vec::new();
     let output = compile_with(
         source,
         backend,
@@ -198,6 +203,7 @@ fn compile_inner(
         &mut errors,
         &mut helpers,
         &mut regions,
+        &mut text_holes,
     )?;
 
     // Only the outermost call injects: nested expressions are compiled on their
@@ -227,6 +233,7 @@ fn compile_inner(
         errors,
         regions,
         preamble,
+        text_holes,
     })
 }
 
@@ -276,6 +283,7 @@ fn compile_with(
     errors: &mut Vec<CompileError>,
     helpers: &mut crate::backend::Helpers,
     regions: &mut Vec<Region>,
+    text_holes: &mut Vec<(usize, usize)>,
 ) -> Result<String, CompileError> {
     let mut lexer = Lexer::new(source);
     let mut scanner = Scanner::new(source);
@@ -312,6 +320,7 @@ fn compile_with(
         // mistake and hide the upstream one.
         let emitted = backend.emit(&node, &context);
         errors.extend(context.take_errors().into_iter().map(CompileError::from));
+        text_holes.extend(context.take_text_holes());
 
         let out_start = out.len();
         out.push_str(&emitted?);
@@ -402,6 +411,7 @@ fn compile_hole(
         warnings,
         errors,
         helpers,
+        &mut Vec::new(),
         &mut Vec::new(),
     );
 

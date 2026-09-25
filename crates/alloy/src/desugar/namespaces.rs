@@ -692,8 +692,10 @@ impl<'s> Desugar<'s> {
 
             let m = info.member(rest[at])?;
 
+            // `N.X.Z` with `X` a struct names nothing: the path runs off
+            // the member.
             if !m.nested {
-                return Some(m.rendered.clone());
+                return (at + 1 == rest.len()).then(|| m.rendered.clone());
             }
 
             key = key_of(Some(&key), rest[at]);

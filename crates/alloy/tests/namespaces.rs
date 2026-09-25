@@ -1443,3 +1443,16 @@ fn an_imported_namespace_type_crosses_a_remote_with_its_layout() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// `new N.X.Z { }` with `X` a struct names nothing. The path resolved
+/// to `N_X` and dropped `Z`, so the build made an `N.X` in silence, and
+/// empty braces said "leaves `a` unset". The path now reaches the
+/// checker whole, which reports "`N.X` has no struct `Z`".
+#[test]
+fn a_path_past_a_struct_names_no_struct() {
+    let src = "namespace N\n    struct X\n        a: number\n    end\nend\nprint(new N.X.Z { a = 1 }, new N.X.Z {})\n";
+    let (ship, _, messages) = compile(src);
+    assert!(messages.is_empty(), "{messages:?}");
+    assert!(ship.contains("construct(N.X.Z, { a = 1 })"), "{ship}");
+    assert!(!ship.contains("N_X({"), "{ship}");
+}

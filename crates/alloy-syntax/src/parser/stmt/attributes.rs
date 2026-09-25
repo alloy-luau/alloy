@@ -47,13 +47,18 @@ impl<'a> Parser<'a> {
 
             // Arguments only when `(` touches the name: `@derive(Eq)`.
             if self.at("(") && self.adjacent_prev() {
-                self.bump();
+                let open = self.bump();
+                let read = match self.at(")") {
+                    true => Ok(Vec::new()),
 
-                if !self.at(")") {
-                    args = self.expr_list()?;
+                    false => self.expr_list(),
                 }
+                .and_then(|a| self.expect(")").map(|_| a));
 
-                self.expect(")")?;
+                // An argument list the author is still typing reads on
+                // into the declaration below, and the report would land
+                // there. The bracket that never closes is the mistake.
+                args = read.map_err(|e| self.unclosed_args(open, name).unwrap_or(e))?;
             }
 
             out.push(Attr {
@@ -64,6 +69,69 @@ impl<'a> Parser<'a> {
         }
 
         Ok(out)
+    }
+
+    /// The report for an argument list that never closes, on the last
+    /// bracket left open: `@deprecated({` above a function. The list
+    /// ends at the end of the file, or at a line that opens with a
+    /// declaration, which no argument can hold.
+    fn unclosed_args(&self, open: usize, name: TokSpan) -> Option<ParseError> {
+        let text = |i: usize| self.toks[i].text(self.src);
+        let mut stack = vec![open];
+
+        for i in open + 1..self.toks.len() {
+            let line_start = crate::contextual::newline_after(self.src, self.toks, i - 1);
+            let declares = match text(i) {
+                "@" | "local" | "const" | "export" => true,
+
+                "function" | "struct" | "enum" | "trait" | "interface" | "impl" | "remote" => self
+                    .toks
+                    .get(i + 1)
+                    .is_some_and(|t| t.kind == TokKind::Ident),
+
+                _ => false,
+            };
+
+            if line_start && declares {
+                break;
+            }
+
+            match text(i) {
+                "(" | "{" | "[" => stack.push(i),
+
+                ")" | "}" | "]" => {
+                    stack.pop();
+
+                    if stack.is_empty() {
+                        return None;
+                    }
+                }
+
+                _ => {}
+            }
+        }
+
+        let last = *stack.last()?;
+        let closers: String = stack
+            .iter()
+            .rev()
+            .map(|&i| match text(i) {
+                "{" => '}',
+
+                "[" => ']',
+
+                _ => ')',
+            })
+            .collect();
+
+        Some(ParseError {
+            offset: self.toks[last].start as usize,
+            message: format!(
+                "`@{}` opens `{}` and never closes it; write `{closers}` after its arguments",
+                self.span_text(name),
+                text(last)
+            ),
+        })
     }
 
     /// The name of an attribute, as one name or a dotted path.

@@ -97,6 +97,9 @@ const KIND_RULES: &[(&[&str], &str)] = &[
     // The removal report names a declaration kind, which the rules
     // below would read as the kind's own family.
     (&["`global` is removed"], "ImportError"),
+    // An attribute's argument list that never closes. The report names
+    // the attribute, which could reach any rule below.
+    (&["and never closes it; write"], "SyntaxError"),
     // Luau's attribute list and `@allow`. The words of a lint name in
     // the report could reach any rule below. A std module's attribute
     // path names the module, which the std rule below would read.
@@ -350,6 +353,15 @@ mod tests {
         ] {
             assert_eq!(super::kind_for(message), "EnumError", "{message}");
         }
+    }
+
+    /// An attribute list that never closes is the parser's report,
+    /// whatever the attribute's name reads as.
+    #[test]
+    fn an_unclosed_attribute_is_a_syntax_error() {
+        let message = "`@deprecated` opens `{` and never closes it; write `})` after its arguments";
+
+        assert_eq!(super::kind_for(message), "SyntaxError");
     }
 
     /// The `Future` entry documents every member the std declares. The

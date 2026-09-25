@@ -709,6 +709,44 @@ fn a_match_head_without_an_alias_name_reports_once() {
     assert_eq!((errors, diagnostics), (0, 1));
 }
 
+/// An attribute's argument list the author is still typing reports on
+/// the bracket left open, not on the declaration below it. A list that
+/// closes keeps the report of what is wrong inside it.
+#[test]
+fn an_unclosed_attribute_names_its_bracket() {
+    for (src, message, at) in [
+        (
+            "@deprecated({\nfunction old()\nend\n",
+            "`@deprecated` opens `{` and never closes it; write `})` after its arguments",
+            "{\n",
+        ),
+        (
+            "@deprecated(\nfunction old()\nend\n",
+            "`@deprecated` opens `(` and never closes it; write `)` after its arguments",
+            "(\n",
+        ),
+    ] {
+        let lexed = lexer::lex(src).unwrap();
+        let (_, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+        assert_eq!(diagnostics.len(), 1, "for {src:?}: {diagnostics:?}");
+        assert_eq!(diagnostics[0].message, message);
+        assert!(src[diagnostics[0].offset..].starts_with(at), "for {src:?}");
+    }
+
+    assert_eq!(
+        lenient("@deprecated({ use = \"f\" })\nfunction old()\nend\n"),
+        (0, 0)
+    );
+
+    let src = "@deprecated(1 +)\nfunction old()\nend\n";
+    let lexed = lexer::lex(src).unwrap();
+    let (_, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+    assert!(
+        !diagnostics[0].message.contains("never closes"),
+        "{diagnostics:?}"
+    );
+}
+
 /// A `case` the author is still typing reports once, on the `case`. The
 /// arms around it, the `end` of the match, and the `end` of the function
 /// all parse, in the value form and in the statement form.

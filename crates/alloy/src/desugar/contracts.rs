@@ -30,6 +30,8 @@ pub(crate) struct Member {
     /// A function's parameter list as written, `(self, dt: number)`, or a
     /// field's type. Empty when the source writes none.
     pub shape: String,
+    /// The byte the member's name starts at.
+    pub at: u32,
 }
 
 /// The declaration a contract is checked against: the target word the
@@ -167,7 +169,6 @@ impl<'s> Desugar<'s> {
             }
 
             for want in self.contract_clauses(a, &decl) {
-                self.contract_names.insert(want.member.clone());
                 self.check_one_clause(a.span, &name, owner, members, &want);
             }
         }
@@ -442,6 +443,9 @@ impl<'s> Desugar<'s> {
             .iter()
             .filter(|m| m.name == want.member && m.kind == want.kind)
             .collect();
+        // The contract fixes the name of each member that answers it. A
+        // member of another type that shares the name keeps the lint.
+        self.contract_names.extend(found.iter().map(|m| m.at));
 
         let Some(m) = found.first() else {
             let visibility = match want.private {
@@ -530,6 +534,7 @@ impl<'s> Desugar<'s> {
                 kind: "field",
                 private: visible && f.visibility.is_some_and(|v| self.text_of(v) == "private"),
                 shape: self.text_of(f.ty).trim().to_string(),
+                at: self.byte_start(f.name),
             })
             .collect()
     }
@@ -540,13 +545,14 @@ impl<'s> Desugar<'s> {
         i.methods
             .iter()
             .filter_map(|m| {
-                let name = self.text_of(*m.path.first()?).to_string();
+                let first = *m.path.first()?;
 
                 Some(Member {
-                    name,
+                    name: self.text_of(first).to_string(),
                     kind: "function",
                     private: m.visibility.is_some_and(|v| self.text_of(v) == "private"),
                     shape: self.params_text(&m.body),
+                    at: self.byte_start(first),
                 })
             })
             .collect()
@@ -577,6 +583,7 @@ impl<'s> Desugar<'s> {
                 kind: "function",
                 private: false,
                 shape: signature_params(self.text_of(m.signature)).to_string(),
+                at: self.byte_start(m.name),
             })
             .collect()
     }
@@ -597,6 +604,7 @@ impl<'s> Desugar<'s> {
                             kind: "function",
                             private,
                             shape: self.params_text(&f.body),
+                            at: self.byte_start(*n),
                         });
                     }
                 }
@@ -606,6 +614,7 @@ impl<'s> Desugar<'s> {
                     kind: "function",
                     private,
                     shape: self.params_text(&f.body),
+                    at: self.byte_start(f.name),
                 }),
 
                 Stmt::Local(l) => {
@@ -618,6 +627,7 @@ impl<'s> Desugar<'s> {
                                 .ty
                                 .map(|t| self.text_of(t).trim().to_string())
                                 .unwrap_or_default(),
+                            at: self.byte_start(b.name),
                         });
                     }
                 }

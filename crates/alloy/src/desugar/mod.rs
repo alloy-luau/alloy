@@ -463,9 +463,10 @@ pub struct Rendered {
     pub tests: Vec<(String, bool)>,
     /// The members an attribute contract asked for and did not find.
     pub contract_gaps: Vec<ContractGap>,
-    /// The member names an attribute contract asks for. The contract
-    /// fixes each name, so the naming lint leaves it alone.
-    pub contract_names: HashSet<String>,
+    /// The byte each member name starts at that an attribute contract
+    /// asks for. The contract fixes the name, so the naming lint leaves
+    /// that member alone, and reads another member of the same name.
+    pub contract_names: HashSet<u32>,
 }
 
 /// The words a declaration may write between `global` and the name it
@@ -1350,7 +1351,7 @@ struct Desugar<'s> {
     /// writes in.
     contract_gaps: Vec<ContractGap>,
     /// See [`Rendered::contract_names`].
-    contract_names: HashSet<String>,
+    contract_names: HashSet<u32>,
     /// Where a member of a type goes, by the type's name: the span of
     /// the `struct` or `interface` that holds its fields, and the span of
     /// an `impl` that holds its methods. A contract on an `impl` can ask

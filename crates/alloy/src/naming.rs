@@ -1292,15 +1292,15 @@ pub(crate) fn scoped_bindings(src: &str, toks: &[Tok], block: &Block) -> Vec<Sco
         .collect()
 }
 
-/// `fixed` holds the member names an attribute contract asks for: the
-/// contract fixes the name, so a rename breaks it.
+/// `fixed` holds the byte each member name starts at that an attribute
+/// contract asks for: the contract fixes the name, so a rename breaks it.
 pub(crate) fn lints(
     src: &str,
     toks: &[Tok],
     chunk: &Chunk,
     naming: &Naming,
     markup: &Markup,
-    fixed: &HashSet<String>,
+    fixed: &HashSet<u32>,
 ) -> Vec<Lint> {
     let mut w = Walk {
         src,
@@ -1366,7 +1366,10 @@ pub(crate) fn lints(
             continue;
         };
 
-        if name.starts_with('_') || styles.fits(name) || (d.is_member() && fixed.contains(name)) {
+        if name.starts_with('_')
+            || styles.fits(name)
+            || (d.is_member() && fixed.contains(&toks[d.tok].start))
+        {
             continue;
         }
 
@@ -1674,6 +1677,35 @@ mod tests {
         assert_eq!(
             hits(src),
             vec!["`Other` is a method, and methods are snake_case here: `other`"]
+        );
+    }
+
+    /// The skip keyed by name alone, so one `@service impl Door` turned
+    /// the lint off for `Start` on every type in the file. A `Start` that
+    /// no contract asks for reports again.
+    #[test]
+    fn a_contract_fixes_the_name_on_its_own_type_alone() {
+        let src = concat!(
+            "attribute service on impl as\n    requires function Start(self)\nend\n",
+            "struct Door\n    n: number\nend\n",
+            "struct Window\n    n: number\nend\n",
+            "@service\nimpl Door\n    function Start(self): () print(self.n) end\nend\n",
+            "impl Window\n    function Start(self): () print(self.n) end\nend\n",
+        );
+        let out = crate::compile(src).unwrap();
+        let hits: Vec<(u32, String)> = out
+            .lints
+            .into_iter()
+            .filter(|l| l.name == LINT)
+            .map(|l| (l.start, l.message))
+            .collect();
+        let window = src.rfind("Start").unwrap() as u32;
+        assert_eq!(
+            hits,
+            vec![(
+                window,
+                "`Start` is a method, and methods are snake_case here: `start`".to_string()
+            )]
         );
     }
 

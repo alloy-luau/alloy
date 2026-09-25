@@ -137,38 +137,47 @@ impl<'s> Scan<'s> {
     /// annotation, or the struct a `new` builds. `None` when the file
     /// does not say.
     pub(crate) fn declared_type(&self, name: &str) -> Option<&'s str> {
-        for i in 0..self.toks.len() {
-            if !self.is_name(i) || self.t(i) != name {
-                continue;
+        (0..self.toks.len())
+            .filter(|&i| self.is_name(i) && self.t(i) == name)
+            .find_map(|i| self.decl_type(i))
+    }
+
+    /// The type the name at `at` carries: the declaration it reads says,
+    /// or the first declaration of the name in the file when no local
+    /// or parameter in scope binds it.
+    pub(crate) fn type_at(&self, at: usize) -> Option<&'s str> {
+        match self.binding_at(at) {
+            Some(d) => self.decl_type(d),
+
+            None => self.declared_type(self.t(at)),
+        }
+    }
+
+    /// The type the declaration at `i` gives its name: an annotation on
+    /// a parameter or a local, or the struct a `new` builds.
+    fn decl_type(&self, i: usize) -> Option<&'s str> {
+        let introduced = matches!(self.prev(i), "(" | "," | "local" | "const");
+
+        if introduced && self.at(i + 1, ":") {
+            let mut j = i + 2;
+
+            while matches!(self.t(j), "read" | "write") {
+                j += 1;
             }
 
-            let introduced = matches!(self.prev(i), "(" | "," | "local" | "const");
-
-            if introduced && self.at(i + 1, ":") {
-                let mut j = i + 2;
-
-                while matches!(self.t(j), "read" | "write") {
-                    j += 1;
-                }
-
-                // `print(c:ready())` reads as `(c: ready)` from the
-                // tokens alone; the `(` after the name says it is a
-                // method call, not an annotation.
-                if self.is_name(j) && !self.at(j + 1, "(") {
-                    return Some(self.last_segment(j));
-                }
-            }
-
-            if matches!(self.prev(i), "local" | "const")
-                && self.at(i + 1, "=")
-                && self.at(i + 2, "new")
-                && self.is_name(i + 3)
-            {
-                return Some(self.last_segment(i + 3));
+            // `print(c:ready())` reads as `(c: ready)` from the tokens
+            // alone; the `(` after the name says it is a method call,
+            // not an annotation.
+            if self.is_name(j) && !self.at(j + 1, "(") {
+                return Some(self.last_segment(j));
             }
         }
 
-        None
+        (matches!(self.prev(i), "local" | "const")
+            && self.at(i + 1, "=")
+            && self.at(i + 2, "new")
+            && self.is_name(i + 3))
+        .then(|| self.last_segment(i + 3))
     }
 
     /// `x.count` or `x:reset()` outside the impl of the struct that
@@ -480,17 +489,20 @@ impl<'s> Scan<'s> {
     }
 
     /// How the statement at the name `i` writes into the value the name
-    /// holds: `X.a.b = v` and `X[k] = v` assign into it, `X:push(v)`
-    /// calls a method that changes it. The binding itself stands.
+    /// holds: `X.a.b = v`, `X[k] = v`, and `X.n += 1` assign into it,
+    /// `X:push(v)` calls a method that changes it. The binding itself
+    /// stands.
     fn value_write(&self, i: usize) -> Option<ValueWrite<'s>> {
         if !self.statement_start(i) {
             return None;
         }
 
         let assigned = match self.path_end(i) {
-            Some(end) if end > i + 1 && self.at(end, "=") => true,
+            Some(end) if end > i + 1 && self.assigns_at(end) => true,
 
-            _ => self.at(i + 1, "[") && self.matching(i + 1).is_some_and(|c| self.at(c + 1, "=")),
+            _ => {
+                self.at(i + 1, "[") && self.matching(i + 1).is_some_and(|c| self.assigns_at(c + 1))
+            }
         };
 
         if assigned {
@@ -499,6 +511,15 @@ impl<'s> Scan<'s> {
 
         (self.at(i + 1, ":") && self.is_name(i + 2) && MUTATING_METHODS.contains(&self.t(i + 2)))
             .then(|| ValueWrite::Method(self.t(i + 2)))
+    }
+
+    /// Whether token `k` assigns: `=`, a compound operator such as `+=`
+    /// or `..=`, or `??=`, which lexes as `?`, `?`, and `=`.
+    fn assigns_at(&self, k: usize) -> bool {
+        matches!(
+            self.t(k),
+            "=" | "+=" | "-=" | "*=" | "/=" | "//=" | "%=" | "^=" | "..="
+        ) || (self.at(k, "?") && self.at(k + 1, "?") && self.at(k + 2, "="))
     }
 
     /// The names a `local` at `i` binds, with their tokens. A destructure
@@ -811,7 +832,8 @@ impl<'s> Scan<'s> {
     /// `local x = v` that nothing assigns again reads as `const x = v`:
     /// the word says the binding holds one value, and a later write
     /// becomes a compile error. The scan is file-wide, as the one for
-    /// reads is, so a write to any local of the name keeps it quiet.
+    /// reads is, so a write to any local of the name keeps it quiet. A
+    /// later `local` of the name holds the writes in its own block.
     pub(crate) fn prefer_const(&self, out: &mut Vec<Lint>) {
         for i in 0..self.toks.len() {
             if !self.at(i, "local")
@@ -843,6 +865,7 @@ impl<'s> Scan<'s> {
                             self.t(j) == self.t(n)
                                 && !self.is_member(j)
                                 && self.value_write(j).is_some()
+                                && !self.shadowed(n, j)
                         })
                 })
             {
@@ -886,13 +909,7 @@ impl<'s> Scan<'s> {
                 k += 2;
             }
 
-            // `??=` lexes as three tokens, `?`, `?`, and `=`.
-            let op = self.t(k);
-            let assigns = op == "="
-                || matches!(op, "+=" | "-=" | "*=" | "/=" | "//=" | "%=" | "^=" | "..=")
-                || (op == "?" && self.at(k + 1, "?") && self.at(k + 2, "="));
-
-            if !assigns {
+            if !self.assigns_at(k) || self.shadowed(n, j) {
                 return false;
             }
 

@@ -245,9 +245,9 @@ impl<'s> Scan<'s> {
             return false;
         }
 
-        let name = self.t(a);
-
-        if let Some(ty) = self.declared_type(name) {
+        // The binding the name reads at `a` answers. An earlier `conn`
+        // in a closed block is another value.
+        if let Some(ty) = self.type_at(a) {
             return if event {
                 names_event_type(ty)
             } else {
@@ -255,7 +255,7 @@ impl<'s> Scan<'s> {
             };
         }
 
-        deep && match self.local_init(name) {
+        deep && match self.init_at(a) {
             Some((s, e)) => self.roblox_expr(s, e, event, false),
             None => false,
         }
@@ -311,30 +311,36 @@ impl<'s> Scan<'s> {
             })
     }
 
-    /// The tokens of the value in `local name = value`, on one line.
-    fn local_init(&self, name: &str) -> Option<(usize, usize)> {
-        for j in 1..self.toks.len() {
-            if !self.at(j - 1, "local") || !self.is_name(j) || self.t(j) != name {
-                continue;
-            }
+    /// The tokens of the value the name at `at` holds: its `local` in
+    /// scope says, or the first `local` of the name in the file when no
+    /// local or parameter in scope binds it.
+    fn init_at(&self, at: usize) -> Option<(usize, usize)> {
+        match self.binding_at(at) {
+            Some(d) if self.at(d.wrapping_sub(1), "local") => self.local_value(d),
 
-            if !self.at(j + 1, "=") {
-                continue;
-            }
+            Some(_) => None,
 
-            let line = self.line_of(j);
-            let mut k = j + 2;
+            None => (1..self.toks.len())
+                .filter(|&j| self.at(j - 1, "local") && self.is_name(j) && self.t(j) == self.t(at))
+                .find_map(|j| self.local_value(j)),
+        }
+    }
 
-            while k < self.toks.len() && self.line_of(k) == line {
-                k += 1;
-            }
-
-            if k > j + 2 {
-                return Some((j + 2, k));
-            }
+    /// The tokens of the value in `local name = value`, on one line, for
+    /// the name at `j`.
+    fn local_value(&self, j: usize) -> Option<(usize, usize)> {
+        if !self.at(j + 1, "=") {
+            return None;
         }
 
-        None
+        let line = self.line_of(j);
+        let mut k = j + 2;
+
+        while k < self.toks.len() && self.line_of(k) == line {
+            k += 1;
+        }
+
+        (k > j + 2).then_some((j + 2, k))
     }
 
     /// Whether the file names a derive, as in `@derive(Debug, Clone)`.
@@ -429,14 +435,11 @@ impl<'s> Scan<'s> {
             return false;
         }
 
-        if self
-            .declared_type(self.t(i))
-            .is_some_and(names_instance_type)
-        {
+        if self.type_at(i).is_some_and(names_instance_type) {
             return true;
         }
 
-        match self.local_init(self.t(i)) {
+        match self.init_at(i) {
             Some((a, _)) => {
                 self.instance_new_open(a).is_some()
                     || (self.at(a, "new") && self.at(a + 1, "Instance"))
@@ -799,6 +802,23 @@ mod tests {
             names("local c: SignalConnection = sig:connect(f)\nc:disconnect()\n"),
             Vec::<&str>::new()
         );
+    }
+
+    /// The receiver reads the binding in scope. A `conn` of a Roblox
+    /// event in a closed block is another value than the `conn` of a
+    /// std signal after it, and a parameter holds its own function.
+    #[test]
+    fn a_receiver_reads_the_binding_in_scope() {
+        let src = "do\n    local conn = damaged:Connect(f)\n    conn:Disconnect()\nend\ndo\n    local conn = damaged:connect(f)\n    conn:disconnect()\nend\n";
+        assert_eq!(names(src), Vec::<&str>::new());
+
+        let roblox = "local conn = sig:connect(f)\ndo\n    local conn = part.Touched:Connect(f)\n    conn:disconnect()\nend\nconn:disconnect()\n";
+        let got = lints(roblox);
+        assert_eq!(names_of(&got), vec!["deprecated_method"]);
+        assert_eq!(got[0].start, roblox.find("disconnect").unwrap() as u32);
+
+        let param = "local conn = part.Touched:Connect(f)\nlocal function g(conn: SignalConnection)\n    conn:disconnect()\nend\nprint(g)\n";
+        assert_eq!(names(param), Vec::<&str>::new());
     }
 
     #[test]

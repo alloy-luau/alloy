@@ -1452,6 +1452,51 @@ mod tests {
         );
     }
 
+    /// A compound write into a field is a write into the value: the
+    /// const draws `const_mutation`, and the local stays `local`. A
+    /// `local` of the name in an inner block holds its own writes.
+    #[test]
+    fn a_compound_field_write_writes_into_the_value() {
+        // The lines one lint fires on.
+        let lines = |src: &str, lint: &str| -> Vec<usize> {
+            crate::compile(src)
+                .unwrap()
+                .lints
+                .into_iter()
+                .filter(|l| l.name == lint)
+                .map(|l| src[..l.start as usize].matches('\n').count() + 1)
+                .collect()
+        };
+        assert_eq!(
+            lines(
+                "const W = { n = 0, s = \"\" }\nW.n += 1\nW[\"s\"] ..= \"x\"\nprint(W)\n",
+                "const_mutation"
+            ),
+            [2, 3]
+        );
+        assert_eq!(
+            lines("local u = { n = 0 }\nu.n += 1\nprint(u)\n", "prefer_const"),
+            Vec::<usize>::new()
+        );
+        // The inner `z` takes the write, so the outer one is a const.
+        assert_eq!(
+            lines(
+                "local z = 1\ndo\n    local z = 2\n    z = 3\n    print(z)\nend\nprint(z)\n",
+                "prefer_const"
+            ),
+            [1]
+        );
+        // A `local` in one branch does not reach the other: the write
+        // in the `else` keeps the outer `q` a local.
+        assert_eq!(
+            lines(
+                "local q = 1\nif q then\n    local q = 2\n    print(q)\nelse\n    q = 3\nend\nprint(q)\n",
+                "prefer_const"
+            ),
+            Vec::<usize>::new()
+        );
+    }
+
     /// One name given a body twice: the second replaces the first, and
     /// the checker's `DuplicateFunction` gives way to this one.
     #[test]

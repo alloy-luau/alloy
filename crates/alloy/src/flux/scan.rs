@@ -124,6 +124,64 @@ impl<'s> Scan<'s> {
             || matches!(self.t(i), "local" | "const")
     }
 
+    /// The token that ends the block a declaration at `d` stands in: the
+    /// first later token that closes its level, such as the `end` of a
+    /// `do` or the `else` of an `if`. At the top level, the token count.
+    pub(crate) fn scope_end(&self, d: usize) -> usize {
+        let level = self.st.steps[d].depth_before;
+
+        (d + 1..self.toks.len())
+            .find(|&k| {
+                let step = self.st.steps[k];
+
+                step.depth_before.saturating_sub(step.closes) < level
+            })
+            .unwrap_or(self.toks.len())
+    }
+
+    /// Whether a `local` or a `const` of the name at `n`, declared after
+    /// it, holds the name at `j` in its block. The name at `j` then reads
+    /// that binding, not the one at `n`.
+    pub(crate) fn shadowed(&self, n: usize, j: usize) -> bool {
+        (n + 1..j).any(|d| {
+            self.t(d) == self.t(n)
+                && matches!(self.prev(d), "local" | "const")
+                && j < self.scope_end(d)
+        })
+    }
+
+    /// The declaration that the name at `at` reads: the last `local`,
+    /// `const`, or parameter of the name before it whose block still
+    /// holds it. `None` for a name that no such declaration binds.
+    pub(crate) fn binding_at(&self, at: usize) -> Option<usize> {
+        let name = self.t(at);
+
+        (0..at).rev().find(|&d| {
+            self.is_name(d)
+                && self.t(d) == name
+                && match self.prev(d) {
+                    "local" | "const" => at < self.scope_end(d),
+
+                    "(" | "," => self.param_scope(d).is_some_and(|end| at < end),
+
+                    _ => false,
+                }
+        })
+    }
+
+    /// The `end` of the function whose parameter list holds the name at
+    /// `d`. `None` when the name is not a parameter.
+    fn param_scope(&self, d: usize) -> Option<usize> {
+        let f = (0..d).rev().find(|&f| self.at(f, "function"))?;
+        let open = (f + 1..d).find(|&j| self.at(j, "("))?;
+
+        if self.matching(open)? < d {
+            return None;
+        }
+
+        self.st.ends[f]
+    }
+
     /// A name and its `.name` members: `a.b.c`. The end is exclusive.
     pub(crate) fn path_end(&self, i: usize) -> Option<usize> {
         if !self.is_name(i) {

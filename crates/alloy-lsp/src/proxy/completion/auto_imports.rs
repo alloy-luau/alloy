@@ -192,6 +192,13 @@ impl State {
                     continue;
                 }
 
+                // A value needs an import that binds a value. A type
+                // export binds none, and the file then reports the use
+                // as "imported as a type".
+                if export.is_type && !message.contains("Unknown type '") {
+                    continue;
+                }
+
                 let typed = as_type && !export.is_default && matches!(export.kind, 7 | 8 | 13);
                 let export = imports::Export {
                     is_type: export.is_type || typed,

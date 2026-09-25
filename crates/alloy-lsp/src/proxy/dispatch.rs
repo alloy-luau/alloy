@@ -1955,6 +1955,7 @@ impl Server {
                         actions.extend(st.import_actions(uri, &reported));
                         st.unused_import_actions(uri, range, actions);
                         drop_child_prefix_fixes(actions);
+                        drop_child_requires(actions);
                     }
                 }
 
@@ -2439,6 +2440,28 @@ fn drop_child_prefix_fixes(actions: &mut Vec<Value>) {
         let rewrite = format!("Rewrite as `_{name}`");
 
         !ours.iter().any(|o| o.starts_with(&rewrite))
+    });
+}
+
+/// The child's "Add require for 'X'" and "Add all missing requires"
+/// where Alloy offers an import for the name. The child writes a raw
+/// `require`, which the `raw_require` lint then reports.
+pub(crate) fn drop_child_requires(actions: &mut Vec<Value>) {
+    let title = |a: &Value| {
+        a.get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+
+    if !actions.iter().any(|a| title(a).starts_with("Add `import ")) {
+        return;
+    }
+
+    actions.retain(|a| {
+        let t = title(a);
+
+        !t.starts_with("Add require for '") && t != "Add all missing requires"
     });
 }
 

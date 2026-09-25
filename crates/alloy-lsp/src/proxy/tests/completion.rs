@@ -2762,6 +2762,44 @@ fn a_name_read_as_a_member_takes_the_value_import() {
     );
 }
 
+/// `Frost.new()` on a class module offered `import { type Frost }` next
+/// to the default import, and the child put its raw `require` first.
+/// The type import binds no value, so the file then reported "imported
+/// as a type". A value use now offers the default import alone, and
+/// the child's require fixes go.
+#[test]
+fn a_value_use_of_a_class_offers_no_type_import() {
+    let st = files(&[
+        (
+            "file:///Frost.aly",
+            "local Frost = {}\nFrost.__index = Frost\nexport type Frost = typeof(setmetatable({} :: { slow: number }, Frost))\nfunction Frost.new(): Frost\n    return setmetatable({ slow = 1 }, Frost)\nend\nreturn Frost\n",
+        ),
+        ("file:///use.aly", "local f = Frost.new()\nprint(f)\n"),
+    ]);
+    let report = json!({
+        "message": "TypeError: Unknown global 'Frost'; consider assigning to it first",
+        "range": { "start": { "line": 0, "character": 10 }, "end": { "line": 0, "character": 15 } },
+    });
+    let mut actions = st.import_actions("file:///use.aly", &[report]);
+    let titles = |actions: &[Value]| -> Vec<String> {
+        actions
+            .iter()
+            .map(|a| a["title"].as_str().unwrap_or("").to_string())
+            .collect()
+    };
+
+    assert_eq!(titles(&actions), ["Add `import Frost from './Frost'`"]);
+
+    actions.insert(
+        0,
+        json!({ "title": "Add require for 'Frost' from \"script.Parent.Frost\"", "isPreferred": true }),
+    );
+    actions.push(json!({ "title": "Add all missing requires" }));
+    super::super::dispatch::drop_child_requires(&mut actions);
+
+    assert_eq!(titles(&actions), ["Add `import Frost from './Frost'`"]);
+}
+
 /// `Unknown type 'Vec2'` where another module exports `Vec2`: the
 /// quick fix writes the import line the completion list would insert.
 #[test]

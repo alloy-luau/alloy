@@ -98,6 +98,24 @@ pub fn reassigned(src: &str, name_at: usize) -> bool {
     Scan::new(src, &lexed.toks, &st).written_after(n)
 }
 
+/// The byte where the declaration of the name at byte `at` starts: the
+/// `local`, `const` or parameter in scope there. A name that a `local`
+/// or a `const` declares is its own declaration. `None` for a name that
+/// no such declaration binds, and for a source that does not lex.
+pub fn binding_of(src: &str, at: usize) -> Option<usize> {
+    let lexed = alloy_syntax::lexer::lex(src).ok()?;
+    let st = crate::fmt::structure::structure(src, &lexed.toks);
+    let n = lexed.toks.iter().position(|t| t.start as usize == at)?;
+    let s = Scan::new(src, &lexed.toks, &st);
+    let d = match s.prev(n) {
+        "local" | "const" => n,
+
+        _ => s.binding_at(n)?,
+    };
+
+    Some(s.start(d) as usize)
+}
+
 impl<'s> Scan<'s> {
     // --- the lints -----------------------------------------------------------------------
 

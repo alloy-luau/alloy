@@ -2371,6 +2371,49 @@ fn an_initializer_shows_only_while_the_binding_holds_it() {
     assert!(hover("s", 19).is_some_and(|t| t.contains("n = 8")));
 }
 
+/// Three functions each declare a `bag`. A hover reads the declaration
+/// in scope: its keyword, and its value or none.
+#[test]
+fn a_hover_reads_the_declaration_in_scope_of_a_shared_name() {
+    let src = concat!(
+        "struct Bag\n",
+        "    n: number = 0\n",
+        "end\n",
+        "local function fresh(): Bag\n",
+        "    const bag = new Bag {}\n",
+        "    return bag\n",
+        "end\n",
+        "local function other(): Bag\n",
+        "    const bag = fresh()\n",
+        "    return bag\n",
+        "end\n",
+        "local function third(): Bag\n",
+        "    local bag = new Bag { n = 5 }\n",
+        "    return bag\n",
+        "end\n",
+    );
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let hover = |line: u32, character: u32| {
+        let child = "```luau\nlocal bag: Bag\n```";
+        let text = restyle_hover(child, doc, line, character).unwrap_or(child.to_string());
+
+        append_initializer(&text, doc, line, character).unwrap_or(text)
+    };
+
+    assert_eq!(hover(5, 12), "```alloy\nconst bag: Bag = new Bag {}\n```");
+    assert_eq!(hover(8, 11), "```alloy\nconst bag: Bag\n```");
+    assert_eq!(hover(9, 12), "```alloy\nconst bag: Bag\n```");
+    assert_eq!(
+        hover(12, 11),
+        "```luau\nlocal bag: Bag = new Bag { n = 5 }\n```"
+    );
+    assert_eq!(
+        hover(13, 12),
+        "```luau\nlocal bag: Bag = new Bag { n = 5 }\n```"
+    );
+}
+
 /// A name a std import binds hovers as the std: a star alias as its
 /// module, an alias as the name it renames, and a type with no doc
 /// entry as the runtime declares it.

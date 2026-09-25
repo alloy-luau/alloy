@@ -8,6 +8,11 @@ use super::*;
 /// the header names something else or the source used the same keyword.
 pub(crate) fn restyle_hover(value: &str, doc: &Doc, line: u32, character: u32) -> Option<String> {
     let word = word_at(doc, line, character)?;
+    // A use reads the keywords of the declaration in scope, so a `const
+    // bag` and a `local bag` in two functions each keep their own.
+    let line = Caret::at(&doc.source, line, character)
+        .and_then(|c| alloy::flux::binding_of(&doc.source, c.start))
+        .map_or(line, |at| position_of(&doc.source, at).0);
     let binding = declaring_binding(doc, line, word)?;
 
     restyle_with(value, word, binding)

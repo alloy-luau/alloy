@@ -565,61 +565,47 @@ impl<'s> Scan<'s> {
         }
     }
 
-    /// The names the file declares with an Array type: `xs: T[]`,
-    /// `xs: Array<T>`, and `local xs = [ ... ]`.
-    pub(crate) fn array_names(&self) -> Vec<&'s str> {
-        let mut arrays: Vec<&str> = Vec::new();
+    /// Whether the name at `at` reads a binding declared as an Array:
+    /// `xs: T[]`, `xs: Array<T>`, or `local xs = [ ... ]`. The binding
+    /// is the one in scope at `at`, so a local of the same name in
+    /// another function is not the one the name reads.
+    pub(crate) fn reads_array(&self, at: usize) -> bool {
+        let Some(i) = self.binding_at(at) else {
+            return false;
+        };
 
-        for i in 0..self.toks.len() {
-            if !self.is_name(i) {
-                continue;
-            }
-
-            if self.at(i + 1, ":") {
-                let mut j = i + 2;
-                let mut depth = 0i32;
-
-                while j < self.toks.len() {
-                    let text = self.t(j);
-
-                    if matches!(text, "(" | "[" | "{" | "<") {
-                        depth += 1;
-                    } else if matches!(text, ")" | "]" | "}" | ">") {
-                        depth -= 1;
-                    }
-
-                    if depth < 0
-                        || (depth == 0 && matches!(text, "=" | ","))
-                        || self.line_of(j) != self.line_of(i)
-                    {
-                        break;
-                    }
-
-                    j += 1;
-                }
-
-                let array = (self.at(j - 1, "]") && self.at(j - 2, "["))
-                    || (self.at(i + 2, "Array") && self.at(i + 3, "<"));
-
-                if array {
-                    arrays.push(self.t(i));
-                }
-            } else if self.prev(i) == "local" && self.at(i + 1, "=") && self.at(i + 2, "[") {
-                arrays.push(self.t(i));
-            }
+        if !self.at(i + 1, ":") {
+            return self.prev(i) == "local" && self.at(i + 1, "=") && self.at(i + 2, "[");
         }
 
-        arrays
+        let mut j = i + 2;
+        let mut depth = 0i32;
+
+        while j < self.toks.len() {
+            let text = self.t(j);
+
+            if matches!(text, "(" | "[" | "{" | "<") {
+                depth += 1;
+            } else if matches!(text, ")" | "]" | "}" | ">") {
+                depth -= 1;
+            }
+
+            if depth < 0
+                || (depth == 0 && matches!(text, "=" | ","))
+                || self.line_of(j) != self.line_of(i)
+            {
+                break;
+            }
+
+            j += 1;
+        }
+
+        (self.at(j - 1, "]") && self.at(j - 2, "["))
+            || (self.at(i + 2, "Array") && self.at(i + 3, "<"))
     }
 
     /// `table.insert(xs, v)` on an Array is `xs:push(v)`.
     fn manual_push(&self, out: &mut Vec<Lint>) {
-        let arrays = self.array_names();
-
-        if arrays.is_empty() {
-            return;
-        }
-
         for i in 0..self.toks.len() {
             if !(self.at(i, "table") && self.at(i + 1, ".") && self.at(i + 3, "(")) {
                 continue;
@@ -631,7 +617,9 @@ impl<'s> Scan<'s> {
             };
             let target = self.t(i + 4);
 
-            if !arrays.contains(&target) {
+            // The target is one name: `table.insert(xs.inner, v)` pushes
+            // onto `xs.inner`, which the rewrite would drop.
+            if !matches!(self.t(i + 5), "," | ")") || !self.reads_array(i + 4) {
                 continue;
             }
 
@@ -1232,6 +1220,22 @@ mod tests {
         assert_eq!(
             fixed("local t = {}\ntable.insert(t, 1)\n"),
             "local t = {}\ntable.insert(t, 1)\n"
+        );
+    }
+
+    /// An Array local of one function made a plain table of the same
+    /// name in another read as an Array, and the `:push` rewrite raised
+    /// `attempt to call a nil value`. The lint reads the binding in
+    /// scope where the call stands.
+    #[test]
+    fn an_array_of_another_function_is_not_the_target() {
+        let src = "export function a(): number[]\n    local out: number[] = []\n    out:push(1)\n    return out\nend\n\nexport function b(): { number }\n    const out: { number } = {}\n    table.insert(out, 2)\n    table.insert(out.inner, 3)\n    return out\nend\n";
+        assert_eq!(fixed(src), src);
+
+        // An Array in scope still takes the method.
+        assert_eq!(
+            fixed("export function c(out: number[])\n    table.insert(out, 2)\nend\n"),
+            "export function c(out: number[])\n    out:push(2)\nend\n"
         );
     }
 

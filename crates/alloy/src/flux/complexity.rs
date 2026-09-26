@@ -466,7 +466,7 @@ impl<'s> Scan<'s> {
             let value = self.slice(q + 3, close).trim();
             // On an Array the shorter form is the method, and
             // `manual_push` would report the plain call next.
-            let (message, fix) = if self.array_names().contains(&table) {
+            let (message, fix) = if p == i + 5 && self.reads_array(i + 4) {
                 (
                     format!(
                         "`table.insert({table}, #{table} + 1, v)` appends; `{table}` is an Array, so `{table}:push(v)` is the form"

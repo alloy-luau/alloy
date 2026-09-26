@@ -498,6 +498,16 @@ fn run_inner(
     // its own output back as a source on the next run.
     let written = written_dirs(root, config);
 
+    // A folder under `in` is skipped whole. `in` itself is the folder
+    // the walk reads, so its outputs would come back as plain sources,
+    // `a.luau` beside `a.aly`, and the second build would collide.
+    if normalize_path(&out) == normalize_path(&input) {
+        return Err(std::io::Error::other(format!(
+            "[build] out is the folder in names, `{}`. The build writes each `.luau` beside its source, and the next build reads it as a source. Set out to another folder, such as \"build\"",
+            build.input.to_string_lossy().replace('\\', "/")
+        )));
+    }
+
     if input.is_dir() && normalize_path(&out).starts_with(normalize_path(&input)) {
         report
             .notes

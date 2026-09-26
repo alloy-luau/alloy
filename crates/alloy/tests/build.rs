@@ -51,6 +51,46 @@ fn a_project_builds_into_its_out_tree() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// With `out` equal to `in`, the second build read the first one's
+/// `a.luau` as a plain source and reported that two files build it.
+/// The build now refuses the folder with a message, before it writes.
+#[test]
+fn a_build_refuses_out_equal_to_in() {
+    let dir = temp_project("in-place");
+    fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"src\"\n",
+    )
+    .unwrap();
+    fs::write(dir.join("src/a.aly"), "return 1\n").unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let err = alloy::build::run_project(&dir, &config).unwrap_err();
+    assert!(
+        err.to_string()
+            .starts_with("[build] out is the folder in names, `src`"),
+        "{err}"
+    );
+    assert!(!dir.join("src/a.luau").exists());
+
+    // A folder under `in` still builds, and the walk skips it.
+    fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"src/out\"\n",
+    )
+    .unwrap();
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+
+    for _ in 0..2 {
+        let report = alloy::build::run_project(&dir, &config).unwrap();
+        assert!(report.diagnostics.is_empty(), "{report:?}");
+    }
+
+    assert!(dir.join("src/out/a.luau").exists());
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /*
 The build skips the write when the output already holds the bytes the
 compile produced, so rojo does not resync. `written` counted every

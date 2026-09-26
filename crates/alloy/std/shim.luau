@@ -4,8 +4,9 @@
 -- `game` is nil: the datatypes shared code touches, `task`, `Enum`,
 -- and a small Instance tree. In Studio it does nothing. The doubles
 -- hold the shape the code reads, not the engine's behavior: a
--- `Vector3` adds and measures, an `Instance` parents and finds
--- children, a `task.wait` parks the thread.
+-- `Vector3` adds and measures, a `CFrame` turns and moves points, an
+-- `Instance` parents and finds children, a `task.wait` parks the
+-- thread.
 
 -- Under the engine every name is the engine's own.
 if game ~= nil then
@@ -63,7 +64,15 @@ end
 -- ---------------------------------------------------------------------------
 
 local Vector3 = {}
-Vector3.__index = Vector3
+
+-- `Unit` is a vector too, so it comes on read: a field would build a
+-- unit vector of each unit vector without end.
+function Vector3.__index(v, key)
+	if key == "Unit" then
+		return v / v.Magnitude
+	end
+	return Vector3[key]
+end
 
 local function v3(x, y, z)
 	local self = setmetatable({ X = x or 0, Y = y or 0, Z = z or 0 }, Vector3)
@@ -175,40 +184,323 @@ function Vector2.__tostring(a)
 	return `{a.X}, {a.Y}`
 end
 
+-- A CFrame holds its rotation as a row-major 3x3 matrix in the slots 1
+-- to 9, as `GetComponents` gives it. The columns are the RightVector, the
+-- UpVector, and the back vector, the way the engine lays them out.
 local CFrame = {}
-CFrame.__index = CFrame
 
-local function cf(position)
-	local self = setmetatable({ Position = position, X = position.X, Y = position.Y, Z = position.Z }, CFrame)
+local IDENTITY = { 1, 0, 0, 0, 1, 0, 0, 0, 1 }
+
+-- The matrix `r`, or a CFrame, applied to the vector (x, y, z).
+local function rotate(r, x, y, z)
+	return v3(r[1] * x + r[2] * y + r[3] * z, r[4] * x + r[5] * y + r[6] * z, r[7] * x + r[8] * y + r[9] * z)
+end
+
+-- The product of two matrices, either of which can be a CFrame.
+local function mul3(a, b)
+	local out = {}
+	for row = 0, 2 do
+		for col = 1, 3 do
+			out[row * 3 + col] = a[row * 3 + 1] * b[col] + a[row * 3 + 2] * b[col + 3] + a[row * 3 + 3] * b[col + 6]
+		end
+	end
+	return out
+end
+
+local function transpose(r)
+	return { r[1], r[4], r[7], r[2], r[5], r[8], r[3], r[6], r[9] }
+end
+
+local function cf(position, r)
+	r = r or IDENTITY
+	local self = setmetatable({
+		Position = position,
+		X = position.X,
+		Y = position.Y,
+		Z = position.Z,
+		r[1],
+		r[2],
+		r[3],
+		r[4],
+		r[5],
+		r[6],
+		r[7],
+		r[8],
+		r[9],
+	}, CFrame)
 	return mark(table.freeze(self), "CFrame")
 end
 
-function CFrame.new(x, y, z)
-	if typeof(x) == "Vector3" then
+local function from_columns(position, x, y, z)
+	return cf(position, { x.X, y.X, z.X, x.Y, y.Y, z.Y, x.Z, y.Z, z.Z })
+end
+
+local function rot_x(a)
+	local c, s = math.cos(a or 0), math.sin(a or 0)
+	return { 1, 0, 0, 0, c, -s, 0, s, c }
+end
+
+local function rot_y(a)
+	local c, s = math.cos(a or 0), math.sin(a or 0)
+	return { c, 0, s, 0, 1, 0, -s, 0, c }
+end
+
+local function rot_z(a)
+	local c, s = math.cos(a or 0), math.sin(a or 0)
+	return { c, -s, 0, s, c, 0, 0, 0, 1 }
+end
+
+local function from_quaternion(w, x, y, z)
+	local n = math.sqrt(w * w + x * x + y * y + z * z)
+	w, x, y, z = w / n, x / n, y / n, z / n
+	return {
+		1 - 2 * (y * y + z * z),
+		2 * (x * y - z * w),
+		2 * (x * z + y * w),
+		2 * (x * y + z * w),
+		1 - 2 * (x * x + z * z),
+		2 * (y * z - x * w),
+		2 * (x * z - y * w),
+		2 * (y * z + x * w),
+		1 - 2 * (x * x + y * y),
+	}
+end
+
+-- The quaternion w, x, y, z of a rotation, by the largest diagonal term
+-- so that the square root never takes a value near zero.
+local function to_quaternion(r)
+	local trace = r[1] + r[5] + r[9]
+	if trace > 0 then
+		local s = math.sqrt(1 + trace) * 2
+		return s / 4, (r[8] - r[6]) / s, (r[3] - r[7]) / s, (r[4] - r[2]) / s
+	elseif r[1] > r[5] and r[1] > r[9] then
+		local s = math.sqrt(1 + r[1] - r[5] - r[9]) * 2
+		return (r[8] - r[6]) / s, s / 4, (r[2] + r[4]) / s, (r[3] + r[7]) / s
+	elseif r[5] > r[9] then
+		local s = math.sqrt(1 + r[5] - r[1] - r[9]) * 2
+		return (r[3] - r[7]) / s, (r[2] + r[4]) / s, s / 4, (r[6] + r[8]) / s
+	end
+	local s = math.sqrt(1 + r[9] - r[1] - r[5]) * 2
+	return (r[4] - r[2]) / s, (r[3] + r[7]) / s, (r[6] + r[8]) / s, s / 4
+end
+
+-- The direction vectors and `Rotation` come on read: each one is a new
+-- value, and `Rotation` is a CFrame of its own.
+local props = {}
+
+function props.RightVector(c)
+	return v3(c[1], c[4], c[7])
+end
+
+function props.UpVector(c)
+	return v3(c[2], c[5], c[8])
+end
+
+function props.LookVector(c)
+	return v3(-c[3], -c[6], -c[9])
+end
+
+function props.ZVector(c)
+	return v3(c[3], c[6], c[9])
+end
+
+props.XVector = props.RightVector
+props.YVector = props.UpVector
+
+function props.Rotation(c)
+	return cf(Vector3.zero, c)
+end
+
+function CFrame.__index(c, key)
+	local prop = props[key]
+	if prop ~= nil then
+		return prop(c)
+	end
+	return CFrame[key]
+end
+
+-- `new()`, `new(x, y, z)`, `new(pos)`, `new(pos, target)`, the twelve
+-- components `GetComponents` gives, or a position and a quaternion.
+function CFrame.new(...)
+	local n = select("#", ...)
+	local x, y, z = ...
+	if n == 0 then
+		return CFrame.identity
+	elseif typeof(x) == "Vector3" then
+		if y ~= nil then
+			return CFrame.lookAt(x, y)
+		end
 		return cf(x)
+	elseif n == 12 then
+		return cf(v3(x, y, z), { select(4, ...) })
+	elseif n == 7 then
+		local qx, qy, qz, qw = select(4, ...)
+		return cf(v3(x, y, z), from_quaternion(qw, qx, qy, qz))
 	end
 	return cf(v3(x, y, z))
+end
+
+-- The engine's `lookAt`: the LookVector points from `at` to `target`, and
+-- the UpVector leans to `up`. A look along `up` leaves no RightVector, so
+-- the X axis stands in for `up` there. A target at `at` turns nothing.
+function CFrame.lookAt(at, target, up)
+	local look = target - at
+	if look.Magnitude == 0 then
+		return cf(at)
+	end
+	local back = -look.Unit
+	local right = (up or Vector3.yAxis):Cross(back)
+	if right.Magnitude < 1e-6 then
+		right = Vector3.xAxis:Cross(back)
+	end
+	right = right.Unit
+	return from_columns(at, right, back:Cross(right), back)
+end
+
+-- The engine turns about Z, then Y, then X.
+function CFrame.Angles(rx, ry, rz)
+	return cf(Vector3.zero, mul3(rot_x(rx), mul3(rot_y(ry), rot_z(rz))))
+end
+
+CFrame.fromEulerAnglesXYZ = CFrame.Angles
+
+-- The engine turns about Z, then X, then Y.
+function CFrame.fromEulerAnglesYXZ(rx, ry, rz)
+	return cf(Vector3.zero, mul3(rot_y(ry), mul3(rot_x(rx), rot_z(rz))))
+end
+
+CFrame.fromOrientation = CFrame.fromEulerAnglesYXZ
+
+function CFrame.fromAxisAngle(axis, angle)
+	local k = axis.Unit
+	local x, y, z = k.X, k.Y, k.Z
+	local c, s = math.cos(angle), math.sin(angle)
+	local t = 1 - c
+	return cf(Vector3.zero, {
+		t * x * x + c,
+		t * x * y - s * z,
+		t * x * z + s * y,
+		t * x * y + s * z,
+		t * y * y + c,
+		t * y * z - s * x,
+		t * x * z - s * y,
+		t * y * z + s * x,
+		t * z * z + c,
+	})
+end
+
+function CFrame.fromMatrix(position, x, y, z)
+	return from_columns(position, x, y, z or x:Cross(y).Unit)
 end
 
 CFrame.identity = cf(v3(0, 0, 0))
 
 function CFrame.__add(a, b)
-	return cf(a.Position + b)
+	return cf(a.Position + b, a)
 end
 
 function CFrame.__sub(a, b)
-	return cf(a.Position - b)
+	return cf(a.Position - b, a)
 end
 
+-- A CFrame times a CFrame composes the two; times a Vector3 it moves the
+-- point into world space.
 function CFrame.__mul(a, b)
 	if typeof(b) == "CFrame" then
-		return cf(a.Position + b.Position)
+		return cf(a.Position + rotate(a, b.X, b.Y, b.Z), mul3(a, b))
 	end
-	return cf(a.Position + b)
+	return a.Position + rotate(a, b.X, b.Y, b.Z)
+end
+
+function CFrame.__eq(a, b)
+	for i = 1, 9 do
+		if a[i] ~= b[i] then
+			return false
+		end
+	end
+	return a.Position == b.Position
 end
 
 function CFrame.__tostring(a)
-	return tostring(a.Position)
+	return table.concat({ a:GetComponents() }, ", ")
+end
+
+function CFrame.GetComponents(a)
+	return a.X, a.Y, a.Z, a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9]
+end
+
+function CFrame.Inverse(a)
+	local r = transpose(a)
+	return cf(-rotate(r, a.X, a.Y, a.Z), r)
+end
+
+function CFrame.ToWorldSpace(a, b)
+	return a * b
+end
+
+function CFrame.ToObjectSpace(a, b)
+	return a:Inverse() * b
+end
+
+function CFrame.PointToWorldSpace(a, v)
+	return a * v
+end
+
+function CFrame.PointToObjectSpace(a, v)
+	return a:Inverse() * v
+end
+
+function CFrame.VectorToWorldSpace(a, v)
+	return rotate(a, v.X, v.Y, v.Z)
+end
+
+function CFrame.VectorToObjectSpace(a, v)
+	return rotate(transpose(a), v.X, v.Y, v.Z)
+end
+
+-- The position moves in a line and the rotation turns on the shortest
+-- arc, as the engine's `Lerp` does.
+function CFrame.Lerp(a, b, t)
+	local aw, ax, ay, az = to_quaternion(a)
+	local bw, bx, by, bz = to_quaternion(b)
+	local dot = aw * bw + ax * bx + ay * by + az * bz
+	if dot < 0 then
+		bw, bx, by, bz, dot = -bw, -bx, -by, -bz, -dot
+	end
+	local wa, wb = 1 - t, t
+	-- Two rotations this close divide by a sine near zero, so they mix
+	-- in a line, and `from_quaternion` scales the result back to one.
+	if dot < 0.9995 then
+		local theta = math.acos(dot)
+		wa = math.sin((1 - t) * theta) / math.sin(theta)
+		wb = math.sin(t * theta) / math.sin(theta)
+	end
+	local r = from_quaternion(wa * aw + wb * bw, wa * ax + wb * bx, wa * ay + wb * by, wa * az + wb * bz)
+	return cf(a.Position:Lerp(b.Position, t), r)
+end
+
+-- The angles that `Angles` takes back to this rotation.
+function CFrame.ToEulerAnglesXYZ(a)
+	local ry = math.asin(math.clamp(a[3], -1, 1))
+	return math.atan2(-a[6], a[9]), ry, math.atan2(-a[2], a[1])
+end
+
+-- The angles that `fromEulerAnglesYXZ` takes back to this rotation.
+function CFrame.ToEulerAnglesYXZ(a)
+	local rx = math.asin(math.clamp(-a[6], -1, 1))
+	return rx, math.atan2(a[3], a[9]), math.atan2(a[4], a[5])
+end
+
+CFrame.ToOrientation = CFrame.ToEulerAnglesYXZ
+
+function CFrame.FuzzyEq(a, b, epsilon)
+	local e = epsilon or 1e-5
+	for i = 1, 9 do
+		if math.abs(a[i] - b[i]) > e then
+			return false
+		end
+	end
+	return a.Position:FuzzyEq(b.Position, e)
 end
 
 -- ---------------------------------------------------------------------------

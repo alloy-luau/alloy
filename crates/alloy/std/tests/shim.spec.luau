@@ -32,6 +32,65 @@ describe("shim", function()
 		expect(Enum.Font.GothamBold.Name).toBe("GothamBold")
 	end)
 
+	it("turns a CFrame with the engine's math", function()
+		local CFrame = shim.CFrame
+		local function near(v, x, y, z)
+			expect(v.X).toBeCloseTo(x, 6)
+			expect(v.Y).toBeCloseTo(y, 6)
+			expect(v.Z).toBeCloseTo(z, 6)
+		end
+
+		-- lookAt faces the target, with the UpVector toward +Y.
+		local face = CFrame.lookAt(Vector3.new(1, 2, 3), Vector3.new(6, 2, 3))
+		expect(typeof(face)).toBe("CFrame")
+		near(face.Position, 1, 2, 3)
+		near(face.LookVector, 1, 0, 0)
+		near(face.RightVector, 0, 0, 1)
+		near(face.UpVector, 0, 1, 0)
+		near(face.ZVector, -1, 0, 0)
+		near(CFrame.lookAt(Vector3.zero, Vector3.new(0, 0, 5)).RightVector, -1, 0, 0)
+		near(CFrame.lookAt(Vector3.zero, Vector3.new(0, 9, 0)).LookVector, 0, 1, 0)
+		expect(CFrame.new(Vector3.new(1, 2, 3), Vector3.new(6, 2, 3))).toEqual(face)
+
+		-- Angles turns about Z, then Y, then X, as the engine does.
+		near(CFrame.Angles(0, math.rad(90), 0).LookVector, -1, 0, 0)
+		near(CFrame.Angles(math.rad(90), 0, 0).LookVector, 0, 1, 0)
+		expect(CFrame.fromAxisAngle(Vector3.yAxis, math.rad(90)):FuzzyEq(CFrame.Angles(0, math.rad(90), 0))).toBe(true)
+		local rx, ry, rz = CFrame.Angles(0.3, -0.4, 1.1):ToEulerAnglesXYZ()
+		expect(rx).toBeCloseTo(0.3, 6)
+		expect(ry).toBeCloseTo(-0.4, 6)
+		expect(rz).toBeCloseTo(1.1, 6)
+		rx, ry, rz = CFrame.fromOrientation(0.3, -0.4, 1.1):ToOrientation()
+		expect(rx).toBeCloseTo(0.3, 6)
+		expect(ry).toBeCloseTo(-0.4, 6)
+		expect(rz).toBeCloseTo(1.1, 6)
+
+		-- A CFrame times a Vector3 is a point in world space.
+		local turned = CFrame.new(1, 0, 0) * CFrame.Angles(0, math.rad(90), 0)
+		local point = turned * Vector3.new(0, 0, -1)
+		expect(typeof(point)).toBe("Vector3")
+		near(point, 0, 0, 0)
+		near(turned:VectorToObjectSpace(turned:VectorToWorldSpace(Vector3.new(1, 2, 3))), 1, 2, 3)
+		local c = CFrame.lookAt(Vector3.new(3, 1, 2), Vector3.new(-4, 5, 9))
+		near(c:PointToObjectSpace(c:PointToWorldSpace(Vector3.new(1, 2, 3))), 1, 2, 3)
+		expect((c * c:Inverse()):FuzzyEq(CFrame.identity)).toBe(true)
+		expect(c:ToWorldSpace(c:ToObjectSpace(turned)):FuzzyEq(turned)).toBe(true)
+		near(c.Rotation.Position, 0, 0, 0)
+		near(c.Rotation.LookVector, c.LookVector.X, c.LookVector.Y, c.LookVector.Z)
+		near((c + Vector3.new(1, 0, 0)).Position, 4, 1, 2)
+
+		-- Lerp moves in a line and turns on the shortest arc.
+		local half = CFrame.new():Lerp(CFrame.Angles(0, math.rad(90), 0) + Vector3.new(2, 0, 0), 0.5)
+		near(half.Position, 1, 0, 0)
+		near(half.LookVector, -math.sqrt(0.5), 0, -math.sqrt(0.5))
+
+		-- The components round trip, and a quaternion builds a rotation.
+		expect(CFrame.new(c:GetComponents())).toEqual(c)
+		expect(CFrame.new(1, 2, 3, 0, 0, 0, 1) == CFrame.new(1, 2, 3)).toBe(true)
+		near(CFrame.new(0, 0, 0, 0, math.sqrt(0.5), 0, math.sqrt(0.5)).LookVector, -1, 0, 0)
+		near(Vector3.new(3, 0, 4).Unit, 0.6, 0, 0.8)
+	end)
+
 	it("keeps a small instance tree", function()
 		local part = Instance.new("Part")
 		part.Name = "P"

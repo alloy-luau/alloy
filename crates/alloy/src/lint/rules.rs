@@ -9,7 +9,7 @@ use alloy_syntax::lexer::{Tok, TokKind};
 
 use crate::fmt::structure;
 
-use super::{Fix, Lint, Thresholds};
+use super::{Fix, Lint};
 
 /// The lints about the directives themselves: an
 /// `--@alloy-expect-error` with no reason after it.
@@ -621,18 +621,12 @@ fn game_alias(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Lint> {
     out
 }
 
-pub fn run(
-    src: &str,
-    toks: &[Tok],
-    chunk: &Chunk,
-    definitions: bool,
-    thresholds: &Thresholds,
-    import_privates: &[(String, Vec<String>)],
-    import_callables: &[(String, crate::flux::Callable)],
-) -> Vec<Lint> {
+/// The lints of one file. The options give the complexity limits, the
+/// indexes of the imported modules, and the text an ingot wrote.
+pub fn run(src: &str, toks: &[Tok], chunk: &Chunk, options: &crate::EmitOptions) -> Vec<Lint> {
     let mut lints = Vec::new();
 
-    if definitions {
+    if options.definitions {
         return lints;
     }
 
@@ -1327,12 +1321,14 @@ pub fn run(
         }
     }
 
+    let privates = options.privates();
     let scan = crate::flux::scan::Scan::new(src, toks, &st)
-        .with_privates(import_privates)
-        .with_callables(import_callables);
+        .with_privates(&privates)
+        .with_callables(&options.import_callables)
+        .with_generated(&options.generated);
     lints.extend(crate::flux::run(&scan));
     lints.extend(crate::flux::correctness::run(&scan));
-    lints.extend(crate::flux::complexity::run(&scan, thresholds));
+    lints.extend(crate::flux::complexity::run(&scan, &options.thresholds));
     lints.extend(crate::flux::roblox::run(&scan));
     lints.sort_by_key(|l| l.start);
     lints

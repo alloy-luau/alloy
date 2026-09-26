@@ -172,7 +172,7 @@ impl<'s> Scan<'s> {
             for (j, &at) in nest.iter().enumerate().take(e).skip(i + 1) {
                 let text = self.t(j);
 
-                if matches!(self.prev(j), "." | ":") {
+                if matches!(self.prev(j), "." | ":") || self.generated_at(j) {
                     continue;
                 }
 
@@ -697,6 +697,38 @@ mod tests {
             fixed(src),
             "local function f(a, b, c)\n    if a and b and c then\n        return 1\n    end\n    return 0\nend\n"
         );
+    }
+
+    /// An ingot wraps a tag in a helper function. That block is not the
+    /// author's, so it adds no depth: the author wrote three levels here.
+    #[test]
+    fn a_block_an_ingot_wrote_adds_no_depth() {
+        let src = "local function f(a)\n    return __w(function()\n        for i = 1, a do\n            if i > 1 then\n                print(i)\n            end\n        end\n    end)\nend\n";
+        let at = src.find("__w(").unwrap() as u32;
+        let run = |generated: Vec<(u32, u32)>| {
+            let options = crate::EmitOptions {
+                thresholds: Thresholds {
+                    max_nesting: 3,
+                    cognitive_complexity: 3,
+                    ..Thresholds::default()
+                },
+                generated,
+                ..Default::default()
+            };
+            let lints: Vec<crate::Lint> = crate::compile_with(src, &options)
+                .unwrap()
+                .lints
+                .into_iter()
+                .filter(|l| !UNUSED.contains(&l.name))
+                .collect();
+
+            names_of(&lints)
+        };
+        assert_eq!(
+            run(Vec::new()),
+            vec!["cognitive_complexity", "deep_nesting"]
+        );
+        assert_eq!(run(vec![(at, at + 14)]), Vec::<&str>::new());
     }
 
     /// A condition that binds a name joins no `and`: the lint offered

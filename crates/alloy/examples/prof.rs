@@ -46,15 +46,7 @@ fn main() {
     );
     let _ = st;
     let t = Instant::now();
-    let lints = alloy::lint::run(
-        &src,
-        &parsed.lexed.toks,
-        &parsed.chunk,
-        false,
-        &Default::default(),
-        &[],
-        &[],
-    );
+    let lints = alloy::lint::run(&src, &parsed.lexed.toks, &parsed.chunk, &Default::default());
     println!(
         "lint::run        {:>7.1} ms  ({} lints)",
         t.elapsed().as_secs_f64() * 1e3,

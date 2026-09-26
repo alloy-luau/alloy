@@ -71,6 +71,12 @@ pub fn compile_alx(
     // component, which `[lint.naming] component` styles.
     let mut options = options.clone();
     options.markup = crate::naming::Markup::of(src, &compiled.regions);
+    // The text an ingot wrote, as bytes of the lowered text.
+    options.generated = options
+        .generated
+        .iter()
+        .flat_map(|&(a, b)| lowering.copied_from(a, b))
+        .collect();
     // A lone `{expr}` that the markup gives as `Text` is a string or a
     // number, or a binding of one, as `Text={expr}` is. A hole that held
     // markup of its own has no copied bytes to map, and goes unchecked.

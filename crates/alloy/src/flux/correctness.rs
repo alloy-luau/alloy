@@ -884,23 +884,15 @@ mod tests {
             panic!("the source does not lex");
         };
 
-        crate::lint::run(
-            src,
-            &parsed.lexed.toks,
-            &parsed.chunk,
-            false,
-            &crate::lint::Thresholds::default(),
-            &[],
-            &[],
-        )
-        .into_iter()
-        .filter(|l| {
-            !matches!(
-                l.name,
-                "unused_variable" | "unused_function" | "redundant_as" | "prefer_const"
-            )
-        })
-        .collect()
+        crate::lint::run(src, &parsed.lexed.toks, &parsed.chunk, &Default::default())
+            .into_iter()
+            .filter(|l| {
+                !matches!(
+                    l.name,
+                    "unused_variable" | "unused_function" | "redundant_as" | "prefer_const"
+                )
+            })
+            .collect()
     }
 
     fn fixed(src: &str) -> String {
@@ -1401,19 +1393,15 @@ mod tests {
         else {
             panic!("the source does not lex");
         };
-        let hits: Vec<String> = crate::lint::run(
-            src,
-            &parsed.lexed.toks,
-            &parsed.chunk,
-            false,
-            &crate::lint::Thresholds::default(),
-            &privates,
-            &[],
-        )
-        .into_iter()
-        .filter(|l| l.name == "private_access")
-        .map(|l| l.message)
-        .collect();
+        let options = crate::EmitOptions {
+            import_privates: privates,
+            ..Default::default()
+        };
+        let hits: Vec<String> = crate::lint::run(src, &parsed.lexed.toks, &parsed.chunk, &options)
+            .into_iter()
+            .filter(|l| l.name == "private_access")
+            .map(|l| l.message)
+            .collect();
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert!(
             hits[0].contains("`secret` is private to `Item`"),
@@ -1468,19 +1456,15 @@ mod tests {
             else {
                 panic!("the source does not lex");
             };
-            crate::lint::run(
-                src,
-                &parsed.lexed.toks,
-                &parsed.chunk,
-                false,
-                &crate::lint::Thresholds::default(),
-                &privates,
-                &[],
-            )
-            .into_iter()
-            .filter(|l| l.name == "private_access")
-            .map(|l| l.message)
-            .collect()
+            let options = crate::EmitOptions {
+                import_privates: privates.clone(),
+                ..Default::default()
+            };
+            crate::lint::run(src, &parsed.lexed.toks, &parsed.chunk, &options)
+                .into_iter()
+                .filter(|l| l.name == "private_access")
+                .map(|l| l.message)
+                .collect()
         };
         assert_eq!(
             run("task.spawn(print, 'hi')\nnew Forge():Start()\nlocal f = make()\nf:Start()\n"),

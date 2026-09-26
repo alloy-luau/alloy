@@ -19,6 +19,9 @@ pub(crate) struct Scan<'s> {
     /// The functions the imported modules declare, keyed the way this
     /// file calls them. See `crate::modules::import_callables`.
     pub(crate) callables: &'s [(String, super::Callable)],
+    /// The byte ranges an ingot's transform wrote. See
+    /// `EmitOptions::generated`.
+    pub(crate) generated: &'s [(u32, u32)],
 }
 
 pub(crate) const KEYWORDS: &[&str] = &[
@@ -95,7 +98,21 @@ impl<'s> Scan<'s> {
             st,
             privates: &[],
             callables: &[],
+            generated: &[],
         }
+    }
+
+    /// The same scan, with the byte ranges an ingot wrote.
+    pub(crate) fn with_generated(mut self, generated: &'s [(u32, u32)]) -> Self {
+        self.generated = generated;
+        self
+    }
+
+    /// Whether an ingot wrote token `i`, not the author.
+    pub(crate) fn generated_at(&self, i: usize) -> bool {
+        let at = self.start(i);
+
+        self.generated.iter().any(|&(a, b)| a <= at && at < b)
     }
 
     /// The same scan, with the private fields of the imported structs.
@@ -729,13 +746,14 @@ impl<'s> Scan<'s> {
 
     /// For each token, how many block openers enclose it: `function`,
     /// `if`, loops, `match`, `do`. A function's own body starts at one.
+    /// A block an ingot wrote around the author's code adds no level.
     pub(crate) fn nesting(&self) -> Vec<usize> {
         let mut nest = vec![0usize; self.toks.len()];
 
         for (i, e) in self.st.ends.iter().enumerate() {
             let Some(e) = e else { continue };
 
-            if !self.opens_scope(i) {
+            if !self.opens_scope(i) || self.generated_at(i) {
                 continue;
             }
 

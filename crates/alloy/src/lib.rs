@@ -288,15 +288,7 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
     diagnostics.sort_by_key(|d| d.start);
     diagnostics.dedup_by(|a, b| a.start == b.start && a.message == b.message);
 
-    let mut lints = lint::run(
-        src,
-        &parsed.lexed.toks,
-        &parsed.chunk,
-        options.definitions,
-        &options.thresholds,
-        &options.privates(),
-        &options.import_callables,
-    );
+    let mut lints = lint::run(src, &parsed.lexed.toks, &parsed.chunk, options);
     lints.extend(rendered.lints);
 
     // `[emit] wait_timeout` gives `=>` a limit, so the rewrite of an
@@ -466,6 +458,21 @@ pub fn compile_file(
     let ingots = ingots.filter(|i| !i.is_empty());
     let layer = ingots.map(|i| i.before(path, source));
     let text = layer.as_ref().map_or(source, |l| l.text.as_str());
+    // A block the transform wrote around the author's code, such as a
+    // helper function around a tag, adds no depth to the lints.
+    let marked;
+    let options = match layer.as_ref().and_then(|l| l.map.as_ref()) {
+        Some(map) => {
+            marked = EmitOptions {
+                generated: map.generated(),
+                ..options.clone()
+            };
+
+            &marked
+        }
+
+        None => options,
+    };
     let compiled = if path.ends_with(".alx") {
         compile_alx(text, options, jsx.cloned().unwrap_or_default()).map(|a| a.output)
     } else {

@@ -121,6 +121,10 @@ pub struct EmitOptions {
     pub foreign_privates: Vec<(String, Vec<String>)>,
     /// The limits of the complexity lints.
     pub thresholds: crate::lint::Thresholds,
+    /// The byte ranges of the compiled text that an ingot's transform
+    /// wrote. A block that opens there adds no depth to the complexity
+    /// lints, since the author did not write it.
+    pub generated: Vec<(u32, u32)>,
     /// Render the test artifact: a `@test` function stays in the output
     /// as a local, unregistered, for `alloy test` to call by name.
     pub tests: bool,
@@ -431,6 +435,7 @@ impl Default for EmitOptions {
             foreign_impls: Vec::new(),
             foreign_privates: Vec::new(),
             thresholds: crate::lint::Thresholds::default(),
+            generated: Vec::new(),
             tests: false,
             test_runner: true,
             import_types: Vec::new(),

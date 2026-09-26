@@ -3048,8 +3048,10 @@ local Attributes = {}
 -- The emit stores the arguments in declaration order. One parameter
 -- reads as that value, several read as a table that names them, and
 -- none reads as `true`, the mark that the attribute is there.
+-- A target that is no table gives `false` here, from the
+-- `type(target) == "table" and ...` of each caller, and reads as none.
 local function lookup(data, attr)
-	if data == nil then
+	if not data then
 		return nil
 	end
 	local value = data[attr.name]

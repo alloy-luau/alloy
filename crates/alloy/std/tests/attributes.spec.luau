@@ -56,6 +56,14 @@ describe("Attributes", function()
 		expect(Attributes.of(function() end)).toEqual({})
 		expect(Attributes.get({}, icon)).toBeNil()
 	end)
+
+	it("reads none on a target that is no table", function()
+		expect(Attributes.get(nil, icon)).toBeNil()
+		expect(Attributes.get(false, icon)).toBeNil()
+		expect(Attributes.get(5, icon)).toBeNil()
+		expect(Attributes.field("x", "count", range)).toBeNil()
+		expect(Attributes.variant(true, "Quit", icon)).toBeNil()
+	end)
 end)
 
 return nil

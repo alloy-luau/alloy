@@ -502,12 +502,18 @@ mod tests {
 
     /// Every member's example is Alloy the compiler accepts. A doc
     /// example that does not compile is worse than none: a reader
-    /// copies it.
+    /// copies it. A fresh project makes no std name ambient, so the
+    /// compile does not either, and an example imports what it reads.
     #[test]
     fn every_member_example_compiles() {
+        let options = crate::EmitOptions {
+            std_globals: crate::std_names::Globals::None,
+            ..crate::EmitOptions::default()
+        };
+
         for (owner, members) in super::MEMBERS {
             for m in *members {
-                let out = crate::compile(m.example)
+                let out = crate::compile_with(m.example, &options)
                     .unwrap_or_else(|e| panic!("{owner}.{}: {}", m.name, e.located(m.example)));
 
                 assert!(

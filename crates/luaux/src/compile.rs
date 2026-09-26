@@ -705,6 +705,16 @@ mod tests {
         );
     }
 
+    /// The arm before `default` ends in markup, so the scan sees a region,
+    /// not a token, before the word.
+    #[test]
+    fn a_default_arm_takes_markup() {
+        assert_eq!(
+            build("return match n with\n  case 1 then\n    <Frame/>\n  default\n    <Frame/>\nend"),
+            "return match n with\n  case 1 then\n    create(\"Frame\")({})\n  default\n    create(\"Frame\")({})\nend"
+        );
+    }
+
     #[test]
     fn emits_attributes() {
         assert_eq!(

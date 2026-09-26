@@ -71,6 +71,10 @@ pub struct Scanner<'a> {
     previous: Option<Token>,
     /// A consumed LuauX region acts as a previous token that ends an expression.
     previous_was_luaux: bool,
+    /// Alloy patch: the previous token is a `default` that follows a whole
+    /// expression. No expression goes on there, so it is the word of a
+    /// `match` arm, and a `<` after it opens LuauX.
+    previous_is_default_arm: bool,
 }
 
 impl<'a> Scanner<'a> {
@@ -82,6 +86,7 @@ impl<'a> Scanner<'a> {
             in_type_declaration: false,
             previous: None,
             previous_was_luaux: false,
+            previous_is_default_arm: false,
         }
     }
 
@@ -135,6 +140,12 @@ impl<'a> Scanner<'a> {
             self.depth += 1;
         }
 
+        self.previous_is_default_arm = token.kind == TokenKind::Name
+            && text == "default"
+            && (self.previous_was_luaux
+                || self
+                    .previous
+                    .is_some_and(|p| can_end_expression(&p, p.text(self.src))));
         self.previous = Some(token);
         self.previous_was_luaux = false;
         false
@@ -155,6 +166,10 @@ impl<'a> Scanner<'a> {
         // comparison.
         if self.previous_was_luaux {
             return false;
+        }
+
+        if self.previous_is_default_arm {
+            return true;
         }
 
         let Some(previous) = &self.previous else {
@@ -364,6 +379,15 @@ mod tests {
     #[test]
     fn detects_after_logical_operators() {
         assert_eq!(count("local x = cond and <Frame/> or nil"), 1);
+    }
+
+    #[test]
+    fn detects_after_the_default_arm_of_a_match() {
+        assert_eq!(count("case 1 then f()\ndefault\n  <Frame/>"), 1);
+        assert_eq!(count("case 1 then x\ndefault <Frame/>"), 1);
+        // A `default` after an operator is a name, and `<` compares it.
+        assert_eq!(count("local b = a and default < 3"), 0);
+        assert_eq!(count("local b = t.default < 3"), 0);
     }
 
     #[test]

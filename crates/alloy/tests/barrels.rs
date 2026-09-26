@@ -80,3 +80,59 @@ fn a_barrel_passes_on_enums_macros_namespaces_and_defaults() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// Luau keeps types and values apart, and Vide exports a value and a
+/// type by the name `source`. Its entry module returns what it
+/// requires. The barrel and a plain import send both on; a name that is
+/// a type alone stays a type.
+#[test]
+fn a_value_and_a_type_of_one_name_both_pass() {
+    let dir = std::env::temp_dir().join(format!("alloy-barrels-both-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("src/lib")).unwrap();
+    fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n",
+    )
+    .unwrap();
+    let files = [
+        (
+            "lib/core.luau",
+            "local function source(v) return function() return v end end\nreturn { source = source }\n",
+        ),
+        (
+            "lib/init.luau",
+            "local m = require(\"@self/core\")\nexport type source<T> = () -> T\nexport type Only = number\nreturn m\n",
+        ),
+        ("index.aly", "export { source, Only } from \"./lib\"\n"),
+        (
+            "main.aly",
+            "import { source } from \"./index\"\nimport { source as direct } from \"./lib\"\nprint(source(1)(), direct(2)())\n",
+        ),
+    ];
+
+    for (name, text) in files {
+        fs::write(dir.join("src").join(name), text).unwrap();
+    }
+
+    let config = alloy::config::Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run_project(&dir, &config).unwrap();
+    assert!(report.is_clean(), "{:?}", report.diagnostics);
+
+    let read = |name: &str| fs::read_to_string(dir.join(format!("build/{name}.luau"))).unwrap();
+    let index = read("index");
+
+    assert!(
+        index.contains("export type source<T> = _m1.source<T>"),
+        "{index}"
+    );
+    assert!(index.contains("export type Only = _m1.Only"), "{index}");
+    assert!(index.contains("return { source = _m1.source }"), "{index}");
+    assert!(
+        read("main").contains("local direct = _m2.source"),
+        "{}",
+        read("main")
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

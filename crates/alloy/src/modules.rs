@@ -1000,6 +1000,19 @@ fn module_types(path: &Path, aliases: &[(String, PathBuf)], depth: u8) -> Vec<St
         out.push(entry);
     }
 
+    // Luau keeps types and values apart, so a module may export a type
+    // and a value by one name: Vide's `source`. The type is no type
+    // alone when the table the module returns holds the name.
+    if out.iter().any(|e| type_only(e))
+        && let Some(keys) = returned_keys_at(path, aliases, depth)
+    {
+        for entry in out.iter_mut() {
+            if type_only(entry) && keys.iter().any(|k| k == type_head(entry)) {
+                entry.pop();
+            }
+        }
+    }
+
     if depth == 0 {
         return out;
     }
@@ -3014,6 +3027,52 @@ pub fn returned_keys(source: &str) -> Option<Vec<String>> {
 
         _ => None,
     }
+}
+
+/// `returned_keys` of the module at `path`, through the modules that
+/// return what they require, `local m = require("./src")` then
+/// `return m`, `depth` steps deep.
+fn returned_keys_at(path: &Path, aliases: &[(String, PathBuf)], depth: u8) -> Option<Vec<String>> {
+    let source = module_text(path).ok()?;
+
+    if let Some(keys) = returned_keys(&source) {
+        return Some(keys);
+    }
+
+    let target = resolve(&returned_require(&source)?, path, aliases).filter(|t| t != path)?;
+
+    returned_keys_at(&target, aliases, depth.checked_sub(1)?)
+}
+
+/// The spec of a module that a source requires and returns as it is.
+fn returned_require(source: &str) -> Option<String> {
+    use alloy_syntax::ast::{Expr, Stmt};
+
+    let parsed = alloy_syntax::parse_lenient(source, Default::default()).ok()?;
+    let toks = &parsed.lexed.toks;
+    let text = |span: TokSpan| span.text(source, toks);
+    let stmts = &parsed.chunk.block.stmts;
+    let Some(Stmt::Return(r)) = stmts.last() else {
+        return None;
+    };
+    let [Expr::Name(n)] = r.values.as_slice() else {
+        return None;
+    };
+
+    stmts.iter().rev().find_map(|s| match s {
+        Stmt::Local(l) if l.names.len() == 1 && text(l.names[0].name) == text(*n) => {
+            let call = text(l.values.first()?.span());
+            let spec = call.strip_prefix("require(")?.strip_suffix(')')?.trim();
+
+            Some(
+                spec.strip_prefix(['"', '\''])?
+                    .strip_suffix(['"', '\''])?
+                    .to_string(),
+            )
+        }
+
+        _ => None,
+    })
 }
 
 /// The named keys of a table literal. A spread copies keys the reader

@@ -1,6 +1,6 @@
 [package]
 name = "alloy-luaux"
-version = "0.1.0-rc.8"
+version = "0.1.0-rc.9"
 description = "Fork of luaux 0.2.0, the JSX-style markup compiler for Luau, with the Alloy patches"
 edition = "2021"
 rust-version.workspace = true
@@ -12,7 +12,7 @@ name = "luaux"
 path = "src/lib.rs"
 
 [dependencies]
-alloy-syntax = { version = "0.1.0-rc.8", path = "../alloy-syntax" }
+alloy-syntax = { version = "0.1.0-rc.9", path = "../alloy-syntax" }
 globset = "0.4.19"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.4"

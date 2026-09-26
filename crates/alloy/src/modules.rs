@@ -1415,10 +1415,17 @@ fn sent_decls<T: Clone>(
         let members = format!("{name}.");
 
         for (decl, payload) in sent_decls(&target, &inner, aliases, read, depth - 1) {
+            // A macro and an attribute are keyed by their sigil.
+            let sigil = decl
+                .strip_prefix(['$', '@'])
+                .filter(|bare| *bare == name)
+                .map(|_| &decl[..1]);
             let renamed = match decl.strip_prefix(&members) {
                 Some(rest) => format!("{exported}.{rest}"),
 
                 None if decl == name => exported.clone(),
+
+                None if let Some(sigil) = sigil => format!("{sigil}{exported}"),
 
                 None => continue,
             };

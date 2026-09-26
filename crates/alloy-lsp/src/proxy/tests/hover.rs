@@ -2920,3 +2920,67 @@ fn a_method_hover_binds_the_receiver_arguments() {
     // Off a call there is no receiver to bind.
     assert_eq!(bind_hover_receiver(printed, doc, 10, 6), None);
 }
+
+/// `import { twice as t2 } from "./index"`, where the barrel sends on
+/// the macro of `./mac`: the hover on `$t2` gave nothing. The barrel's
+/// list keyed the macro without its sigil. It reads the macro's
+/// declaration, as `$twice` does.
+#[test]
+fn a_macro_through_a_barrel_hovers_by_its_declaration() {
+    use super::documents::Recorder;
+
+    let dir = std::env::temp_dir().join(format!("alloy-barrel-macro-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n",
+    )
+    .expect("alloy.toml");
+    let src = "import { twice as t2 } from \"./index\"\nprint($t2(3))\n";
+    let sources = [
+        (
+            "mac",
+            "-- Doubles a value.\nexport macro twice(x)\n    x * 2\nend\n",
+        ),
+        ("index", "export { twice } from \"./mac\"\n"),
+        ("use", src),
+    ];
+    let mut state = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        ..State::default()
+    };
+
+    for (name, source) in sources {
+        let path = dir.join(format!("src/{name}.aly"));
+        std::fs::write(&path, source).expect("source");
+        let uri = path_to_uri(&path);
+        let (options, jsx) = state.options_for(&uri);
+        state
+            .docs
+            .insert(uri, Doc::new(source.to_string(), 1, &options, &jsx, None));
+    }
+
+    let uri = path_to_uri(&dir.join("src/use.aly"));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let server = Server::new(
+        Box::new(std::io::sink()),
+        Box::new(Recorder(Arc::clone(&log))),
+        Vec::new(),
+        None,
+    );
+    *server.state.lock().expect("state") = state;
+    let (line, character) = position_of(src, src.find("t2(3)").unwrap() + 1);
+    let message = json!({ "params": {
+        "textDocument": { "uri": uri },
+        "position": { "line": line, "character": character },
+    } });
+    let answered = server.declaration_hover(&uri, &message, &json!(1));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(answered);
+
+    let sent = String::from_utf8_lossy(&log.lock().expect("the log")).into_owned();
+    assert!(sent.contains("macro twice(x)"), "{sent}");
+}

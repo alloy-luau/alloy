@@ -185,7 +185,8 @@ impl<'s> Desugar<'s> {
     /// The attributes of one declaration, against the target each one
     /// takes.
     pub(crate) fn check_stmt_attrs(&mut self, stmt: &Stmt) {
-        match stmt {
+        // `export default struct S` carries its attributes on `S`.
+        match stmt.under_default() {
             Stmt::Function(f) => self.check_attrs(&f.attrs, "function"),
 
             Stmt::LocalFunction(f) => self.check_attrs(&f.attrs, "function"),

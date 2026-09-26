@@ -242,6 +242,29 @@ fn a_contract_reads_the_struct_and_its_impls_together() {
     ));
 }
 
+/// `export default struct` declares a struct like any other, so its
+/// contract holds, and the name the contract asks for keeps its case.
+#[test]
+fn a_contract_holds_under_export_default() {
+    let decl = "attribute starts on struct as\n    requires function Start(self)\nend\n\n";
+    let missing = format!("{decl}@starts\nexport default struct Door\n    x: number\nend\n");
+    assert_eq!(
+        one(&missing),
+        "`@starts` requires a function `Start(self)`; `Door` declares none"
+    );
+
+    let met = format!(
+        "{decl}@starts\nexport default struct Door\n    x: number\nend\n\nimpl Door\n    function Start(self): ()\n        print(self.x)\n    end\nend\n"
+    );
+    let out = compile(&met);
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    assert!(
+        out.lints.iter().all(|l| l.name != "naming_convention"),
+        "{:?}",
+        out.lints
+    );
+}
+
 /// The contract is a check: the emit is what it was.
 #[test]
 fn a_contract_emits_nothing_of_its_own() {

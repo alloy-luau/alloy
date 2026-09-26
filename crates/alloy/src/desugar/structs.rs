@@ -900,7 +900,7 @@ impl<'s> Desugar<'s> {
                     }
                 }
 
-                self.expected_generic = generic_head(&ty);
+                self.expected_generic = generic_head(self.alias_value(&ty));
                 let v = self.render_to_string(dv);
                 self.expected_generic = None;
                 defaults.push(format!("if f.{fname} == nil then f.{fname} = {v} end"));
@@ -2705,6 +2705,8 @@ impl<'s> Desugar<'s> {
     /// a constructor on its own: a std container, or a generic struct or
     /// enum of this file, `Stack<number>`.
     fn generic_annotation(&self, ty: &str) -> Option<(String, String)> {
+        let ty = self.alias_value(ty);
+
         if let Some(head) = generic_head(ty) {
             return Some(head);
         }
@@ -2724,6 +2726,14 @@ impl<'s> Desugar<'s> {
         self.generic_types
             .contains(base)
             .then(|| (base.to_string(), args.trim().to_string()))
+    }
+
+    /// The value of a type alias of this file that `ty` names, or `ty`
+    /// itself. `type Rows = HashMap<K, V>` is a second spelling of the
+    /// map, so a binding typed `Rows` passes the map's arguments to its
+    /// constructor. One step, as `alias_head` reads an alias.
+    pub(crate) fn alias_value<'a>(&'a self, ty: &'a str) -> &'a str {
+        self.alias_values.get(ty.trim()).map_or(ty, String::as_str)
     }
 
     /// The return type's base and arguments when a `return` hands back
@@ -4541,6 +4551,23 @@ mod tests {
                 out.check
             );
         }
+    }
+
+    /// A type alias of the file is a second spelling of its value, so a
+    /// binding and a return typed by the alias pass the value's arguments.
+    #[test]
+    fn a_constructor_under_an_alias_takes_the_alias_arguments() {
+        let src = "type Rows = HashMap<number, { number }>\nconst rows: Rows = HashMap.new()\nlocal function make(): Rows\n    return HashMap.new()\nend\nprint(rows, make())\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert_eq!(
+            out.check
+                .matches("HashMap.new<<number, { number }>>()")
+                .count(),
+            2,
+            "{}",
+            out.check
+        );
     }
 
     /// `is` reads through a type alias, and the branch it opens has to

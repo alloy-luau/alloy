@@ -2566,7 +2566,8 @@ impl<'s> Desugar<'s> {
         let mut decls: Vec<(Vec<TypedName>, String)> = Vec::new();
 
         for (b, v) in l.names.iter().zip(&l.values) {
-            self.expected_generic = b.ty.and_then(|t| generic_head(self.text_of(t)));
+            self.expected_generic =
+                b.ty.and_then(|t| generic_head(self.alias_value(self.text_of(t))));
             let value = self.render_to_string(v);
             self.expected_generic = None;
             let ty =

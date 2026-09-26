@@ -176,7 +176,9 @@ impl<'s> Desugar<'s> {
                 continue;
             };
             // An optional field takes the same constructor.
-            let Some(g) = super::types::generic_head(ty.trim().trim_end_matches('?')) else {
+            let Some(g) =
+                super::types::generic_head(self.alias_value(ty.trim().trim_end_matches('?')))
+            else {
                 continue;
             };
             let at = std::ptr::from_ref(value) as usize;

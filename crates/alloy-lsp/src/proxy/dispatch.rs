@@ -2023,7 +2023,14 @@ impl Server {
                     if let Some(uri) = &ctx
                         && let Some((line, character)) = position
                     {
-                        st.mend_field_rename(uri, line, character, &child, result);
+                        st.mend_field_rename(
+                            uri,
+                            line,
+                            character,
+                            &child,
+                            query.as_deref(),
+                            result,
+                        );
                         st.mend_export_list(uri, line, character, result);
                         st.mend_prop_attributes(uri, line, character, result);
                     }

@@ -1124,11 +1124,77 @@ impl<'s> Desugar<'s> {
             return;
         }
 
-        let names: Vec<&str> = variants.iter().map(|(v, _)| v.as_str()).collect();
-        let message = format!(
-            "`{ename}` has no variant `{member}`; its variants are {}",
-            list_names(&names)
-        );
+        // A variant starts with a capital. A lower-case member is a
+        // method the author misspelt, so the report lists the methods.
+        let message = if member.starts_with(|c: char| c.is_lowercase()) {
+            // The same sources the check above accepts: this file's
+            // impls, the import index, trait defaults, other files' impls.
+            let prefix = format!("{ename}.");
+            let defaults = self
+                .impl_traits
+                .get(&ename)
+                .into_iter()
+                .flatten()
+                .flat_map(|t| {
+                    self.traits
+                        .get(t)
+                        .or_else(|| {
+                            let imported = self.options.import_trait_defaults.iter();
+
+                            imported.filter(|(n, _)| n == t).map(|(_, d)| d).next()
+                        })
+                        .into_iter()
+                        .flatten()
+                });
+            let mut methods: Vec<&str> = self
+                .impl_methods
+                .get(&ename)
+                .into_iter()
+                .flatten()
+                .chain(defaults)
+                .map(String::as_str)
+                .chain(
+                    self.options
+                        .import_callables
+                        .iter()
+                        .filter_map(|(k, _)| k.strip_prefix(&prefix)),
+                )
+                .chain(
+                    self.options
+                        .foreign_impls
+                        .iter()
+                        .filter(|x| x.head().0 == declared)
+                        .map(|x| x.name.as_str()),
+                )
+                .collect();
+            methods.sort_unstable();
+            methods.dedup();
+            let near = methods
+                .iter()
+                .map(|m| (crate::game_import::edit_distance(m, &member), *m))
+                .filter(|(d, _)| *d <= 2 && *d < member.len())
+                .min();
+
+            match near {
+                Some((_, m)) => {
+                    format!("`{ename}` has no method `{member}`; did you mean `{m}`?")
+                }
+
+                None if methods.is_empty() => format!("`{ename}` has no method `{member}`"),
+
+                None => format!(
+                    "`{ename}` has no method `{member}`; its methods are {}",
+                    list_names(&methods)
+                ),
+            }
+        } else {
+            let names: Vec<&str> = variants.iter().map(|(v, _)| v.as_str()).collect();
+
+            format!(
+                "`{ename}` has no variant `{member}`; its variants are {}",
+                list_names(&names)
+            )
+        };
         self.diagnose(*field, &message);
     }
 

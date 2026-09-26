@@ -4376,10 +4376,7 @@ mod tests {
         let out = crate::compile_with(src, &options).expect("compile");
         let got: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
 
-        assert_eq!(
-            got,
-            ["`M` has no variant `hii`; its variants are `On` and `Off`"]
-        );
+        assert_eq!(got, ["`M` has no method `hii`; did you mean `hi`?"]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -3502,10 +3502,7 @@ mod tests {
         let own = "enum Opt as\n    Some(number)\n    Nil\nend\nlocal o = Opt.Some(1)\nprint(Opt.or_else(o, 5))\n";
         let got = messages(own);
         assert_eq!(got.len(), 1, "{got:?}");
-        assert_eq!(
-            got[0],
-            "`Opt` has no variant `or_else`; its variants are `Some` and `Nil`"
-        );
+        assert_eq!(got[0], "`Opt` has no method `or_else`");
     }
 
     /// `Reached.Walkd` on an imported enum gave the checker's "Key
@@ -3550,9 +3547,23 @@ mod tests {
         let out = crate::compile_with(src, &options).expect("compiles");
         let got: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
 
+        assert_eq!(got, ["`Mode` has no method `hii`; did you mean `hi`?"]);
+    }
+
+    /// `State.is_redy(s)` said "`State` has no variant `is_redy`" and
+    /// listed the variants. A lower-case member is a method, so the
+    /// report names the method and the nearest one, or lists them.
+    #[test]
+    fn a_misspelt_enum_method_names_the_methods() {
+        let src = "enum State as\n    Empty\n    Ripe(number)\nend\nimpl State as\n    function is_ready(self): boolean\n        return $matches(self, Ripe(_))\n    end\n    function grow(self): State\n        return self\n    end\nend\nprint(State.is_redy(State.Empty), State.harvest, State.Rip)\n";
+
         assert_eq!(
-            got,
-            ["`Mode` has no variant `hii`; its variants are `On` and `Off`"]
+            messages(src),
+            [
+                "`State` has no method `is_redy`; did you mean `is_ready`?",
+                "`State` has no method `harvest`; its methods are `grow` and `is_ready`",
+                "`State` has no variant `Rip`; its variants are `Empty` and `Ripe`",
+            ]
         );
     }
 

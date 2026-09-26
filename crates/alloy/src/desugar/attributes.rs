@@ -1102,19 +1102,7 @@ impl<'s> Desugar<'s> {
                 .import_callables
                 .iter()
                 .any(|(k, _)| *k == format!("{ename}.{member}"));
-        // `impl Named for Mode` here gives `Mode` the trait's defaults.
-        let from_trait = self.impl_traits.get(&ename).is_some_and(|ts| {
-            ts.iter().any(|t| {
-                self.traits
-                    .get(t)
-                    .or_else(|| {
-                        let imported = self.options.import_trait_defaults.iter();
-
-                        imported.filter(|(n, _)| n == t).map(|(_, d)| d).next()
-                    })
-                    .is_some_and(|d| d.contains(&member))
-            })
-        });
+        let from_trait = self.takes_default(&ename, &member);
         // An impl in another file, and the defaults its trait brings.
         let declared = self.declared_type_name(&ename);
         let elsewhere = self
@@ -1142,6 +1130,23 @@ impl<'s> Desugar<'s> {
             list_names(&names)
         );
         self.diagnose(*field, &message);
+    }
+
+    /// Whether an `impl Named for Mode` of this file gives `Mode` the
+    /// trait's default `member`.
+    pub(crate) fn takes_default(&self, ename: &str, member: &str) -> bool {
+        self.impl_traits.get(ename).is_some_and(|ts| {
+            ts.iter().any(|t| {
+                self.traits
+                    .get(t)
+                    .or_else(|| {
+                        let imported = self.options.import_trait_defaults.iter();
+
+                        imported.filter(|(n, _)| n == t).map(|(_, d)| d).next()
+                    })
+                    .is_some_and(|d| d.iter().any(|m| m == member))
+            })
+        })
     }
 
     pub(crate) fn scan_expr_for_reduce(&mut self, e: &Expr) {

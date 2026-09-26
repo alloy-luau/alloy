@@ -1249,15 +1249,47 @@ impl<'s> Desugar<'s> {
         }
     }
 
-    /// Whether an `impl` of the enum writes the method: an impl in this
-    /// file, or in the module that declares an imported enum.
+    /// The enum a `:` call's receiver holds, when a unit variant of it
+    /// is a string at runtime, and that variant. `State.Idle:label()`
+    /// names the variant itself.
+    fn unit_receiver(
+        &self,
+        func: &Expr,
+        annotated: &HashMap<String, String>,
+    ) -> Option<(String, String)> {
+        if let Some((target, v)) = self.dotted_name(func).and_then(|p| self.enum_of_path(&p))
+            && self
+                .enum_decls
+                .get(&target)
+                .is_some_and(|vs| vs.iter().any(|(n, arity)| *n == v && *arity == 0))
+        {
+            return Some((target, v));
+        }
+
+        let ty = self.receiver_type(func, annotated)?;
+        // `Opt<number>` names the generic enum `Opt`.
+        let target = ty.trim_end_matches('?').split('<').next()?.trim();
+        let unit = self.unit_variant(target)?;
+
+        Some((target.to_string(), unit.to_string()))
+    }
+
+    /// Whether the enum has the method: an `impl` in this file, a trait
+    /// default an impl takes, or either in the module that declares an
+    /// imported enum. The index keys a method `State:m` and a default
+    /// `State.m`.
     fn enum_has_method(&self, target: &str, method: &str) -> bool {
-        let key = format!("{target}:{method}");
+        let keys = [format!("{target}:{method}"), format!("{target}.{method}")];
 
         self.impl_methods
             .get(target)
             .is_some_and(|ms| ms.contains(method))
-            || self.options.import_callables.iter().any(|(k, _)| *k == key)
+            || self.takes_default(target, method)
+            || self
+                .options
+                .import_callables
+                .iter()
+                .any(|(k, _)| keys.contains(k))
     }
 
     fn is_unit_enum(&self, name: &str) -> bool {
@@ -1299,10 +1331,12 @@ impl<'s> Desugar<'s> {
             }
 
             // `self` in an impl of a struct holds the struct, so
-            // `self.rarity:weight()` reads the type of the field.
+            // `self.rarity:weight()` reads the type of the field. In an
+            // impl of an enum with a unit variant, `self:m()` can find
+            // a string.
             if let Stmt::Impl(i) = stmt
                 && let target = self.impl_target_name(i.target)
-                && self.structs.contains(&target)
+                && (self.structs.contains(&target) || self.unit_variant(&target).is_some())
             {
                 let mut inner = annotated.clone();
                 inner.insert("self".to_string(), target);
@@ -1431,14 +1465,11 @@ impl<'s> Desugar<'s> {
         // metatable of its own, so `s:m()` finds no method. The impl
         // writes `Status.m`, and the static form reaches it.
         if let Some(m) = method
-            && let Some(ty) = self.receiver_type(func, annotated)
-            // `Opt<number>` names the generic enum `Opt`.
-            && let target = ty.trim_end_matches('?').split('<').next().unwrap_or_default().trim()
-            && let Some(unit) = self.unit_variant(target)
-            && self.enum_has_method(target, self.text_of(*m))
+            && let Some((target, unit)) = self.unit_receiver(func, annotated)
+            && self.enum_has_method(&target, self.text_of(*m))
         {
             let (m, recv) = (self.text_of(*m), self.text_of(func.span()));
-            let what = match self.is_unit_enum(target) {
+            let what = match self.is_unit_enum(&target) {
                 true => format!("`{target}` is a unit enum, a string at runtime"),
 
                 false => format!("`{target}.{unit}` is a unit variant, a string at runtime"),
@@ -4481,6 +4512,53 @@ mod tests {
 
         let bound = "enum Item as\n    Tool(number)\n    Junk\nend\n\nimpl Item as\n    function label(self): string\n        return \"x\"\n    end\nend\n\nenum Why as\n    Lost(Item)\n    Full\nend\n\nlocal function g(w: Why): string\n    return match w with\n        case Lost(item) then item:label()\n        case Full then \"full\"\n    end\nend\nprint(g)\n";
         assert_eq!(messages(bound), [want]);
+    }
+
+    /// A typed parameter got the report, and three receivers got the
+    /// checker's "Key 'name' is missing from 'string'" alone: the unit
+    /// variant written out, `self` in an impl of the enum, and a call
+    /// of a trait default the enum takes, here or through an import.
+    #[test]
+    fn a_colon_call_on_a_variant_self_or_default_names_the_static_form() {
+        let src = "trait Describe as\n    function name(self): string\n    function label(self): string\n        return self:name()\n    end\nend\nenum Mode as\n    On\n    Off(number)\nend\nimpl Describe for Mode as\n    function name(self): string\n        return \"m\"\n    end\nend\nimpl Mode as\n    function shout(self): string\n        return self:name()\n    end\nend\nlocal function f(m: Mode): string\n    return m:label()\nend\nprint(f, Mode.On:name())\n";
+        assert_eq!(
+            messages(src),
+            [
+                "`Mode.On` is a unit variant, a string at runtime; call `Mode.name(self)`",
+                "`Mode.On` is a unit variant, a string at runtime; call `Mode.label(m)`",
+                "`Mode.On` is a unit variant, a string at runtime; call `Mode.name(Mode.On)`",
+            ]
+        );
+
+        // The index keys a default the module's impl takes as `Kind.greet`.
+        let imported = crate::compile_with(
+            "import { Kind } from \"./kind\"\nlocal function f(k: Kind): string\n    return k:greet()\nend\nprint(f, Kind.Rich(1):greet())\n",
+            &crate::EmitOptions {
+                import_enums: vec![(
+                    "Kind".to_string(),
+                    vec![("Plain".to_string(), 0), ("Rich".to_string(), 1)],
+                )],
+                import_callables: vec![(
+                    "Kind.greet".to_string(),
+                    crate::flux::Callable {
+                        params: None,
+                        deprecated: None,
+                        exported: true,
+                    },
+                )],
+                ..crate::EmitOptions::default()
+            },
+        )
+        .unwrap();
+        let got: Vec<&str> = imported
+            .diagnostics
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect();
+        assert_eq!(
+            got,
+            ["`Kind.Plain` is a unit variant, a string at runtime; call `Kind.greet(k)`"]
+        );
     }
 
     /// `p.rarity:weight()` read a receiver that is a field, and the

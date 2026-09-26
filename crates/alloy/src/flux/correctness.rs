@@ -1001,7 +1001,28 @@ mod tests {
         let table_and_call = "local function g(a: number)\n    return {\n        value = a,\n        name = tostring(\n            a\n        ),\n    }\nend\n";
         assert_eq!(names(table_and_call), Vec::<&str>::new());
 
+        // A line that opens with an operator, an access or a bracket goes
+        // on with the value above it.
+        for rest in [
+            "a\n        + b\n        + c",
+            "a\n        and b",
+            "a\n        .. b",
+            "a\n        == b",
+            "a\n        ?? b",
+            "t\n        .x",
+            "t\n        [1]",
+        ] {
+            let src = format!(
+                "local function k(a: any, b: any, c: any, t: any)\n    return {rest}\nend\n"
+            );
+            assert_eq!(names(&src), Vec::<&str>::new(), "{src}");
+        }
+
         // A real statement after the jump still fires.
+        assert_eq!(
+            names("local function j(a: number)\n    return a\n    print(a)\nend\n"),
+            vec!["unreachable_code"]
+        );
         assert_eq!(
             names(
                 "local function h(n: number): string\n    return if n == 1 then\n        \"one\"\n        else\n        \"other\"\n    print(n)\nend\n"

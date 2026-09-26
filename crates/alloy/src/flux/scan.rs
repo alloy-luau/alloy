@@ -664,7 +664,10 @@ impl<'s> Scan<'s> {
                             | ":"
                             | "??"
                             | "."
-                    ) || matches!(text, "." | ":" | "?." | "?:")
+                    ) || matches!(text, "." | ":" | "?." | "?:" | "?" | "(" | "[" | "{")
+                        // No statement opens with a binary operator, so
+                        // `return a` over `+ b` is one `return a + b`.
+                        || BINARY_OPS.contains(&text)
                         || ((open_ifs > 0 || else_branch) && matches!(prev, "then" | "else"));
 
                     if !continues {

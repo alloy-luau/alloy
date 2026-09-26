@@ -102,6 +102,44 @@ fn the_operands_of_a_coalesce_and_a_guarded_chain_copy_from_the_source() {
     }
 }
 
+/// `$assert`, `$assert_eq` and `$dbg` lower to generated calls. Each
+/// argument keeps its place in the map, so a report on `twice` inside
+/// one underlines `twice`, not the whole call.
+#[test]
+fn the_arguments_of_an_assert_and_a_dbg_copy_from_the_source() {
+    let src = concat!(
+        "local function twice(n: number): number\n",
+        "    return n * 2\n",
+        "end\n",
+        "$assert_eq(twice(1), 2)\n",
+        "$assert(twice(3) == 6)\n",
+        "$assert(twice(4) > 0, \"positive\")\n",
+        "local v = $dbg(twice(5))\n",
+        "print(v)\n",
+    );
+    let out = alloy::compile(src).unwrap();
+
+    for (text, word) in [
+        ("twice(1)", "twice(1)"),
+        ("2)\n$assert(", "2"),
+        ("twice(3)", "twice(3)"),
+        ("twice(4)", "twice(4)"),
+        ("\"positive\"", "\"positive\""),
+        ("twice(5)", "twice(5)"),
+    ] {
+        let s = src.find(text).unwrap() as u32;
+        let o = out
+            .map
+            .to_output(s)
+            .unwrap_or_else(|| panic!("{word} is generated"));
+        assert!(
+            out.check[o as usize..].starts_with(word),
+            "{word}: {}",
+            &out.check[o as usize..]
+        );
+    }
+}
+
 #[test]
 fn forward_then_back_is_identity_on_copied_bytes() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases");

@@ -735,7 +735,7 @@ impl<'s> Desugar<'s> {
                 if let Some(m) = self.macro_of(&mname).cloned() {
                     let text = self.expand_macro(&m, &mname, args, *span);
                     self.generate(anchor, &text);
-                } else {
+                } else if !self.intrinsic_in_place(*name, args, *span) {
                     let text = self.intrinsic(*name, args, *span);
                     self.generate(anchor, &text);
                 }

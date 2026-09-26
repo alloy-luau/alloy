@@ -158,10 +158,15 @@ impl Server {
         let st = self.state.lock().expect("state");
         let doc = st.docs.get(uri)?;
         let shadow = doc.to_shadow(line, character);
+        // The code copy of an intrinsic's argument takes the same moves
+        // as any call: `$assert_eq(E.plain(|E.A), "p")` sits on the base
+        // of an index there too.
+        let code = intrinsic_code_home(&doc.source, &doc.shadow, line, shadow.0, character);
+        let at = code.unwrap_or(shadow);
 
-        intrinsic_code_home(&doc.source, &doc.shadow, line, shadow.0, character)
-            .or_else(|| before_call_argument(&doc.shadow, shadow))
-            .or_else(|| past_index_base(&doc.shadow, shadow))
+        before_call_argument(&doc.shadow, at)
+            .or_else(|| past_index_base(&doc.shadow, at))
+            .or(code)
     }
 
     /// The shadow text a member completion after a child lookup reads,
@@ -1070,10 +1075,10 @@ pub(crate) fn uncast_children(shadow: &str) -> String {
 }
 
 /// Where a caret inside a call in an intrinsic's argument stands in
-/// the shadow. The intrinsic lowers to one generated text, with the
-/// argument as a string for its message and as code after it, so the
-/// map holds no position for the caret and the child sees a call in
-/// the code alone. The text from the intrinsic's `(` to the caret is
+/// the shadow. The intrinsic writes the argument as a string for its
+/// message and as code after it, and the child sees a call in the code
+/// alone. The map holds the code copy of `$assert`, `$assert_eq` and
+/// `$dbg`; for the rest, the text from the intrinsic's `(` to the caret is
 /// the key: its last match outside every string of the shadow line is
 /// the code copy. `None` when no call of the argument is open at the
 /// caret, where the intrinsic's own signature is the answer.

@@ -1197,9 +1197,9 @@ fn the_arrow_setting_reaches_the_return_hint_alone() {
 
 /*
 `$dbg(Point.new(1))`: the emit writes the argument as a string for the
-message and as code after it. A caret inside the inner call maps to
-the string, where the child sees no call to help with; the code copy
-is where it answers. A call outside an intrinsic maps to code already.
+message and as code after it. The string holds no call for the child
+to help with; the code copy is where it answers. A call outside an
+intrinsic maps to code already.
 */
 #[test]
 fn a_call_inside_an_intrinsic_argument_maps_to_its_code_copy() {
@@ -1217,6 +1217,39 @@ fn a_call_inside_an_intrinsic_argument_maps_to_its_code_copy() {
     // The intrinsic's own list, and a call outside one.
     assert_eq!(home(10, 16), None);
     assert_eq!(home(11, 26), None);
+}
+
+/// Signature help right after the `(` of `E.plain(E.A)` inside
+/// `$assert_eq` gave nothing: the caret sat on the base `E` of the
+/// argument, where the child answers no signature. Outside an
+/// intrinsic the caret moves to the `.`; inside one it moves the same.
+#[test]
+fn a_caret_before_a_variant_inside_an_intrinsic_moves_to_its_dot() {
+    let src = "enum E\n    A\nend\n\nimpl E\n    function plain(self): string\n        return \"p\"\n    end\nend\n\nprint(E.plain(E.A))\n$assert_eq(E.plain(E.A), \"p\")\n";
+    let state = super::support::files(&[("file:///s.aly", src)]);
+    let server = Server::new(
+        Box::new(std::io::sink()),
+        Box::new(std::io::sink()),
+        Vec::new(),
+        None,
+    );
+    *server.state.lock().expect("state") = state;
+    let home = |line: u32, character: u32| {
+        let message = json!({ "params": {
+            "textDocument": { "uri": "file:///s.aly" },
+            "position": { "line": line, "character": character },
+        } });
+        let shadow = server.state.lock().expect("state").docs["file:///s.aly"]
+            .shadow
+            .clone();
+        let (l, c) = server.signature_home("file:///s.aly", &message)?;
+        let text = shadow.lines().nth(l as usize)?.to_string();
+
+        Some(text[..c as usize].to_string())
+    };
+
+    assert!(home(10, 14).expect("print").ends_with("E.plain(E"));
+    assert!(home(11, 19).expect("assert_eq").ends_with("E.plain(E"));
 }
 
 /*

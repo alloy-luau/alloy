@@ -760,6 +760,81 @@ impl<'s> Desugar<'s> {
         })
     }
 
+    /// `$assert`, `$assert_eq` and `$dbg`, with the same text as
+    /// [`Self::intrinsic`]. Each argument keeps its source map, so a
+    /// report or a hover inside it lands on the text the author wrote,
+    /// not on the whole call. False for every other intrinsic.
+    pub(crate) fn intrinsic_in_place(
+        &mut self,
+        name: TokSpan,
+        args: &[Expr],
+        span: TokSpan,
+    ) -> bool {
+        let at = self.byte_start(span);
+        let quoted = |d: &Self, i: usize| luau_string(d.text_of(args[i].span()));
+        // The text before each argument, and the text after the last.
+        let pieces: Vec<String> = match (self.text_of(name), args.len()) {
+            ("assert", 1) => vec![
+                "assert(".to_string(),
+                format!(
+                    ", {})",
+                    luau_string(&format!(
+                        "assertion failed: {}",
+                        self.text_of(args[0].span())
+                    ))
+                ),
+            ],
+
+            ("assert", 2) => vec!["assert(".to_string(), ", ".to_string(), ")".to_string()],
+
+            ("assert_eq", 2) => {
+                let std = self.std();
+
+                vec![
+                    format!(
+                        "{std}.assert_eq({}, {}, ",
+                        luau_string(&self.where_at(at)),
+                        quoted(self, 0)
+                    ),
+                    format!(", {}, ", quoted(self, 1)),
+                    ")".to_string(),
+                ]
+            }
+
+            ("dbg", 1) => {
+                let std = self.std();
+
+                vec![
+                    format!(
+                        "{std}.dbg({}, {}, ",
+                        luau_string(&self.where_at(at)),
+                        quoted(self, 0)
+                    ),
+                    ")".to_string(),
+                ]
+            }
+
+            _ => return false,
+        };
+
+        for (i, piece) in pieces.iter().enumerate() {
+            // A piece after an argument stands where that argument ends.
+            let anchor = match i {
+                0 => at,
+
+                _ => self.byte_end(args[i - 1].span()),
+            };
+            self.generate(anchor, piece);
+
+            if let Some(arg) = args.get(i) {
+                let side = self.render_to_side(arg);
+                self.r.append(side);
+            }
+        }
+
+        true
+    }
+
     pub(crate) fn intrinsic(&mut self, name: TokSpan, args: &[Expr], span: TokSpan) -> String {
         let n = self.text_of(name).to_string();
         let at = self.byte_start(span);
@@ -771,17 +846,6 @@ impl<'s> Desugar<'s> {
             .collect();
 
         match (n.as_str(), args.len()) {
-            ("dbg", 1) => {
-                let std = self.std();
-
-                format!(
-                    "{std}.dbg({}, {}, {})",
-                    luau_string(&where_),
-                    luau_string(&sources[0]),
-                    rendered[0]
-                )
-            }
-
             ("todo", 0) => format!("error({})", luau_string(&format!("todo at {where_}"))),
 
             ("todo", 1) => format!(
@@ -794,27 +858,6 @@ impl<'s> Desugar<'s> {
                 format!(
                     "error({})",
                     luau_string(&format!("unreachable at {where_}"))
-                )
-            }
-
-            ("assert", 1) => format!(
-                "assert({}, {})",
-                rendered[0],
-                luau_string(&format!("assertion failed: {}", sources[0]))
-            ),
-
-            ("assert", 2) => format!("assert({}, {})", rendered[0], rendered[1]),
-
-            ("assert_eq", 2) => {
-                let std = self.std();
-
-                format!(
-                    "{std}.assert_eq({}, {}, {}, {}, {})",
-                    luau_string(&where_),
-                    luau_string(&sources[0]),
-                    rendered[0],
-                    luau_string(&sources[1]),
-                    rendered[1]
                 )
             }
 

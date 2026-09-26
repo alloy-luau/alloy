@@ -759,8 +759,9 @@ impl Server {
 
         // One pass at a time, the way `open_mirror` holds it.
         let _pass = self.scan.lock().unwrap_or_else(|e| e.into_inner());
+        let held_before = self.state.lock().expect("state").editor_open.clone();
 
-        for path in files {
+        for path in dependencies_first(files) {
             if self.stopping.load(std::sync::atomic::Ordering::Relaxed) {
                 return;
             }
@@ -776,6 +777,21 @@ impl Server {
             if let Ok(text) = std::fs::read_to_string(&path) {
                 self.open_doc(&uri, text, 0, false);
             }
+        }
+
+        // The child checked a file the editor opened during the pass
+        // against a mirror that still lacked some shadows. The mirror
+        // is whole now, so the child checks it again.
+        let opened: Vec<String> = {
+            let st = self.state.lock().expect("state");
+
+            st.editor_open.difference(&held_before).cloned().collect()
+        };
+
+        for uri in opened {
+            self.wait_for_requests();
+            self.resend_doc(&uri);
+            self.publish(&uri);
         }
 
         log::took("workspace shadows opened", shadows);
@@ -1398,6 +1414,64 @@ pub(crate) fn normalize(path: &Path) -> PathBuf {
             }
 
             other => out.push(other),
+        }
+    }
+
+    out
+}
+
+/*
+The sources in the order the shadow pass opens them: each file after the
+files it imports, in path order otherwise.
+
+The child checks a shadow when it opens, and it resolves each require
+against the mirror as it stands then. A require to a shadow the pass has
+not written yet fails, and the child records no dependency for it. The
+later open of that shadow then does not check the importer again, so
+the importer keeps the failed types until its own text changes. In path
+order, `server/Plot` opens before the `shared/index` it imports.
+*/
+pub(crate) fn dependencies_first(files: Vec<PathBuf>) -> Vec<PathBuf> {
+    let known: HashSet<PathBuf> = files.iter().map(|p| normalize(p)).collect();
+    let imports_of = |path: &Path| -> Vec<PathBuf> {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Vec::new();
+        };
+
+        alloy::modules::import_targets_for_file(path, &text)
+            .into_iter()
+            .map(|t| normalize(&t))
+            .filter(|t| known.contains(t))
+            .collect()
+    };
+    let mut out = Vec::with_capacity(files.len());
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+
+    // A depth-first walk with its own stack: an import chain can be
+    // longer than the thread's stack allows for recursion.
+    for file in files {
+        let file = normalize(&file);
+
+        if !seen.insert(file.clone()) {
+            continue;
+        }
+
+        let mut stack = vec![(file.clone(), imports_of(&file))];
+
+        while let Some((path, pending)) = stack.last_mut() {
+            match pending.pop() {
+                Some(next) => {
+                    if seen.insert(next.clone()) {
+                        let deps = imports_of(&next);
+                        stack.push((next, deps));
+                    }
+                }
+
+                None => {
+                    out.push(path.clone());
+                    stack.pop();
+                }
+            }
         }
     }
 

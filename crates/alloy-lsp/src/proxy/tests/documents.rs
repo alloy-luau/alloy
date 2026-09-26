@@ -870,6 +870,62 @@ fn the_mirror_depth_follows_the_deepest_dependency() {
     assert_eq!(mirror_above(Some(&dir)), 4);
 }
 
+/// The shadow pass opens a file after the files it imports, through
+/// an alias and a barrel too. In path order `server/Plot` comes before
+/// `shared/index`, and the child keeps the require it could not resolve
+/// then: every type Plot imports reads as `unknown` until Plot changes.
+#[test]
+fn the_shadow_pass_opens_a_file_after_its_imports() {
+    let dir = alias_root(
+        "pass-order",
+        &[
+            (
+                "alloy.toml",
+                "[build]\nin = \"src\"\nout = \"build\"\n\n[mount]\nshared = [\"src/shared\", \"@game/ReplicatedStorage/Shared\"]\n",
+            ),
+            (
+                "src/server/Plot.aly",
+                "import { CropKind } from \"@shared/index\"\nexport function plant(kind: CropKind) end\n",
+            ),
+            (
+                "src/server/Probe.aly",
+                "import * as Plot from \"./Plot\"\nPlot.plant(\"Wheat\")\n",
+            ),
+            (
+                "src/shared/index.aly",
+                "export { CropKind } from \"./crops/Crops\"\n",
+            ),
+            (
+                "src/shared/crops/Crops.aly",
+                "export type CropKind = \"Wheat\" | \"Carrot\"\n",
+            ),
+        ],
+    );
+    let mut files = Vec::new();
+    walk(&dir, None, &mut files, &mut Vec::new());
+    files.sort();
+    let order: Vec<String> = dependencies_first(files)
+        .iter()
+        .map(|p| {
+            p.strip_prefix(normalize(&dir))
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(
+        order,
+        [
+            "src/shared/crops/Crops.aly",
+            "src/shared/index.aly",
+            "src/server/Plot.aly",
+            "src/server/Probe.aly",
+        ]
+    );
+}
+
 /// The file poll watches the `[build] in` of every project the root's
 /// sources import into, so a dependency saved outside the editor
 /// reaches the next tick.

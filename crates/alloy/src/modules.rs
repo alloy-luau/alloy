@@ -2702,6 +2702,10 @@ pub fn exported_names(source: &str) -> Vec<String> {
         definitions: true,
         ..Default::default()
     };
+    // A `.alx` holds markup, and the parse of the raw text can lose the
+    // exports below it.
+    let source = parsable(source);
+    let source: &str = &source;
     let Ok(parsed) = alloy_syntax::parse_lenient(source, options) else {
         return Vec::new();
     };
@@ -2759,7 +2763,7 @@ pub fn exports_default(source: &str) -> bool {
         definitions: true,
         ..Default::default()
     };
-    let Ok(parsed) = alloy_syntax::parse_lenient(source, options) else {
+    let Ok(parsed) = alloy_syntax::parse_lenient(&parsable(source), options) else {
         return false;
     };
 
@@ -2814,7 +2818,7 @@ pub fn exports_values(source: &str) -> bool {
         definitions: true,
         ..Default::default()
     };
-    let Ok(parsed) = alloy_syntax::parse_lenient(source, options) else {
+    let Ok(parsed) = alloy_syntax::parse_lenient(&parsable(source), options) else {
         return false;
     };
 

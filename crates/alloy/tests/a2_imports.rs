@@ -22,6 +22,25 @@ fn a_module_lists_what_it_exports() {
     );
 }
 
+/// An `if` in a markup hole of a `.alx` made the plain parse swallow
+/// the rest of the file, so the module "exported nothing" and the
+/// importer did not build. The markup blanks first, as for `return`.
+#[test]
+fn a_markup_hole_hides_no_export() {
+    for hole in [
+        "Text={if true then \"a\" else \"b\"} />",
+        ">{if true then \"a\" else \"b\"}</TextLabel>",
+    ] {
+        let source =
+            format!("local x = <TextLabel {hole}\nexport function View()\n    return x\nend\n");
+        assert_eq!(
+            alloy::modules::exported_names(&source),
+            vec!["View"],
+            "{hole}"
+        );
+    }
+}
+
 /// An `export { ... }` list names the types of the declarations it
 /// holds, so an import of one binds the type as `export struct` does.
 #[test]

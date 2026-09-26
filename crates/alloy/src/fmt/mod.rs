@@ -1959,6 +1959,19 @@ mod tests {
             );
         }
 
+        // A parameter typed by a table hugs the same way, and the return
+        // type after the parentheses counts toward the line.
+        stable(
+            "export function NewCard(props: { label: string, width: number, height: number, on_click: () -> () }): Instance\nend\n",
+            "export function NewCard(props: {\n  label: string,\n  width: number,\n  height: number,\n  on_click: () -> (),\n}): Instance\nend\n",
+        );
+
+        // One parenthesized value hugs too.
+        stable(
+            "list:push((first_long_argument_name_here + second_long_argument_name_here + third_long_one + fourth_one_x))\n",
+            "list:push((\n  first_long_argument_name_here + second_long_argument_name_here + third_long_one + fourth_one_x\n))\n",
+        );
+
         // A table that fits stays on the line, and a second argument
         // breaks the list as before.
         stable("copy({ a = 1 })\n", "copy({ a = 1 })\n");

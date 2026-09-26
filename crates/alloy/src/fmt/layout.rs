@@ -765,7 +765,7 @@ impl<'s> Formatter<'s> {
         let opener = self.items[open].text.clone();
         let closer = self.items[close].text.clone();
         let expand = !elements.is_empty()
-            && !self.hugs(elements, open)
+            && !self.hugs(open, close)
             && self.should_expand(elements, *magic_comma, hard, open, close);
         self.line.push_str(&opener);
 
@@ -837,15 +837,32 @@ impl<'s> Formatter<'s> {
         }
     }
 
-    /// Whether the parentheses at `open` hold one table and nothing else,
-    /// `f({ ... })`. They hug it: the table breaks inside them, so the
-    /// call takes no lines of brackets of its own.
-    fn hugs(&self, elements: &[(Vec<Node>, Option<usize>)], open: usize) -> bool {
-        matches!(self.items[open].text.as_str(), "(" | "?(")
-            && matches!(
-                elements,
-                [(el, None)] if matches!(el.as_slice(), [Node::Group { open: o, .. }] if self.items[*o].is("{"))
-            )
+    /// Whether the parentheses from `open` to `close` hug what they hold:
+    /// one table, `f({ ... })`, a parameter typed by one, `(props: { ...
+    /// })`, or one parenthesized value, `push((<Frame />))`. The inner
+    /// group breaks inside them, so they take no lines of brackets of
+    /// their own.
+    fn hugs(&self, open: usize, close: usize) -> bool {
+        if !matches!(self.items[open].text.as_str(), "(" | "?(") || close <= open + 1 {
+            return false;
+        }
+
+        let inner = &self.items[close - 1];
+        let Some(inner_open) = self.opener_of(close - 1).filter(|o| *o > open) else {
+            return false;
+        };
+
+        match inner.text.as_str() {
+            "}" if !inner.is_comment() => (open + 1..inner_open).all(|k| {
+                let t = &self.items[k];
+
+                !t.is_comment() && !opens(&t.text) && !closes(&t.text) && !t.is(",") && !t.is(";")
+            }),
+
+            ")" if !inner.is_comment() => inner_open == open + 1 && self.items[inner_open].is("("),
+
+            _ => false,
+        }
     }
 
     /// Whether a group breaks: a magic trailing comma, a comment among
@@ -949,11 +966,13 @@ impl<'s> Formatter<'s> {
         // A return type, `): { number }` or `): (number, string?)`, is no
         // place to break: the parameters break first, as they do before
         // `): Result<A, B>`. Its groups count whole.
-        let returns = self.items[close].is(")")
-            && self
-                .items
-                .get(j)
-                .is_some_and(|c| (c.is(":") && self.annotation.contains(&c.start)) || c.is("->"));
+        let returns_after = |close: usize| {
+            self.items[close].is(")")
+                && self.items.get(close + 1).is_some_and(|c| {
+                    (c.is(":") && self.annotation.contains(&c.start)) || c.is("->")
+                })
+        };
+        let mut returns = returns_after(close);
 
         while j < self.items.len() {
             let it = &self.items[j];
@@ -963,6 +982,17 @@ impl<'s> Formatter<'s> {
             }
 
             let text = it.text.as_str();
+
+            // Parentheses that hug the group break with it, so the line
+            // goes on past their closer.
+            if closes(text) && self.opener_of(j).is_some_and(|o| self.hugs(o, j)) {
+                w += self.spaced_width(j);
+                returns = returns_after(j);
+                j += 1;
+
+                continue;
+            }
+
             let closer = match text {
                 "," | ";" => self.next_code(j).filter(|n| closes(&self.items[*n].text)),
 

@@ -695,12 +695,7 @@ impl<'s> Formatter<'s> {
                     block_depth += self.block_delta(*i);
                 }
 
-                Node::Group {
-                    open,
-                    close,
-                    elements,
-                    ..
-                } => {
+                Node::Group { open, elements, .. } => {
                     let it = &self.items[*open];
 
                     if self.forced[*open]
@@ -709,22 +704,13 @@ impl<'s> Formatter<'s> {
                         hard[*open] = true;
                     }
 
-                    for (el, sep) in elements {
+                    // The separators and the closer belong to the group, not
+                    // to the statements of a callback body around it, so a
+                    // newline before one is no break: the group breaks by
+                    // its width, as it does outside a callback. The closer
+                    // kept its line, and `(` hugged the value with `)` below.
+                    for (el, _) in elements {
                         self.mark_hard(el, hard, true, 0);
-
-                        if let Some(s) = sep
-                            && self.items[*s].newlines_before > 0
-                            && block_depth > 0
-                            && in_group
-                        {
-                            hard[*s] = true;
-                        }
-                    }
-
-                    let c = &self.items[*close];
-
-                    if c.newlines_before > 0 && in_group && block_depth > 0 {
-                        hard[*close] = true;
                     }
                 }
             }

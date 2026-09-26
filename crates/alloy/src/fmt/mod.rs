@@ -1186,6 +1186,25 @@ mod tests {
         assert_eq!(fmt(short), short);
     }
 
+    /// In a callback body, a group that stayed on one line kept a `)` or
+    /// a `}` on the line the source gave it. `return (` hugged the call
+    /// and the `)` stood alone below `end)`. The closer follows the
+    /// group now, as it does outside a callback.
+    #[test]
+    fn a_closer_in_a_callback_follows_its_group() {
+        let src = "task.spawn(function()\n  return (\n    f(function()\n      return 1\n    end)\n  )\nend)\n";
+        let want = "task.spawn(function()\n  return (f(function()\n    return 1\n  end))\nend)\n";
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want);
+
+        let table =
+            "task.spawn(function()\n  local t = {\n    a = 1,\n    b = 2\n  }\n  print(t)\nend)\n";
+        assert_eq!(
+            fmt(table),
+            "task.spawn(function()\n  local t = { a = 1, b = 2 }\n  print(t)\nend)\n"
+        );
+    }
+
     /// A long ternary broke the arguments of the call in its last
     /// branch. It breaks at its `?` and its `:`, one branch a line.
     #[test]

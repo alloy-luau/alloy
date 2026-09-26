@@ -181,10 +181,15 @@ fn substitute(formatted: &str, printed: &[Vec<Line>], options: &FmtConfig) -> St
             let lines = &printed[n];
 
             for (k, (level, text)) in lines.iter().enumerate() {
+                // A blank line of a hole's body stays empty: an indent
+                // there is trailing whitespace.
                 if k > 0 {
                     out.push('\n');
-                    out.push_str(&base);
-                    out.push_str(&indent(options, *level));
+
+                    if !text.is_empty() {
+                        out.push_str(&base);
+                        out.push_str(&indent(options, *level));
+                    }
                 }
 
                 out.push_str(text);
@@ -855,6 +860,14 @@ mod tests {
     #[test]
     fn a_multi_line_hole_keeps_its_lines() {
         let src = "return (\n  <TextButton\n    Activated={function()\n      go()\n    end}\n  >\n    {name} x{count}\n  </TextButton>\n)\n";
+        assert_eq!(fmt(src), src);
+    }
+
+    /// A blank line in the body of a hole stays empty. fmt wrote the
+    /// indent of the tag on it.
+    #[test]
+    fn a_blank_line_in_a_hole_takes_no_indent() {
+        let src = "return (\n  <Frame\n    Size={function()\n      const w = 1\n\n      return w\n    end}\n  />\n)\n";
         assert_eq!(fmt(src), src);
     }
 

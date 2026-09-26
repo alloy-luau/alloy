@@ -523,7 +523,7 @@ impl<'s> Desugar<'s> {
             return;
         }
 
-        if normalize_shape(&want.shape) != normalize_shape(&m.shape) {
+        if normalize_shape(m.kind, &want.shape) != normalize_shape(m.kind, &m.shape) {
             let message = format!(
                 "`@{attr}` requires `{}`; `{}` declares `{}`",
                 member_sketch(want),
@@ -720,13 +720,48 @@ fn signature_params(sig: &str) -> &str {
 }
 
 /// A shape with its spacing dropped, so `(self, dt: number)` and
-/// `(self,dt : number)` compare equal. The comparison is textual on
-/// purpose: a contract asks for the signature the author wrote.
-fn normalize_shape(s: &str) -> String {
-    signature_params(s)
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect()
+/// `(self,dt : number)` compare equal. A function keeps the type of
+/// each parameter and drops its name. The name is no part of the type,
+/// so `run(self, x: number, _y: number)` meets `run(self, x: number, y:
+/// number)`.
+fn normalize_shape(kind: &str, s: &str) -> String {
+    let squash = |t: &str| t.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    let params = signature_params(s);
+    let inner = params.strip_prefix('(').and_then(|p| p.strip_suffix(')'));
+
+    let (Some(inner), "function") = (inner, kind) else {
+        return squash(params);
+    };
+
+    if inner.trim().is_empty() {
+        return "()".to_string();
+    }
+    let mut types = Vec::new();
+    let mut depth = 0i32;
+    let mut from = 0;
+    let mut prev = ' ';
+
+    for (i, c) in inner.char_indices().chain([(inner.len(), ',')]) {
+        match c {
+            '(' | '{' | '[' | '<' => depth += 1,
+
+            // The `>` of `->` closes nothing.
+            '>' if prev == '-' => {}
+
+            ')' | '}' | ']' | '>' => depth -= 1,
+
+            ',' if depth == 0 => {
+                let param = &inner[from..i];
+                types.push(squash(param.split_once(':').map_or("", |(_, t)| t)));
+                from = i + 1;
+            }
+
+            _ => {}
+        }
+        prev = c;
+    }
+
+    format!("({})", types.join(","))
 }
 
 /*

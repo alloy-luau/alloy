@@ -118,6 +118,33 @@ fn a_wrong_shape_names_what_the_file_wrote() {
     );
 }
 
+/// A parameter's name is no part of the type, so `_y` meets `y`. The
+/// count and the types still count.
+#[test]
+fn a_shape_compares_the_types_and_not_the_names() {
+    let src = |params: &str| {
+        format!(
+            "attribute pass on struct as\n    requires function run(self, x: number, f: (number) -> (), t: {{ a: number, b: string }})\nend\n\n@pass\nstruct OnlyX as\n    n: number\nend\n\nimpl OnlyX as\n    function run{params}: ()\n    end\nend\n\nprint(OnlyX)\n"
+        )
+    };
+    clean(&src(
+        "(self, _x: number, _f: (number)->(), _t: { a: number, b: string })",
+    ));
+
+    for wrong in [
+        "(self, x: string, f: (number) -> (), t: { a: number, b: string })",
+        "(self, x: number, f: (number) -> ())",
+        "(self, x: number, f: (string) -> (), t: { a: number, b: string })",
+    ] {
+        assert_eq!(
+            one(&src(wrong)),
+            format!(
+                "`@pass` requires `run(self, x: number, f: (number) -> (), t: {{ a: number, b: string }})`; `OnlyX` declares `run{wrong}`"
+            )
+        );
+    }
+}
+
 /// A clause with no shape asks for the member alone.
 #[test]
 fn a_clause_without_a_shape_takes_any_signature() {

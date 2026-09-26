@@ -1805,6 +1805,28 @@ mod tests {
         stable("local xs = [1, 2]\n", "local xs = [ 1, 2 ]\n");
     }
 
+    /// A return type is no place to break. Past the column, fmt broke a
+    /// `{ T }` or `(A, B)` return type and kept the parameters on the
+    /// line; it breaks the parameters first, as before `Result<A, B>`.
+    #[test]
+    fn a_long_header_breaks_its_parameters_before_its_return_type() {
+        let params = "start: number, stop: number, step: number, extra: number, more: number";
+        let broken = "(\n  start: number,\n  stop: number,\n  step: number,\n  extra: number,\n  more: number\n)";
+
+        for ret in ["{ number }", "(number, number?)", "{ [string]: number }?"] {
+            stable(
+                &format!("export function walk({params}): {ret}\n  return nil\nend\n"),
+                &format!("export function walk{broken}: {ret}\n  return nil\nend\n"),
+            );
+        }
+
+        // A short header keeps its line.
+        stable(
+            "local function f(a: number): { number }\n  return { a }\nend\n",
+            "local function f(a: number): { number }\n  return { a }\nend\n",
+        );
+    }
+
     #[test]
     fn formatting_is_idempotent_on_the_examples() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../examples");

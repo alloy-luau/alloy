@@ -931,6 +931,14 @@ impl<'s> Formatter<'s> {
     fn tail_width(&self, close: usize, hard: &[bool]) -> usize {
         let mut w = 0;
         let mut j = close + 1;
+        // A return type, `): { number }` or `): (number, string?)`, is no
+        // place to break: the parameters break first, as they do before
+        // `): Result<A, B>`. Its groups count whole.
+        let returns = self.items[close].is(")")
+            && self
+                .items
+                .get(j)
+                .is_some_and(|c| (c.is(":") && self.annotation.contains(&c.start)) || c.is("->"));
 
         while j < self.items.len() {
             let it = &self.items[j];
@@ -959,6 +967,24 @@ impl<'s> Formatter<'s> {
 
             if matches!(text, "," | ";") {
                 break;
+            }
+
+            if opens(text) && returns {
+                // The whole group, then the type goes on only through
+                // `?`, `|`, `&` or `->`.
+                let Some(end) = self.closer_at(j) else {
+                    break;
+                };
+                w += (j + 1..=end).map(|k| self.spaced_width(k)).sum::<usize>();
+                j = end + 1;
+
+                match self.items.get(j) {
+                    Some(n) if !hard[j] && matches!(n.text.as_str(), "?" | "|" | "&" | "->") => {
+                        continue;
+                    }
+
+                    _ => break,
+                }
             }
 
             if opens(text) {
@@ -1456,6 +1482,31 @@ impl<'s> Formatter<'s> {
         let it = &self.items[i];
 
         !it.name_here && (it.is("case") || it.is("default") || it.is("end"))
+    }
+
+    /// The closer of the group that opens at `open`.
+    fn closer_at(&self, open: usize) -> Option<usize> {
+        let mut depth = 0i32;
+
+        for j in open..self.items.len() {
+            let t = &self.items[j];
+
+            if t.is_comment() {
+                continue;
+            }
+
+            if opens(&t.text) {
+                depth += 1;
+            } else if closes(&t.text) {
+                depth -= 1;
+
+                if depth == 0 {
+                    return Some(j);
+                }
+            }
+        }
+
+        None
     }
 
     /// The opener of the group that holds item `i`, or none at the top.

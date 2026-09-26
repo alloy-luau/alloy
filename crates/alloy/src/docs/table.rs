@@ -204,7 +204,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "new",
-        "```\nnew Name(...)\nnew Name(...) { Field = value }\n```\nConstructs a value. `new Name(...)` calls the constructor a struct's impl wrote, `new` or `New`, or the `new` of a Roblox datatype, an Instance, or any class; braces after it set fields on the new value, one per line. `new Name { ... }` is a struct's fields form, the only way to construct one that writes no constructor. A struct never constructs without `new`.\n\nThe word is also free as a name. `new` before a type name constructs; `new(x)`, `new.field`, `new = 1`, and `new \"Part\"` read the Luau way, so a local named `new` may hold `Instance.new`.\n\nA constructor chains. `new Thing():method()` and `new Thing().field` read the way `(new Thing()):method()` does.",
+        "```\nnew Name(...)\nnew Name(...) { Field = value }\n```\nConstructs a value. `new Name(...)` calls the constructor a struct's impl wrote, `new` or `New`, or the `new` of a Roblox datatype, an Instance, or any class; braces after it set fields on the new value, one per line. The braces set `Parent` after every other field, in a statement or an expression, so an Instance enters the tree with its properties set. `new Name { ... }` is a struct's fields form, the only way to construct one that writes no constructor. A struct never constructs without `new`.\n\nThe word is also free as a name. `new` before a type name constructs; `new(x)`, `new.field`, `new = 1`, and `new \"Part\"` read the Luau way, so a local named `new` may hold `Instance.new`.\n\nA constructor chains. `new Thing():method()` and `new Thing().field` read the way `(new Thing()):method()` does.",
     ),
     (
         "delete",

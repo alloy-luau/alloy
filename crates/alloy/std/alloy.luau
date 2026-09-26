@@ -2896,10 +2896,17 @@ function alloy.assert_eq(where: string, left_source: string, left, right_source:
 	end
 end
 
---- The object initializer: `new X(args) { ... }` assigns each field in order.
+--- The object initializer: `new X(args) { ... }` in an expression. It
+--- assigns `Parent` after every other field, so an Instance enters the
+--- tree with its properties set. The statement form keeps that order too.
 function alloy.init<T>(object: T, fields: { [string]: any }): T
 	for k, v in pairs(fields) do
-		(object :: any)[k] = v
+		if k ~= "Parent" then
+			(object :: any)[k] = v
+		end
+	end
+	if fields.Parent ~= nil then
+		(object :: any).Parent = fields.Parent
 	end
 	return object
 end

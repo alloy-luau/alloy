@@ -2721,14 +2721,33 @@ impl<'s> Desugar<'s> {
         let open_end = self.toks[span.start as usize].end;
         let close = self.toks[span.end as usize - 1];
         let mut cursor = open_end;
+        // `Parent` goes after every other field, as `alloy.init` does for
+        // the expression form: an Instance then enters the tree with its
+        // properties set. Its value still runs in its own place, into a
+        // temp, so the order of the values holds.
+        let parent_at = fields
+            .iter()
+            .position(
+                |f| matches!(f, TableField::Named { name, .. } if self.text_of(*name) == "Parent"),
+            )
+            .filter(|i| i + 1 < fields.len());
+        let mut parent_temp = None;
 
-        for field in fields {
+        for (i, field) in fields.iter().enumerate() {
             let (fs, fe) = self.field_bytes(field);
             // The gap holds the newlines; the comma becomes a space since
             // the fields are statements now.
             self.copy_gap_without_commas(cursor, fs);
 
             match field {
+                TableField::Named { value, .. } if parent_at == Some(i) => {
+                    self.new_stmt_next += 1;
+                    let temp = format!("_parent{}", self.new_stmt_next);
+                    self.generate(fs, &format!("local {temp} = "));
+                    self.expr(value);
+                    parent_temp = Some(temp);
+                }
+
                 TableField::Named { name, value } => {
                     let f = self.text_of(*name).to_string();
                     self.generate(fs, &format!("{binding}.{f} = "));
@@ -2752,7 +2771,10 @@ impl<'s> Desugar<'s> {
         }
 
         self.copy_gap_without_commas(cursor, close.start);
-        let _ = close;
+
+        if let Some(temp) = parent_temp {
+            self.generate(close.start, &format!("{binding}.Parent = {temp}"));
+        }
     }
 
     /// Copies a gap, turning each comma into a space so newlines survive.

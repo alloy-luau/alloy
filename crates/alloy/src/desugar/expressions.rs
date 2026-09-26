@@ -1687,8 +1687,8 @@ impl<'s> Desugar<'s> {
         let (base, links) = flatten(e);
         self.check_child_chain(base, &links);
         let timed_waits = self.options.wait_timeout.is_some();
-        let casts: Vec<Option<&'static str>> = (0..links.len())
-            .map(|i| Self::child_cast(&links, i, target, bare, timed_waits))
+        let casts: Vec<Option<String>> = (0..links.len())
+            .map(|i| self.child_cast(&links, i, target, bare, timed_waits))
             .collect();
         // A timed `WaitForChild` can return nil, so the link after it
         // guards. The first link guards an optional name, `gui=>Hud`,
@@ -1872,7 +1872,7 @@ impl<'s> Desugar<'s> {
             pending_guard = false;
             // A guarded link is optional already.
             self.child_cast = match link {
-                Link::Optional(_) if cast == Some("?") => None,
+                Link::Optional(_) if cast.as_deref() == Some("?") => None,
 
                 _ => cast,
             };
@@ -1961,7 +1961,11 @@ impl<'s> Desugar<'s> {
     /// `WaitForChild`, and `Instance` for a `WaitForChild` with no timeout.
     ///
     /// A field or a method after the child needs `any`, since `Instance`
-    /// has no `CFrame`. A child lookup after it needs a receiver that is
+    /// has no `CFrame`. A `?.` or a `?:` after a child that the file
+    /// names after a Roblox class, `->Humanoid?.Health`, takes that class
+    /// instead, so luau-lsp checks the field or the method. The cast goes
+    /// through `any`, so a sourcemap that gives the child another class
+    /// reports nothing. A child lookup after it needs a receiver that is
     /// not nil: a `->` or a timed `=>` guards it, and a `=>` with no
     /// timeout gives one. Only a `->` before an unguarded `=>` casts to
     /// `Instance`. `bare` drops every guard, see `require_arg`.
@@ -1970,19 +1974,20 @@ impl<'s> Desugar<'s> {
     /// drops the nil the timeout gives. `?` casts the last link to its
     /// own type made optional.
     fn child_cast(
+        &self,
         links: &[Link<'_>],
         i: usize,
         target: bool,
         bare: bool,
         timed: bool,
-    ) -> Option<&'static str> {
-        let (Link::Plain(Step::Child { wait, .. }) | Link::Optional(Step::Child { wait, .. })) =
+    ) -> Option<String> {
+        let (Link::Plain(Step::Child { name, wait }) | Link::Optional(Step::Child { name, wait })) =
             &links[i]
         else {
             return None;
         };
 
-        match links.get(i + 1) {
+        let cast = match links.get(i + 1) {
             None if target => Some("any"),
 
             None => (timed && *wait && !bare).then_some("?"),
@@ -2000,8 +2005,29 @@ impl<'s> Desugar<'s> {
                 }
             }
 
+            Some(Link::Optional(
+                Step::Field(_)
+                | Step::Call {
+                    method: Some(_), ..
+                },
+            )) => {
+                let class = match name {
+                    ChildName::Name(s) => INSTANCE_CLASSES.iter().find(|c| **c == self.text_of(*s)),
+
+                    _ => None,
+                };
+
+                match class {
+                    Some(class) => return Some(format!("{class}?")),
+
+                    None => Some("any"),
+                }
+            }
+
             Some(_) => Some("any"),
-        }
+        };
+
+        cast.map(str::to_string)
     }
 
     /// Applies a step, as code that runs on some paths only when `lazy`
@@ -2157,8 +2183,14 @@ impl<'s> Desugar<'s> {
                     (false, _) => format!("{prefix}:FindFirstChild({n})"),
                 };
 
-                match self.child_cast {
+                match self.child_cast.as_deref() {
                     Some("?") if self.options.check => format!("({call} :: typeof({call})?)"),
+
+                    // A class from the child's name goes through `any`,
+                    // see `child_cast`.
+                    Some(ty) if self.options.check && ty.ends_with('?') => {
+                        format!("(({call} :: any) :: {ty})")
+                    }
 
                     Some(ty) if self.options.check => format!("({call} :: {ty})"),
 
@@ -2601,6 +2633,38 @@ mod tests {
             out.contains("local m = require(p:WaitForChild(\"A\", 5):WaitForChild(\"B\", 5))"),
             "{out}"
         );
+    }
+
+    /// A `?.` or a `?:` after a child that the file names after a Roblox
+    /// class casts the child to that class, so luau-lsp checks the
+    /// member. `p->Humanoid?.Healthh` reported nothing, and the
+    /// `manual_child_lookup` fix turned a checked line into it. Another
+    /// name keeps `any`, since `Instance` has no `CFrame`, and a child
+    /// lookup after a child keeps its guard.
+    #[test]
+    fn a_member_after_a_class_named_child_takes_the_class() {
+        let options = EmitOptions {
+            check: true,
+            ..EmitOptions::default()
+        };
+        let src = concat!(
+            "local a = p->Humanoid?.Health\n",
+            "local b = p->Humanoid?:TakeDamage(5)\n",
+            "local c = p->Spawn1?.CFrame\n",
+            "local d = p->Humanoid.Health\n",
+            "local e = p->Humanoid->Animator\n",
+        );
+        let out = crate::compile_with(src, &options).unwrap().check;
+
+        for want in [
+            "local _1 = (if p == nil then nil else ((p:FindFirstChild(\"Humanoid\") :: any) :: Humanoid?)) local a = (if _1 == nil then nil else _1.Health)\n",
+            "_1 = (if p == nil then nil else ((p:FindFirstChild(\"Humanoid\") :: any) :: Humanoid?)) local b = (if _1 == nil then nil else _1:TakeDamage(5))\n",
+            "_1 = (if p == nil then nil else (p:FindFirstChild(\"Spawn1\") :: any)) local c = (if _1 == nil then nil else _1.CFrame)\n",
+            "local d = (if p == nil then nil else (p:FindFirstChild(\"Humanoid\") :: any).Health)\n",
+            "_1 = (if p == nil then nil else p:FindFirstChild(\"Humanoid\")) local e = (if _1 == nil then nil else _1:FindFirstChild(\"Animator\"))\n",
+        ] {
+            assert!(out.contains(want), "{want}\n{out}");
+        }
     }
 
     /// Under a timeout, `=>` on a name that may be nil guards it, as `->`

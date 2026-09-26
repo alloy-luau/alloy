@@ -1231,7 +1231,7 @@ struct Desugar<'s> {
     /// The cast the check artifact puts on the child lookup under
     /// render. None emits the plain call, so luau-lsp types the child
     /// from the sourcemap. See `chain_parts`.
-    child_cast: Option<&'static str>,
+    child_cast: Option<String>,
     /// Set while the check artifact renders the argument of `require`.
     /// The child lookups of that chain lose their nil guards, since
     /// luau-lsp resolves a module from plain calls only.

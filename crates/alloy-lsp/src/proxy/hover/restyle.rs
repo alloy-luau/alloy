@@ -1904,6 +1904,12 @@ pub(crate) fn name_method_receiver(value: &str, doc: &Doc, line: u32) -> Option<
         // `function Bag:is_empty(self: any)`: the head has the type.
         (true, "any") => recv.to_string(),
 
+        // `function CropKind.describe(CropKind)`: the copy of a trait's
+        // default method carries its receiver's type and no name.
+        (true, d) if d == recv && first == d && trait_of_method(doc, name).is_some() => {
+            recv.to_string()
+        }
+
         (true, _) => return None,
 
         // `function v:upper(string)`: the parameter carries it.

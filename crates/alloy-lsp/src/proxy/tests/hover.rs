@@ -106,6 +106,40 @@ pub(crate) fn a_bound_reads_where_the_source_wrote_it() {
         "export function cheapest<T: Priced>(a: T, b: T): T"
     );
 }
+/// The copy of a trait's default method printed its receiver with no
+/// name, `CropKind.describe(CropKind)`, where a method the `impl` writes
+/// reads `self: CropKind`. The copy reads the same way.
+#[test]
+fn a_trait_default_copy_names_its_receiver() {
+    let src = concat!(
+        "enum CropKind\n",
+        "    Wheat\n",
+        "end\n",
+        "trait Describe\n",
+        "    function label(self): string\n",
+        "    function describe(self): string\n",
+        "        return self:label()\n",
+        "    end\n",
+        "end\n",
+        "impl Describe for CropKind\n",
+        "    function label(self): string\n",
+        "        return \"w\"\n",
+        "    end\n",
+        "end\n",
+        "print(CropKind.describe(CropKind.Wheat))\n",
+    );
+
+    assert_eq!(
+        hover_of(src, 14, 17, "function CropKind.describe(CropKind): string"),
+        "function CropKind.describe(self: CropKind): string"
+    );
+    // A plain function of the type keeps its print.
+    assert_eq!(
+        hover_of(src, 14, 17, "function CropKind.make(CropKind): string"),
+        "function CropKind.make(CropKind): string"
+    );
+}
+
 /// A bound reaches a local through the cast the check artifact writes.
 /// The artifact puts `(T & Ord)` on the array's element and on the read
 /// of one, so the trait's record prints twice, and the two assignments

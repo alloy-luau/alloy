@@ -4304,3 +4304,102 @@ fn a_new_call_shows_the_constructor() {
     );
     assert_eq!(help["activeParameter"], json!(1));
 }
+
+/// The modules the markup tests import: a component, a module of
+/// components, and a module of plain functions.
+fn markup_modules(ui: &str) -> State {
+    files(&[
+        ("file:///src/ui.alx", ui),
+        (
+            "file:///src/badge.alx",
+            "export function Badge()\n  return <TextLabel />\nend\n",
+        ),
+        (
+            "file:///src/kit.alx",
+            "export function Panel()\n  return <Frame />\nend\n",
+        ),
+        (
+            "file:///src/util.aly",
+            "export function helper(): number\n  return 1\nend\n",
+        ),
+    ])
+}
+
+/// The labels at the `|` of `ui`, other than the Roblox classes.
+fn tag_slot_names(ui: &str) -> Vec<String> {
+    let at = ui.find('|').expect("a caret");
+    let ui = ui.replacen('|', "", 1);
+    let st = markup_modules(&ui);
+    let items = st
+        .markup_completion("file:///src/ui.alx", at, None)
+        .expect("the markup answers");
+
+    assert!(
+        items.iter().any(|i| i["detail"] == "Roblox class"),
+        "the classes stay: {items:?}"
+    );
+
+    let mut names: Vec<String> = items
+        .iter()
+        .filter(|i| i["detail"] != "Roblox class")
+        .filter_map(|i| i["label"].as_str().map(str::to_string))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Ctrl+Space after `<` offered every import, every uppercase local,
+/// and, in a file with the unfinished tag, the attribute names of the
+/// other tags. The list now holds the classes and the components in
+/// scope alone: a function that returns markup, an import of one, and a
+/// module that declares one.
+#[test]
+fn a_tag_slot_offers_the_components_alone() {
+    let head = "import { Badge } from './badge'\nimport * as Kit from './kit'\nimport * as Util from './util'\nimport { helper } from './util'\n\nlocal MAX = 3\nlocal Players = game:GetService('Players')\n\nlocal function format(n: number): string\n  return tostring(n) .. tostring(helper()) .. tostring(MAX) .. tostring(Players)\nend\n\nfunction Card(props: { title: string })\n  return <Frame />\nend\n\n";
+    let want = ["App", "Badge", "Card", "Kit"];
+
+    // A child of an element, in a file whose tag is unfinished.
+    assert_eq!(
+        tag_slot_names(&format!(
+            "{head}export function App()\n  return <Frame Name=\"root\" Size={{UDim2.new()}}>\n    <|\n  </Frame>\nend\n"
+        )),
+        want
+    );
+
+    // A child of a fragment.
+    assert_eq!(
+        tag_slot_names(&format!(
+            "{head}export function App()\n  return <>\n    <|\n  </>\nend\n"
+        )),
+        want
+    );
+
+    // Inside `<>`, where the name of a tag goes.
+    assert_eq!(
+        tag_slot_names(&format!(
+            "{head}export function App()\n  return <Frame>\n    <|>\n  </Frame>\nend\n"
+        )),
+        want
+    );
+
+    // The part of the name typed so far narrows the same list.
+    assert_eq!(
+        tag_slot_names(&format!(
+            "{head}export function App()\n  return <Frame>\n    <Ca|\n  </Frame>\nend\n"
+        )),
+        ["Card"]
+    );
+}
+
+/// `</` takes the name of the element it closes, and nothing else.
+#[test]
+fn a_closing_tag_offers_the_open_element_alone() {
+    let ui = "export function App()\n  return <Frame>\n    <TextLabel />\n    </\nend\n";
+    let st = markup_modules(ui);
+    let items = st
+        .markup_completion("file:///src/ui.alx", ui.find("</\n").unwrap() + 2, None)
+        .expect("the markup answers");
+
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0]["label"], "Frame");
+}

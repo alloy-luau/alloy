@@ -135,6 +135,17 @@ pub fn recovered_spans(src: &str) -> Vec<(usize, usize)> {
     spans
 }
 
+/// The markup regions of a source. A file with an unfinished tag, which
+/// is every file while the author types one, takes the recovered ones.
+pub fn regions(src: &str) -> Vec<(usize, usize)> {
+    alloy::luaux::compile::markup_spans(src).unwrap_or_else(|_| recovered_spans(src))
+}
+
+/// The components a source declares: the functions that return markup.
+pub fn components(src: &str) -> HashSet<String> {
+    alloy::naming::components(src, &regions(src))
+}
+
 /// Whether `c` can stand in a tag name.
 fn is_name_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '.'
@@ -985,19 +996,14 @@ pub struct IngotProp {
 /// Completion items for a slot.
 ///
 /// `reach` holds what the tag slot can name: the members of the path in
-/// front of the last `.` for a dotted tag, and otherwise every name of
-/// the file that holds a component.
+/// front of the last `.` for a dotted tag, and otherwise each component
+/// in reach and each name that holds one, as `components::tag_names`
+/// finds them.
 ///
 /// `src` is the source that declares the component an attribute slot
 /// sits in: this file, or the module an import brings the component
 /// from. `component_source` resolves it.
-pub fn completions(
-    spot: &Spot,
-    bound: &HashSet<String>,
-    src: &str,
-    props: &[IngotProp],
-    reach: &[Member],
-) -> Vec<Value> {
+pub fn completions(spot: &Spot, src: &str, props: &[IngotProp], reach: &[Member]) -> Vec<Value> {
     let mut items = Vec::new();
 
     match spot {
@@ -1031,8 +1037,9 @@ pub fn completions(
                 }
             }
 
-            // A namespace, a table, a struct, and an import hold
-            // components, so the slot offers them under any case.
+            // The components, and the names that hold one, under any
+            // case. A name that is neither stays out: the slot takes a
+            // tag, not a value.
             for m in reach {
                 if m.name.starts_with(prefix.as_str()) {
                     items.push(json!({
@@ -1040,24 +1047,6 @@ pub fn completions(
                         "kind": m.kind,
                         "detail": m.detail,
                         "sortText": format!("0{}", m.name),
-                    }));
-                }
-            }
-
-            let mut names: Vec<&String> = bound
-                .iter()
-                .filter(|n| n.starts_with(prefix.as_str()))
-                .filter(|n| !reach.iter().any(|m| m.name == **n))
-                .collect();
-            names.sort();
-
-            for name in names {
-                if name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
-                    items.push(json!({
-                        "label": name,
-                        "kind": 3,
-                        "detail": "component",
-                        "sortText": format!("0{name}"),
                     }));
                 }
             }
@@ -1379,7 +1368,6 @@ mod tests {
             &Spot::TagSlot {
                 prefix: "TextL".into(),
             },
-            &HashSet::new(),
             "",
             &[],
             &[],
@@ -1391,7 +1379,6 @@ mod tests {
                 prefix: "Act".into(),
                 existing: vec![],
             },
-            &HashSet::new(),
             "",
             &[],
             &[],
@@ -1420,14 +1407,11 @@ mod tests {
             member("component", 3, "function"),
             member("other", 3, "function"),
         ];
-        let mut bound = HashSet::new();
-        bound.insert("Scope".to_string());
 
         let items = completions(
             &Spot::TagSlot {
                 prefix: "Scope.".into(),
             },
-            &bound,
             "",
             &[],
             &reach,
@@ -1441,7 +1425,6 @@ mod tests {
             &Spot::TagSlot {
                 prefix: "Scope.com".into(),
             },
-            &bound,
             "",
             &[],
             &reach,
@@ -1455,14 +1438,10 @@ mod tests {
     /// the file's own names belong to a bare tag, not to this one.
     #[test]
     fn a_dotted_tag_slot_that_reaches_nothing_offers_nothing() {
-        let mut bound = HashSet::new();
-        bound.insert("Frame".to_string());
-
         let items = completions(
             &Spot::TagSlot {
                 prefix: "plain.".into(),
             },
-            &bound,
             "",
             &[],
             &[],
@@ -1480,7 +1459,6 @@ mod tests {
             &Spot::TagSlot {
                 prefix: String::new(),
             },
-            &HashSet::new(),
             "",
             &[],
             &reach,
@@ -1594,7 +1572,7 @@ mod tests {
         let at = src.find("there").expect("text");
 
         assert_eq!(completion_spot(src, at), Some(Spot::Text));
-        assert!(completions(&Spot::Text, &HashSet::new(), src, &[], &[]).is_empty());
+        assert!(completions(&Spot::Text, src, &[], &[]).is_empty());
         // A hole is code, and the child answers it.
         let hole = "local function V()\n    return <TextLabel>{x}</TextLabel>\nend\n";
         let inside = hole.find("x}").expect("hole");
@@ -1680,7 +1658,6 @@ mod tests {
                 prefix: String::new(),
                 existing: vec![],
             },
-            &HashSet::new(),
             src,
             &[],
             &[],
@@ -1713,7 +1690,6 @@ mod tests {
                 prefix: String::new(),
                 existing: vec![],
             },
-            &HashSet::new(),
             &owner,
             &[],
             &[],
@@ -1750,7 +1726,6 @@ mod tests {
                     prefix: prefix.to_string(),
                     existing: vec![],
                 },
-                &HashSet::new(),
                 "",
                 &[],
                 &[],
@@ -1782,7 +1757,7 @@ mod tests {
             prefix: prefix.to_string(),
             existing,
         };
-        let items = completions(&slot("Cla", vec![]), &HashSet::new(), "", &props, &[]);
+        let items = completions(&slot("Cla", vec![]), "", &props, &[]);
         let first = &items[0];
 
         assert_eq!(first["label"], "ClassName");
@@ -1791,16 +1766,10 @@ mod tests {
         assert_eq!(first["documentation"]["value"], "Utility classes.");
 
         // At the attribute column, and never twice on the same tag.
-        let items = completions(&slot("", vec![]), &HashSet::new(), "", &props, &[]);
+        let items = completions(&slot("", vec![]), "", &props, &[]);
         assert_eq!(items[0]["label"], "ClassName");
 
-        let items = completions(
-            &slot("", vec!["ClassName".to_string()]),
-            &HashSet::new(),
-            "",
-            &props,
-            &[],
-        );
+        let items = completions(&slot("", vec!["ClassName".to_string()]), "", &props, &[]);
         assert!(items.iter().all(|i| i["label"] != "ClassName"));
 
         // A component gets its props as a table, so the ingot has
@@ -1813,7 +1782,6 @@ mod tests {
                 prefix: "Class".into(),
                 existing: vec![],
             },
-            &HashSet::new(),
             src,
             &props,
             &[],

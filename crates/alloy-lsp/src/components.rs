@@ -310,15 +310,101 @@ pub fn containers(src: &str) -> Vec<Member> {
     out
 }
 
-/// The source with markup blanked, so the parser reads the code around
-/// it. A file the author is still typing does not parse as markup, and
-/// then the text stands as it is.
-fn readable(src: &str) -> String {
-    match alloy::luaux::compile::markup_spans(src) {
-        Ok(spans) => alloy::luaux::resolve::blank_luaux_regions(src, &spans),
+/// Every name a bare tag slot can take besides a class: a component the
+/// file declares at the top, a holder with a component among its
+/// members, and an import of a component or of a module that declares
+/// one. A component is a function that returns markup. A constant, a
+/// service, and a plain helper are no tag.
+pub fn tag_names(src: &str, load: &Load) -> Vec<Member> {
+    let own = crate::markup::components(src);
+    let text = readable(src);
+    let Ok(parsed) = alloy_syntax::parse_lenient(&text, Default::default()) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let t = |span: TokSpan| text_of(&text, toks, span);
+    let component = |name: String| Member::new(&name, FUNCTION, "component", None);
+    let mine = |name: String| own.contains(&name).then(|| component(name));
 
-        Err(_) => src.to_string(),
+    // A holder of this file: a namespace, a table, or a struct whose
+    // members hold a component.
+    let mut out: Vec<Member> = containers(src)
+        .into_iter()
+        .filter(|m| matches!(m.detail.as_str(), "namespace" | "table" | "struct"))
+        .filter(|m| {
+            members(src, &[m.name.as_str()], load)
+                .iter()
+                .any(|inner| own.contains(&inner.name))
+        })
+        .collect();
+
+    for stmt in &parsed.chunk.block.stmts {
+        match stmt.under_default() {
+            Stmt::LocalFunction(f) => out.extend(mine(t(f.name))),
+
+            Stmt::Function(f) if f.path.len() == 1 => out.extend(mine(t(f.path[0]))),
+
+            Stmt::Local(l) => out.extend(l.names.iter().filter_map(|b| mine(t(b.name)))),
+
+            Stmt::Import(im) => {
+                let spec = t(im.path).trim_matches(['"', '\'']).to_string();
+                let Some((module, _)) = load(&spec) else {
+                    continue;
+                };
+                let theirs = crate::markup::components(&module);
+
+                if theirs.is_empty() {
+                    continue;
+                }
+
+                // The module declares the component under its own name;
+                // the file writes the alias.
+                let picked = |specs: &[ImportSpec]| -> Vec<Member> {
+                    specs
+                        .iter()
+                        .filter(|s| !s.is_type && theirs.contains(&t(s.name)))
+                        .map(|s| component(t(s.alias.unwrap_or(s.name))))
+                        .collect()
+                };
+                let default = |name: TokSpan| {
+                    default_name(&readable(&module))
+                        .filter(|n| theirs.contains(n))
+                        .map(|_| component(t(name)))
+                };
+
+                match &im.kind {
+                    ImportKind::Namespace(alias, specs) => {
+                        out.push(Member::new(&t(*alias), MODULE, "module", None));
+                        out.extend(picked(specs));
+                    }
+
+                    ImportKind::Default(name) => out.extend(default(*name)),
+
+                    ImportKind::Both(name, specs) => {
+                        out.extend(default(*name));
+                        out.extend(picked(specs));
+                    }
+
+                    ImportKind::Named(specs) => out.extend(picked(specs)),
+
+                    ImportKind::TypeOnly(_) => {}
+                }
+            }
+
+            _ => {}
+        }
     }
+
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out.dedup_by(|a, b| a.name == b.name);
+    out
+}
+
+/// The source with markup blanked, so the parser reads the code around
+/// it. A file the author is still typing blanks the regions recovered
+/// around its unfinished tag. Its attributes are no code.
+fn readable(src: &str) -> String {
+    alloy::luaux::resolve::blank_luaux_regions(src, &crate::markup::regions(src))
 }
 
 fn text_of(src: &str, toks: &[Tok], span: TokSpan) -> String {

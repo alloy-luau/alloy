@@ -1290,6 +1290,32 @@ fn markup_returns(
     }
 }
 
+/// The names of the components an `.alx` source declares, at any depth:
+/// the functions that return markup, as the lint reads them. `spans`
+/// holds the byte ranges of the markup in `src`. The editor passes the
+/// ranges it recovers from a file with an unfinished tag.
+pub fn components(src: &str, spans: &[(usize, usize)]) -> HashSet<String> {
+    // Blanking keeps every offset, so a span is a region of the text.
+    let text = luaux::resolve::blank_luaux_regions(src, spans);
+    let Ok(parsed) = alloy_syntax::parse_lenient(&text, crate::fmt::parse_options()) else {
+        return HashSet::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let markup = Markup {
+        regions: spans.iter().map(|&(a, b)| (a as u32, b as u32)).collect(),
+        tags: HashSet::new(),
+    };
+    let mut found = HashSet::new();
+
+    markup_returns(&text, toks, &parsed.chunk.block, &markup, &mut found);
+
+    found
+        .into_iter()
+        .filter_map(|t| toks.get(t))
+        .map(|t| t.text(&text).to_string())
+        .collect()
+}
+
 /// A binding's name, the token that declares it, and the token ranges
 /// its scope holds; `None` for a scope the walk does not know.
 pub(crate) type ScopedBinding = (String, usize, Option<Vec<(usize, usize)>>);
@@ -1622,6 +1648,18 @@ pub fn lints_after_consts(src: &str, consts: &[Fix], naming: &Naming) -> Vec<Lin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A function that returns markup, itself or through a local, is a
+    /// component. A function or a value that holds none is not.
+    #[test]
+    fn the_components_of_a_source_return_markup() {
+        let src = "local MAX = 3\nlocal function helper() return 1 end\nlocal function Card() return <Frame /> end\nlocal function Box()\n    local b = <Frame />\n    return b\nend\nexport function App() return (\n    <Card />\n) end\n";
+        let spans = luaux::compile::markup_spans(src).expect("the markup reads");
+        let mut names: Vec<String> = components(src, &spans).into_iter().collect();
+        names.sort();
+
+        assert_eq!(names, ["App", "Box", "Card"]);
+    }
 
     #[test]
     fn a_style_reads_the_case_and_one_letter_fits_what_it_can() {

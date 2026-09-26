@@ -590,7 +590,6 @@ impl State {
         }
 
         let mut spot = markup::completion_spot(&doc.source, offset)?;
-        let bound = markup_bound(&doc.source);
         let load = |spec: &str| self.module_source(uri, spec);
 
         if let (markup::Spot::AttributeSlot { class, .. }, Some(as_class)) = (&mut spot, as_class) {
@@ -599,8 +598,8 @@ impl State {
 
         let props = self.ingot_props(uri);
         // A dotted tag reaches the members of the path in front of its
-        // last `.`; a bare one reaches every name of the file that holds
-        // a component.
+        // last `.`; a bare one reaches the components in scope and the
+        // names that hold one.
         let reach = match &spot {
             markup::Spot::TagSlot { prefix } => match prefix.rsplit_once('.') {
                 Some((holder, _)) => {
@@ -609,7 +608,7 @@ impl State {
                     components::members(&doc.source, &path, &load)
                 }
 
-                None => components::containers(&doc.source),
+                None => components::tag_names(&doc.source, &load),
             },
 
             _ => Vec::new(),
@@ -627,7 +626,6 @@ impl State {
 
         Some(markup::completions(
             &spot,
-            &bound,
             declared.as_deref().unwrap_or(&doc.source),
             &props,
             &reach,

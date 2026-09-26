@@ -823,18 +823,28 @@ impl<'s> Desugar<'s> {
     /// The arguments a use of an attribute carries, as Luau. A parameter
     /// the use leaves out takes the default its declaration writes.
     pub(crate) fn attr_args(&mut self, a: &Attr, name: &str) -> Vec<String> {
-        let mut args: Vec<String> = a.args.iter().map(|e| self.render_to_string(e)).collect();
-        let defaults = self
-            .attr_decl_of(name)
+        let decl = self.attr_decl_of(name).cloned();
+        let defaults = decl
+            .as_ref()
             .map(|d| d.defaults.clone())
             .unwrap_or_default();
         let at = self.byte_start(a.span);
+        let mut args = Vec::new();
 
-        for default in defaults.iter().skip(args.len()) {
-            let Some(default) = default else { break };
-            // The default is source text, and may come from another
-            // file, so it compiles on its own: `[]` is Alloy, not Luau.
-            args.push(self.compile_fragment(&format!("return {default}"), at, true));
+        for (i, slot) in self.attr_slots(a, decl.as_ref()).into_iter().enumerate() {
+            let default = defaults.get(i).cloned().flatten();
+
+            args.push(match (slot, default) {
+                (Some(e), _) => self.render_to_string(e),
+
+                // The default is source text, and may come from another
+                // file, so it compiles on its own: `[]` is Alloy, not
+                // Luau.
+                (None, Some(d)) => self.compile_fragment(&format!("return {d}"), at, true),
+
+                // The argument check reports the missing argument.
+                (None, None) => "nil".to_string(),
+            });
         }
 
         args
@@ -967,6 +977,22 @@ impl<'s> Desugar<'s> {
             return;
         };
         let params = decl.params.as_slice();
+        let keyed = self.keyed_slots(a, decl);
+        let slots = self.attr_slots(a, Some(decl));
+
+        // The record form names each parameter by key, so each one
+        // without a default needs its key.
+        if keyed.is_some() {
+            for (((pname, _), slot), default) in params.iter().zip(&slots).zip(&decl.defaults) {
+                if slot.is_none() && default.is_none() {
+                    let message = format!(
+                        "the attribute `{name}` needs `{pname}`; the table gives no such key"
+                    );
+                    self.diagnose(a.span, &message);
+                }
+            }
+        }
+
         // The arguments are positional, so a default makes its parameter
         // optional only when every parameter after it has one too.
         let required = decl
@@ -975,7 +1001,7 @@ impl<'s> Desugar<'s> {
             .rposition(Option::is_none)
             .map_or(0, |i| i + 1);
 
-        if a.args.len() > params.len() || a.args.len() < required {
+        if keyed.is_none() && (a.args.len() > params.len() || a.args.len() < required) {
             let count = if required == params.len() {
                 format!(
                     "{} argument{}",
@@ -996,8 +1022,10 @@ impl<'s> Desugar<'s> {
 
         let params: Vec<(String, Option<String>)> = params.to_vec();
 
-        for (arg, (pname, ty)) in a.args.iter().zip(&params) {
-            let Some(want) = ty.as_deref() else { continue };
+        for (arg, (pname, ty)) in slots.iter().zip(&params) {
+            let (Some(arg), Some(want)) = (arg, ty.as_deref()) else {
+                continue;
+            };
 
             // A list parameter carries entries, and the element type
             // says what each one takes.
@@ -3012,6 +3040,45 @@ print(a)
             out.ship
         );
         assert!(!out.ship.contains("[]"), "{}", out.ship);
+    }
+
+    /// A use by key writes each value in its parameter's place, as a use
+    /// by position does, so `Attributes.get` reads the key form by key.
+    #[test]
+    fn a_keyed_use_writes_each_argument_in_its_place() {
+        let decl = "attribute options(steps: string[] = [], priority: number = 0) on struct\n";
+        let src = format!(
+            "{decl}@options({{ priority = 10, steps = [ \"Init\" ] }})\nstruct S as x: number end\nprint(S)\n"
+        );
+        assert!(messages(&src).is_empty(), "{:?}", messages(&src));
+        let ship = crate::compile(&src).unwrap().ship;
+        assert!(
+            ship.contains("options = { __alloy.Array.from({ \"Init\" }), 10 }"),
+            "{ship}"
+        );
+
+        // A key left out takes its default.
+        let src =
+            format!("{decl}@options({{ priority = 3 }})\nstruct S as x: number end\nprint(S)\n");
+        let ship = crate::compile(&src).unwrap().ship;
+        assert!(
+            ship.contains("options = { __alloy.Array.from({}), 3 }"),
+            "{ship}"
+        );
+
+        // A key the declaration needs reports when the table leaves it out.
+        let src = "attribute pair(a: number, b: number) on struct\n@pair({ b = 2 })\nstruct S as x: number end\nprint(S)\n";
+        assert_eq!(
+            messages(src),
+            vec!["the attribute `pair` needs `a`; the table gives no such key"]
+        );
+
+        // A key's value checks against its parameter's type.
+        let src = "attribute pair(a: number, b: number) on struct\n@pair({ b = 2, a = \"x\" })\nstruct S as x: number end\nprint(S)\n";
+        assert_eq!(
+            messages(src),
+            vec!["the attribute `pair` takes number for `a`, string given"]
+        );
     }
 
     /// An attribute on an `impl` is one on its type, so the runtime

@@ -273,15 +273,9 @@ impl<'s> Desugar<'s> {
     */
     fn each_entries(&self, a: &Attr, decl: &AttrDecl, param: &str) -> Vec<String> {
         let at = decl.params.iter().position(|(p, _)| p == param);
-        let Some(arg) = at.and_then(|i| a.args.get(i)).or_else(|| a.args.first()) else {
-            return Vec::new();
-        };
-        let list = match self.table_key(arg, param) {
-            Some(inner) => inner,
-
-            None => arg,
-        };
-        let Expr::Array { items, .. } = list else {
+        let slots = self.attr_slots(a, Some(decl));
+        let Some(Expr::Array { items, .. }) = at.and_then(|i| slots.get(i).copied().flatten())
+        else {
             return Vec::new();
         };
         let mut names: Vec<String> = items.iter().filter_map(|e| self.entry_name(e)).collect();
@@ -301,18 +295,59 @@ impl<'s> Desugar<'s> {
         names
     }
 
-    /// The value one key of a table literal holds, when the argument is
-    /// the record form `{ lifecycles = [ ... ] }`.
-    pub(crate) fn table_key<'e>(&self, e: &'e Expr, key: &str) -> Option<&'e Expr> {
-        let Expr::Table { fields, .. } = e else {
+    /*
+    The argument of each parameter of one use, in declaration order, with
+    `None` where the use gives none.
+
+    A use names its arguments by position, `@options([ Init ], 10)`, or
+    by key in one table, `@options({ steps = [ Init ], priority = 10 })`.
+    The table is the record form when each of its keys names a parameter.
+    The emit, the argument check and `each` all read the slots, so the
+    runtime value and the contract agree on each form.
+    */
+    pub(crate) fn attr_slots<'e>(
+        &self,
+        a: &'e Attr,
+        decl: Option<&AttrDecl>,
+    ) -> Vec<Option<&'e Expr>> {
+        if let Some(slots) = decl.and_then(|d| self.keyed_slots(a, d)) {
+            return slots;
+        }
+
+        let params = decl.map_or(0, |d| d.params.len());
+        let mut slots: Vec<Option<&Expr>> = a.args.iter().map(Some).collect();
+        slots.resize(slots.len().max(params), None);
+
+        slots
+    }
+
+    /// The slots of a use in the record form, or `None` for a use by
+    /// position.
+    pub(crate) fn keyed_slots<'e>(
+        &self,
+        a: &'e Attr,
+        decl: &AttrDecl,
+    ) -> Option<Vec<Option<&'e Expr>>> {
+        let [Expr::Table { fields, .. }] = a.args.as_slice() else {
             return None;
         };
 
-        fields.iter().find_map(|f| match f {
-            TableField::Named { name, value } if self.text_of(*name) == key => Some(value),
+        if fields.is_empty() {
+            return None;
+        }
 
-            _ => None,
-        })
+        let mut slots = vec![None; decl.params.len()];
+
+        for f in fields {
+            let TableField::Named { name, value } = f else {
+                return None;
+            };
+            let key = self.text_of(*name);
+            let i = decl.params.iter().position(|(p, _)| p == key)?;
+            slots[i] = Some(value);
+        }
+
+        Some(slots)
     }
 
     /// The member name one entry of an `each` list carries.
@@ -355,12 +390,7 @@ impl<'s> Desugar<'s> {
         }
 
         let strings = is_string_union(&element);
-        let list = match self.table_key(arg, param) {
-            Some(inner) => inner,
-
-            None => arg,
-        };
-        let entries: Vec<&Expr> = match list {
+        let entries: Vec<&Expr> = match arg {
             Expr::Array { items, .. } => items.iter().collect(),
 
             // A single value stands for itself; a list type written with

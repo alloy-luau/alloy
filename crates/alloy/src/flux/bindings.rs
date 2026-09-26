@@ -900,7 +900,7 @@ impl<'s> Scan<'s> {
     }
 
     /// Whether a `@cfg` line stands right above the token.
-    fn cfg_gated(&self, i: usize) -> bool {
+    pub(super) fn cfg_gated(&self, i: usize) -> bool {
         let at = self.start(i) as usize;
         let from = self.src[..at].rfind('\n').map_or(0, |n| n + 1);
         let above = self.src[..from].trim_end();

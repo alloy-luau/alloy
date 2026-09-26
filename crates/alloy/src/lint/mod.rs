@@ -436,7 +436,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Correctness,
         default: Level::Warn,
         summary: "a statement after `return`, `break`, or `continue`",
-        detail: "Nothing runs after `return`, `break`, or `continue` in the same block, so the statement is dead. Luau rejects most of these as syntax errors; Alloy reports the rest here. Delete the code, or move the jump.",
+        detail: "Nothing runs after `return`, `break`, or `continue` in the same block, so the statement is dead. Luau rejects most of these as syntax errors; Alloy reports the rest here. Delete the code, or move the jump. A jump under `@cfg` leaves the block on one side of the build alone, so the code after it does not fire.",
     },
     LintInfo {
         name: "constant_condition",

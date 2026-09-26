@@ -80,9 +80,12 @@ impl<'s> Scan<'s> {
         for i in 0..self.toks.len() {
             let word = self.t(i);
 
+            // A `@cfg` statement runs on one side of the build alone, so
+            // the rest of the block runs on the other.
             if !matches!(word, "return" | "break" | "continue")
                 || !self.statement_start(i)
                 || matches!(self.prev(i), "." | ":")
+                || self.cfg_gated(i)
             {
                 continue;
             }
@@ -987,6 +990,18 @@ mod tests {
             names("local function f()\n    return {\n        a = 1,\n    }\nend\n"),
             Vec::<&str>::new()
         );
+    }
+
+    /// A `@cfg` return runs on one side of the build, so the rest of the
+    /// block runs on the other. The lint read the line past it as dead.
+    #[test]
+    fn code_after_a_cfg_jump_stays_clean() {
+        for jump in ["return true", "break"] {
+            let src = format!(
+                "local function f(): boolean\n    while true do\n        @cfg(server)\n        {jump}\n\n        return false\n    end\nend\n"
+            );
+            assert_eq!(names(&src), Vec::<&str>::new(), "{src}");
+        }
     }
 
     /// A `return` whose value spans several lines is one statement, so

@@ -1343,6 +1343,7 @@ pub(crate) fn lints(
     // In an `.alx` file a function that returns markup, or that a tag
     // names, is a component and takes the component styles.
     let mut components = HashSet::new();
+    let classes = class_tables(src, toks, &chunk.block.stmts);
 
     if !markup.regions.is_empty() {
         markup_returns(toks, &chunk.block, markup, &mut components);
@@ -1358,6 +1359,8 @@ pub(crate) fn lints(
             {
                 Kind::Component
             }
+
+            Kind::Variable | Kind::Const if classes.contains(&d.tok) => Kind::Struct,
 
             other => other,
         };
@@ -1408,6 +1411,10 @@ pub(crate) fn lints(
         let what = match kind == Kind::Const && w.promoted.contains(&at) {
             true => "never assigned again, so it is a const".to_string(),
 
+            false if classes.contains(&d.tok) => {
+                "a class table, which takes the struct style".to_string()
+            }
+
             false => format!("{article} {key}"),
         };
 
@@ -1424,6 +1431,49 @@ pub(crate) fn lints(
     }
 
     out
+}
+
+/// The name token of each top-level local that holds a class or a
+/// module table: the file writes `X.__index = X` or a colon method
+/// `function X:m()` on it. Such a name reads as a type, `Timer.new()`,
+/// so it takes the struct style. A plain data table stays a variable.
+fn class_tables(src: &str, toks: &[Tok], stmts: &[Stmt]) -> HashSet<usize> {
+    let text = |span: TokSpan| span.text(src, toks);
+    let mut owners: HashSet<&str> = HashSet::new();
+
+    for stmt in stmts {
+        match stmt.under_default() {
+            Stmt::Assign(a) => {
+                if let ([Expr::Index { object, key, .. }], [Expr::Name(v)]) =
+                    (a.targets.as_slice(), a.values.as_slice())
+                    && let (Expr::Name(o), IndexKey::Field(k)) = (object.as_ref(), key)
+                    && text(*k) == "__index"
+                    && text(*o) == text(*v)
+                {
+                    owners.insert(text(*o));
+                }
+            }
+
+            Stmt::Function(f) if f.is_method && f.path.len() == 2 => {
+                owners.insert(text(f.path[0]));
+            }
+
+            _ => {}
+        }
+    }
+
+    stmts
+        .iter()
+        .filter_map(|stmt| match stmt.under_default() {
+            Stmt::Local(l) if l.names.len() == 1 && l.names[0].destructure.is_none() => {
+                let name = l.names[0].name;
+
+                owners.contains(text(name)).then_some(name.start as usize)
+            }
+
+            _ => None,
+        })
+        .collect()
 }
 
 /// The source with each name that breaks its `[lint.naming]` style
@@ -1628,17 +1678,18 @@ mod tests {
 
         // `_` marks a name as unused, a service or a module keeps its
         // own case, `self` is the receiver, and a function stored on a
-        // table is a member of the table. `M` stays a local here, so
-        // it takes the variable style.
+        // table is a member of the table. `M` carries a colon method,
+        // so it is a module table and takes the struct style. A plain
+        // data table stays a local and takes the variable style.
         assert_eq!(
             hits_with(
-                "local _unusedThing = 1\nlocal Players = game:GetService(\"Players\")\nlocal M = {}\nfunction M:Destroy() end\nfunction M.OnLoad() end\nprint(Players)\n",
+                "local _unusedThing = 1\nlocal Players = game:GetService(\"Players\")\nlocal M = {}\nfunction M:Destroy() end\nfunction M.OnLoad() end\nlocal Config = { a = 1 }\nprint(Players, Config)\n",
                 &Naming {
                     locals_as_const: false,
                     ..Naming::default()
                 }
             ),
-            vec!["`M` is a variable, and variables are snake_case here: `m`"]
+            vec!["`Config` is a variable, and variables are snake_case here: `config`"]
         );
 
         let camel = Naming {
@@ -1874,5 +1925,38 @@ mod tests {
         assert_eq!(out.matches("PlayerState").count(), 6, "{out}");
         assert!(!out.contains("player_state"), "{out}");
         assert!(crate::compile(&out).unwrap().diagnostics.is_empty());
+    }
+
+    /// `alloy fmt` renamed `local Timer = {}` with `Timer.__index =
+    /// Timer` to `timer` everywhere. A table the file writes a class
+    /// shape or a colon method on reads as a type, so it takes the
+    /// struct style. A plain data table stays a variable.
+    #[test]
+    fn a_class_or_module_table_takes_the_struct_style() {
+        let class = "local Timer = {}\nTimer.__index = Timer\nfunction Timer.new(d: number)\n    return setmetatable({ left = d }, Timer)\nend\nreturn Timer\n";
+        assert_eq!(fixed(class), class);
+        let module = "local Shop = {}\nfunction Shop:open() end\nreturn Shop\n";
+        assert_eq!(fixed(module), module);
+
+        let lower = "local timer = {}\ntimer.__index = timer\nreturn timer\n";
+        let lints: Vec<Lint> = crate::compile(lower)
+            .unwrap()
+            .lints
+            .into_iter()
+            .filter(|l| l.name == LINT)
+            .collect();
+        assert_eq!(
+            lints[0].message,
+            "`timer` is a class table, which takes the struct style, and structs are PascalCase here: `Timer`"
+        );
+        assert_eq!(
+            fixed(lower),
+            "local Timer = {}\nTimer.__index = Timer\nreturn Timer\n"
+        );
+
+        assert_eq!(
+            fixed("local Prices = { sword = 1 }\nprint(Prices.sword)\n"),
+            "local prices = { sword = 1 }\nprint(prices.sword)\n"
+        );
     }
 }

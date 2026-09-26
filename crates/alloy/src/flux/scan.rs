@@ -735,12 +735,7 @@ impl<'s> Scan<'s> {
         for (i, e) in self.st.ends.iter().enumerate() {
             let Some(e) = e else { continue };
 
-            if !matches!(
-                self.t(i),
-                "function" | "if" | "for" | "while" | "repeat" | "do" | "match"
-            ) || matches!(self.prev(i), "." | ":")
-                || (self.at(i, "if") && !self.is_statement_if(i))
-            {
+            if !self.opens_scope(i) {
                 continue;
             }
 
@@ -750,6 +745,28 @@ impl<'s> Scan<'s> {
         }
 
         nest
+    }
+
+    /// Whether token `i` opens a block of statements: `function`, a
+    /// statement `if`, a loop, `match`, or `do`.
+    pub(crate) fn opens_scope(&self, i: usize) -> bool {
+        matches!(
+            self.t(i),
+            "function" | "if" | "for" | "while" | "repeat" | "do" | "match"
+        ) && !matches!(self.prev(i), "." | ":")
+            && !(self.at(i, "if") && !self.is_statement_if(i))
+    }
+
+    /// The opener of the innermost block of statements that encloses
+    /// token `j`.
+    pub(crate) fn enclosing_scope(&self, j: usize) -> Option<usize> {
+        self.st
+            .ends
+            .iter()
+            .enumerate()
+            .filter(|(i, e)| e.is_some_and(|e| *i < j && j < e) && self.opens_scope(*i))
+            .map(|(i, _)| i)
+            .max()
     }
 
     /// Whether a namespace body encloses token `j`.

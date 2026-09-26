@@ -871,7 +871,13 @@ impl<'s> Scan<'s> {
             }
 
             let path = self.slice(start, j);
-            let key = format!("{}.{path}", self.enclosing_path(start));
+            // A function in a block belongs to that block: a `local
+            // function bump` in the body of a method is not the method.
+            let key = format!(
+                "{}.{:?}.{path}",
+                self.enclosing_path(start),
+                self.enclosing_scope(i)
+            );
 
             match seen.iter().find(|(k, _)| *k == key) {
                 Some((_, first)) => {

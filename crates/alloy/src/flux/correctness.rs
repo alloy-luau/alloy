@@ -1753,6 +1753,17 @@ mod tests {
             ),
             Vec::<&str>::new()
         );
+        // A local function in a method's body is local to that body. It
+        // read as a second body of the method of its name.
+        let local = "struct C as\n    n: number = 0\nend\nimpl C as\n    function run(self)\n        local function bump()\n            self:bump()\n        end\n        bump()\n    end\n    function bump(self)\n        self.n += 1\n    end\nend\nprint(C)\n";
+        assert_eq!(names(local), Vec::<&str>::new());
+        // Two bodies in one function body still fire.
+        assert_eq!(
+            names(
+                "local function outer()\n    local function f()\n        return 1\n    end\n    local function f()\n        return 2\n    end\n    return f()\nend\nprint(outer())\n"
+            ),
+            vec!["duplicate_function"]
+        );
     }
 
     /// An `if` expression in a `case` arm has no `end`; counting one

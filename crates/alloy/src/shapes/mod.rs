@@ -804,6 +804,7 @@ pub fn fold(text: &str, known: &Known) -> String {
     // `(Player)` once the table goes, and that fold drops the pair.
     fold_refinement_tables(&mut out);
     fold_name_parens(&mut out);
+    fold_call_values(&mut out);
     fold_signalish(&mut out);
     fold_array_alias(&mut out);
     fold_narrowed_primitives(&mut out);
@@ -1277,6 +1278,51 @@ fn fold_negated_members(text: &mut String) {
 
             None => return,
         }
+    }
+}
+
+/// `__call_value<() -> (T...)>` is the std type function that reads the
+/// first value a call returns; `Result.pcall` uses it. It is no name a
+/// reader wrote, so it reads as the pack's name: `Result<T, string>`.
+fn fold_call_values(text: &mut String) {
+    const OPEN: &str = "__call_value<() -> ";
+
+    while let Some(at) = text.find(OPEN) {
+        let inner = at + OPEN.len();
+        // The `>` of `->` closes nothing, so count the angles by hand.
+        let mut depth = 1usize;
+        let mut end = None;
+        let bytes = text.as_bytes();
+
+        for i in inner..bytes.len() {
+            match bytes[i] {
+                b'<' => depth += 1,
+
+                b'>' if bytes[i - 1] != b'-' => {
+                    depth -= 1;
+
+                    if depth == 0 {
+                        end = Some(i);
+
+                        break;
+                    }
+                }
+
+                _ => {}
+            }
+        }
+
+        let Some(end) = end else {
+            return;
+        };
+        let body = text[inner..end].trim();
+        let body = body
+            .strip_prefix('(')
+            .and_then(|b| b.strip_suffix(')'))
+            .unwrap_or(body);
+        let name = body.strip_suffix("...").unwrap_or(body).to_string();
+
+        text.replace_range(at..=end, &name);
     }
 }
 
@@ -2843,6 +2889,24 @@ mod tests {
     /// A narrowed branch prints one type as a union of copies. Each copy
     /// folds to one name and the union to one member, and no pair of
     /// parentheses stays around it.
+    /// `Result.pcall` returns `Result<__call_value<() -> T...>, string>`;
+    /// the type function is no name a reader wrote.
+    #[test]
+    fn a_call_value_reads_as_its_pack() {
+        let mut text =
+            "function Result.pcall<T...>(f: (...any) -> (T...), ...: any): Result<__call_value<() -> (T...)>, string>"
+                .to_string();
+        fold_call_values(&mut text);
+        assert_eq!(
+            text,
+            "function Result.pcall<T...>(f: (...any) -> (T...), ...: any): Result<T, string>"
+        );
+
+        let mut nested = "Result<__call_value<() -> (Map<K, V>)>, string>".to_string();
+        fold_call_values(&mut nested);
+        assert_eq!(nested, "Result<Map<K, V>, string>");
+    }
+
     #[test]
     fn a_folded_union_keeps_no_parentheses() {
         let rig = "(Model & {\n    HumanoidRootPart: Part?,\n    UpperTorso: MeshPart?\n})";

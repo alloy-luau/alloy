@@ -146,7 +146,9 @@ impl<'a> Lexed<'a> {
             .find(|&k| matches!(self.text(k), "const" | "local"))?
             + 1;
 
-        // `local =`, half typed, binds no name.
+        // No name stands between the word and its `=`: `const = { ... }`
+        // in `lint.naming` is a key named `const`, and `local =` is half
+        // typed.
         if name >= eq {
             return None;
         }
@@ -1101,6 +1103,17 @@ mod tests {
         assert_eq!(place("local = {\n    |\n}\n"), None);
         assert_eq!(place("export const = { | }\n"), None);
         assert!(check(&schema(), "local = {\n    build = 1,\n}\n").len() < 100);
+    }
+
+    /// `const = { ... }` names a naming key. The reader took `const` for
+    /// the keyword and cut a byte range that runs backward, which
+    /// panicked and took the server down.
+    #[test]
+    fn a_key_named_const_is_a_key() {
+        let src = "export default {\n  lint = {\n    naming = {\n      const = { 'PascalCase' },\n    },\n  },\n}\n";
+
+        assert!(check(&schema(), src).is_empty());
+        assert!(at(&src.replace("'PascalCase'", "|")).is_some());
     }
 
     #[test]

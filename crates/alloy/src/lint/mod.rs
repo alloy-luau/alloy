@@ -514,7 +514,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Suspicious,
         default: Level::Warn,
         summary: "a write to an exported `local` inside a function",
-        detail: "A module returns its exports as a table built when it loads, and an import copies each value into a local of the importer. `export local count = 0` sends out the number 0, not the variable. A write at the top level runs before the module returns, so the table takes it. A write inside a function runs later and never reaches an importer, which keeps the value it read when it loaded. Export a function that returns the value, or keep the value in a table: `export const state = { count = 0 }` and `state.count += 1`. An importer holds that table, so it reads every write. A `local` member of a namespace stays live through accessors and draws no report.",
+        detail: "A module returns its exports as a table built when it loads, and an import copies each value into a local of the importer. `export local count = 0` sends out the number 0, not the variable. A write at the top level runs before the module returns, so the table takes it. A write inside a function runs later and never reaches an importer, which keeps the value it read when it loaded. Export a function that returns the value, or keep the value in a table and write its fields: `export local state = { count = 0 }` and `state.count += 1`. An importer holds that table, so it reads every write. Keep the table in a `local` that no line assigns again. A `const` freezes its value by convention, so `const_mutation` reports each write into it, and `prefer_const` leaves alone a `local` whose fields change. A `local` member of a namespace stays live through accessors and draws no report.",
     },
     LintInfo {
         name: "deprecated_call",
@@ -1248,7 +1248,7 @@ mod tests {
         );
 
         // The top level runs before the module returns its table.
-        let top = "export local count = 0\ncount += 1\nif count > 0 then\n    count = 2\nend\nexport const state = { count = 0 }\n\nexport function bump(): ()\n    state.count += 1\nend\n";
+        let top = "export local count = 0\ncount += 1\nif count > 0 then\n    count = 2\nend\nexport local state = { count = 0 }\n\nexport function bump(): ()\n    state.count += 1\nend\n";
         assert!(!names(top).contains(&"stale_export"), "{:?}", names(top));
 
         let got = crate::compile(
@@ -1262,7 +1262,33 @@ mod tests {
             .expect("the lint");
         assert_eq!(
             one.message,
-            "`count` is an exported `local`; importers keep the value they read when they loaded, so they never see this write. Export a function that returns it, or hold it in a table, such as `export const state = { count = ... }`"
+            "`count` is an exported `local`; importers keep the value they read when they loaded, so they never see this write. Export a function that returns it, or hold it in a table that stays `local` and write its field: `export local state = { count = ... }`, then `state.count = ...`"
+        );
+    }
+
+    /// The shape `stale_export` names draws no lint under `strict`: a
+    /// table in an `export local` that no line assigns again, whose
+    /// fields change. A `const` there trips `const_mutation`, so the
+    /// advice cannot name one.
+    #[test]
+    fn the_shape_stale_export_names_draws_no_lint() {
+        let src = "--- The shared state.\nexport local state = { count = 0 }\n\n--- Adds one.\nexport function bump(): ()\n    state.count += 1\nend\n";
+        let strict = LintConfig::default();
+        let lints = |src: &str| -> Vec<&'static str> {
+            crate::compile(src)
+                .unwrap()
+                .lints
+                .iter()
+                .map(|l| l.name)
+                .filter(|n| level_of(&strict, n) != Level::Allow)
+                .collect()
+        };
+
+        assert!(strict.strict);
+        assert_eq!(lints(src), Vec::<&str>::new());
+        assert_eq!(
+            lints(&src.replace("export local", "export const")),
+            vec!["const_mutation"]
         );
     }
 

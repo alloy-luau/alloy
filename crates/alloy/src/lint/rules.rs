@@ -357,7 +357,7 @@ impl ConstWalk<'_> {
                             start,
                             end,
                             message: format!(
-                                "`{path}` is an exported `local`; importers keep the value they read when they loaded, so they never see this write. Export a function that returns it, or hold it in a table, such as `export const state = {{ {path} = ... }}`"
+                                "`{path}` is an exported `local`; importers keep the value they read when they loaded, so they never see this write. Export a function that returns it, or hold it in a table that stays `local` and write its field: `export local state = {{ {path} = ... }}`, then `state.{path} = ...`"
                             ),
                             fix: None,
                         });

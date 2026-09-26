@@ -265,6 +265,22 @@ fn a_contract_holds_under_export_default() {
     );
 }
 
+/// A struct inside a function has members too. The contract read the
+/// file's declarations alone and found none.
+#[test]
+fn a_contract_reads_a_struct_inside_a_function() {
+    let decl = "attribute has_x on struct, impl as\n    requires field x\n    requires function run(self)\nend\n\n";
+    clean(&format!(
+        "{decl}function make(): ()\n    @has_x\n    struct Inner as\n        x: number\n    end\n\n    impl Inner as\n        function run(self): ()\n            print(self.x)\n        end\n    end\n\n    print(Inner.new({{ x = 1 }}))\nend\n\nmake()\n"
+    ));
+    assert_eq!(
+        one(&format!(
+            "{decl}function make(): ()\n    @has_x\n    struct Inner as\n        y: number\n    end\n\n    impl Inner as\n        function run(self): ()\n            print(self.y)\n        end\n    end\n\n    print(Inner.new({{ y = 1 }}))\nend\n\nmake()\n"
+        )),
+        "`@has_x` requires a field `x`; `Inner` declares none"
+    );
+}
+
 /// The contract is a check: the emit is what it was.
 #[test]
 fn a_contract_emits_nothing_of_its_own() {

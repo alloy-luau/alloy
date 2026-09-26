@@ -1,7 +1,7 @@
 //! Attribute checks, cfg, and the prescan that gathers names other
 //! phases route through.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use alloy_syntax::ast::{
     Attr, AttributeDecl, Block, CallArgs, Expr, FunctionBody, ImportKind, IndexKey, Stmt, TokSpan,
@@ -9,7 +9,7 @@ use alloy_syntax::ast::{
 
 use crate::roblox_classes::{DATATYPES, INSTANCE_CLASSES};
 
-use super::contracts::{Owner, is_list_type};
+use super::contracts::{Member, Owner, is_list_type};
 use super::types::{literal_kind, literal_type, strip_bounds};
 use super::*;
 
@@ -1066,10 +1066,67 @@ impl<'s> Desugar<'s> {
                     self.check_children_of(expr_children(e));
                 }
 
-                Child::Block(b) => self.scan_static_checks(b),
+                Child::Block(b) => self.scan_nested_block(b),
 
-                Child::Function(f) => self.scan_static_checks(&f.block),
+                Child::Function(f) => self.scan_nested_block(&f.block),
             }
+        }
+    }
+
+    /// A block inside the file's top level. Its structs and impls are no
+    /// declarations of the file, so the prescan never read their
+    /// members. A contract in the block reads them from here, over a
+    /// type of the same name that the file declares.
+    fn scan_nested_block(&mut self, block: &Block) {
+        let mut local: HashMap<String, Vec<Member>> = HashMap::new();
+
+        for stmt in &block.stmts {
+            let (name, members) = match stmt {
+                Stmt::Struct(st) => (
+                    self.text_of(st.name).to_string(),
+                    self.field_members(&st.fields, true),
+                ),
+
+                Stmt::Interface(i) => (
+                    self.text_of(i.name).to_string(),
+                    self.field_members(&i.fields, false),
+                ),
+
+                _ => continue,
+            };
+            local.entry(name).or_default().extend(members);
+        }
+
+        // An impl adds to its struct: the one in this block, or the one
+        // the file declares.
+        for stmt in &block.stmts {
+            if let Stmt::Impl(i) = stmt {
+                let name = self.impl_target_name(i.target);
+                let members = self.impl_block_members(i);
+                local
+                    .entry(name.clone())
+                    .or_insert_with(|| self.type_members_of(&name))
+                    .extend(members);
+            }
+        }
+
+        let saved: Vec<(String, Option<Vec<Member>>)> = local
+            .into_iter()
+            .map(|(name, members)| {
+                let old = self.type_members.insert(name.clone(), members);
+
+                (name, old)
+            })
+            .collect();
+
+        self.scan_static_checks(block);
+
+        for (name, old) in saved {
+            match old {
+                Some(members) => self.type_members.insert(name, members),
+
+                None => self.type_members.remove(&name),
+            };
         }
     }
 

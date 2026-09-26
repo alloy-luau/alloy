@@ -1449,6 +1449,33 @@ mod tests {
         assert!(!text.contains("unused"), "{text}");
     }
 
+    /// The text of a `<style>` element is CSS, as the build reads it.
+    /// The scan for markup read `--soon` as a comment, so the `}` and the
+    /// `</style>` after it fell into the comment and no spec was written.
+    #[test]
+    fn a_style_block_is_no_code_to_the_spec() {
+        let src = "local function Panel(): any\n    return (\n        <div>\n            <style>\n                :root { --soon: red; }\n                .soon { color: var(--soon); }\n            </style>\n        </div>\n    )\nend\n\n@test\nfunction adds()\n    $assert(1 + 1 == 2)\nend\n";
+        let config = Config::parse(
+            "[alx.factory]\nbackend = \"table\"\ncreate = \"create\"\n",
+            Path::new("alloy.toml"),
+        )
+        .unwrap();
+        let (text, diagnostics, count) = spec(
+            &config,
+            Path::new("/none"),
+            Path::new("src/m.alx"),
+            src,
+            None,
+            &[],
+        )
+        .unwrap()
+        .expect("a spec");
+
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(count, 1);
+        assert!(text.contains("__lest.it(\"adds\", adds)"), "{text}");
+    }
+
     /// A namespace member renders under its own name and the table
     /// carries it, so the spec calls the test by its path.
     #[test]

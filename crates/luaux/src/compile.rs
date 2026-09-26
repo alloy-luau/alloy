@@ -239,8 +239,47 @@ fn compile_inner(
 
 /// The byte spans of every markup region, outermost only. Alloy patch: the
 /// caller blanks them to collect bindings with its own parser.
+///
+/// A `<style>` element holds CSS, which an ingot reads, not markup: `{`
+/// there opens a rule and `--x` names a property. The scan reads the
+/// source with that text blanked, so the spans are the ones the build
+/// finds after the ingot took the element out.
 pub fn markup_spans(source: &str) -> Result<Vec<(usize, usize)>, CompileError> {
-    luaux_spans(source)
+    luaux_spans(&blank_styles(source))
+}
+
+/// The source with the text of each `<style>` element blanked to spaces,
+/// byte for byte, so every offset holds. A source with no `<style>` comes
+/// back as it is.
+pub fn blank_styles(src: &str) -> std::borrow::Cow<'_, str> {
+    if !src.contains("<style") {
+        return std::borrow::Cow::Borrowed(src);
+    }
+
+    let mut out = src.to_string();
+    let mut from = 0;
+
+    while let Some(open) = src[from..].find("<style") {
+        let open = from + open;
+        let Some(body) = src[open..].find('>').map(|i| open + i + 1) else {
+            break;
+        };
+        let Some(close) = src[body..].find("</style>").map(|i| body + i) else {
+            break;
+        };
+        let blank: String = src[body..close]
+            .chars()
+            .map(|c| match c {
+                '\n' => "\n".to_string(),
+
+                c => " ".repeat(c.len_utf8()),
+            })
+            .collect();
+        out.replace_range(body..close, &blank);
+        from = close;
+    }
+
+    std::borrow::Cow::Owned(out)
 }
 
 #[doc(hidden)]

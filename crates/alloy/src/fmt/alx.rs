@@ -56,12 +56,12 @@ fn format_alx_inner(src: &str, options: &FmtConfig, whole: bool) -> Result<Strin
     // cannot read: the file keeps its text and the run says why, with
     // the position the same error carries under `alloy check`.
     // A `<style>` element holds CSS, which an ingot reads, not markup:
-    // `{` there opens a rule and `--x` names a property. The spans are
-    // found with its text blanked, and a span that holds one keeps its
-    // text as written.
-    let masked = blank_styles(src);
+    // `{` there opens a rule and `--x` names a property. The span scan
+    // reads its text blanked, and a span that holds one keeps its text
+    // as written.
+    let masked = luaux::compile::blank_styles(src);
     let spans =
-        luaux::compile::markup_spans(&masked).map_err(|e| unparsed(src, e.offset, &e.message))?;
+        luaux::compile::markup_spans(src).map_err(|e| unparsed(src, e.offset, &e.message))?;
 
     if spans.is_empty() {
         return code_fmt(src, options);
@@ -104,35 +104,6 @@ fn format_alx_inner(src: &str, options: &FmtConfig, whole: bool) -> Result<Strin
     code.push_str(&src[last..]);
     let formatted = code_fmt(&code, options)?;
     Ok(substitute(&formatted, &printed, options))
-}
-
-/// The source with the text of each `<style>` element blanked to
-/// spaces, byte for byte, so every offset holds.
-fn blank_styles(src: &str) -> String {
-    let mut out = src.to_string();
-    let mut from = 0;
-
-    while let Some(open) = src[from..].find("<style") {
-        let open = from + open;
-        let Some(body) = src[open..].find('>').map(|i| open + i + 1) else {
-            break;
-        };
-        let Some(close) = src[body..].find("</style>").map(|i| body + i) else {
-            break;
-        };
-        let blank: String = src[body..close]
-            .chars()
-            .map(|c| match c {
-                '\n' => "\n".to_string(),
-
-                c => " ".repeat(c.len_utf8()),
-            })
-            .collect();
-        out.replace_range(body..close, &blank);
-        from = close;
-    }
-
-    out
 }
 
 /// A span as the source wrote it, one line per source line. A later

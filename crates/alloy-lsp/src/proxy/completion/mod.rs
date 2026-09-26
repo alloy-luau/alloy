@@ -309,7 +309,8 @@ impl State {
 
     /// Signature help on a variant constructor: the child shows the
     /// emit's `_1: Player`; the variant's own shape, `Msg.Move(Player,
-    /// number)`, replaces it, one parameter per payload type.
+    /// number)`, replaces it, one parameter per payload type. An enum
+    /// the file imports reads the same way.
     pub(crate) fn rewrite_variant_signatures(&self, uri: &str, result: &mut Value) {
         let Some(doc) = self.docs.get(uri) else {
             return;
@@ -325,6 +326,7 @@ impl State {
             let Some(d) = doc
                 .decls
                 .iter()
+                .chain(doc.import_decls.iter())
                 .filter(|d| d.name.contains('.'))
                 .find(|d| label.contains(&format!("{}(", d.name)))
             else {

@@ -3271,6 +3271,72 @@ fn a_signature_caret_leaves_an_index_base_and_a_lowered_constructor() {
     assert_eq!(past_index_base(shadow, (1, 26)), Some((1, 36)));
 }
 
+/// A caret at the start of an argument that is itself a call sat on the
+/// callee of the inner call, and the child answered for that call. The
+/// caret moves to the `(` or the space in front of the argument, where
+/// the child answers for the outer call.
+#[test]
+fn a_signature_caret_at_a_call_argument_answers_for_the_outer_call() {
+    use super::super::hover::before_call_argument;
+
+    let shadow = concat!(
+        "local p = make_path(CFrame.new(), Vector3.new(0, 0, 1))\n",
+        "if (f()) then end\n",
+        "print(Mode.speed(Mode.Walk, 2))\n",
+        "local q = make_path(\n",
+        "  origin,\n",
+        "  Vector3.new(0, 0, 40)\n",
+        ")\n",
+        "take({ a, g() })\n",
+    );
+
+    assert_eq!(before_call_argument(shadow, (0, 20)), Some((0, 19)));
+    assert_eq!(before_call_argument(shadow, (0, 34)), Some((0, 33)));
+    // Inside the inner call, and in its callee, the inner call answers.
+    assert_eq!(before_call_argument(shadow, (0, 26)), None);
+    assert_eq!(before_call_argument(shadow, (0, 46)), None);
+    // A `(` that groups opens no call.
+    assert_eq!(before_call_argument(shadow, (1, 4)), None);
+    // An argument that calls nothing keeps the index-base route.
+    assert_eq!(before_call_argument(shadow, (2, 17)), None);
+    assert_eq!(before_call_argument(shadow, (2, 6)), Some((2, 5)));
+    // An argument on a line of its own.
+    assert_eq!(before_call_argument(shadow, (5, 2)), Some((5, 1)));
+    // An item of a table is no argument.
+    assert_eq!(before_call_argument(shadow, (7, 10)), None);
+}
+
+/// Signature help on a variant of an imported enum showed the emit's
+/// `_1: number`. The declaration the import brings names the payload.
+#[test]
+fn an_imported_variant_signature_reads_its_payload_types() {
+    let (mut st, uri) = one_file("print(Enemy.Grunt(5, 8))\n");
+    st.docs
+        .get_mut(uri)
+        .expect("doc")
+        .import_decls
+        .push(alloy::declarations::Declaration {
+            name: "Enemy.Grunt".to_string(),
+            hover: "```alloy\nEnemy.Grunt(number, number)\n```\nA variant of `enum Enemy`."
+                .to_string(),
+            offset: 0,
+        });
+    let mut help = json!({ "signatures": [{
+        "label": "function Enemy.Grunt(_1: number, _2: number): Enemy",
+        "parameters": [{ "label": [21, 31] }, { "label": [33, 43] }],
+    }] });
+    st.rewrite_variant_signatures(uri, &mut help);
+
+    assert_eq!(
+        help["signatures"][0]["label"],
+        json!("Enemy.Grunt(number, number)")
+    );
+    assert_eq!(
+        help["signatures"][0]["parameters"],
+        json!([{ "label": "number" }, { "label": "number" }])
+    );
+}
+
 /// `player->leaderstats?.` listed no member: the check casts a child
 /// that a member follows to `any`. The copy the completion reads drops
 /// the cast and keeps every other byte in its place.

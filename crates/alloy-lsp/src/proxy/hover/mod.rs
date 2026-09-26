@@ -119,6 +119,7 @@ impl Server {
         let shadow = doc.to_shadow(line, character);
 
         intrinsic_code_home(&doc.source, &doc.shadow, line, shadow.0, character)
+            .or_else(|| before_call_argument(&doc.shadow, shadow))
             .or_else(|| past_index_base(&doc.shadow, shadow))
     }
 
@@ -871,6 +872,77 @@ pub(crate) fn shadow_home(shadow: &str, line: u32, word: &str) -> Option<(u32, u
 
         Some((i as u32, text[..byte].chars().count() as u32))
     })
+}
+
+/// A caret at the start of an argument that is itself a call,
+/// `make_path(|CFrame.new())`, sits on the callee of the inner call, and
+/// the child answers for that call. The caret moves one character back,
+/// to the `(` or the space in front of the argument. There the child
+/// answers for the call the argument belongs to, with the argument's
+/// index. An argument on a line of its own moves the same way.
+pub(crate) fn before_call_argument(
+    shadow: &str,
+    (line, character): (u32, u32),
+) -> Option<(u32, u32)> {
+    let at = offset_of(shadow, line, character)?;
+    let before = shadow[..at].chars().next_back()?;
+    let head = shadow[..at].trim_end();
+    let text = &shadow[..shadow[at..].find('\n').map_or(shadow.len(), |i| at + i)];
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+
+    if !matches!(before, '(' | ' ' | '\t' | '\n') {
+        return None;
+    }
+
+    if !head.ends_with(['(', ',']) {
+        return None;
+    }
+
+    // The bracket the argument stands in. A `(` after a name or a
+    // closing bracket opens a call. A table, an index, and a `(` that
+    // groups, as after `if` or `=`, hold no argument.
+    let mut depth = 0;
+    let (open, _) = head.char_indices().rev().find(|(_, c)| match c {
+        ')' | ']' | '}' => {
+            depth += 1;
+
+            false
+        }
+
+        '(' | '[' | '{' if depth > 0 => {
+            depth -= 1;
+
+            false
+        }
+
+        '(' | '[' | '{' => true,
+
+        _ => false,
+    })?;
+    let callee = head[..open].trim_end();
+    let word = &callee[callee.trim_end_matches(is_word).len()..];
+    let groups = [
+        "if", "elseif", "while", "until", "return", "and", "or", "not", "then", "do", "in", "else",
+        "repeat", "case", "with", "await",
+    ];
+
+    if !head[open..].starts_with('(')
+        || !callee.ends_with(|c: char| is_word(c) || c == ')' || c == ']')
+        || groups.contains(&word)
+    {
+        return None;
+    }
+
+    // The argument is a name chain, then the `(` of its own call.
+    let chain = text[at..]
+        .find(|c: char| !(is_word(c) || c == '.' || c == ':'))
+        .map_or(text.len(), |i| at + i);
+
+    if chain == at || !text[chain..].starts_with('(') {
+        return None;
+    }
+
+    Some(position_of(shadow, at - 1))
 }
 
 /// The child answers no signature help on the base of an index, `T` in

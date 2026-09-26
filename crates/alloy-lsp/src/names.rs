@@ -192,6 +192,7 @@ pub(crate) fn builtin_attribute_targets(key: &str) -> &'static [&'static str] {
             "type",
             "field",
             "variant",
+            "attribute",
         ],
 
         _ => &[

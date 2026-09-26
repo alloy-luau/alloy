@@ -396,6 +396,9 @@ pub struct RemoteDecl {
 /// `as ... end` form adds.
 #[derive(Debug)]
 pub struct AttributeDecl {
+    /// The attributes above the declaration: `@allow` alone means
+    /// anything here.
+    pub attributes: Vec<Attr>,
     pub exported: bool,
     pub name: TokSpan,
     pub params: Vec<Param>,

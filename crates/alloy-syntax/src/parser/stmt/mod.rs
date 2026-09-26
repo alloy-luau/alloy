@@ -957,6 +957,17 @@ impl<'a> Parser<'a> {
                 return self.namespace_decl(start, attrs, exported);
             }
 
+            // `@allow(naming_convention) attribute Tagged on struct`.
+            "attribute" if self.name_at(1) => {
+                let mut stmt = self.attribute_decl(start, exported)?;
+
+                if let Stmt::Attribute(a) = &mut stmt {
+                    a.attributes = attrs;
+                }
+
+                return Ok(stmt);
+            }
+
             // `attribute X on type` declares one, so a type alias takes
             // attributes the way every other declaration does. The
             // modifier is already read, so the flags go on by hand.

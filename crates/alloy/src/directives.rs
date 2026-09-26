@@ -394,6 +394,8 @@ fn allow_ranges(src: &str) -> Vec<(usize, usize, String)> {
 
                 Stmt::TypeAlias(t) => add(&t.attributes, t.span, out),
 
+                Stmt::Attribute(a) => add(&a.attributes, a.span, out),
+
                 Stmt::Attributed { attrs, stmt, span } => {
                     add(attrs, *span, out);
                     walk(std::slice::from_ref(stmt.as_ref()), add, out);

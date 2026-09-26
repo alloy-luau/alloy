@@ -69,6 +69,7 @@ pub(crate) fn builtin_attr_targets(name: &str) -> Option<&'static [&'static str]
             "type",
             "field",
             "variant",
+            "attribute",
         ],
 
         _ => return None,
@@ -345,7 +346,10 @@ impl<'s> Desugar<'s> {
                 );
             }
 
-            Stmt::Attribute(a) => self.check_attribute_decl(a),
+            Stmt::Attribute(a) => {
+                self.check_attrs(&a.attributes, "attribute");
+                self.check_attribute_decl(a);
+            }
 
             _ => {}
         }

@@ -646,7 +646,7 @@ pub fn analyze(
     // The sourcemap the language server gives luau-lsp. Its scripts
     // point at the artifacts, which sit under `out` here as the build
     // writes them, so `script.Parent` and a `require` of a child resolve.
-    if let Some(text) = crate::project::luau_sourcemap(root, config) {
+    if let Some(text) = crate::project::luau_sourcemap(root, config, Some(&mirror)) {
         let out_dir = normalize(&root.join(&config.build.out));
         let text = crate::project::map_sourcemap(&text, &|s| {
             let luau = crate::project::luau_script_path(s);

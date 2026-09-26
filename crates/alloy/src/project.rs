@@ -731,10 +731,12 @@ pub(crate) fn dir_node(root: &Path, dir: &Path, name: &str) -> std::io::Result<M
 }
 
 /// The sourcemap of the tree: the instance tree, each script with the
-/// path of its source, relative to `root`.
-pub fn sourcemap(tree: &Tree, root: &Path) -> std::io::Result<Value> {
+/// path of its source, relative to `root`. A mount that `mirror` holds
+/// is read there: the flux mirror holds the output of a project an
+/// import leads into, and the disk has none until a build.
+pub fn sourcemap(tree: &Tree, root: &Path, mirror: Option<&Path>) -> std::io::Result<Value> {
     if let Some(project) = &tree.project {
-        return project.sourcemap(root, &tree.runtime, &tree.out);
+        return project.sourcemap(root, mirror, &tree.runtime, &tree.out);
     }
 
     let mut game = node("game", "DataModel", None);
@@ -786,11 +788,12 @@ pub fn sourcemap(tree: &Tree, root: &Path) -> std::io::Result<Value> {
     };
 
     for m in &tree.mounts {
-        let path = root.join(&m.disk);
+        let read = mirror.filter(|d| d.join(&m.disk).exists()).unwrap_or(root);
+        let path = read.join(&m.disk);
         let name = m.place.last().cloned().unwrap_or_default();
 
         let leaf = if path.is_dir() {
-            dir_node(root, &path, &name)?
+            dir_node(read, &path, &name)?
         } else if path.is_file() {
             let fname = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
             let mut n = node(
@@ -831,12 +834,13 @@ pub fn sourcemap(tree: &Tree, root: &Path) -> std::io::Result<Value> {
 /// into a mirror. A tree that mounts a folder writes it, as `alloy
 /// build` does, so a file added since the last build has its place.
 /// Any other root reads the file the last build or Rojo left there.
-/// The language server and `alloy flux` both start from this text.
-pub fn luau_sourcemap(root: &Path, config: &Config) -> Option<String> {
+/// The language server and `alloy flux` both start from this text;
+/// `mirror` is the one `sourcemap` reads.
+pub fn luau_sourcemap(root: &Path, config: &Config, mirror: Option<&Path>) -> Option<String> {
     let tree = Tree::load(root, config);
 
     if !tree.mounts.is_empty() {
-        let map = sourcemap(&tree, root).ok()?;
+        let map = sourcemap(&tree, root, mirror).ok()?;
 
         return Some(serde_json::to_string_pretty(&map).ok()? + "\n");
     }
@@ -981,7 +985,7 @@ pub fn files(tree: &Tree, config: &Config, root: &Path) -> std::io::Result<Vec<(
     if config.project.sourcemap {
         out.push((
             PathBuf::from("sourcemap.json"),
-            pretty(&sourcemap(tree, root)?),
+            pretty(&sourcemap(tree, root, None)?),
         ));
     }
 
@@ -1226,7 +1230,7 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
         write(&dir, "Packages/jecs.luau", "");
 
         let config = Config::parse(MOUNTS, Path::new("alloy.toml")).unwrap();
-        let map = sourcemap(&Tree::load(&dir, &config), &dir).unwrap();
+        let map = sourcemap(&Tree::load(&dir, &config), &dir, None).unwrap();
         let services = map["children"].as_array().unwrap();
         let sss = services
             .iter()

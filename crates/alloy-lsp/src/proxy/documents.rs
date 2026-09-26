@@ -730,7 +730,7 @@ impl Server {
             // in this one, so `@game/` completes and types without one.
             if let Some(config) = &config
                 && tree_sourcemap(&root, Some(config))
-                && let Some(text) = alloy::project::luau_sourcemap(&root, config)
+                && let Some(text) = alloy::project::luau_sourcemap(&root, config, None)
             {
                 st.write_mirror(
                     &root.join("sourcemap.json"),

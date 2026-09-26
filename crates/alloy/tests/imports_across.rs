@@ -368,6 +368,57 @@ fn a_mounted_dependency_takes_its_place() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// On a fresh clone the other project has no output on disk. The
+/// sourcemap read the mount there and found no module, so flux failed
+/// until a build; it reads the artifacts in the mirror now.
+#[test]
+fn flux_types_a_mounted_dependency_before_a_build() {
+    let dir = workspace("mounted-flux", &["main", "shared"]);
+    fs::write(dir.join("shared/src/util.aly"), UTIL).unwrap();
+    fs::create_dir_all(dir.join("main/src/server")).unwrap();
+    fs::write(
+        dir.join("main/src/server/main.server.aly"),
+        "import { double } from \"../../../shared/src/util\"\n\nprint(double(\"x\"))\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("main/alloy.toml"),
+        format!(
+            "{TOML}\n[mount]\nserver = [\"src/server\", \"@game/ServerScriptService/Server\"]\nlib = [\"../shared/build\", \"@game/ReplicatedStorage/Shared\"]\n"
+        ),
+    )
+    .unwrap();
+
+    let root = dir.join("main");
+    let config = Config::load(&root.join("alloy.toml")).unwrap();
+    let report = alloy::build::flux_project(&root, &config).unwrap();
+
+    assert!(report.is_clean(), "{:?}", messages(&report));
+    assert!(!dir.join("shared/build").exists(), "flux writes nothing");
+
+    if alloy::typecheck::find_luau_lsp(&config.flux).is_none() {
+        eprintln!("skipped: luau-lsp is not installed");
+
+        return;
+    }
+
+    let analysis = alloy::typecheck::analyze(&root, &config, &report.checks, &report.dep_artifacts)
+        .expect("the type check runs");
+    let errors: Vec<String> = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| d.is_error())
+        .map(|d| format!("{} {}", d.line, d.message))
+        .collect();
+
+    assert_eq!(
+        errors,
+        vec!["3 Expected this to be 'number', but got 'string'".to_string()]
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn one_file_follows_the_same_route() {
     let dir = workspace("one", &["main", "shared"]);

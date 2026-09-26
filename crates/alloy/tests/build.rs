@@ -1076,6 +1076,68 @@ relay(nil)
 }
 
 /*
+A barrel that passes a module of remotes on whole, `import * as Remotes`
+then `export { Remotes }`, lost the remotes. The server fired a remote
+that goes from the client, and nothing reported it. An `await` in a
+plain handler of one reported that it needs an async context.
+*/
+#[test]
+fn a_remote_through_a_star_barrel_keeps_its_side() {
+    let dir = temp_project("remote-star-barrel");
+    fs::write(dir.join("alloy.toml"), "[build]\nout = \"dist\"\n").unwrap();
+    fs::write(
+        dir.join("src/rem.aly"),
+        "export remote Up(n: number) from client\nexport remote function Buy(id: string): boolean from client\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/index.aly"),
+        "import * as Remotes from \"./rem\"\nexport { Remotes }\n",
+    )
+    .unwrap();
+    let src = "import { Remotes } from \"./index\"
+import * as Idx from \"./index\"
+async function load(id: string): boolean
+    return id ~= \"\"
+end
+Remotes.Up.fire(1)
+Idx.Remotes.Up.fire(2)
+Remotes.Buy.on(function(player, id)
+    return await load(id)
+end)
+";
+    fs::write(dir.join("src/a.server.aly"), src).unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run(&dir, &config.build, &config.emit).unwrap();
+    let got: Vec<(usize, &str)> = report
+        .diagnostics
+        .iter()
+        .map(|(_, d)| {
+            let line = src[..d.start as usize].matches('\n').count() + 1;
+
+            (line, d.message.as_str())
+        })
+        .collect();
+
+    assert_eq!(
+        got,
+        [
+            (
+                6,
+                "`Remotes.Up` goes from the client; the server cannot fire it"
+            ),
+            (
+                7,
+                "`Idx.Remotes.Up` goes from the client; the server cannot fire it"
+            ),
+        ]
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/*
 A local that holds a remote skipped the side check: `const vote =
 Net.Up` then `vote.fire("x")` passed on the server and called
 `FireClient("x")`. An alias of a namespace, an alias of an alias, and a

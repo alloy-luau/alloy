@@ -1365,7 +1365,9 @@ as: its own, the ones a barrel passes on from another module, and its
 `export default` declaration once more as `default`.
 
 A namespace member reads under its path, `Geo.Vec`, so a barrel that
-passes `Geo` on as `G` passes `G.Vec` too.
+passes `Geo` on as `G` passes `G.Vec` too. A module that a barrel
+passes on whole, `import * as Leaf` then `export { Leaf }`, reads the
+same way: `Leaf.Vec`.
 */
 fn sent_decls<T: Clone>(
     path: &Path,
@@ -1386,7 +1388,24 @@ fn sent_decls<T: Clone>(
         return out;
     }
 
-    for (name, exported, spec) in reexports(text) {
+    let (named, stars) = passes(text);
+
+    for (exported, spec) in stars {
+        let Some(target) = resolve(&spec, path, aliases).filter(|t| t != path) else {
+            continue;
+        };
+        let Ok(inner) = module_text(&target) else {
+            continue;
+        };
+
+        for (decl, payload) in sent_decls(&target, &inner, aliases, read, depth - 1) {
+            if decl != "default" {
+                out.push((format!("{exported}.{decl}"), payload));
+            }
+        }
+    }
+
+    for (name, exported, spec) in named {
         let Some(target) = resolve(&spec, path, aliases).filter(|t| t != path) else {
             continue;
         };

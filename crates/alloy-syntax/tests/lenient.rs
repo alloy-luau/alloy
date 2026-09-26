@@ -1057,6 +1057,21 @@ fn a_missing_end_names_the_block_the_indent_leaves_open() {
             "local function tick(dt: number)\n    if dt > 1 then\n        print(\"slow\")\n    for i = 1, 3 do\n        print(i)\n    end\nend\n\nlocal function other()\n    print(2)\nend\n",
             "`if` on line 2 needs an `end`",
         ),
+        // A callback in call arguments: the `end)` closed the `if`, and
+        // the `)` failed as a statement. Four errors named `function(`,
+        // the `)`, and the end of the file.
+        (
+            "game:GetService(\"RunService\").Heartbeat:Connect(function(dt)\n  if dt > 1 then\n  print(dt)\nend)\nprint(\"after\")\n",
+            "`if` on line 2 needs an `end`",
+        ),
+        (
+            "local t = { f = function()\n  if true then\n  print(1)\nend }\nprint(t)\n",
+            "`if` on line 2 needs an `end`",
+        ),
+        (
+            "task.spawn(function(a)\n  print(a)\n)\nprint(1)\n",
+            "`function` on line 1 needs an `end`",
+        ),
     ] {
         let (_, count) = lenient(src);
         let lexed = lexer::lex(src).unwrap();

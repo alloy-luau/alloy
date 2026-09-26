@@ -150,6 +150,7 @@ pub fn parse_with(src: &str, toks: &[Tok], options: ParseOptions) -> Result<Chun
         value_lines: 0,
         match_head: 0,
         closes: Vec::new(),
+        groups: 0,
     };
 
     let block = p.block()?;
@@ -217,6 +218,7 @@ pub fn parse_lenient(src: &str, toks: &[Tok], options: ParseOptions) -> (Chunk, 
         value_lines: 0,
         match_head: 0,
         closes: Vec::new(),
+        groups: 0,
     };
 
     let mut stmts = Vec::new();
@@ -313,6 +315,10 @@ struct Parser<'a> {
     /// `end`. A missing `end` reads it to find the block that took an
     /// `end` from further out.
     closes: Vec<(usize, usize)>,
+    /// Above zero inside brackets: call arguments, a parenthesis, an
+    /// index, a table, or an array. A block there, the body of a
+    /// callback, ends at the bracket that closes the group.
+    groups: u32,
 }
 
 /// The lengths of the records a parse appends to. A reader that reads

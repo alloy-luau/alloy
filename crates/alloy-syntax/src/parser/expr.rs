@@ -66,7 +66,9 @@ impl<'a> Parser<'a> {
         let saved = (self.no_method_call, self.match_head);
         self.no_method_call = 0;
         self.match_head = 0;
+        self.groups += 1;
         let r = f(self);
+        self.groups -= 1;
         (self.no_method_call, self.match_head) = saved;
 
         r

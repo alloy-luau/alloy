@@ -7,7 +7,7 @@
 //! The index is a line scan of the target file, not a compile: it runs
 //! for every import of every file on every edit in the editor.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
@@ -301,6 +301,50 @@ const DEFAULT_ENTRY: &str = "default ";
 /// among the entries of its types.
 pub fn default_type(entries: &[String]) -> Option<&str> {
     entries.iter().find_map(|e| e.strip_prefix(DEFAULT_ENTRY))
+}
+
+/// Stands for the module's value in a default entry that is a type
+/// expression, not a name: `typeof(@.new(nil :: any))`, the `self` type
+/// of a class the module returns. No name holds the character.
+pub const MODULE_VALUE: char = '@';
+
+/// The default entry of a module that ends in `return Klass`. The
+/// returned value is the default, and its type is the type the module
+/// exports under the same name, or else the `self` type of the class
+/// `Klass` is. `types` are the module's other entries.
+fn returned_type(source: &str, types: &[String]) -> Option<String> {
+    use alloy_syntax::ast::{Expr, Stmt};
+
+    if !source.contains("return") {
+        return None;
+    }
+
+    let options = alloy_syntax::parser::ParseOptions {
+        definitions: true,
+        ..Default::default()
+    };
+    let source = parsable(source);
+    let parsed = alloy_syntax::parse_lenient(&source, options).ok()?;
+    let Some(Stmt::Return(r)) = parsed.chunk.block.stmts.last() else {
+        return None;
+    };
+    let [Expr::Name(n)] = r.values.as_slice() else {
+        return None;
+    };
+    let name = n.text(&source, &parsed.lexed.toks);
+
+    if let Some(entry) = types.iter().find(|e| type_head(e) == name) {
+        return Some(format!("{DEFAULT_ENTRY}{name}{}", type_args(entry)));
+    }
+
+    match crate::tables::self_types(&source).get(name)? {
+        kind @ crate::tables::SelfType::Instance(_) => Some(format!(
+            "{DEFAULT_ENTRY}{}",
+            kind.text(&MODULE_VALUE.to_string())
+        )),
+
+        _ => None,
+    }
 }
 
 /// The name a type entry carries, without its parameter list.
@@ -786,10 +830,19 @@ pub fn aliases(root: &Path, tree: &crate::project::Tree) -> Vec<(String, PathBuf
         .collect()
 }
 
-/// The file an import spec names from a source file: `./x`, `../x`, or
-/// `@alias/x`, with `.aly`, `.alx`, `.luau`, `.lua`, or an `init` file.
+/// The file an import spec names from a source file: `./x`, `../x`,
+/// `@self/x`, or `@alias/x`, with `.aly`, `.alx`, `.luau`, `.lua`, or an
+/// `init` file.
 pub fn resolve(spec: &str, from: &Path, aliases: &[(String, PathBuf)]) -> Option<PathBuf> {
-    let base = if let Some(rest) = spec.strip_prefix('@') {
+    let base = if let Some(tail) = spec.strip_prefix("@self/") {
+        // `@self` is the folder of an `init` file. Any other file has no
+        // folder of its own, so the spec names no module there.
+        if !crate::build::is_init(from) {
+            return None;
+        }
+
+        from.parent()?.join(tail)
+    } else if let Some(rest) = spec.strip_prefix('@') {
         let (alias, tail) = rest.split_once('/').unwrap_or((rest, ""));
         let (_, dir) = aliases.iter().find(|(a, _)| a == alias)?;
 
@@ -943,19 +996,62 @@ fn module_types(path: &Path, aliases: &[(String, PathBuf)], depth: u8) -> Vec<St
     };
     let mut out = exported_types(&source);
 
+    if let Some(entry) = returned_type(&source, &out) {
+        out.push(entry);
+    }
+
     if depth == 0 {
         return out;
     }
 
     let mut inner: HashMap<String, Vec<String>> = HashMap::new();
+    let mut types_of = |spec: &str| -> Vec<String> {
+        inner
+            .entry(spec.to_string())
+            .or_insert_with(|| {
+                resolve(spec, path, aliases)
+                    .filter(|target| target != path)
+                    .map(|target| module_types(&target, aliases, depth - 1))
+                    .unwrap_or_default()
+            })
+            .clone()
+    };
+    let (named, stars) = passes(&source);
 
-    for (name, exported, spec) in reexports(&source) {
-        let types = inner.entry(spec.clone()).or_insert_with(|| {
-            resolve(&spec, path, aliases)
-                .filter(|target| target != path)
-                .map(|target| module_types(&target, aliases, depth - 1))
-                .unwrap_or_default()
-        });
+    // A module passed on whole sends each type out under one flat name,
+    // `Leaf_Box`, and the export table holds no value of that name.
+    for (exported, spec) in stars {
+        // The default entry names no type of its own; the table holds
+        // the type under its own name already.
+        for entry in types_of(&spec)
+            .iter()
+            .filter(|e| default_type(std::slice::from_ref(e)).is_none())
+        {
+            out.push(format!(
+                "{exported}_{}{}=",
+                type_head(entry),
+                type_args(entry)
+            ));
+        }
+    }
+
+    for (name, exported, spec) in named {
+        let types = types_of(&spec);
+
+        // `export { default as K } from "./m"` sends the type of the
+        // default on under `K`, as the barrel writes it.
+        if name == "default"
+            && let Some(entry) = default_type(&types)
+        {
+            let args = match entry.contains(MODULE_VALUE) {
+                true => "",
+
+                false => type_args(entry),
+            };
+
+            out.push(format!("{exported}{args}"));
+        }
+
         // A namespace sends its members on too, `Geo_Vec` as `G_Vec`.
         let members = format!("{name}_");
 
@@ -985,11 +1081,20 @@ fn module_types(path: &Path, aliases: &[(String, PathBuf)], depth: u8) -> Vec<St
 /// by, the name it goes out under here, and the spec that names it. A
 /// barrel writes `export { Point } from "./model"`, or imports `Point`
 /// and names it in an `export { ... }` list of its own.
-fn reexports(source: &str) -> Vec<(String, String, String)> {
+pub(crate) fn reexports(source: &str) -> Vec<(String, String, String)> {
+    passes(source).0
+}
+
+/// A module a barrel passes on whole: `import * as Leaf from "./leaf"`
+/// and then `export { Leaf }`. The name it goes out under, and the spec.
+type StarPass = (String, String);
+
+/// `reexports`, and the modules the source passes on whole.
+fn passes(source: &str) -> (Vec<(String, String, String)>, Vec<StarPass>) {
     use alloy_syntax::ast::{ImportKind, Stmt};
 
     if !source.contains("export") {
-        return Vec::new();
+        return Default::default();
     }
 
     let options = alloy_syntax::parser::ParseOptions {
@@ -997,7 +1102,7 @@ fn reexports(source: &str) -> Vec<(String, String, String)> {
         ..Default::default()
     };
     let Ok(parsed) = alloy_syntax::parse_lenient(source, options) else {
-        return Vec::new();
+        return Default::default();
     };
     let toks = &parsed.lexed.toks;
     let text = |span: TokSpan| span.text(source, toks).to_string();
@@ -1007,6 +1112,11 @@ fn reexports(source: &str) -> Vec<(String, String, String)> {
     let mut bound: Vec<(String, String, String)> = Vec::new();
 
     for i in crate::desugar::imports_in(&parsed.chunk.block) {
+        // `*` stands for the whole module the local binds.
+        if let ImportKind::Namespace(n, _) = &i.kind {
+            bound.push((text(*n), bare(i.path), "*".to_string()));
+        }
+
         let specs = match &i.kind {
             ImportKind::Named(v)
             | ImportKind::TypeOnly(v)
@@ -1025,6 +1135,7 @@ fn reexports(source: &str) -> Vec<(String, String, String)> {
     }
 
     let mut out = Vec::new();
+    let mut stars = Vec::new();
 
     for stmt in &parsed.chunk.block.stmts {
         let Stmt::ExportList(list) = stmt else {
@@ -1038,16 +1149,22 @@ fn reexports(source: &str) -> Vec<(String, String, String)> {
             match list.from {
                 Some(from) => out.push((name, exported, bare(from))),
 
-                None => {
-                    if let Some((_, spec, from_name)) = bound.iter().find(|(l, _, _)| *l == name) {
+                None => match bound.iter().find(|(l, _, _)| *l == name) {
+                    Some((_, spec, from_name)) if from_name == "*" => {
+                        stars.push((exported, spec.clone()));
+                    }
+
+                    Some((_, spec, from_name)) => {
                         out.push((from_name.clone(), exported, spec.clone()));
                     }
-                }
+
+                    None => {}
+                },
             }
         }
     }
 
-    out
+    (out, stars)
 }
 
 /// Per import spec, the structs the module declares whose check
@@ -1088,32 +1205,25 @@ pub fn import_private_views(
 }
 
 /// The struct and enum shapes of every module the source imports, for
-/// a hover that names an imported struct by its fields.
+/// a hover that names an imported struct by its fields. A shape a
+/// barrel passes on reads from the module that declares it.
 pub fn import_shapes(
     source: &str,
     from: &Path,
     aliases: &[(String, PathBuf)],
 ) -> Vec<crate::declarations::Shape> {
-    let mut seen: Vec<PathBuf> = Vec::new();
-    let mut out = Vec::new();
+    let read = |text: &str| {
+        crate::declarations::shapes(text)
+            .into_iter()
+            .map(|s| (s.name().to_string(), s))
+            .collect()
+    };
 
-    for spec in import_specs(source) {
-        let Some(path) = resolve(&spec, from, aliases) else {
-            continue;
-        };
-
-        if seen.contains(&path) {
-            continue;
-        }
-
-        seen.push(path.clone());
-
-        if let Ok(text) = module_text(&path) {
-            out.extend(crate::declarations::shapes(&text));
-        }
-    }
-
-    out
+    module_decls(source, from, aliases, read)
+        .into_iter()
+        .flat_map(|(_, shapes)| shapes)
+        .map(|(_, s)| s)
+        .collect()
 }
 
 /// Every `import { Name }` and `import { Name as Local }` of a source:
@@ -1122,7 +1232,7 @@ pub fn import_shapes(
 /// an index keyed by the declared name alone holds one of them. The
 /// name this file binds is a key of its own, and it names the right
 /// module.
-fn named_specs(
+pub(crate) fn named_specs(
     source: &str,
     from: &Path,
     aliases: &[(String, PathBuf)],
@@ -1174,7 +1284,11 @@ fn named_specs(
 /// The module each `import * as X` binds, with the local name it binds
 /// it under. A star import binds the module table, so a declaration of
 /// the module reads one level deeper here: `X.State`.
-fn star_locals(source: &str, from: &Path, aliases: &[(String, PathBuf)]) -> Vec<(PathBuf, String)> {
+pub(crate) fn star_locals(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<(PathBuf, String)> {
     use alloy_syntax::ast::{ImportKind, Stmt};
 
     let Ok(parsed) = alloy_syntax::parse_lenient(source, Default::default()) else {
@@ -1208,6 +1322,17 @@ fn module_decls<T: Clone>(
     from: &Path,
     aliases: &[(String, PathBuf)],
     read: impl Fn(&str) -> Vec<(String, T)>,
+) -> Vec<(PathBuf, Vec<(String, T)>)> {
+    module_decls_at(source, from, aliases, |_, text| read(text))
+}
+
+/// `module_decls` with a reader that takes the path of each module, for
+/// a declaration that reads the module's own imports.
+fn module_decls_at<T: Clone>(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+    read: impl Fn(&Path, &str) -> Vec<(String, T)>,
 ) -> Vec<(PathBuf, Vec<(String, T)>)> {
     let mut seen: Vec<PathBuf> = Vec::new();
     let mut out = Vec::new();
@@ -1246,10 +1371,10 @@ fn sent_decls<T: Clone>(
     path: &Path,
     text: &str,
     aliases: &[(String, PathBuf)],
-    read: &impl Fn(&str) -> Vec<(String, T)>,
+    read: &impl Fn(&Path, &str) -> Vec<(String, T)>,
     depth: u8,
 ) -> Vec<(String, T)> {
-    let mut out = read(text);
+    let mut out = read(path, text);
 
     if let Some(name) = default_decl(text)
         && let Some((_, payload)) = out.iter().find(|(n, _)| *n == name)
@@ -1325,6 +1450,28 @@ fn keyed_by_local<T: Clone>(
     aliases: &[(String, PathBuf)],
     modules: &[(PathBuf, Vec<(String, T)>)],
 ) -> Vec<(String, T)> {
+    let mut out = keyed_by_binding(source, from, aliases, modules);
+
+    // `default` is a key a bare import reads through, not a name.
+    for (_, decls) in modules {
+        for (name, payload) in decls.iter().filter(|(n, _)| n != "default") {
+            if !out.iter().any(|(n, _)| n == name) {
+                out.push((name.clone(), payload.clone()));
+            }
+        }
+    }
+
+    out
+}
+
+/// `keyed_by_local` with the names this file binds alone, for an index
+/// that must not answer for a name the file never imported.
+fn keyed_by_binding<T: Clone>(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+    modules: &[(PathBuf, Vec<(String, T)>)],
+) -> Vec<(String, T)> {
     let named = named_specs(source, from, aliases);
     let stars = star_locals(source, from, aliases);
     let mut out: Vec<(String, T)> = Vec::new();
@@ -1336,11 +1483,17 @@ fn keyed_by_local<T: Clone>(
 
     for (path, decls) in modules {
         for (name, payload) in decls {
+            // `Net.Up` is a member of `Net`, so `import { Net as N }`
+            // reaches it as `N.Up`.
+            let (head, rest) = name
+                .find(['.', ':'])
+                .map_or((name.as_str(), ""), |at| name.split_at(at));
+
             for (_, _, local) in named
                 .iter()
-                .filter(|(p, declared, _)| p == path && declared == name)
+                .filter(|(p, declared, _)| p == path && declared == head)
             {
-                push(local.clone(), payload);
+                push(format!("{local}{rest}"), payload);
             }
 
             for (_, local) in stars.iter().filter(|(p, _)| p == path) {
@@ -1349,14 +1502,62 @@ fn keyed_by_local<T: Clone>(
         }
     }
 
-    // `default` is a key a bare import reads through, not a name.
-    for (_, decls) in modules {
-        for (name, payload) in decls.iter().filter(|(n, _)| n != "default") {
-            push(name.clone(), payload);
-        }
-    }
-
     out
+}
+
+/// The remotes every module a source imports declares, keyed by the
+/// name this file binds: whether the client fires each one, and whether
+/// the server does. A `.server.aly` file reads it to refuse a fire that
+/// only the client can send.
+pub fn import_remotes(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<(String, (bool, bool))> {
+    let modules = module_decls(source, from, aliases, |text| {
+        let Ok(parsed) = alloy_syntax::parse_lenient(text, Default::default()) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+
+        for stmt in &parsed.chunk.block.stmts {
+            remote_sides(text, &parsed.lexed.toks, stmt, "", &mut out);
+        }
+
+        out
+    });
+
+    keyed_by_binding(source, from, aliases, &modules)
+}
+
+/// The remote a statement declares, by its path from the top of the
+/// file, with whether the client and the server fire it. A remote in
+/// `namespace Net` is `Net.Up`, so the side check reads `Net.Up.fire`.
+pub(crate) fn remote_sides(
+    src: &str,
+    toks: &[alloy_syntax::lexer::Tok],
+    stmt: &alloy_syntax::ast::Stmt,
+    prefix: &str,
+    out: &mut Vec<(String, (bool, bool))>,
+) {
+    use alloy_syntax::ast::Stmt;
+
+    match stmt.under_default() {
+        Stmt::Remote(r) => out.push((
+            format!("{prefix}{}", r.name.text(src, toks)),
+            (r.from_client, r.from_server),
+        )),
+
+        Stmt::Namespace(n) => {
+            let prefix = format!("{prefix}{}.", n.name.text(src, toks));
+
+            for m in &n.members {
+                remote_sides(src, toks, &m.stmt, &prefix, out);
+            }
+        }
+
+        _ => {}
+    }
 }
 
 /// The fields of every struct a module the source imports declares,
@@ -1370,6 +1571,21 @@ pub fn import_struct_fields(
 ) -> Vec<(String, Vec<(String, bool)>)> {
     let modules = module_decls(source, from, aliases, |text| {
         crate::declarations::struct_field_defaults(text)
+    });
+
+    keyed_by_local(source, from, aliases, &modules)
+}
+
+/// The field types of every struct a module the source imports
+/// declares, each with whether this file can write it. A field of `new
+/// S { }` then constructs under its declared type, as in the module.
+pub fn import_field_types(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<(String, Vec<crate::declarations::FieldText>)> {
+    let modules = module_decls(source, from, aliases, |text| {
+        crate::declarations::struct_field_types(text)
     });
 
     keyed_by_local(source, from, aliases, &modules)
@@ -1406,6 +1622,110 @@ pub fn import_privates(
     });
 
     keyed_by_local(source, from, aliases, &modules)
+}
+
+/// The functions every module the source imports sends out: an
+/// `export function` and each method and static of a struct, with the
+/// parameter count and the `@deprecated` note. `argument_count` and
+/// `deprecated_call` read a call of one through it.
+pub fn import_callables(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<(String, crate::flux::Callable)> {
+    let modules = module_decls_at(source, from, aliases, |path, text| {
+        let mut out = crate::flux::exported_callables(text);
+        out.extend(trait_default_callables(text, path, aliases));
+
+        out
+    });
+
+    keyed_by_local(source, from, aliases, &modules)
+}
+
+/*
+`Mode.hi` for each default method an `impl Named for Mode` of a module
+gives a type the module declares. The emit writes the default onto the
+type's table, so a file that imports `Mode` reaches it as a member.
+
+The trait is one the module declares, or one it imports; the defaults
+resolve the way the module's own emit resolves them. The parameter
+count is left open, so `argument_count` stands down.
+*/
+fn trait_default_callables(
+    text: &str,
+    path: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<(String, crate::flux::Callable)> {
+    use alloy_syntax::ast::Stmt;
+
+    if !text.contains(" for ") {
+        return Vec::new();
+    }
+
+    let Ok(parsed) = alloy_syntax::parse_lenient(text, Default::default()) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let name = |span: alloy_syntax::ast::TokSpan| span.text(text, toks).to_string();
+    let stmts: Vec<&Stmt> = parsed
+        .chunk
+        .block
+        .stmts
+        .iter()
+        .map(|s| s.under_default())
+        .collect();
+    let mut defaults: Vec<(String, Vec<String>)> = stmts
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::Trait(t) => {
+                let methods = t.methods.iter().filter(|m| m.body.is_some());
+
+                Some((name(t.name), methods.map(|m| name(m.name)).collect()))
+            }
+
+            _ => None,
+        })
+        .collect();
+    defaults.extend(import_trait_defaults(text, path, aliases));
+    let own = |target: &str| {
+        stmts.iter().any(|s| match s {
+            Stmt::Enum(e) => name(e.name) == target,
+
+            Stmt::Struct(d) => name(d.name) == target,
+
+            _ => false,
+        })
+    };
+    let mut out = Vec::new();
+
+    for s in &stmts {
+        let Stmt::Impl(i) = s else {
+            continue;
+        };
+        let (Some(t), target) = (i.trait_name, name(i.target)) else {
+            continue;
+        };
+
+        if !own(&target) {
+            continue;
+        }
+
+        let Some((_, methods)) = defaults.iter().find(|(n, _)| *n == name(t)) else {
+            continue;
+        };
+
+        for m in methods {
+            let callable = crate::flux::Callable {
+                params: None,
+                deprecated: None,
+                exported: true,
+            };
+            out.push((format!("{target}.{m}"), callable));
+        }
+    }
+
+    out
 }
 
 /// The private fields of the imported structs of a file under the
@@ -1453,98 +1773,231 @@ states.
 An attribute contract is checked where the attribute is used, and a use
 in this file reaches the declaration through an import. Without this the
 check would hold only inside the declaring module.
+
+Each one is keyed as a use spells it: `price` for a named import, and
+`M.price` through `import * as M`, so the path fills the defaults and
+checks the targets the way the bare name does. A public member of an
+exported namespace reads under its path, `M.Ns.tag`. A path whose head
+this file does not bind is left out.
 */
 pub fn import_attributes(
     source: &str,
     from: &Path,
     aliases: &[(String, PathBuf)],
 ) -> Vec<(String, crate::desugar::AttrDecl)> {
-    let mut seen: Vec<PathBuf> = Vec::new();
-    let mut out: Vec<(String, crate::desugar::AttrDecl)> = Vec::new();
-
-    for spec in import_specs(source) {
-        let Some(path) = resolve(&spec, from, aliases) else {
-            continue;
-        };
-
-        if seen.contains(&path) {
-            continue;
-        }
-
-        seen.push(path.clone());
-
-        let Ok(text) = module_text(&path) else {
-            continue;
-        };
-
-        for (name, decl) in exported_attribute_decls(&text) {
-            if !out.iter().any(|(n, _)| *n == name) {
-                out.push((name, decl));
-            }
-        }
-    }
+    let modules = module_decls(source, from, aliases, exported_attribute_decls);
+    let bound: HashSet<String> = named_specs(source, from, aliases)
+        .into_iter()
+        .map(|(_, _, local)| local)
+        .chain(
+            star_locals(source, from, aliases)
+                .into_iter()
+                .map(|(_, l)| l),
+        )
+        .collect();
+    let mut out = keyed_by_local(source, from, aliases, &modules);
+    out.retain(|(key, _)| {
+        key.split_once('.')
+            .is_none_or(|(head, _)| bound.contains(head))
+    });
 
     out
 }
 
+/// Each star import of an Alloy module: the local, the namespaces the
+/// module declares, and every name it exports. The attribute index
+/// holds each attribute of the module and of those namespaces, so a
+/// path it lacks reports. See `EmitOptions::import_star_modules`.
+pub fn import_star_modules(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<(String, Vec<String>, Vec<String>)> {
+    star_locals(source, from, aliases)
+        .into_iter()
+        .filter(|(path, _)| is_alloy(path))
+        .map(|(path, local)| {
+            let text = module_text(&path).unwrap_or_default();
+            let mut namespaces = Vec::new();
+            attribute_walk(
+                &text,
+                &mut Vec::new(),
+                &mut namespaces,
+                &mut Vec::new(),
+                false,
+            );
+
+            (local, namespaces, exported_names(&text))
+        })
+        .collect()
+}
+
 /// The `export attribute` declarations of one source, for a file that
-/// imports it.
+/// imports it, with the public attributes of its exported namespaces.
 pub fn exported_attribute_decls(src: &str) -> Vec<(String, crate::desugar::AttrDecl)> {
     let mut out = Vec::new();
+    attribute_walk(src, &mut out, &mut Vec::new(), &mut Vec::new(), false);
 
-    {
-        let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
-            return out;
-        };
-        let toks = &parsed.lexed.toks;
+    out
+}
 
-        for stmt in &parsed.chunk.block.stmts {
-            let alloy_syntax::ast::Stmt::Attribute(a) = stmt else {
-                continue;
-            };
+/// Every attribute a file can name, by its path: its own declarations,
+/// exported or not, and the public members of its namespaces. The
+/// editor completes `@Ns.` from it.
+pub fn attribute_paths(src: &str) -> Vec<(String, crate::desugar::AttrDecl)> {
+    let mut out = Vec::new();
+    attribute_walk(src, &mut out, &mut Vec::new(), &mut Vec::new(), true);
 
-            if !a.exported {
-                continue;
+    out
+}
+
+/// The private attributes of the namespaces the modules a source
+/// imports export, by the path this file would write: `Kit.secret`
+/// through `import { Kit }`, `P.Kit.secret` through `import * as P`.
+/// A use of one reports that it is private, not that it is missing.
+pub fn import_private_attributes(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<String> {
+    let modules = module_decls(source, from, aliases, |text| {
+        let mut private = Vec::new();
+        attribute_walk(text, &mut Vec::new(), &mut Vec::new(), &mut private, false);
+
+        private.into_iter().map(|p| (p, ())).collect()
+    });
+    let bound: HashSet<String> = named_specs(source, from, aliases)
+        .into_iter()
+        .map(|(_, _, local)| local)
+        .chain(
+            star_locals(source, from, aliases)
+                .into_iter()
+                .map(|(_, l)| l),
+        )
+        .collect();
+
+    keyed_by_local(source, from, aliases, &modules)
+        .into_iter()
+        .map(|(key, ())| key)
+        .filter(|key| {
+            key.split_once('.')
+                .is_some_and(|(head, _)| bound.contains(head))
+        })
+        .collect()
+}
+
+/// The attributes a module exports, and the path of every namespace
+/// the walk reads them from. A top-level declaration counts when it is
+/// exported, or always under `every`, and a namespace member when it is
+/// not private. `private` gets the path of each private attribute of
+/// those namespaces.
+fn attribute_walk(
+    src: &str,
+    out: &mut Vec<(String, crate::desugar::AttrDecl)>,
+    namespaces: &mut Vec<String>,
+    private: &mut Vec<String>,
+    every: bool,
+) {
+    use alloy_syntax::ast::Stmt;
+
+    fn walk(
+        src: &str,
+        toks: &[alloy_syntax::lexer::Tok],
+        stmt: &Stmt,
+        prefix: &str,
+        out: &mut Vec<(String, crate::desugar::AttrDecl)>,
+        namespaces: &mut Vec<String>,
+        private: &mut Vec<String>,
+    ) {
+        match stmt {
+            Stmt::Attribute(a) => out.push((
+                format!("{prefix}{}", token_text(src, toks, a.name)),
+                attribute_decl(src, toks, a),
+            )),
+
+            Stmt::Namespace(ns) => {
+                let path = format!("{prefix}{}", token_text(src, toks, ns.name));
+
+                for m in &ns.members {
+                    match (m.is_private(src, toks), &m.stmt) {
+                        (false, stmt) => walk(
+                            src,
+                            toks,
+                            stmt,
+                            &format!("{path}."),
+                            out,
+                            namespaces,
+                            private,
+                        ),
+
+                        (true, Stmt::Attribute(a)) => {
+                            private.push(format!("{path}.{}", token_text(src, toks, a.name)))
+                        }
+
+                        (true, _) => {}
+                    }
+                }
+
+                namespaces.push(path);
             }
 
-            let targets = a
-                .targets
-                .iter()
-                .map(|t| token_text(src, toks, *t))
-                .collect();
-            let params = a
-                .params
-                .iter()
-                .map(|p| {
-                    (
-                        token_text(src, toks, p.name),
-                        p.ty.map(|t| span_text(src, toks, t).trim().to_string()),
-                    )
-                })
-                .collect();
-            let defaults = a
-                .params
-                .iter()
-                .map(|p| p.default.as_ref().map(|d| span_text(src, toks, d.span())))
-                .collect();
-            let requires = a
-                .requires
-                .iter()
-                .map(|c| require_of(src, toks, c))
-                .collect();
-            out.push((
-                token_text(src, toks, a.name),
-                crate::desugar::AttrDecl {
-                    targets,
-                    params,
-                    defaults,
-                    requires,
-                },
-            ));
+            _ => {}
         }
     }
 
-    out
+    let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
+        return;
+    };
+    let toks = &parsed.lexed.toks;
+
+    for stmt in &parsed.chunk.block.stmts {
+        let exported = match stmt {
+            Stmt::Attribute(a) => a.exported,
+
+            Stmt::Namespace(ns) => ns.exported,
+
+            _ => false,
+        };
+
+        if exported || every {
+            walk(src, toks, stmt, "", out, namespaces, private);
+        }
+    }
+}
+
+/// One `attribute` declaration as the check reads it.
+fn attribute_decl(
+    src: &str,
+    toks: &[alloy_syntax::lexer::Tok],
+    a: &alloy_syntax::ast::AttributeDecl,
+) -> crate::desugar::AttrDecl {
+    crate::desugar::AttrDecl {
+        targets: a
+            .targets
+            .iter()
+            .map(|t| token_text(src, toks, *t))
+            .collect(),
+        params: a
+            .params
+            .iter()
+            .map(|p| {
+                (
+                    token_text(src, toks, p.name),
+                    p.ty.map(|t| span_text(src, toks, t).trim().to_string()),
+                )
+            })
+            .collect(),
+        defaults: a
+            .params
+            .iter()
+            .map(|p| p.default.as_ref().map(|d| span_text(src, toks, d.span())))
+            .collect(),
+        requires: a
+            .requires
+            .iter()
+            .map(|c| require_of(src, toks, c))
+            .collect(),
+    }
 }
 
 /// One `requires` clause of an `attribute`, as the check reads it.
@@ -1846,6 +2299,65 @@ pub fn import_sources_for_file(path: &Path, source: &str) -> Vec<String> {
     out
 }
 
+/// The declarations of every module a file imports, under the names
+/// each module sends them out as. A barrel's `export { T } from` reads
+/// as the declaration of the module it names.
+pub fn import_summaries_for_file(
+    path: &Path,
+    source: &str,
+) -> Vec<crate::declarations::Declaration> {
+    let (from, aliases) = file_context(path);
+
+    module_decls(source, &from, &aliases, summary_pairs)
+        .into_iter()
+        .flat_map(|(_, decls)| decls)
+        .map(|(name, d)| crate::declarations::Declaration { name, ..d })
+        .collect()
+}
+
+/// The declarations the module at `path` sends out, its text given.
+/// A name a barrel passes on reads as the module it names declares it.
+pub fn sent_summaries(path: &Path, text: &str) -> Vec<crate::declarations::Declaration> {
+    let (_, aliases) = file_context(path);
+
+    sent_decls(path, text, &aliases, &|_, t| summary_pairs(t), BARREL_DEPTH)
+        .into_iter()
+        .map(|(name, d)| crate::declarations::Declaration { name, ..d })
+        .collect()
+}
+
+/// The text of the module that declares the name `spec` sends out as
+/// `name`, and the name that module declares it under. A barrel's
+/// `export { T } from` holds no declaration, so the walk follows it to
+/// the module it names.
+pub fn import_home(path: &Path, spec: &str, name: &str) -> Option<(String, String)> {
+    let (from, aliases) = file_context(path);
+    let mut target = resolve(spec, &from, &aliases)?;
+    let mut name = name.to_string();
+
+    for _ in 0..=BARREL_DEPTH {
+        let text = module_text(&target).ok()?;
+        let Some((own, _, spec)) = reexports(&text)
+            .into_iter()
+            .find(|(_, sent, _)| *sent == name)
+        else {
+            return Some((text, name));
+        };
+
+        target = resolve(&spec, &target, &aliases).filter(|t| *t != target)?;
+        name = own;
+    }
+
+    None
+}
+
+fn summary_pairs(text: &str) -> Vec<(String, crate::declarations::Declaration)> {
+    crate::declarations::summaries(text, false)
+        .into_iter()
+        .map(|d| (d.name.clone(), d))
+        .collect()
+}
+
 pub fn import_shapes_for_file(path: &Path, source: &str) -> Vec<crate::declarations::Shape> {
     let (from, aliases) = file_context(path);
 
@@ -1860,11 +2372,16 @@ impl crate::EmitOptions {
     pub fn imports(mut self, source: &str, from: &Path, aliases: &[(String, PathBuf)]) -> Self {
         self.import_types = import_types(source, from, aliases);
         self.import_enums = import_enums(source, from, aliases);
+        self.import_remotes = import_remotes(source, from, aliases);
         self.import_privates = import_privates(source, from, aliases);
+        self.import_callables = import_callables(source, from, aliases);
         self.import_struct_fields = import_struct_fields(source, from, aliases);
+        self.import_field_types = import_field_types(source, from, aliases);
         self.import_struct_ctors = import_struct_ctors(source, from, aliases);
         self.import_private_views = import_private_views(source, from, aliases);
         self.import_attributes = import_attributes(source, from, aliases);
+        self.import_private_attributes = import_private_attributes(source, from, aliases);
+        self.import_star_modules = import_star_modules(source, from, aliases);
         self.macros = import_macros(source, from, aliases);
         self.plain_modules = plain_modules(source, from, aliases);
         self.import_result_asyncs = import_result_asyncs(source, from, aliases);
@@ -1877,19 +2394,62 @@ impl crate::EmitOptions {
     /// `imports`, with the project read from the nearest `alloy.toml`.
     /// One file compiled on its own reads the structs of the modules it
     /// imports, so an imported struct clones, defaults, and crosses a
-    /// remote the way the project build writes it.
+    /// remote the way the project build writes it. The file itself
+    /// joins them, since its imports say what a name in it means.
     pub fn imports_for_file(self, path: &Path, source: &str) -> Self {
         let (from, aliases, config) = project_context(path);
-        let std_globals = config.map(|c| c.std.globals).unwrap_or_default();
-        let imported: Vec<PathBuf> = import_specs(source)
-            .iter()
-            .filter_map(|spec| resolve(spec, &from, &aliases))
-            .filter(|p| is_alloy(p))
-            .collect();
+        // The file and the chain of modules it imports: a type in a
+        // remote's layout reads through the imports of each one.
+        let mut files = vec![from.clone()];
+        let mut next = 0;
+
+        while let Some(file) = files.get(next).cloned() {
+            let text = match next {
+                0 => source.to_string(),
+
+                _ => module_text(&file).unwrap_or_default(),
+            };
+            next += 1;
+
+            for target in import_specs(&text)
+                .iter()
+                .filter_map(|spec| resolve(spec, &file, &aliases))
+            {
+                if is_alloy(&target) && !files.contains(&target) {
+                    files.push(target);
+                }
+            }
+        }
+
+        // The project's `in` folder keys each module as the project
+        // build does, so a key here names the table a build registers.
+        let base = match &config {
+            Some((root, c)) => root.join(&c.build.input),
+
+            None => from.parent().unwrap_or(&from).to_path_buf(),
+        };
+        let (shapes, wire_scopes) = crate::build::struct_shapes(&files, &base, &aliases);
+        let (mount_requires, mount_side) = match &config {
+            Some((root, c)) => {
+                let root = normalize(&std::env::current_dir().unwrap_or_default().join(root));
+                let rel = from.strip_prefix(&root).unwrap_or(&from);
+                let tree = crate::project::Tree::load(&root, c);
+
+                (
+                    crate::project::mount_requires(&tree, rel, source),
+                    crate::project::place_side(&tree, rel),
+                )
+            }
+
+            None => (Vec::new(), None),
+        };
 
         Self {
-            std_globals,
-            shapes: crate::build::struct_shapes(&imported),
+            mount_requires,
+            mount_side,
+            std_globals: config.map(|(_, c)| c.std.globals).unwrap_or_default(),
+            shapes,
+            wire_scopes,
             ..self.imports(source, &from, &aliases)
         }
     }
@@ -1926,22 +2486,25 @@ fn file_context(path: &Path) -> (PathBuf, Vec<(String, PathBuf)>) {
     (from, aliases)
 }
 
-/// `file_context`, with the configuration it read.
-fn project_context(path: &Path) -> (PathBuf, Vec<(String, PathBuf)>, Option<Config>) {
-    let dir = path.parent().unwrap_or(Path::new("."));
-    let config = Config::find(dir).and_then(|p| Config::load(&p).ok().map(|c| (p, c)));
-    let aliases = match &config {
-        Some((config_path, config)) => {
-            let root = config_path.parent().unwrap_or(dir);
+/// A project's configuration, with the folder it sits in.
+type Project = Option<(PathBuf, Config)>;
 
-            aliases(root, &crate::project::Tree::load(root, config))
-        }
+/// `file_context`, with the configuration it read and its root.
+fn project_context(path: &Path) -> (PathBuf, Vec<(String, PathBuf)>, Project) {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let config = Config::find(dir).and_then(|p| {
+        let root = p.parent().unwrap_or(dir).to_path_buf();
+
+        Config::load(&p).ok().map(|c| (root, c))
+    });
+    let aliases = match &config {
+        Some((root, config)) => aliases(root, &crate::project::Tree::load(root, config)),
 
         None => Vec::new(),
     };
     let from = normalize(&std::env::current_dir().unwrap_or_default().join(path));
 
-    (from, aliases, config.map(|(_, c)| c))
+    (from, aliases, config)
 }
 
 /// The specs of a source whose module has no export table: a `.luau`
@@ -2016,6 +2579,41 @@ pub fn import_that_exports(path: &Path, source: &str, name: &str) -> Option<Stri
                 .any(|n| n == name)
                 .then(|| spec.to_string())
         })
+}
+
+/// The spec of a module of the project that exports `name`, as the
+/// file at `path` would import it: where a name the file never imported
+/// lives. The first source in path order answers.
+pub fn module_that_exports(path: &Path, name: &str) -> Option<String> {
+    let config_path = Config::find(path.parent()?)?;
+    let config = Config::load(&config_path).ok()?;
+    let root = config_path.parent()?;
+    let abs = |p: &Path| normalize(&std::env::current_dir().unwrap_or_default().join(p));
+    let input = abs(&root.join(&config.build.input));
+    let from = abs(path);
+    let written = crate::build::written_dirs(root, &config);
+    let target = crate::build::sources(&input, &written)
+        .ok()?
+        .into_iter()
+        .map(|p| abs(&p))
+        .filter(|p| *p != from && !p.to_string_lossy().ends_with(".d.aly"))
+        .find(|p| {
+            std::fs::read_to_string(p)
+                .is_ok_and(|text| exported_names(&text).iter().any(|n| n == name))
+        })?;
+    let target = target.strip_prefix(&input).ok()?;
+    // An `init` file is the module of its folder, so the import names
+    // the folder. `"./obby/init"` names no module.
+    let module = match crate::build::is_init(target) {
+        true => target.parent()?.to_path_buf(),
+
+        false => target.with_extension(""),
+    };
+
+    Some(crate::build::relative_require(
+        from.strip_prefix(&input).ok()?,
+        &module,
+    ))
 }
 
 /// A type or interface that a module exports.
@@ -2119,16 +2717,18 @@ pub fn missing_import_message(message: &str, path: &Path, source: &str) -> Optio
 
     // `import type { Item }` binds the type alone; a derive or a call
     // reads the value, which the type import leaves out.
-    let as_type = source.lines().any(|line| {
-        let line = line.trim_start();
-        let words = |from: &str| {
-            from.split(|c: char| !(c.is_alphanumeric() || c == '_'))
-                .any(|w| w == name)
-        };
+    let as_type = alloy_syntax::scan::import_statements(source)
+        .iter()
+        .any(|s| {
+            let line = s.text.as_str();
+            let words = |from: &str| {
+                from.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .any(|w| w == name)
+            };
 
-        (line.starts_with("import type") && words(line.split(" from").next().unwrap_or("")))
-            || (line.starts_with("import") && line.contains(&format!("type {name}")))
-    });
+            (line.starts_with("import type") && words(line.split(" from").next().unwrap_or("")))
+                || (line.starts_with("import") && line.contains(&format!("type {name}")))
+        });
 
     if as_type {
         return Some(format!(
@@ -2170,6 +2770,10 @@ pub fn exported_names(source: &str) -> Vec<String> {
         definitions: true,
         ..Default::default()
     };
+    // A `.alx` holds markup, and the parse of the raw text can lose the
+    // exports below it.
+    let source = parsable(source);
+    let source: &str = &source;
     let Ok(parsed) = alloy_syntax::parse_lenient(source, options) else {
         return Vec::new();
     };
@@ -2227,7 +2831,7 @@ pub fn exports_default(source: &str) -> bool {
         definitions: true,
         ..Default::default()
     };
-    let Ok(parsed) = alloy_syntax::parse_lenient(source, options) else {
+    let Ok(parsed) = alloy_syntax::parse_lenient(&parsable(source), options) else {
         return false;
     };
 
@@ -2282,7 +2886,7 @@ pub fn exports_values(source: &str) -> bool {
         definitions: true,
         ..Default::default()
     };
-    let Ok(parsed) = alloy_syntax::parse_lenient(source, options) else {
+    let Ok(parsed) = alloy_syntax::parse_lenient(&parsable(source), options) else {
         return false;
     };
 
@@ -2458,8 +3062,9 @@ fn assigned_keys(source: &str, name: &str) -> Vec<String> {
 
 /// The message for `import X from "./m"` where `m` has no default. It
 /// names the export the author probably meant when one carries the
-/// binding's name.
-fn no_default_message(spec: &str, local: &str, names: &[String]) -> String {
+/// binding's name. `reexport` says the line is `export { default as X }
+/// from "./m"`, and the fix it names takes that form.
+fn no_default_message(spec: &str, local: &str, names: &[String], reexport: bool) -> String {
     // The name written here when the module exports it, else the one
     // name it exports.
     let meant = names
@@ -2468,8 +3073,16 @@ fn no_default_message(spec: &str, local: &str, names: &[String]) -> String {
         .or_else(|| names.first().filter(|_| names.len() == 1));
 
     if let Some(name) = meant {
+        let fix = match (reexport, name == local) {
+            (false, _) => format!("import {{ {name} }}"),
+
+            (true, true) => format!("export {{ {name} }}"),
+
+            (true, false) => format!("export {{ {name} as {local} }}"),
+        };
+
         return format!(
-            "\"{spec}\" has no default export; write `import {{ {name} }} from \"{spec}\"` \
+            "\"{spec}\" has no default export; write `{fix} from \"{spec}\"` \
              or add `export default` to it"
         );
     }
@@ -2545,9 +3158,11 @@ impl Surface {
                 .as_ref()
                 .is_none_or(|r| r.iter().any(|m| !m.contains("is a reserved word"))),
             names: exported_names(source),
+            // An import list names a top-level attribute alone.
             attributes: exported_attribute_decls(source)
                 .into_iter()
                 .map(|(name, _)| name)
+                .filter(|name| !name.contains('.'))
                 .collect(),
             has_default: exports_default(source),
             returns: returns && !both,
@@ -2605,17 +3220,103 @@ pub fn import_problems(
     let mut bound_types: Vec<String> = Vec::new();
 
     for stmt in &parsed.chunk.block.stmts {
+        // `export { X } from "./m"` reads `X` off the module as an
+        // import does, and a name it lacks is nil at run time.
+        if let Stmt::ExportList(list) = stmt
+            && let Some(path) = list.from
+        {
+            let spec = text(path).trim_matches(['"', '\'']).to_string();
+            let Some(target) = resolve(&spec, from, aliases).filter(|t| is_alloy(t)) else {
+                continue;
+            };
+            let surface = exports
+                .entry(target.clone())
+                .or_insert_with(|| {
+                    module_text(&target)
+                        .map(|t| Surface::of(&t))
+                        .unwrap_or_default()
+                })
+                .clone();
+
+            if surface.broken || surface.returns || surface.both {
+                continue;
+            }
+
+            for item in &list.specs {
+                let name = text(item.name).to_string();
+
+                // `default` reads the module's `export default`. A module
+                // that returns a value skipped the check above: that
+                // value is its default.
+                if name == "default" {
+                    if !surface.has_default && !surface.names.contains(&name) {
+                        let local = text(item.alias.unwrap_or(item.name));
+                        let (a, b) = range(item.name);
+                        out.push(ImportProblem {
+                            start: a,
+                            end: b,
+                            kind: "ImportError",
+                            message: no_default_message(&spec, local, &surface.names, true),
+                        });
+                    }
+
+                    continue;
+                }
+
+                if !surface.names.contains(&name) {
+                    let (a, b) = range(item.name);
+                    out.push(ImportProblem {
+                        start: a,
+                        end: b,
+                        kind: "ImportError",
+                        message: format!(
+                            "\"{spec}\" does not export `{name}`; it exports {}",
+                            and_list(&surface.names)
+                        ),
+                    });
+                }
+            }
+
+            continue;
+        }
+
         let Stmt::Import(node) = stmt else {
             continue;
         };
         let spec = text(node.path).trim_matches(['"', '\'']).to_string();
 
         // A `.json` or `.toml` import builds a module of its own; the
-        // build reports what is wrong with one. The compile reports a
-        // std import, which names no file.
-        if crate::data::Format::of(&spec).is_some()
-            || crate::std_names::module_of_spec(&spec).is_some()
-        {
+        // build reports what is wrong with one. A module of its stem
+        // beside it builds the same `.luau`, and the build refuses that.
+        if crate::data::Format::of(&spec).is_some() {
+            if let Some(target) = resolve(&spec, from, aliases)
+                && let Some(twin) = crate::data::module_beside(&target)
+            {
+                let data = match spec.starts_with('.') {
+                    true => normalize(&rel.parent().unwrap_or(Path::new("")).join(&spec)),
+
+                    false => PathBuf::from(&spec),
+                };
+                let shown = |p: PathBuf| p.to_string_lossy().replace('\\', "/");
+                let (a, b) = range(node.path);
+                out.push(ImportProblem {
+                    start: a,
+                    end: b,
+                    kind: "DataError",
+                    message: format!(
+                        "data file {} and {} both build {}; rename one",
+                        shown(data.clone()),
+                        shown(data.with_file_name(twin.file_name().unwrap_or_default())),
+                        shown(data.with_extension("luau"))
+                    ),
+                });
+            }
+
+            continue;
+        }
+
+        // The compile reports a std import, which names no file.
+        if crate::std_names::module_of_spec(&spec).is_some() {
             continue;
         }
 
@@ -2871,7 +3572,7 @@ pub fn import_problems(
                     start: a,
                     end: b,
                     kind: "ImportError",
-                    message: no_default_message(&spec, &local, &names),
+                    message: no_default_message(&spec, &local, &names, false),
                 });
             } else if bound_values.contains(&local) {
                 out.push(ImportProblem {
@@ -2932,10 +3633,11 @@ pub fn import_problems(
             // read: a name in braces takes one key of it. A name the
             // module exports as a type alone is the exception: it has
             // no value at run time, so the import binds the type and
-            // the table needs no key. The emit does the same.
+            // the table needs no key. The emit does the same. `default`
+            // is the returned value itself, as a bare import reads it.
             let missing_key = match (returns, &keys, type_only || item.is_type) {
                 (true, Some(keys), false) => {
-                    !keys.contains(&name) && !type_only_names.contains(&name)
+                    name != "default" && !keys.contains(&name) && !type_only_names.contains(&name)
                 }
 
                 _ => false,
@@ -3019,31 +3721,11 @@ pub fn import_problems(
 }
 
 /// The quoted path of every `import ... from "..."` and `export ... from "..."`.
-fn import_specs(source: &str) -> Vec<String> {
-    let mut out = Vec::new();
-
-    for line in source.lines() {
-        let trimmed = line.trim_start();
-
-        if !(trimmed.starts_with("import ") || trimmed.starts_with("export ")) {
-            continue;
-        }
-
-        let Some(at) = trimmed.find(" from ") else {
-            continue;
-        };
-        let after = trimmed[at + 6..].trim_start();
-        let Some(quote) = after.chars().next().filter(|c| *c == '"' || *c == '\'') else {
-            continue;
-        };
-        let body = &after[1..];
-
-        if let Some(end) = body.find(quote) {
-            out.push(body[..end].to_string());
-        }
-    }
-
-    out
+pub(crate) fn import_specs(source: &str) -> Vec<String> {
+    alloy_syntax::scan::import_statements(source)
+        .into_iter()
+        .map(|s| s.spec)
+        .collect()
 }
 
 /// A path with `.` and `..` folded, no file system access.
@@ -3151,6 +3833,16 @@ mod tests {
             None
         );
 
+        // A type import over several lines binds the type alone.
+        let source = "import type {\n    Item,\n} from \"./items\"\nprint(Item.new)\n";
+        let message = super::missing_import_message("Unknown global 'Item'", &main, source);
+        assert!(
+            message
+                .as_deref()
+                .is_some_and(|m| m.starts_with("`Item` is imported as a type")),
+            "{message:?}"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3199,6 +3891,227 @@ mod tests {
             import_problems(src, Path::new("src/main.aly"), &from, &[]).is_empty(),
             "{:?}",
             import_problems(src, Path::new("src/main.aly"), &from, &[])
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `cfg.json` beside `cfg.aly` builds the module the source builds.
+    /// The project build refused it, but the editor and a check of one
+    /// file said nothing.
+    #[test]
+    fn a_data_import_beside_a_module_of_its_stem_reports() {
+        let dir = std::env::temp_dir().join(format!("alloy-data-twin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+        std::fs::write(dir.join("src/cfg.json"), "{ \"a\": 1 }").expect("data");
+        let from = dir.join("src/cfg.aly");
+        let src = "import data from \"./cfg.json\"\nprint(data.a)\n";
+        std::fs::write(&from, src).expect("module");
+        let problems = import_problems(src, Path::new("src/cfg.aly"), &from, &[]);
+
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(problems[0].kind, "DataError");
+        assert_eq!(
+            problems[0].message,
+            "data file src/cfg.json and src/cfg.aly both build src/cfg.luau; rename one"
+        );
+        assert_eq!(
+            &src[problems[0].start as usize..problems[0].end as usize],
+            "\"./cfg.json\""
+        );
+
+        std::fs::rename(&from, dir.join("src/main.aly")).expect("rename");
+        assert!(
+            import_problems(
+                src,
+                Path::new("src/main.aly"),
+                &dir.join("src/main.aly"),
+                &[]
+            )
+            .is_empty()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A call of an imported function or method reads the count and the
+    /// `@deprecated` note the module declares. Luau's solver misses a
+    /// call with too many arguments.
+    #[test]
+    fn an_imported_function_carries_its_arity_and_deprecation() {
+        let dir = std::env::temp_dir().join(format!("alloy-callables-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+        std::fs::write(
+            dir.join("src/lib.aly"),
+            "export function one(x: number): number\n    return x\nend\n\nlocal function hidden(x: number): number\n    return x\nend\n\nexport struct Crate\n    v: number\nend\n\nimpl Crate\n    @deprecated(\"use get\")\n    function value(self): number\n        return self.v + hidden(1)\n    end\nend\n",
+        )
+        .expect("module");
+        let from = dir.join("src/main.aly");
+        let src = "import { one, Crate } from \"./lib\"\nimport * as M from \"./lib\"\n\nconst a: Crate = new Crate { v = 1 }\nprint(one(1, 2), M.one(1, 2), a:value(3), one(1), a:value())\n";
+        let options = crate::EmitOptions::default().imports(src, &from, &[]);
+        let out = crate::compile_with(src, &options).expect("compile");
+        let messages: Vec<&str> = out
+            .lints
+            .iter()
+            .filter(|l| matches!(l.name, "argument_count" | "deprecated_call"))
+            .map(|l| l.message.as_str())
+            .collect();
+
+        assert_eq!(
+            messages,
+            vec![
+                "`one` takes 1 argument; this call passes 2",
+                "`M.one` takes 1 argument; this call passes 2",
+                "`a:value` takes 0 arguments; this call passes 1",
+                "`Crate:value` is deprecated; use get",
+                "`Crate:value` is deprecated; use get",
+            ]
+        );
+        // A function the module keeps to itself is no key.
+        assert!(!options.import_callables.iter().any(|(k, _)| k == "hidden"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A name a barrel passes on with `export { T } from` reads as the
+    /// declaration of the module it names, under the name the barrel
+    /// sends out. The editor hover of an import through a barrel read
+    /// only the barrel, and found no enum there.
+    #[test]
+    fn a_barrel_passes_the_declaration_on() {
+        let dir = std::env::temp_dir().join(format!("alloy-barrel-decls-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+        std::fs::write(
+            dir.join("src/leaf.aly"),
+            "-- The tier of a thing.\nexport enum Tier\n    Low\n    High\nend\n",
+        )
+        .expect("module");
+        let barrel = "export { Tier, Tier as Rank } from \"./leaf\"\n";
+        std::fs::write(dir.join("src/barrel.aly"), barrel).expect("module");
+        let hover = |decls: &[crate::declarations::Declaration], name: &str| {
+            decls
+                .iter()
+                .find(|d| d.name == name)
+                .map(|d| d.hover.clone())
+        };
+
+        let sent = sent_summaries(&dir.join("src/barrel.aly"), barrel);
+        let tier = hover(&sent, "Tier").expect("the barrel sends Tier on");
+        assert!(tier.contains("export enum Tier"), "{tier}");
+        assert!(tier.contains("The tier of a thing."), "{tier}");
+        assert_eq!(hover(&sent, "Rank"), Some(tier.clone()));
+
+        let src = "import { Tier } from \"./barrel\"\nprint(Tier.Low)\n";
+        let imported = import_summaries_for_file(&dir.join("src/use.aly"), src);
+        assert_eq!(hover(&imported, "Tier"), Some(tier));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A struct a barrel passes on keeps its fields. The editor read the
+    /// barrel's shapes alone, found no `SaveState`, and left `cp.stag`
+    /// as the checker's "does not have key" with no field to suggest.
+    #[test]
+    fn a_barrel_passes_the_shape_on() {
+        let dir = std::env::temp_dir().join(format!("alloy-barrel-shape-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/obby")).expect("temp dir");
+        std::fs::write(
+            dir.join("src/obby/checkpoint.aly"),
+            "export struct SaveState\n    stage: number = 1\nend\n",
+        )
+        .expect("module");
+        std::fs::write(
+            dir.join("src/obby/init.aly"),
+            "export { SaveState } from \"./checkpoint\"\n",
+        )
+        .expect("module");
+        let src = "import { SaveState } from \"./obby\"\nprint(new SaveState {})\n";
+
+        let shapes = import_shapes_for_file(&dir.join("src/use.aly"), src);
+        assert!(
+            shapes.iter().any(|s| matches!(
+                s,
+                crate::declarations::Shape::Struct { name, fields, .. }
+                    if name == "SaveState" && fields.iter().any(|(f, _)| f == "stage")
+            )),
+            "{shapes:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `const` or a function a barrel passes on has its declaration in
+    /// the module the barrel names. The editor hover read the barrel's
+    /// text, found no `export const NAMES` there, and the child printed
+    /// `local NAMES: t2[]`.
+    #[test]
+    fn a_barrel_name_finds_the_module_that_declares_it() {
+        let dir = std::env::temp_dir().join(format!("alloy-barrel-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/lib")).expect("temp dir");
+        let leaf = "-- The names.\nexport const NAMES = [1]\n";
+        std::fs::write(dir.join("src/lib/m.aly"), leaf).expect("module");
+        std::fs::write(
+            dir.join("src/lib/init.aly"),
+            "export { NAMES, NAMES as ALL } from \"./m\"\n",
+        )
+        .expect("module");
+        let file = dir.join("src/use.aly");
+
+        let home = |name: &str| import_home(&file, "./lib", name);
+        assert_eq!(home("NAMES"), Some((leaf.to_string(), "NAMES".to_string())));
+        assert_eq!(home("ALL"), Some((leaf.to_string(), "NAMES".to_string())));
+        assert_eq!(
+            import_home(&file, "./lib/m", "NAMES"),
+            Some((leaf.to_string(), "NAMES".to_string()))
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A function in a namespace is `Ns.one` to a call, in its own file
+    /// and through a named import, a rename, or a star path. The count
+    /// read nothing for it, so `Ns.one(1, 2)` passed.
+    #[test]
+    fn a_namespace_function_carries_its_arity() {
+        let dir = std::env::temp_dir().join(format!("alloy-ns-callables-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+        std::fs::write(
+            dir.join("src/lib.aly"),
+            "export namespace Stations\n    function menu(f: number): number\n        return f\n    end\n    private function secret(a: number): number\n        return a\n    end\n    namespace Deep\n        function dig(): number\n            return secret(1)\n        end\n    end\nend\n",
+        )
+        .expect("module");
+        let from = dir.join("src/main.aly");
+        let src = "import { Stations } from \"./lib\"\nimport { Stations as St } from \"./lib\"\nimport * as M from \"./lib\"\n\nnamespace Ns\n    function one(a: number): number\n        return a\n    end\nend\n\nprint(Ns.one(1, 2), Stations.menu(1, 2), St.menu(1, 2), M.Stations.Deep.dig(1), Stations.menu(1))\n";
+        let options = crate::EmitOptions::default().imports(src, &from, &[]);
+        let out = crate::compile_with(src, &options).expect("compile");
+        let messages: Vec<&str> = out
+            .lints
+            .iter()
+            .filter(|l| l.name == "argument_count")
+            .map(|l| l.message.as_str())
+            .collect();
+
+        assert_eq!(
+            messages,
+            vec![
+                "`Ns.one` takes 1 argument; this call passes 2",
+                "`Stations.menu` takes 1 argument; this call passes 2",
+                "`St.menu` takes 1 argument; this call passes 2",
+                "`M.Stations.Deep.dig` takes 0 arguments; this call passes 1",
+            ]
+        );
+        // A private member is no key another module reads.
+        assert!(
+            !options
+                .import_callables
+                .iter()
+                .any(|(k, _)| k.ends_with("secret"))
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -3407,6 +4320,46 @@ mod tests {
             vec![
                 "this match is not exhaustive: `B.State` has no arm for `On`; add it or a `default` arm"
             ]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `impl Named for Mode` writes the trait's default `hi` onto the
+    /// enum, and `Mode.hi(m)` in a file that imports `Mode` said "`Mode`
+    /// has no variant `hi`". The callable index now holds the defaults:
+    /// of a trait the module declares, and of one it imports. A typo
+    /// still reports, through a rename, a star import and a barrel.
+    #[test]
+    fn a_trait_default_of_an_imported_enum_is_no_missing_variant() {
+        let dir = std::env::temp_dir().join(format!("alloy-trait-enum-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+        let files = [
+            (
+                "traits.aly",
+                "export trait Shout as\n    function yell(self): string\n        return \"HEY\"\n    end\nend\n",
+            ),
+            (
+                "mode.aly",
+                "import { Shout } from \"./traits\"\ntrait Named as\n    function hi(self): string\n        return \"hi\"\n    end\nend\nexport enum Mode as On, Off end\nimpl Named for Mode as\nend\nimpl Shout for Mode as\nend\n",
+            ),
+            ("barrel.aly", "export { Mode } from \"./mode\"\n"),
+        ];
+
+        for (name, text) in files {
+            std::fs::write(dir.join("src").join(name), text).expect("module");
+        }
+
+        let from = dir.join("src/main.aly");
+        let src = "import { Mode } from \"./mode\"\nimport { Mode as M } from \"./mode\"\nimport * as D from \"./mode\"\nimport { Mode as B } from \"./barrel\"\nprint(Mode.hi(Mode.On), M.yell(M.On), D.Mode.hi(D.Mode.On), B.yell(B.On))\nprint(M.hii)\n";
+        let options = crate::EmitOptions::default().imports(src, &from, &[]);
+        let out = crate::compile_with(src, &options).expect("compile");
+        let got: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+        assert_eq!(
+            got,
+            ["`M` has no variant `hii`; its variants are `On` and `Off`"]
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -3683,6 +4636,45 @@ mod tests {
         set_open_source(&module, None);
 
         assert_eq!(names(), vec!["Saved".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One file compiled on its own reads the chain of modules it
+    /// imports, so a remote's layout reaches a type two imports away,
+    /// and keys it as the project build does. It read the direct
+    /// imports alone, and the enum slot fell to `any`.
+    #[test]
+    fn one_file_reads_the_import_chain_of_a_layout() {
+        let dir = std::env::temp_dir().join(format!("alloy-wire-chain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/shared")).expect("temp dir");
+        let write = |rel: &str, text: &str| std::fs::write(dir.join(rel), text).expect("write");
+        write("alloy.toml", "[build]\nin = \"src\"\n");
+        write(
+            "src/shared/inner.aly",
+            "export struct Inner\n    n: number\nend\n",
+        );
+        write(
+            "src/shared/kind.aly",
+            "import { Inner } from \"./inner\"\nexport enum Kind\n    Big(Inner)\n    Small\nend\n",
+        );
+        write("src/other.aly", "struct Inner\n    label: string\nend\n");
+        let src = "import * as K from \"./shared/kind\"\nexport remote R1(k: K.Kind) from client\n";
+        write("src/net.aly", src);
+
+        let net = dir.join("src/net.aly");
+        let options = crate::EmitOptions {
+            file_name: net.to_string_lossy().into_owned(),
+            ..crate::EmitOptions::default().imports_for_file(&net, src)
+        };
+        let out = crate::compile_with(src, &options).expect("compiles");
+
+        assert!(
+            out.ship.contains("slots = { Big = { { fields = { { \"n\", \"f64\" } }, struct = \"shared/inner.aly:Inner\" } } }"),
+            "{}",
+            out.ship
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

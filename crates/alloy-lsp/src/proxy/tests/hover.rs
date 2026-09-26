@@ -1,5 +1,6 @@
 use super::super::hover::{
-    impl_self_type, intrinsic_code_home, member_doc, shadow_home, shadows_an_import, source_type,
+    child_cast, child_value_home, impl_self_type, intrinsic_code_home, member_doc, shadow_home,
+    shadows_an_import, source_type, star_module_hover,
 };
 use super::super::*;
 use super::support::one_file;
@@ -147,6 +148,23 @@ pub(crate) fn a_bound_on_a_local_reads_as_the_parameter() {
 
     assert_eq!(hints[0]["label"], json!(": T"));
     assert_eq!(hints[0]["textEdits"][0]["newText"], json!(": T"));
+}
+
+/// A hint that spells out how the runtime lays out an enum names
+/// nothing the source wrote. The hover names the type, and the gutter
+/// stays empty.
+#[test]
+fn a_hint_of_a_runtime_layout_goes() {
+    let src = "import { Err } from \"./errors\"\nconst short = missing(1)\nprint(short)\n";
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let mut hints = vec![json!({
+        "position": { "line": 1, "character": 11 },
+        "label": ": (\"Full\" | { _1: \"Junk\" | { @metatable Item, { _1: number } }, _2: number })?",
+    })];
+    clean_hints(&mut hints, doc);
+
+    assert!(hints.is_empty(), "{hints:?}");
 }
 #[test]
 pub(crate) fn a_union_keeps_the_order_the_source_wrote() {
@@ -339,6 +357,88 @@ pub(crate) fn a_module_import_hovers_as_the_module() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A star alias of an Alloy module hovers as a std star alias does:
+/// the import line and the names the module exports. The child printed
+/// the module's table, with its types as `t7`.
+#[test]
+fn a_star_alias_of_an_alloy_module_hovers_as_the_module() {
+    let dir = std::env::temp_dir().join(format!("alloy-star-hover-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(
+        dir.join("types.aly"),
+        "export struct Blade as damage: number end\nexport enum Hit\n    Miss\nend\nexport type Id = number\nlocal hidden = 1\n",
+    )
+    .expect("module");
+    std::fs::write(dir.join("lib.luau"), "return { a = 1 }\n").expect("module");
+    let src = "import * as Ty from \"./types\"\nimport * as L from \"./lib\"\nprint(Ty.Hit.Miss, x.Ty, L)\n";
+    let from = dir.join("main.aly");
+    let hover = |needle: &str, word: &str| {
+        let start = src.find(needle).expect("the name");
+
+        star_module_hover(src, word, start, Some(&from), &[])
+    };
+
+    assert_eq!(
+        hover("Ty from", "Ty").as_deref(),
+        Some("```alloy\nimport * as Ty from \"./types\"\n```\nExports: `Blade`, `Hit`, `Id`")
+    );
+    assert_eq!(hover("Ty.Hit", "Ty"), hover("Ty from", "Ty"));
+    // A member of another name, and a Luau module, keep the child's answer.
+    assert_eq!(hover("Ty, L", "Ty"), None);
+    assert_eq!(hover("L)", "L"), None);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `@self/x` names `x` in the folder of an `init` script, as the
+/// compiler reads it, so its star alias hovers as the module. Any other
+/// file has no `@self`, and the child answers there.
+#[test]
+fn a_star_alias_of_a_self_import_hovers_in_an_init_script() {
+    let dir = std::env::temp_dir().join(format!("alloy-self-hover-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(dir.join("a.aly"), "export const A = 1\n").expect("module");
+    let src = "import * as M from '@self/a'\n";
+    let hover = |file: &str| star_module_hover(src, "M", 12, Some(&dir.join(file)), &[]);
+
+    assert_eq!(
+        hover("init.server.aly").as_deref(),
+        Some("```alloy\nimport * as M from '@self/a'\n```\nExports: `A`")
+    );
+    assert_eq!(hover("main.aly"), None);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A name the module passes on with `export { T } from` is one of its
+/// exports. The list left it out. Its spec reads from the module's own
+/// folder.
+#[test]
+fn a_star_alias_lists_a_name_passed_on_with_export_from() {
+    let dir = std::env::temp_dir().join(format!("alloy-pass-hover-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("game")).expect("temp dir");
+    std::fs::write(
+        dir.join("game/scored.aly"),
+        "export type Tally = number\nexport trait Scored\n  function score(self): number\nend\n",
+    )
+    .expect("module");
+    std::fs::write(
+        dir.join("game/scoring.aly"),
+        "export { Scored, Tally as Count } from './scored'\nexport const BONUS = 2\n",
+    )
+    .expect("module");
+    let src = "import * as Game from './game/scoring'\n";
+
+    assert_eq!(
+        star_module_hover(src, "Game", 12, Some(&dir.join("main.aly")), &[]).as_deref(),
+        Some(
+            "```alloy\nimport * as Game from './game/scoring'\n```\nExports: `BONUS`, `Scored`, `Count`"
+        )
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
 /// A hover on a std member reads the member's own section, not the
 /// type's whole page. The receiver resolves from the source: an
 /// annotation, an initializer, or the type name itself.
@@ -418,6 +518,85 @@ pub(crate) fn a_case_binding_reads_its_payload() {
         Some("```alloy\namount: number\n```\nA field of `struct Boost`.".to_string())
     );
 }
+/// A name a nested pattern binds reads its type off the level that
+/// binds it: a variant's payload, with the arguments of a generic one
+/// from the payload above, a struct's field, and an `or` the union of
+/// its sides. The emit writes the path in the name's place, so the child
+/// answered for the text after the name.
+#[test]
+pub(crate) fn a_nested_case_binding_reads_its_payload() {
+    const SRC: &str = "struct Point as\n    x: number\n    y: number\nend\n\nenum Opt<T> as\n    Some(T)\n    Nil\nend\n\nenum Item as\n    Sword(number)\n    Wand(string)\nend\n\nenum Box as\n    It(Item)\n    O(Opt<Item>)\n    Pt(Point)\nend\n\nlocal function s(b: Box): string\n    return match b with\n        case Box.It(Item.Sword(d)) then d:upper()\n        case Box.O(Opt.Some(it)) then tostring(it)\n        case Box.Pt(Point { x = px }) then tostring(px)\n        case Box.It(Item.Sword(n) or Item.Wand(n)) then tostring(n)\n        default \"x\"\n    end\nend\nprint(s)\n";
+    let (st, uri) = one_file(SRC);
+    let doc = st.docs.get(uri).expect("doc");
+    let known = st.known_shapes_at(Some(uri));
+    let hover = |needle: &str, word: &str| {
+        let at = SRC.find(needle).expect("needle");
+
+        case_binding_text(doc, position_of(SRC, at).0 as usize, at, word, &known)
+    };
+
+    assert_eq!(
+        hover("d:upper", "d").as_deref(),
+        Some("```alloy\nd: number\n```\nA binding of `Item.Sword`.")
+    );
+    assert_eq!(
+        hover("it)\n", "it").as_deref(),
+        Some("```alloy\nit: Item\n```\nA binding of `Opt.Some`.")
+    );
+    assert_eq!(
+        hover("px)\n", "px").as_deref(),
+        Some("```alloy\npx: number\n```\nA binding of field `x` of `Point`.")
+    );
+    assert_eq!(
+        hover("n)\n", "n").as_deref(),
+        Some("```alloy\nn: number | string\n```\nA binding of `Item.Sword` or `Item.Wand`.")
+    );
+
+    // Go to definition lands on the name in the pattern.
+    let used = SRC.find("d:upper").expect("use");
+    let bound = SRC.find("Sword(d)").expect("pattern") + "Sword(".len();
+    assert_eq!(
+        case_binding_span(doc, position_of(SRC, used).0 as usize, "d", &known),
+        Some((bound, bound + 1))
+    );
+}
+
+/// A struct pattern that names its struct by a path, `N.P { x }`,
+/// reads the fields off the declaration of `P`.
+#[test]
+fn a_qualified_struct_pattern_types_its_fields() {
+    const SRC: &str = "namespace N\n    struct P\n        x: number\n    end\nend\n\nenum Box as\n    Pt(N.P)\n    Empty\nend\n\nlocal function s(b: Box): number\n    return match b with\n        case Box.Pt(N.P { x = px }) then px\n        default 0\n    end\nend\nprint(s)\n";
+    let (st, uri) = one_file(SRC);
+    let doc = st.docs.get(uri).expect("doc");
+    let known = st.known_shapes_at(Some(uri));
+    let at = SRC.find("px }").expect("needle");
+
+    assert_eq!(
+        case_binding_text(doc, position_of(SRC, at).0 as usize, at, "px", &known).as_deref(),
+        Some("```alloy\npx: number\n```\nA binding of field `x` of `N.P`.")
+    );
+}
+
+/// A call of a name a `case` pattern binds: the child names the call
+/// after the path the emit writes, `Item._1`. The label takes the name.
+#[test]
+fn a_call_of_a_case_binding_names_the_binding() {
+    let src = "enum Item as\n    Wand((n: number) -> string)\n    Nothing\nend\nlocal function f(i: Item): string\n    return match i with\n        case Item.Wand(w) then w(1)\n        default \"x\"\n    end\nend\nprint(f)\n";
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let mut result = json!({
+        "signatures": [{
+            "label": "function Item._1(n: number): string",
+            "parameters": [{ "label": [17, 26] }],
+        }],
+    });
+    restyle_signatures(&mut result, doc, 6, 34);
+    assert_eq!(
+        result["signatures"][0]["label"],
+        "function w(n: number): string"
+    );
+}
+
 /// The `default` arm binds nothing, so a name in it is not the payload
 /// a sibling `case` bound. The emit gives the arm no shadow, and the
 /// child answers with the outer local.
@@ -1179,6 +1358,34 @@ pub(crate) fn self_reads_as_the_impl_target_at_every_site() {
     assert_eq!(at("function Point.length(self: Point): number"), None);
 }
 
+/// `self` in a colon method on a table printed the checker's shape, or
+/// `unknown` for a class. It reads as the class for an instance, and as
+/// the table otherwise.
+#[test]
+pub(crate) fn self_on_a_table_method_reads_as_the_table() {
+    let src = concat!(
+        "local Klass = { }\n",
+        "Klass.__index = Klass\n",
+        "function Klass:m()\n",
+        "    print(self)\n",
+        "end\n",
+        "local Rebound = { }\n",
+        "Rebound = { other = 1 }\n",
+        "function Rebound:m()\n",
+        "    print(self)\n",
+        "end\n",
+    );
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let at = |line: u32| name_self_receiver("```alloy\nlocal self: t1\n```", doc, line, 10);
+
+    assert_eq!(at(3).as_deref(), Some("```alloy\nself: Klass\n```"));
+    assert_eq!(
+        at(8).as_deref(),
+        Some("```alloy\nself: typeof(Rebound)\n```")
+    );
+}
+
 /// A method of an `impl` of an imported struct hovered as `unknown`: the
 /// emit writes it on the table the module exports, and that table's type
 /// comes from the module, so the method is not in it.
@@ -1811,6 +2018,40 @@ fn a_key_of_a_const_table_hovers_as_its_entry() {
     assert_eq!(record_entry(printed, &["y".to_string()]), None);
 }
 
+/// `Hit.Swing` reads the variant, not the remote `Swing` the file
+/// imports: the member is the enum's. The bare name and a path through
+/// a star import still read the remote's declaration.
+#[test]
+pub(crate) fn a_variant_of_an_imported_name_is_no_import_hover() {
+    let src = "import { Swing } from \"./net\"\nimport * as Net from \"./net\"\nenum Hit as\n    Swing(number)\n    Miss\nend\nprint(Hit.Swing(1), Swing, Net.Swing)\n";
+    let mut state = super::support::files(&[("file:///f.aly", src)]);
+    state
+        .docs
+        .get_mut("file:///f.aly")
+        .expect("doc")
+        .import_sources = vec!["export remote Swing(n: number) from client\n".to_string()];
+    let server = Server::new(
+        Box::new(std::io::sink()),
+        Box::new(std::io::sink()),
+        Vec::new(),
+        None,
+    );
+    *server.state.lock().expect("state") = state;
+    let at = |needle: &str| {
+        let (line, character) = position_of(src, src.find(needle).expect("the name"));
+
+        json!({ "params": {
+            "textDocument": { "uri": "file:///f.aly" },
+            "position": { "line": line, "character": character },
+        } })
+    };
+    let hover = |needle: &str| server.source_binding_hover("file:///f.aly", &at(needle), &json!(1));
+
+    assert!(!hover("Swing(1)"));
+    assert!(hover("Swing, Net"));
+    assert!(hover("Swing)\n"));
+}
+
 /// A method's name belongs to the file that declares it. Another file
 /// may declare a struct of the same spelling, and that declaration is
 /// no answer for the method: the child types the method itself.
@@ -1881,6 +2122,90 @@ fn a_solver_variable_local_reads_its_first_value() {
     );
     // A print with no solver variable stays.
     assert_eq!(named("local b: HashMap<number, string>", 8, 6), None);
+}
+
+/// `local alias = Provider` printed a solver dump once the shape folds
+/// stopped matching a plain table by its keys. The value is the table
+/// itself, so it reads as `typeof(Provider)`.
+#[test]
+fn a_solver_variable_local_names_its_plain_table() {
+    const SRC: &str = "local Provider = { count = 0 }\nlocal alias = Provider\nlocal other = { count = 1 }\nprint(alias, other)\n";
+    let (st, uri) = one_file(SRC);
+    let doc = st.docs.get(uri).expect("doc");
+    let named = |printed: &str, line: u32, character: u32| {
+        crate::proxy::hover::name_solver_local(
+            &st,
+            &format!("```luau\n{printed}\n```"),
+            doc,
+            line,
+            character,
+        )
+    };
+    let shape = "t1 where t1 = {\n    count: number\n}";
+
+    assert_eq!(
+        named(&format!("local alias: {shape}"), 1, 7).as_deref(),
+        Some("```luau\nlocal alias: typeof(Provider)\n```")
+    );
+    // A use below reads the same binding.
+    assert_eq!(
+        named(&format!("local alias: {shape}"), 3, 7).as_deref(),
+        Some("```luau\nlocal alias: typeof(Provider)\n```")
+    );
+    // A table literal of its own is no other table.
+    assert_eq!(named(&format!("local other: {shape}"), 2, 7), None);
+}
+
+/// An instance a class of the `Klass.__index = Klass` shape builds
+/// printed a solver dump in the declaring file and a dangling `t1`
+/// across modules. It reads as `Klass`, the way `self` does in a method
+/// of the class.
+#[test]
+fn a_solver_variable_local_names_its_class() {
+    const SRC: &str = concat!(
+        "local Klass = {}\n",
+        "Klass.__index = Klass\n",
+        "function Klass.new(n: number)\n",
+        "    return setmetatable({ n = n }, Klass)\n",
+        "end\n",
+        "local Other = {}\n",
+        "function Other.new() return {} end\n",
+        "local k = Klass.new(1)\n",
+        "local tagged = Klass.new(1):tag()\n",
+        "local o = Other.new()\n",
+        "local i = Imported.new(2)\n",
+        "print(k, tagged, o, i)\n",
+    );
+    let (st, uri) = one_file(SRC);
+    let doc = st.docs.get(uri).expect("doc");
+    let named = |printed: &str, line: u32, character: u32| {
+        crate::proxy::hover::name_solver_local(
+            &st,
+            &format!("```luau\n{printed}\n```"),
+            doc,
+            line,
+            character,
+        )
+    };
+    let instance = "t1 where t1 = { @metatable t2,\n{\n    n: number\n} } ; t2 = {\n    __index: t2,\n    new: (n: number) -> t1\n}";
+
+    assert_eq!(
+        named(&format!("local k: {instance}"), 7, 6).as_deref(),
+        Some("```luau\nlocal k: Klass\n```")
+    );
+    // A use below reads the same `new`.
+    assert_eq!(
+        named(&format!("local k: {instance}"), 11, 6).as_deref(),
+        Some("```luau\nlocal k: Klass\n```")
+    );
+    assert_eq!(
+        named(&format!("local i: {instance}"), 10, 6).as_deref(),
+        Some("```luau\nlocal i: Imported\n```")
+    );
+    // A method after `new` returns what it returns, and a table of this
+    // file that is no class builds no instance of itself.
+    assert_eq!(named(&format!("local tagged: {instance}"), 8, 6), None);
+    assert_eq!(named(&format!("local o: {instance}"), 9, 6), None);
 }
 
 /// A callback's parameter belongs to the lambda around it, not to an
@@ -1962,7 +2287,7 @@ fn a_namespace_struct_value_hovers_by_its_name() {
     let (st, uri) = one_file(SRC);
     let doc = st.docs.get(uri).expect("doc");
     let printed = "t2 where t1 = {\n    new: (f: {\n        x: number\n    }) -> t2\n} ; t2 = { @metatable t1,\n{\n    x: number\n} }";
-    let named = |text: String| crate::proxy::hover::name_solver_struct(&text, doc);
+    let named = |text: String| crate::proxy::hover::name_solver_struct(&text, doc, &[]);
 
     assert_eq!(
         named(format!("```luau\nlocal p: {printed}\n```")).as_deref(),
@@ -1983,6 +2308,84 @@ fn a_namespace_struct_value_hovers_by_its_name() {
         .as_deref(),
         Some("```luau\nlocal ps: {Geo.Vec2}?\n```")
     );
+}
+
+/// A remote of `net` sends `{ Stack }`, and only `net` imports `Stack`.
+/// The client reaches the struct through `net`: the hover names it, and
+/// `s.` offers no `new`. An enum field of a struct binds its own
+/// variable ahead of the struct's in the clause.
+#[test]
+fn a_struct_a_remote_sends_is_named_through_its_module() {
+    let dir = std::env::temp_dir().join(format!("alloy-remote-struct-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n",
+    )
+    .expect("alloy.toml");
+    let sources = [
+        (
+            "items",
+            "export enum Kind\n    A\n    B(number)\nend\n\nexport struct Stack\n    count: number\nend\n\nexport struct Slot\n    count: number\n    kind: Kind\nend\n",
+        ),
+        (
+            "net",
+            "import { Stack, Slot } from \"./items\"\n\nexport remote Stacks(stacks: { Stack }, slot: Slot) from server\n",
+        ),
+        (
+            "client",
+            "import { Stacks } from \"./net\"\n\nStacks.on(function(stacks, slot)\n    for _, s in stacks do\n        print(s.count, slot)\n    end\nend)\n",
+        ),
+    ];
+    let mut st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        ..State::default()
+    };
+
+    for (name, source) in sources {
+        let path = dir.join(format!("src/{name}.aly"));
+        std::fs::write(&path, source).expect("source");
+        let uri = path_to_uri(&path);
+        let (options, jsx) = st.options_for(&uri);
+        st.docs
+            .insert(uri, Doc::new(source.to_string(), 1, &options, &jsx, None));
+    }
+
+    let client = path_to_uri(&dir.join("src/client.aly"));
+    let doc = st.docs.get(&client).expect("doc");
+    let imported = st.imported_docs(&client);
+    let decls: Vec<_> = imported
+        .iter()
+        .flat_map(|d| d.import_decls.iter())
+        .collect();
+    let shapes: Vec<_> = imported
+        .iter()
+        .flat_map(|d| d.import_shapes.iter())
+        .collect();
+    let stack = "```luau\nlocal s: t1 where t1 = { @metatable t2,\n{\n    count: number\n} } ; t2 = {\n    __index: t2,\n    new: (f: {\n        count: number\n    }) -> t1\n}\n```";
+    let slot = "```luau\nlocal slot: t3 where t1 = \"A\" | { @metatable t2,\n{\n    _1: number,\n    tag: \"B\"\n} } ; t2 = {\n    __index: t2\n} ; t3 = { @metatable t4,\n{\n    count: number,\n    kind: t1\n} } ; t4 = {\n    __index: t4\n}\n```";
+
+    assert_eq!(name_solver_struct(stack, doc, &[]), None);
+    assert_eq!(
+        name_solver_struct(stack, doc, &decls).as_deref(),
+        Some("```luau\nlocal s: Stack\n```")
+    );
+    assert_eq!(
+        name_solver_struct(slot, doc, &decls).as_deref(),
+        Some("```luau\nlocal slot: Slot\n```")
+    );
+
+    let mut result = json!([
+        { "label": "new", "kind": 3, "detail": "({ count: number }) -> Stack" },
+        { "label": "count", "kind": 5, "detail": "number" },
+    ]);
+    clean_completion(&mut result, doc, &shapes, 4, 16, true);
+    assert_eq!(result.as_array().map(Vec::len), Some(1), "{result}");
+    assert_eq!(result[0]["label"], "count");
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A file-level local and a parameter may share a name. Inside the
@@ -2045,4 +2448,391 @@ fn an_aliased_variant_hovers_as_its_enum_s() {
 
     let sent = String::from_utf8_lossy(&log.lock().expect("the log")).into_owned();
     assert!(sent.contains("Status.Active"), "{sent}");
+}
+
+/// A child lookup hovers with the type the check artifact gives it: the
+/// compiler's cast, or Luau's own signature for a plain call. A
+/// `wait_timeout` makes `=>` optional, and a guarded link inside a chain
+/// is a plain `FindFirstChild`.
+#[test]
+fn a_child_lookup_hovers_with_the_compiler_s_cast() {
+    let src = "const a = workspace=>Baseplate\nconst b = workspace->Baseplate\nconst c = workspace->Model->Part\nprint(a, b, c)\n";
+    let doc = |wait_timeout| {
+        let options = EmitOptions {
+            wait_timeout,
+            ..EmitOptions::default()
+        };
+
+        Doc::new(
+            src.to_string(),
+            1,
+            &options,
+            &alloy::luaux::Config::default(),
+            None,
+        )
+    };
+    let cast = |d: &Doc, needle: &str| child_cast(d, src.find(needle).expect("the lookup") + 2);
+    let timed = doc(Some(5.0));
+
+    assert_eq!(cast(&timed, "=>Baseplate").as_deref(), Some("Instance?"));
+    assert_eq!(cast(&timed, "->Baseplate").as_deref(), Some("Instance?"));
+    assert_eq!(cast(&timed, "->Model").as_deref(), Some("Instance?"));
+    assert_eq!(cast(&timed, "->Part").as_deref(), Some("Instance?"));
+    assert_eq!(cast(&doc(None), "=>Baseplate").as_deref(), Some("Instance"));
+
+    let hover = keywords::child_hover(src, src.find("=>Baseplate").unwrap() + 2, |at| {
+        child_cast(&timed, at)
+    })
+    .expect("a hover");
+    assert!(
+        hover
+            .2
+            .starts_with("```alloy\nworkspace=>Baseplate: Instance?\n```"),
+        "{}",
+        hover.2
+    );
+}
+
+/// A child name hovers with the type luau-lsp gives the name that holds
+/// the lookup: a temp of the chain, or a binding whose whole value it
+/// is. With no such name, the child types the expression at the `)`
+/// that closes the lookup: the call, or the group of its cast. A
+/// sourcemap then names the class, so the hover drops the note that no
+/// source names one.
+#[test]
+fn a_child_name_asks_the_name_that_holds_its_lookup() {
+    let doc = |src: &str, wait_timeout| {
+        let options = EmitOptions {
+            wait_timeout,
+            ..EmitOptions::default()
+        };
+
+        Doc::new(
+            src.to_string(),
+            1,
+            &options,
+            &alloy::luaux::Config::default(),
+            None,
+        )
+    };
+    let home_with = |src: &str, needle: &str, wait_timeout| {
+        let d = doc(src, wait_timeout);
+        let at = src.find(needle).expect("the lookup") + 2;
+
+        child_value_home(&d, at).map(|(l, c)| {
+            let text = d.shadow.lines().nth(l as usize).expect("the line");
+
+            text.chars().skip(c as usize).take(2).collect::<String>()
+        })
+    };
+    let home = |src: &str, needle: &str| home_with(src, needle, Some(5.0));
+    let chain = "const k = ReplicatedStorage=>Assets->Swords->Katana\nprint(k)\n";
+
+    // `_1` holds `=>Assets`, `_2` holds `->Swords`, and `k` the rest.
+    assert_eq!(home(chain, "=>Assets").as_deref(), Some("_1"));
+    assert_eq!(home(chain, "->Swords").as_deref(), Some("_2"));
+    assert_eq!(home(chain, "->Katana").as_deref(), Some("k "));
+
+    // A value that goes on past the lookup, an annotation, and a field
+    // after it hold something else. A temp the block assigns again
+    // types as the union of its values. Each one asks at the `)`.
+    for (src, needle, at) in [
+        ("const n = workspace->A == nil\nprint(n)\n", "->A", "))"),
+        ("const m: Model = workspace=>A\nprint(m)\n", "=>A", ")"),
+        ("const d = workspace=>A.Size\nprint(d)\n", "=>A", ") "),
+        (
+            "const a = workspace=>A->B\nconst b = workspace=>C->D\nprint(a, b)\n",
+            "=>A",
+            ") ",
+        ),
+    ] {
+        assert_eq!(home(src, needle).as_deref(), Some(at), "{src}");
+    }
+
+    // With no timeout a chain holds no temp: the middle link is the
+    // call that the next link calls a method of.
+    let untimed = "const b = ReplicatedStorage=>Shared=>net\nprint(b)\n";
+    assert_eq!(home_with(untimed, "=>Shared", None).as_deref(), Some("):"));
+
+    let at = chain.find("->Katana").unwrap() + 2;
+    let hover = child_lookup_hover(
+        "```luau\nlocal k: Tool?\n```",
+        &doc(chain, Some(5.0)),
+        0,
+        at as u32,
+    )
+    .expect("a hover")
+    .0;
+    assert!(
+        hover.starts_with("```alloy\nReplicatedStorage=>Assets->Swords->Katana: Tool?\n```"),
+        "{hover}"
+    );
+    assert!(!hover.contains("names no class"), "{hover}");
+
+    // At a `)` the child prints the type alone.
+    let at = untimed.find("=>Shared").unwrap() + 2;
+    let hover = child_lookup_hover("```luau\nFolder\n```", &doc(untimed, None), 0, at as u32)
+        .expect("a hover")
+        .0;
+    assert!(
+        hover.starts_with("```alloy\nReplicatedStorage=>Shared: Folder\n```"),
+        "{hover}"
+    );
+}
+
+/// A completion after `->` asks inside the string the lookup lowers to,
+/// where the child lists the children. With no name yet the name is the
+/// word the parser took from the next line, or the repair's placeholder.
+#[test]
+fn a_child_completion_lands_in_the_string_of_its_call() {
+    for (src, typed, written) in [
+        ("const up = script.Parent->sys\n", "->sys", "sys\""),
+        ("const up = script.Parent=>\nprint(up)\n", "=>", "print\""),
+        ("print(script.Parent->)\n", "->", "__alloy_hole\""),
+    ] {
+        let (st, uri) = one_file(src);
+        let doc = st.docs.get(uri).expect("doc");
+        let caret = src.find(typed).expect("the lookup") + typed.len();
+        let start = context::child_name_start(src, caret).expect("a child name");
+        let (_, text, name) = child_call(doc, start).unwrap_or_else(|| panic!("{src}"));
+
+        assert_eq!(start, src.find(typed).unwrap() + 2, "{src}");
+        assert!(text[name..].starts_with(written), "{src}: {text}");
+    }
+
+    // A function type holds no call.
+    let (st, uri) = one_file("local f: (number) -> string = tostring\n");
+    let doc = st.docs.get(uri).expect("doc");
+    assert!(child_call(doc, doc.source.find("string").unwrap()).is_none());
+}
+
+/// A hover shows the value the declaration wrote, and only where the
+/// binding still holds it: not under a `local` with no value, and not
+/// at a use once a later statement assigns it again. A `const` keeps
+/// its value.
+#[test]
+fn an_initializer_shows_only_while_the_binding_holds_it() {
+    let src = concat!(
+        "struct P as\n",
+        "    n: number\n",
+        "end\n",
+        "\n",
+        "local p = new P { n = 1 }\n",
+        "p = new P { n = 2 }\n",
+        "print(p)\n",
+        "local q: P\n",
+        "q = new P { n = 3 }\n",
+        "print(q)\n",
+        "const c = new P { n = 4 }\n",
+        "print(c)\n",
+        "local k = new P { n = 5 }\n",
+        "print(k)\n",
+        "local r = new P { n = 6 }\n",
+        "local x = 0; r = new P { n = 7 }\n",
+        "print(r)\n",
+        "local s = new P { n = 8 }\n",
+        "do local s = 0; s = 1 end\n",
+        "print(s)\n",
+    );
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let hover = |name: &str, line: u32| {
+        append_initializer(&format!("```alloy\nlocal {name}: P\n```"), doc, line, 6)
+    };
+
+    assert!(hover("p", 4).is_some_and(|t| t.contains("n = 1")));
+    assert_eq!(hover("p", 6), None);
+    assert_eq!(hover("q", 7), None);
+    assert_eq!(hover("q", 9), None);
+    assert!(hover("c", 11).is_some_and(|t| t.contains("n = 4")));
+    assert!(hover("k", 13).is_some_and(|t| t.contains("n = 5")));
+    // A write after a `;` counts, and a write to an inner `local` of the
+    // same name does not.
+    assert_eq!(hover("r", 16), None);
+    assert!(hover("s", 19).is_some_and(|t| t.contains("n = 8")));
+}
+
+/// Three functions each declare a `bag`. A hover reads the declaration
+/// in scope: its keyword, and its value or none.
+#[test]
+fn a_hover_reads_the_declaration_in_scope_of_a_shared_name() {
+    let src = concat!(
+        "struct Bag\n",
+        "    n: number = 0\n",
+        "end\n",
+        "local function fresh(): Bag\n",
+        "    const bag = new Bag {}\n",
+        "    return bag\n",
+        "end\n",
+        "local function other(): Bag\n",
+        "    const bag = fresh()\n",
+        "    return bag\n",
+        "end\n",
+        "local function third(): Bag\n",
+        "    local bag = new Bag { n = 5 }\n",
+        "    return bag\n",
+        "end\n",
+    );
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let hover = |line: u32, character: u32| {
+        let child = "```luau\nlocal bag: Bag\n```";
+        let text = restyle_hover(child, doc, line, character).unwrap_or(child.to_string());
+
+        append_initializer(&text, doc, line, character).unwrap_or(text)
+    };
+
+    assert_eq!(hover(5, 12), "```alloy\nconst bag: Bag = new Bag {}\n```");
+    assert_eq!(hover(8, 11), "```alloy\nconst bag: Bag\n```");
+    assert_eq!(hover(9, 12), "```alloy\nconst bag: Bag\n```");
+    assert_eq!(
+        hover(12, 11),
+        "```luau\nlocal bag: Bag = new Bag { n = 5 }\n```"
+    );
+    assert_eq!(
+        hover(13, 12),
+        "```luau\nlocal bag: Bag = new Bag { n = 5 }\n```"
+    );
+}
+
+/// A name a std import binds hovers as the std: a star alias as its
+/// module, an alias as the name it renames, and a type with no doc
+/// entry as the runtime declares it.
+#[test]
+fn a_std_import_name_hovers_as_the_std() {
+    let src = concat!(
+        "import * as serde from \"@alloy/std/serde\"\n",
+        "import { HashMap as Map } from \"@alloy/std/collections\"\n",
+        "import { SignalConnection } from \"@alloy/std/signal\"\n",
+        "local m = new Map<<string, number>>()\n",
+        "local c: SignalConnection? = nil\n",
+        "print(m, c, x.serde)\n",
+    );
+    let at = |needle: &str| {
+        let start = src.find(needle).expect("the name");
+        let word = needle
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .next()
+            .unwrap();
+
+        super::super::hover::std_import_hover(src, word, start)
+    };
+
+    let module = at("serde from").expect("the module");
+    assert!(
+        module.starts_with("```alloy\nimport * as serde from \"@alloy/std/serde\"\n```"),
+        "{module}"
+    );
+    assert!(
+        module.contains("`Serialize`") && module.contains("`@rename`"),
+        "{module}"
+    );
+    assert!(!module.contains("try_block"), "{module}");
+
+    let alias = at("Map<<").expect("the alias");
+    assert!(
+        alias.contains("The std `HashMap`, imported as `Map`"),
+        "{alias}"
+    );
+    assert!(alias.contains("Members: "), "{alias}");
+
+    let runtime = at("SignalConnection?").expect("the type");
+    assert!(runtime.contains("type SignalConnection = {"), "{runtime}");
+    assert!(runtime.contains("Disconnect"), "{runtime}");
+
+    // A member named like the alias is the member's.
+    assert_eq!(at("serde)"), None);
+}
+
+/// A name list over several lines reaches its module as a one-line
+/// list does: a remote, a const and a function the list names hover as
+/// their declarations, in the list and at a use. The path hovers as the
+/// whole statement.
+#[test]
+fn a_list_over_several_lines_hovers_as_its_declarations() {
+    use super::documents::{Recorder, alias_root};
+
+    let main = "import {\n    Hit, -- the hit\n    LIMIT,\n    helper,\n} from \"./net\"\n\nHit.fire(helper(LIMIT))\n";
+    let dir = alias_root(
+        "multi-line-hover",
+        &[
+            ("alloy.toml", "[build]\nin = \"src\"\nout = \"build\"\n"),
+            (
+                "src/net.aly",
+                "-- A hit.\nexport remote Hit(n: number) from client\n-- The cap.\nexport const LIMIT = 10\n-- Adds one.\nexport function helper(n: number): number\n    return n + 1\nend\n",
+            ),
+            ("src/main.aly", main),
+        ],
+    );
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let server = Server::new(
+        Box::new(std::io::sink()),
+        Box::new(Recorder(Arc::clone(&log))),
+        Vec::new(),
+        None,
+    );
+
+    {
+        let mut st = server.state.lock().expect("state");
+        st.root = Some(dir.clone());
+        st.mirror = dir.join("mirror");
+    }
+
+    let uri = path_to_uri(&dir.join("src/main.aly"));
+    server.open_doc(&uri, main.to_string(), 1, true);
+    let hover = |needle: &str, occurrence: usize| {
+        let at = main
+            .match_indices(needle)
+            .nth(occurrence)
+            .expect("the name")
+            .0;
+        let (line, character) = position_of(main, at);
+        let message = json!({ "params": {
+            "textDocument": { "uri": uri },
+            "position": { "line": line, "character": character },
+        } });
+        log.lock().expect("the log").clear();
+        server.source_binding_hover(&uri, &message, &json!(1));
+
+        String::from_utf8_lossy(&log.lock().expect("the log")).into_owned()
+    };
+
+    for occurrence in [0, 1] {
+        let sent = hover("Hit", occurrence);
+        assert!(
+            sent.contains("export remote Hit(n: number) from client"),
+            "{sent}"
+        );
+        let sent = hover("LIMIT", occurrence);
+        assert!(sent.contains("export const LIMIT: number"), "{sent}");
+        let sent = hover("helper", occurrence);
+        assert!(
+            sent.contains("export function helper(n: number): number"),
+            "{sent}"
+        );
+    }
+
+    // The path hovers as the statement, as the source lays it out.
+    let sent = hover("net", 0);
+    assert!(sent.contains(r"import {\n    Hit, -- the hit\n"), "{sent}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A hover on a method name binds the receiver's type arguments, as
+/// signature help does: `parts:take()` on a `Pool<Part>` reads
+/// `take(): Part`, not the `T` of the impl.
+#[test]
+fn a_method_hover_binds_the_receiver_arguments() {
+    let src = "struct Pool<T>\n  free: { T }\nend\n\nimpl Pool<T>\n  function take(self): T\n    return self.free[1]\n  end\nend\n\nlocal parts: Pool<Part> = new Pool { free = {} }\nprint(parts:take())\n";
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let printed = "```alloy\nfunction Pool:take(): T\n```";
+
+    assert_eq!(
+        bind_hover_receiver(printed, doc, 11, 13).as_deref(),
+        Some("```alloy\nfunction Pool:take(): Part\n```")
+    );
+    // Off a call there is no receiver to bind.
+    assert_eq!(bind_hover_receiver(printed, doc, 10, 6), None);
 }

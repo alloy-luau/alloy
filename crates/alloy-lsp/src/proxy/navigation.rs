@@ -222,9 +222,29 @@ impl Server {
         let Some(target) = target else {
             return false;
         };
-        let result = match target {
+        let mut result = match target {
             Target::Export(file, name) => match st.export_rename(&file, &name, &new_name) {
                 Some(edit) => edit,
+
+                // The child sees the import as generated text and edits
+                // this file alone, which leaves the import on the old
+                // name. No edit is better than half of one.
+                None if file.extension().is_some_and(|e| e == "aly" || e == "alx") => {
+                    drop(st);
+                    self.to_client(&json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {
+                            "code": -32803,
+                            "message": format!(
+                                "Cannot rename `{name}`: no module that `{}` reaches declares it",
+                                file.display()
+                            ),
+                        },
+                    }));
+
+                    return true;
+                }
 
                 None => return false,
             },
@@ -257,13 +277,15 @@ impl Server {
                 }
             }
 
-            Target::Method { trait_name, name } => {
-                match st.method_edits(&trait_name, &name, &new_name) {
-                    Some(edit) => edit,
+            Target::Method {
+                trait_name,
+                name,
+                home,
+            } => match st.method_edits(&trait_name, home.as_ref(), &name, &new_name) {
+                Some(edit) => edit,
 
-                    None => return false,
-                }
-            }
+                None => return false,
+            },
 
             // The child reads every value of the struct, typed by the
             // checker, so it answers from the field list the artifact
@@ -285,6 +307,9 @@ impl Server {
 
             Target::Nothing => json!({ "changes": {} }),
         };
+        // A prop's field renamed from its type: the tags that set it
+        // are keys of generated tables, and no walk above reads them.
+        st.mend_prop_attributes(uri, line, character, &mut result);
         drop(st);
         self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
 
@@ -357,13 +382,15 @@ impl Server {
                 }
             }
 
-            Target::Method { trait_name, name } => {
-                match st.method_edits(&trait_name, &name, &name) {
-                    Some(edit) => locations_of(&edit),
+            Target::Method {
+                trait_name,
+                name,
+                home,
+            } => match st.method_edits(&trait_name, home.as_ref(), &name, &name) {
+                Some(edit) => locations_of(&edit),
 
-                    None => return false,
-                }
-            }
+                None => return false,
+            },
 
             Target::Field { owner, name } => match shadow_field(doc, &owner, &name) {
                 Some(at) => {
@@ -382,6 +409,8 @@ impl Server {
 
             Target::Nothing => Vec::new(),
         };
+        let mut out = Value::Array(out);
+        st.mend_prop_attributes(uri, line, character, &mut out);
         drop(st);
         self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": out }));
 
@@ -1077,6 +1106,22 @@ impl State {
             return Some(Target::Export(self.entry_module(uri, &entry)?, entry.name));
         }
 
+        // `export { X as Y } from "./m"`: `X` is the name of `./m`, and
+        // `Y` is the name of this barrel. Without an alias the barrel's
+        // name is the one `./m` declares, and the rename walks from there.
+        let inside = |(s, e): (usize, usize)| (s..=e).contains(&offset);
+
+        if let Some(entry) = reexport_entries(source)
+            .into_iter()
+            .find(|e| inside(e.name_at) || e.alias_at.is_some_and(inside))
+        {
+            return match entry.alias_at.is_some() && inside(entry.name_at) {
+                true => Some(Target::Export(self.entry_module(uri, &entry)?, entry.name)),
+
+                false => Some(Target::Export(uri_to_path(uri)?, entry.bound)),
+            };
+        }
+
         if let Some(file) = uri_to_path(uri)
             && keywords::is_word_caret(source, offset)
         {
@@ -1096,7 +1141,7 @@ impl State {
 
             // A trait's method: the trait declares it once and every
             // `impl` writes it again, so the three places are one name.
-            if let Some(target) = self.method_target(doc, offset) {
+            if let Some(target) = self.method_target(uri, doc, offset) {
                 return Some(target);
             }
 
@@ -1222,7 +1267,7 @@ impl State {
     /// method of an `impl Trait for S`, or a call on a value whose
     /// struct has such an impl. `None` for anything else, and for a
     /// method of a plain `impl S`, which no trait declares.
-    fn method_target(&self, doc: &Doc, offset: usize) -> Option<Target> {
+    fn method_target(&self, uri: &str, doc: &Doc, offset: usize) -> Option<Target> {
         let (s, e) = keywords::word_range(&doc.source, offset);
         let name = doc.source[s..e].to_string();
         let here = trait_method_sites(&doc.source)
@@ -1232,10 +1277,16 @@ impl State {
         // A plain `impl S` declares the method on `S` itself, so the
         // struct stands where a trait would.
         if let Some(site) = here {
+            let home = self.site_home(uri, doc, &site);
+
             return site
                 .trait_name
                 .or(site.target)
-                .map(|trait_name| Target::Method { trait_name, name });
+                .map(|trait_name| Target::Method {
+                    trait_name,
+                    name,
+                    home,
+                });
         }
 
         // `b:hello()`: the struct the receiver holds says which trait,
@@ -1258,41 +1309,50 @@ impl State {
             dot.then(|| self.impl_target_at(doc, head.len() - 1))
                 .flatten()
         });
-        let mut traits: Vec<String> = Vec::new();
+        let mut traits: Vec<(String, Option<TraitHome>)> = Vec::new();
 
-        for site in self
-            .docs
-            .values()
-            .flat_map(|d| trait_method_sites(&d.source))
-        {
-            let Some(trait_name) = site.trait_name.clone().or(site.target.clone()) else {
-                continue;
-            };
-            let mine = match (&owner, &site.target) {
-                // The receiver is the trait itself, or a type parameter
-                // the trait bounds: `s: Speaker`, `<T: Speaker>`.
-                (Some(o), _) if *o == trait_name || bound_by(&doc.source, o, &trait_name) => true,
+        for (u, d) in &self.docs {
+            for site in trait_method_sites(&d.source) {
+                let Some(trait_name) = site.trait_name.clone().or(site.target.clone()) else {
+                    continue;
+                };
 
-                (Some(o), Some(t)) => o == t,
+                if site.name != name {
+                    continue;
+                }
 
-                // The trait's own body: an `impl Trait for S` with no
-                // method of its own still hands `S` the default.
-                (Some(o), None) => self.implements(o, &trait_name),
+                let home = self.site_home(u, d, &site);
+                let mine = match (&owner, &site.target) {
+                    // The receiver is the trait itself, or a type
+                    // parameter the trait bounds: `s: Speaker`,
+                    // `<T: Speaker>`.
+                    (Some(o), _) if *o == trait_name || bound_by(&doc.source, o, &trait_name) => {
+                        true
+                    }
 
-                // A receiver with no type of its own: one trait that
-                // declares the name is still the one the call means.
-                (None, _) => true,
-            };
+                    (Some(o), Some(t)) => o == t,
 
-            if site.name == name && mine && !traits.contains(&trait_name) {
-                traits.push(trait_name);
+                    // The trait's own body: an `impl Trait for S` with no
+                    // method of its own still hands `S` the default.
+                    (Some(o), None) => self.implements(o, &trait_name, home.as_ref()),
+
+                    // A receiver with no type of its own: one trait that
+                    // declares the name is still the one the call means.
+                    (None, _) => true,
+                };
+                let pair = (trait_name, home);
+
+                if mine && !traits.contains(&pair) {
+                    traits.push(pair);
+                }
             }
         }
 
         match traits.as_slice() {
-            [trait_name] => Some(Target::Method {
+            [(trait_name, home)] => Some(Target::Method {
                 trait_name: trait_name.clone(),
                 name,
+                home: home.clone(),
             }),
 
             // Two traits of one method name say nothing about which one
@@ -1322,11 +1382,134 @@ impl State {
 
     /// Whether any file writes `impl Trait for S`, with or without a
     /// method in the block.
-    fn implements(&self, owner: &str, trait_name: &str) -> bool {
+    fn implements(&self, owner: &str, trait_name: &str, home: Option<&TraitHome>) -> bool {
+        self.impl_targets(trait_name, home)
+            .iter()
+            .any(|t| t == owner)
+    }
+
+    /// Every type an `impl Trait for S` of the trait targets, with or
+    /// without a method in the block.
+    fn impl_targets(&self, trait_name: &str, home: Option<&TraitHome>) -> Vec<String> {
         self.docs
-            .values()
-            .flat_map(|d| &d.impl_blocks)
-            .any(|b| b.target == owner && b.trait_name.as_deref() == Some(trait_name))
+            .iter()
+            .flat_map(|(u, d)| d.impl_blocks.iter().map(move |b| (u, d, b)))
+            .filter(|(u, d, b)| {
+                b.trait_name
+                    .as_deref()
+                    .is_some_and(|t| self.is_trait(u, d, &path_head(t), b.start, trait_name, home))
+            })
+            .map(|(_, _, b)| b.target.clone())
+            .collect()
+    }
+
+    /// The trait a method site belongs to, where it lives. `None` for a
+    /// plain `impl S`, and for a trait no scope of the file reaches.
+    fn site_home(&self, uri: &str, doc: &Doc, site: &MethodSite) -> Option<TraitHome> {
+        self.trait_home(uri, doc, site.trait_path.as_deref()?, site.header)
+    }
+
+    /// Whether the trait `written` names at `at` is the one `home`
+    /// points at. Where either side has no home, the names decide.
+    fn is_trait(
+        &self,
+        uri: &str,
+        doc: &Doc,
+        written: &str,
+        at: usize,
+        trait_name: &str,
+        home: Option<&TraitHome>,
+    ) -> bool {
+        match (home, self.trait_home(uri, doc, written, at)) {
+            (Some(h), Some(here)) => *h == here,
+
+            _ => last_name(written) == trait_name,
+        }
+    }
+
+    /*
+    Where the trait a file writes as `written` at byte `at` lives.
+
+    The file's own trait answers first, read from the innermost
+    namespace around `at` outward: `trait Mover` inside `namespace
+    Motion` is `Motion.Mover`. Else an import binds the first name of
+    the path, and a barrel passes it on to the module that declares it.
+    Two files that each declare a `Mover` hold two traits.
+    */
+    fn trait_home(&self, uri: &str, doc: &Doc, written: &str, at: usize) -> Option<TraitHome> {
+        let mut scopes: Vec<&str> = doc
+            .namespace_ranges
+            .iter()
+            .filter(|n| n.start <= at && at < n.end)
+            .map(|n| n.path.as_str())
+            .collect();
+        scopes.sort_by_key(|p| std::cmp::Reverse(p.len()));
+        let own = scopes
+            .iter()
+            .map(|s| format!("{s}.{written}"))
+            .chain([written.to_string()])
+            .find(|path| doc.decls.iter().any(|d| d.name == *path));
+
+        if let Some(path) = own {
+            return Some((imports::module_path(&uri_to_path(uri)?), path));
+        }
+
+        let (head, rest) = match written.split_once('.') {
+            Some((h, r)) => (h, Some(r)),
+
+            None => (written, None),
+        };
+        let (spec, name, rest) = match import_entries(&doc.source)
+            .into_iter()
+            .find(|e| e.bound == head)
+        {
+            Some(e) => (e.spec, e.name, rest),
+
+            // `import * as Lib`: `Lib.Mover` names the module's export.
+            None => {
+                let (_, spec) = module_bindings(&doc.source)
+                    .into_iter()
+                    .find(|(alias, _)| alias == head)?;
+                let rest = rest?;
+                let (name, deeper) = match rest.split_once('.') {
+                    Some((n, d)) => (n, Some(d)),
+
+                    None => (rest, None),
+                };
+
+                (spec, name.to_string(), deeper)
+            }
+        };
+        let (module, own) = self.declaring_module(uri, &spec, &name)?;
+
+        Some(match rest {
+            Some(rest) => (module, format!("{own}.{rest}")),
+
+            None => (module, own),
+        })
+    }
+
+    /// The module that declares what `spec` sends out as `name`, read
+    /// from the file at `uri`, and the name it declares it under. A
+    /// barrel's `export { T } from` passes the walk on.
+    fn declaring_module(&self, uri: &str, spec: &str, name: &str) -> Option<TraitHome> {
+        let (mut uri, mut spec, mut name) = (uri.to_string(), spec.to_string(), name.to_string());
+
+        for _ in 0..4 {
+            let Some((text, file)) = self.module_source(&uri, &spec) else {
+                break;
+            };
+            let Some(entry) = reexport_entries(&text)
+                .into_iter()
+                .find(|e| e.bound == name)
+            else {
+                break;
+            };
+
+            (uri, spec, name) = (path_to_uri(&file), entry.spec, entry.name);
+        }
+
+        Some((imports::module_path(&self.resolve_spec(&uri, &spec)?), name))
     }
 
     /*
@@ -1348,38 +1531,39 @@ impl State {
     pub(crate) fn method_edits(
         &self,
         trait_name: &str,
+        home: Option<&TraitHome>,
         name: &str,
         new_name: &str,
     ) -> Option<Value> {
-        let sites: Vec<(String, MethodSite)> = self
+        // The trait of each site is settled once, here: two files may
+        // each declare a trait of this name.
+        let sites: Vec<(String, MethodSite, bool)> = self
             .docs
             .iter()
             .flat_map(|(u, d)| {
                 trait_method_sites(&d.source)
                     .into_iter()
-                    .map(move |site| (u.clone(), site))
+                    .filter(|s| s.name == name)
+                    .map(move |site| {
+                        let mine = match &site.trait_path {
+                            Some(t) => self.is_trait(u, d, t, site.header, trait_name, home),
+
+                            None => site.target.as_deref() == Some(trait_name),
+                        };
+
+                        (u.clone(), site, mine)
+                    })
             })
             .collect();
-        let mine = |s: &MethodSite| {
-            s.name == name
-                && match &s.trait_name {
-                    Some(t) => t == trait_name,
-
-                    None => s.target.as_deref() == Some(trait_name),
-                }
-        };
         // Every struct the trait reaches, an empty `impl Trait for S`
         // among them; the struct itself for a plain `impl S`.
         let targets: Vec<String> = self
-            .docs
-            .values()
-            .flat_map(|d| &d.impl_blocks)
-            .filter(|b| b.trait_name.as_deref() == Some(trait_name))
-            .map(|b| b.target.clone())
+            .impl_targets(trait_name, home)
+            .into_iter()
             .chain([trait_name.to_string()])
             .collect();
         // The name belongs to this trait alone: nothing else declares it.
-        let only_one = !sites.iter().any(|(_, s)| s.name == name && !mine(s));
+        let only_one = sites.iter().all(|(_, _, mine)| *mine);
         // The modules that declare a target. An importer names one by
         // its module path, the way the export rename finds importers.
         let declared: Vec<PathBuf> = self
@@ -1393,8 +1577,8 @@ impl State {
         for (u, d) in &self.docs {
             let mut edits: Vec<Value> = sites
                 .iter()
-                .filter(|(owner, s)| owner == u && mine(s))
-                .map(|(_, s)| text_edit(&d.source, s.at.0, s.at.1, new_name))
+                .filter(|(owner, _, mine)| owner == u && *mine)
+                .map(|(_, s, _)| text_edit(&d.source, s.at.0, s.at.1, new_name))
                 .collect();
             // `import { Gadget as Gizmo }`: this file writes the target
             // under its alias, so a receiver of that type holds it too.
@@ -2534,6 +2718,15 @@ impl State {
                 for (s, e) in name_uses(&d.source, name) {
                     edits.push(text_edit(&d.source, s, e, new_name));
                 }
+
+                // `export { X }` after the import sends the name on too.
+                if export_list_entries(&d.source)
+                    .iter()
+                    .any(|it| it.name == name && it.alias_at.is_none())
+                    && let Some(path) = uri_to_path(u)
+                {
+                    barrels.push((u.clone(), imports::module_path(&path)));
+                }
             }
 
             for (s, e) in member_uses(&d.source, &holders, name) {
@@ -2582,11 +2775,14 @@ impl State {
     /// only its own name changes; an entry without one changes with
     /// every use under it, and `M.name` under a module binding too.
     pub(crate) fn export_rename(&self, file: &Path, name: &str, new_name: &str) -> Option<Value> {
+        // An import of a barrel names the barrel, which declares
+        // nothing. The walk starts where the name is declared, and it
+        // comes back to the barrel and its importers from there.
+        let file = self.export_home(file, name)?;
+        let file = file.as_path();
         let module = imports::module_path(file);
         let module_uri = path_to_uri(file);
         let text = self.module_text(file)?;
-
-        export_span(&text, name)?;
 
         // A definitions file writes no import: an ambient declaration
         // stands in scope everywhere, so a type name it spells is this
@@ -2643,6 +2839,34 @@ impl State {
         (!changes.is_empty()).then(|| json!({ "changes": changes }))
     }
 
+    /// The module that declares a name `file` exports. A barrel sends
+    /// the name on with `export { X } from "./m"`, or with an import
+    /// and `export { X }`, and the walk follows it. A barrel that sends
+    /// the name out under an alias declares the alias itself.
+    fn export_home(&self, file: &Path, name: &str) -> Option<PathBuf> {
+        let mut file = file.to_path_buf();
+
+        for _ in 0..8 {
+            let text = self.module_text(&file)?;
+
+            if export_span(&text, name).is_some() {
+                return Some(file);
+            }
+
+            let passed = export_list_entries(&text)
+                .iter()
+                .any(|e| e.bound == name && e.alias_at.is_none());
+            let entry = reexport_entries(&text)
+                .into_iter()
+                .chain(import_entries(&text).into_iter().filter(|_| passed))
+                .find(|e| e.bound == name && e.alias_at.is_none())?;
+
+            file = self.spec_module(&path_to_uri(&file), &entry.spec)?;
+        }
+
+        None
+    }
+
     /// The definition a default import's binding names: the
     /// `export default` of the module the line reads. `import M from`
     /// and `import M, { a } from` both bind it.
@@ -2656,19 +2880,15 @@ impl State {
         source: &str,
         offset: usize,
     ) -> Option<Value> {
-        let line_start = source[..offset].rfind('\n').map_or(0, |i| i + 1);
-        let line_end = source[offset..]
-            .find('\n')
-            .map_or(source.len(), |i| offset + i);
-        let line = &source[line_start..line_end];
-
-        if !line.trim_start().starts_with("import ") {
-            return None;
-        }
-
+        // A list may run over several lines, so the statement and not
+        // the caret's line holds the path.
+        let statement = alloy_syntax::scan::import_statements(source)
+            .into_iter()
+            .find(|s| s.text.starts_with("import ") && (s.start..=s.end).contains(&offset))?;
+        let line = statement.text.as_str();
         let (start, end) = keywords::word_range(source, offset);
         let word = &source[start..end];
-        let at = start - line_start;
+        let at = start.checked_sub(statement.start)?;
         let head = &line[..at];
 
         // The binding sits between `import` and the braces or `from`;
@@ -2681,8 +2901,9 @@ impl State {
             return None;
         }
 
-        let spec = import_spec(line)?;
-        let file = imports::module_file(&imports::module_path(&self.resolve_spec(uri, &spec)?))?;
+        let file = imports::module_file(&imports::module_path(
+            &self.resolve_spec(uri, &statement.spec)?,
+        ))?;
         let is_alx = file.extension().is_some_and(|e| e == "alx");
 
         // `import * as M` binds the table the module hands back, not
@@ -2809,17 +3030,27 @@ pub(crate) fn impl_method_span(src: &str, name: &str) -> Option<(usize, usize)> 
     found
 }
 
+/// Where a trait lives: the module path that declares it, and its path
+/// there, `Motion.Mover`.
+pub(crate) type TraitHome = (PathBuf, String);
+
 /// One place a method of a trait is written: the trait's own body, or
 /// an `impl` block.
 pub(crate) struct MethodSite {
     /// The trait the site belongs to: the trait itself, or the one an
-    /// `impl Trait for S` meets. `None` for a plain `impl S`.
+    /// `impl Trait for S` meets. `None` for a plain `impl S`. A path
+    /// gives its last name, `Mover` for `impl Motion.Mover for S`.
     pub trait_name: Option<String>,
+    /// The trait as the header writes it: `Motion.Mover`.
+    pub trait_path: Option<String>,
     /// The type an `impl` targets. `None` inside a trait's own body.
     pub target: Option<String>,
     pub name: String,
     /// The byte range of the method's name.
     pub at: (usize, usize),
+    /// The byte offset of the block's header. The namespaces around it
+    /// say which trait the header names.
+    pub header: usize,
 }
 
 /// The leading name of a text: `Alpha<T> as` gives `Alpha`.
@@ -2830,13 +3061,30 @@ fn name_head(text: &str) -> String {
         .collect()
 }
 
+/// The leading path of a text: `Motion.Mover<T> for` gives
+/// `Motion.Mover`.
+fn path_head(text: &str) -> String {
+    let path: String = text
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
+        .collect();
+
+    path.trim_end_matches('.').to_string()
+}
+
+/// The last name of a path: `Mover` for `Motion.Mover`.
+fn last_name(path: &str) -> &str {
+    path.rsplit('.').next().unwrap_or(path)
+}
+
 /// Every method a source writes inside a `trait` body or an `impl`
 /// block. A trait and an impl both stand at the margin and both close
 /// with an `end` there, so the header above a line says which block it
 /// belongs to.
 pub(crate) fn trait_method_sites(src: &str) -> Vec<MethodSite> {
     let mut out = Vec::new();
-    let mut head: Option<(Option<String>, Option<String>)> = None;
+    let mut head: Option<(Option<String>, Option<String>, usize)> = None;
     let mut at = 0;
 
     for line in src.lines() {
@@ -2848,16 +3096,16 @@ pub(crate) fn trait_method_sites(src: &str) -> Vec<MethodSite> {
         let bare = bare.strip_prefix("global ").unwrap_or(bare);
 
         if let Some(rest) = bare.strip_prefix("trait ") {
-            head = Some((Some(name_head(rest)), None));
+            head = Some((Some(name_head(rest)), None, start));
 
             continue;
         }
 
         if let Some(rest) = bare.strip_prefix("impl ") {
             head = match rest.split_once(" for ") {
-                Some((t, s)) => Some((Some(name_head(t)), Some(name_head(s)))),
+                Some((t, s)) => Some((Some(path_head(t)), Some(name_head(s)), start)),
 
-                None => Some((None, Some(name_head(rest)))),
+                None => Some((None, Some(name_head(rest)), start)),
             };
 
             continue;
@@ -2869,7 +3117,7 @@ pub(crate) fn trait_method_sites(src: &str) -> Vec<MethodSite> {
             head = None;
         }
 
-        let Some((trait_name, target)) = &head else {
+        let Some((trait_path, target, header)) = &head else {
             continue;
         };
         let body = text
@@ -2889,10 +3137,12 @@ pub(crate) fn trait_method_sites(src: &str) -> Vec<MethodSite> {
         let offset = start + indent + (text.len() - body.len()) + "function ".len();
         let at = (offset, offset + name.len());
         out.push(MethodSite {
-            trait_name: trait_name.clone(),
+            trait_name: trait_path.as_deref().map(|p| last_name(p).to_string()),
+            trait_path: trait_path.clone(),
             target: target.clone(),
             name,
             at,
+            header: *header,
         });
     }
 
@@ -2900,7 +3150,9 @@ pub(crate) fn trait_method_sites(src: &str) -> Vec<MethodSite> {
 }
 
 /// Whether a source bounds the type parameter `ty` by `trait_name`:
-/// `<T: Trait>` or `<T: A & B>` anywhere in the file.
+/// `<T: Trait>` or `<T: A & B>` anywhere in the file. A trait in a
+/// namespace bounds by its path, `<T: Abilities.Ability>`, and the site
+/// scan names it `Ability`, so the last segment of a path counts.
 ///
 /// ponytail: a file-wide scan; two functions that bound one parameter
 /// name by different traits read as both. Walk the enclosing header
@@ -2916,7 +3168,11 @@ fn bound_by(src: &str, ty: &str, trait_name: &str) -> bool {
                 return false;
             };
 
-            name.trim() == ty && bounds.split(['&', '+']).any(|b| b.trim() == trait_name)
+            name.trim() == ty
+                && bounds
+                    .split(['&', '+'])
+                    .map(str::trim)
+                    .any(|b| b == trait_name || b.rsplit('.').next() == Some(trait_name))
         })
     })
 }
@@ -3263,12 +3519,24 @@ pub(crate) fn instance_segments(path: &str) -> Vec<String> {
 /// data file's first line; on an imported name, the line of that key.
 /// None when the line holds no data path or the file is not there.
 pub(crate) fn data_definition(source: &str, offset: usize, dir: &Path) -> Option<Value> {
-    let line_start = source[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    let line_end = source[offset..]
-        .find('\n')
-        .map(|i| offset + i)
-        .unwrap_or(source.len());
-    let line = &source[line_start..line_end];
+    // A name list may run over several lines, and the path sits on the
+    // last one; an import statement reads whole.
+    let statement = alloy_syntax::scan::import_statements(source)
+        .into_iter()
+        .find(|s| (s.start..=s.end).contains(&offset));
+    let (line_start, line) = match &statement {
+        Some(s) => (s.start, s.text.as_str()),
+
+        None => {
+            let line_start = source[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let line_end = source[offset..]
+                .find('\n')
+                .map(|i| offset + i)
+                .unwrap_or(source.len());
+
+            (line_start, &source[line_start..line_end])
+        }
+    };
     let at = offset - line_start;
     let reference = alloy::data::references(line).into_iter().next()?;
     let format = alloy::data::Format::of(&reference.path)?;
@@ -3361,24 +3629,34 @@ pub(crate) fn data_source_of(path: PathBuf) -> PathBuf {
 /// line binds. The emit writes the `local` as generated text, which
 /// carries no column of its own.
 pub(crate) fn service_definition(source: &str, uri: &str, word: &str) -> Option<Value> {
-    let mut at = 0usize;
-
-    for line in source.lines() {
-        if imports::service_bindings(line)
+    import_binding(source, uri, word, |text| {
+        imports::service_bindings(text)
             .iter()
             .any(|(local, _)| local == word)
-            && let Some(col) = whole_word(line, word)
-        {
-            let s = position_of(source, at + col);
-            let e = position_of(source, at + col + word.len());
+    })
+}
 
-            return Some(json!([{ "uri": uri, "range": range_value(s, e) }]));
-        }
+/// Where the first import statement that `binds` accepts writes `word`.
+/// A list may run over several lines, and the statement's text keeps
+/// the offsets of the source.
+fn import_binding(
+    source: &str,
+    uri: &str,
+    word: &str,
+    binds: impl Fn(&str) -> bool,
+) -> Option<Value> {
+    alloy_syntax::scan::import_statements(source)
+        .into_iter()
+        .filter(|s| s.text.starts_with("import ") && binds(&s.text))
+        .find_map(|s| {
+            let at = s.start + whole_word(&s.text, word)?;
+            let range = range_value(
+                position_of(source, at),
+                position_of(source, at + word.len()),
+            );
 
-        at += line.len() + 1;
-    }
-
-    None
+            Some(json!([{ "uri": uri, "range": range }]))
+        })
 }
 
 /// Where `import * as M` binds `M`, when the word is such a binding.
@@ -3392,22 +3670,7 @@ pub(crate) fn module_binding_definition(source: &str, uri: &str, word: &str) -> 
         return None;
     }
 
-    let mut at = 0usize;
-
-    for line in source.lines() {
-        if line.trim_start().starts_with("import ")
-            && let Some(col) = whole_word(line, word)
-        {
-            let s = position_of(source, at + col);
-            let e = position_of(source, at + col + word.len());
-
-            return Some(json!([{ "uri": uri, "range": range_value(s, e) }]));
-        }
-
-        at += line.len() + 1;
-    }
-
-    None
+    import_binding(source, uri, word, |_| true)
 }
 
 /// Where a word sits in a line on its own, not inside a longer name:
@@ -3552,8 +3815,13 @@ pub(crate) enum Target {
     /// value; the emit types the receiver as `any`, so the child ties
     /// none of the three together. A method of a plain `impl S` is
     /// the struct's: `trait_name` holds `S`, and the child finds no
-    /// site of it through a `:` call.
-    Method { trait_name: String, name: String },
+    /// site of it through a `:` call. `home` is where the trait lives,
+    /// so two traits that share a name stay apart.
+    Method {
+        trait_name: String,
+        name: String,
+        home: Option<TraitHome>,
+    },
     /// An `import` statement holds no other name either answer can
     /// reach: not the keywords, not the module path. The child would
     /// point at a byte the emit wrote.
@@ -3805,6 +4073,7 @@ pub(crate) fn export_span(src: &str, name: &str) -> Option<(usize, usize)> {
         .or_else(|| {
             export_list_entries(src)
                 .into_iter()
+                .chain(reexport_entries(src))
                 .find(|e| e.bound == name)
                 .and_then(|e| e.alias_at)
         })
@@ -3828,40 +4097,32 @@ fn declares_a_type(src: &str, name: &str) -> bool {
     })
 }
 
-/// The names an import line binds to a whole module, each with the spec
-/// of its line: `import * as M from "./m"` and nothing else. A member
-/// of such a module is written `M.name`, which a rename of `name` has
-/// to follow.
+/// The names an import statement binds to a whole module, each with
+/// the spec of its statement: `import * as M from "./m"` and nothing
+/// else. A member of such a module is written `M.name`, which a rename
+/// of `name` has to follow.
 ///
 /// A default binding is not one of these. `import M from "./m"` on a
 /// module with an export table binds the `default` field, so `M.name`
 /// there is a field of that value and not the module's export.
 pub(crate) fn module_bindings(src: &str) -> Vec<(String, String)> {
-    let mut out = Vec::new();
+    alloy_syntax::scan::import_statements(src)
+        .into_iter()
+        .filter_map(|s| Some((star_alias(&s.text)?.to_string(), s.spec)))
+        .collect()
+}
 
-    for line in src.lines() {
-        let t = line.trim_start();
-        let Some(rest) = t.strip_prefix("import ") else {
-            continue;
-        };
-        let Some(after_star) = rest.trim_start().strip_prefix('*') else {
-            continue;
-        };
-        let Some(name) = after_star.trim_start().strip_prefix("as ") else {
-            continue;
-        };
-        let Some(spec) = import_spec(line) else {
-            continue;
-        };
+/// The name `import * as M` binds, from the statement's text. The list
+/// of `import * as M, { a }` is not part of it.
+pub(crate) fn star_alias(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("import ")?.trim_start();
+    let name = rest.strip_prefix('*')?.trim_start().strip_prefix("as ")?;
+    let name = name.trim_start();
+    let end = name
+        .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .unwrap_or(name.len());
 
-        out.push((
-            name.split_whitespace().next().unwrap_or("").to_string(),
-            spec,
-        ));
-    }
-
-    out.retain(|(name, _)| !name.is_empty());
-    out
+    (end > 0).then(|| &name[..end])
 }
 
 /// Every `case` pattern that names a variant, as the byte range of the

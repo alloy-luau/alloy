@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use alloy::config::QuoteStyle;
 use alloy_syntax::ast::{DefaultExport, Expr, Stmt};
 use alloy_syntax::lexer::TokKind;
+use alloy_syntax::scan::{ImportStatement, import_statements};
 use serde_json::{Value, json};
 
 /// One name a file exports.
@@ -336,6 +337,19 @@ pub fn exports_of_file(path: &Path, depth: u8) -> Vec<Export> {
     let is_alx = path.extension().is_some_and(|e| e == "alx");
     let mut out = exports_of(&src, is_alx);
 
+    if depth < 3 {
+        for e in passed_on(&src, path, depth) {
+            push_export(
+                &mut out,
+                e.name,
+                e.is_type,
+                e.is_default,
+                e.is_attribute,
+                e.kind,
+            );
+        }
+    }
+
     if depth < 3
         && let Some(spec) = follow_of(&src)
         && let Some(dir) = path.parent()
@@ -348,6 +362,48 @@ pub fn exports_of_file(path: &Path, depth: u8) -> Vec<Export> {
             {
                 out.push(e);
             }
+        }
+    }
+
+    out
+}
+
+/// The names a file at `path` passes on with `export { a, T as U } from
+/// "./x"`, each as the module it names exports it. A name that module
+/// does not export, or a module out of reach, passes on as the list
+/// writes it.
+pub fn passed_on(src: &str, path: &Path, depth: u8) -> Vec<Export> {
+    let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let name_of = |span: alloy_syntax::ast::TokSpan| span.text(src, toks).to_string();
+    let mut out = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        let Stmt::ExportList(list) = stmt else {
+            continue;
+        };
+        let Some(at) = list.from else {
+            continue;
+        };
+        let spec = name_of(at);
+        let there = alloy::modules::resolve(spec.trim_matches(['"', '\'']), path, &[])
+            .map(|file| exports_of_file(&file, depth + 1))
+            .unwrap_or_default();
+
+        for s in &list.specs {
+            let name = name_of(s.name);
+            let found = there.iter().find(|e| e.name == name && !e.is_default);
+
+            push_export(
+                &mut out,
+                name_of(s.alias.unwrap_or(s.name)),
+                found.map_or(list.type_only || s.is_type, |e| e.is_type),
+                false,
+                found.is_some_and(|e| e.is_attribute),
+                found.map_or(6, |e| e.kind),
+            );
         }
     }
 
@@ -412,16 +468,13 @@ pub fn lexical(base_dir: &Path, spec: &str) -> PathBuf {
     out
 }
 
-/// The line an import lands on: after the last `import` line, else after
-/// the hot comments at the top.
 /// The names the file's `import` statements bind: `* as M`, a default
 /// `Name`, and each `{ a, b as c, type T }` entry, by its bound name.
 pub fn bound_names(src: &str) -> Vec<String> {
     let mut out = Vec::new();
 
-    for line in src.lines() {
-        let t = line.trim_start();
-        let Some(rest) = t.strip_prefix("import ") else {
+    for statement in import_statements(src) {
+        let Some(rest) = statement.text.strip_prefix("import ") else {
             continue;
         };
         let rest = rest.trim_start();
@@ -432,17 +485,21 @@ pub fn bound_names(src: &str) -> Vec<String> {
         // A std name under its own name is no binding of the file: the
         // emit reaches it through the runtime, and the std answers for
         // it. Under an alias it is one.
-        let std = rest
-            .rfind(" from ")
-            .map(|at| rest[at + " from ".len()..].trim().trim_matches(['"', '\'']))
-            .is_some_and(|spec| alloy::std_names::module_of_spec(spec).is_some());
+        let std = alloy::std_names::module_of_spec(&statement.spec).is_some();
 
         if let Some(after_star) = rest.strip_prefix('*') {
             if let Some(name) = after_star.trim_start().strip_prefix("as ") {
-                out.push(name.split_whitespace().next().unwrap_or("").to_string());
+                let name = name.trim_start();
+                let end = name
+                    .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .unwrap_or(name.len());
+                out.push(name[..end].to_string());
             }
 
-            continue;
+            // `import * as M, { a }` binds the list too.
+            if !rest.contains('{') {
+                continue;
+            }
         }
 
         if let Some(open) = rest.find('{') {
@@ -487,35 +544,31 @@ pub fn bound_names(src: &str) -> Vec<String> {
     out
 }
 
+/// The line an import lands on: under the last line of the last
+/// `import`, else under the hot comments at the top.
 pub fn import_insertion_line(src: &str) -> u32 {
-    let mut after_hot = 0u32;
-    let mut last_import = None;
+    let last_import = import_statements(src)
+        .into_iter()
+        .filter(|s| s.text.starts_with("import "))
+        .map(|s| s.line + src[s.start..s.end].matches('\n').count() + 1)
+        .max();
 
-    for (i, line) in src.lines().enumerate() {
-        let t = line.trim_start();
+    match last_import {
+        Some(line) => line as u32,
 
-        if t.starts_with("--!") && last_import.is_none() && after_hot == i as u32 {
-            after_hot = i as u32 + 1;
-        }
-
-        if t.starts_with("import ") {
-            last_import = Some(i as u32 + 1);
-        }
+        None => src
+            .lines()
+            .take_while(|l| l.trim_start().starts_with("--!"))
+            .count() as u32,
     }
-
-    last_import.unwrap_or(after_hot)
 }
 
-/// The `import { ... } from "spec"` line of a source: its index and its
-/// text. A list takes one more name; a default or a star import does
-/// not.
-fn list_import_line<'a>(src: &'a str, spec: &str) -> Option<(usize, &'a str)> {
-    src.lines().enumerate().find(|(_, line)| {
-        let t = line.trim();
-
-        t.starts_with("import {")
-            && (t.ends_with(&format!("from \"{spec}\"")) || t.ends_with(&format!("from '{spec}'")))
-    })
+/// The `import { ... } from "spec"` statement of a source. A list takes
+/// one more name; a default or a star import does not.
+fn list_import(src: &str, spec: &str) -> Option<ImportStatement> {
+    import_statements(src)
+        .into_iter()
+        .find(|s| s.spec == spec && s.text.starts_with("import {"))
 }
 
 /// The quote a generated string takes: the project's `[fmt]
@@ -541,16 +594,13 @@ pub fn quote_for(src: &str, style: QuoteStyle) -> char {
     }
 }
 
-/// The quote of the last import line of a file.
+/// The quote of the last import of a file.
 fn file_quote(src: &str) -> Option<char> {
-    src.lines()
-        .filter(|line| line.trim_start().starts_with("import "))
-        .filter_map(|line| {
-            line.rfind(" from ")
-                .and_then(|at| line[at + " from ".len()..].trim_start().chars().next())
-                .filter(|c| *c == '"' || *c == '\'')
-        })
-        .next_back()
+    import_statements(src)
+        .into_iter()
+        .filter(|s| s.text.starts_with("import "))
+        .filter_map(|s| src[..s.end].chars().next_back())
+        .rfind(|c| *c == '"' || *c == '\'')
 }
 
 /// The import line as the completion detail and the quick fix title
@@ -578,27 +628,10 @@ pub fn import_edit(src: &str, spec: &str, export: &Export, quote: char) -> Value
     };
 
     if !export.is_default
-        && let Some((i, line)) = list_import_line(src, spec)
-        && let (Some(open), Some(close)) = (line.find('{'), line.rfind('}'))
+        && let Some(list) = list_import(src, spec)
+        && let Some(edit) = list_edit(src, &list, &item)
     {
-        let mut names: Vec<String> = line[open + 1..close]
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        names.push(item);
-        let new_line = format!(
-            "{}{{ {} }}{}",
-            &line[..open],
-            names.join(", "),
-            &line[close + 1..]
-        );
-        let len = line.chars().map(|c| c.len_utf16() as u32).sum::<u32>();
-
-        return json!({
-            "range": { "start": { "line": i, "character": 0 }, "end": { "line": i, "character": len } },
-            "newText": new_line,
-        });
+        return edit;
     }
 
     let q = quote;
@@ -612,6 +645,83 @@ pub fn import_edit(src: &str, spec: &str, export: &Export, quote: char) -> Value
     json!({
         "range": { "start": { "line": line, "character": 0 }, "end": { "line": line, "character": 0 } },
         "newText": text,
+    })
+}
+
+/// The edit that adds `item` to the name list of `list`. A list on one
+/// line takes it at the end: `{ a, b }` gives `{ a, b, c }`. A list over
+/// several lines takes it on a line of its own under the last entry, with
+/// the indent of that entry and a trailing comma when that entry has one.
+fn list_edit(src: &str, list: &ImportStatement, item: &str) -> Option<Value> {
+    let edit = |a: usize, b: usize, text: String| {
+        let (sl, sc) = crate::doc::position_of(src, a);
+        let (el, ec) = crate::doc::position_of(src, b);
+
+        json!({
+            "range": { "start": { "line": sl, "character": sc }, "end": { "line": el, "character": ec } },
+            "newText": text,
+        })
+    };
+
+    if !src[list.start..list.end].contains('\n') {
+        let line_start = src[..list.start].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = src[list.end..]
+            .find('\n')
+            .map_or(src.len(), |i| list.end + i);
+        let line = &src[line_start..line_end];
+        let (open, close) = (line.find('{')?, line.rfind('}')?);
+        let mut names: Vec<&str> = line[open + 1..close]
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        names.push(item);
+        let new_line = format!(
+            "{}{{ {} }}{}",
+            &line[..open],
+            names.join(", "),
+            &line[close + 1..]
+        );
+
+        return Some(edit(line_start, line_end, new_line));
+    }
+
+    // `text` holds each comment as spaces, so the braces and the last
+    // entry are found past any comment.
+    let open = list.start + list.text.find('{')?;
+    let close = list.start + list.text.rfind('}')?;
+    let last = list.start + list.text[..close - list.start].trim_end().len();
+    let comma = src[..last].ends_with(',');
+    let close_line = src[..close].rfind('\n').map_or(0, |i| i + 1);
+
+    if last == open + 1 {
+        return Some(edit(last, last, format!(" {item}")));
+    }
+
+    // `}` shares a line with an entry: the name joins that line.
+    if !src[close_line..close].trim().is_empty() {
+        return Some(match comma {
+            true => edit(last, last, format!(" {item},")),
+
+            false => edit(last, last, format!(", {item}")),
+        });
+    }
+
+    let entry_line = src[..last].rfind('\n').map_or(0, |i| i + 1);
+    let indent: String = src[entry_line..]
+        .chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .collect();
+
+    Some(match comma {
+        true => edit(close_line, close_line, format!("{indent}{item},\n")),
+
+        // The comment after the last entry stays on its line.
+        false => edit(
+            last,
+            close_line,
+            format!(",{}{indent}{item}\n", &src[last..close_line]),
+        ),
     })
 }
 
@@ -631,25 +741,11 @@ pub fn namespace_import_edit(src: &str, spec: &str, name: &str, quote: char) -> 
 /// The specs a file already imports, so an auto-import never offers a
 /// module the file reads.
 pub fn imported_specs(src: &str) -> HashSet<String> {
-    let mut out = HashSet::new();
-
-    for line in src.lines() {
-        let t = line.trim();
-
-        if !t.starts_with("import ") {
-            continue;
-        }
-
-        if let Some(at) = t.rfind("from ") {
-            let spec = t[at + "from ".len()..].trim();
-
-            if spec.len() >= 2 && spec.starts_with(['"', '\'']) {
-                out.insert(spec[1..spec.len() - 1].to_string());
-            }
-        }
-    }
-
-    out
+    import_statements(src)
+        .into_iter()
+        .filter(|s| s.text.starts_with("import "))
+        .map(|s| s.spec)
+        .collect()
 }
 
 /// The spec that names `target` from `from_dir`: the shortest alias
@@ -725,7 +821,7 @@ pub fn auto_import_candidates<'a>(
             continue;
         };
 
-        if taken.contains(&spec) && list_import_line(src, &spec).is_none() {
+        if taken.contains(&spec) && list_import(src, &spec).is_none() {
             continue;
         }
 
@@ -854,7 +950,14 @@ pub fn rename_edits(
                     continue;
                 }
 
-                let target = map_path(&lexical(dir, tail), renames);
+                let old_target = lexical(dir, tail);
+                let target = map_path(&old_target, renames);
+
+                // A spec of a file that stays keeps its text, a `..`
+                // in it too.
+                if target == old_target {
+                    continue;
+                }
 
                 match target.strip_prefix(dir) {
                     Ok(rest) if rest.as_os_str().is_empty() => format!("@{name}"),
@@ -865,7 +968,14 @@ pub fn rename_edits(
                         .unwrap_or_else(|| relative_spec(new_dir, &target)),
                 }
             } else if spec.starts_with("./") || spec.starts_with("../") {
-                relative_spec(new_dir, &map_path(&lexical(old_dir, spec), renames))
+                let old_target = lexical(old_dir, spec);
+                let target = map_path(&old_target, renames);
+
+                if target == old_target && new_dir == old_dir {
+                    continue;
+                }
+
+                relative_spec(new_dir, &target)
             } else {
                 continue;
             };
@@ -893,8 +1003,9 @@ pub fn rename_edits(
 
 // --- the Roblox services -------------------------------------------------
 
-/// The `(local, service)` pairs one import line binds, when its path
-/// names services. `import { RunService as Run } from "@game"` binds
+/// The `(local, service)` pairs one import statement binds, when its
+/// path names services. `line` is the statement on one line, as
+/// `ImportStatement::text` holds it. `import { RunService as Run } from "@game"` binds
 /// `Run` to `RunService`; `import P from "@game/Players"` binds `P` to
 /// `Players`.
 pub fn service_bindings(line: &str) -> Vec<(String, String)> {
@@ -961,8 +1072,9 @@ pub fn service_bindings(line: &str) -> Vec<(String, String)> {
 /// Every service a file already imports, so no auto-import offers one
 /// twice and neither form is added beside the other.
 pub fn imported_services(src: &str) -> HashSet<String> {
-    src.lines()
-        .flat_map(service_bindings)
+    import_statements(src)
+        .iter()
+        .flat_map(|s| service_bindings(&s.text))
         .map(|(_, service)| service)
         .collect()
 }
@@ -973,17 +1085,9 @@ pub fn imported_services(src: &str) -> HashSet<String> {
 /// spelling keeps it, so the edit adds no second list beside the one
 /// the file has.
 pub fn service_import_edit(src: &str, service: &str, quote: char) -> Value {
-    let list_spec = src.lines().find_map(|line| {
-        let t = line.trim();
-
-        if !t.starts_with("import {") {
-            return None;
-        }
-
-        ["@game", "game"].into_iter().find(|spec| {
-            t.ends_with(&format!("from \"{spec}\"")) || t.ends_with(&format!("from '{spec}'"))
-        })
-    });
+    let list_spec = ["@game", "game"]
+        .into_iter()
+        .find(|spec| list_import(src, spec).is_some());
 
     if let Some(spec) = list_spec {
         return import_edit(
@@ -1031,6 +1135,32 @@ mod tests {
         assert_eq!(
             bound_names(src),
             ["Signal", "Panel", "add", "sum", "Item", "Patch"]
+        );
+    }
+
+    /// A list over several lines is one statement to every scan: the
+    /// names it binds, the specs and services the file reads, and the
+    /// line a new import lands on, under the list and not inside it.
+    #[test]
+    fn a_list_over_several_lines_reads_as_one_statement() {
+        let src = "import * as M, {\n    add, -- the sum\n    total as sum,\n} from \"./inv\"\nimport {\n    Players,\n} from \"@game\"\n-- import { gone } from \"./gone\"\nlocal x = 1\n";
+
+        assert_eq!(bound_names(src), ["M", "add", "sum", "Players"]);
+        assert_eq!(
+            imported_specs(src),
+            HashSet::from(["./inv".to_string(), "@game".to_string()])
+        );
+        assert_eq!(
+            imported_services(src),
+            HashSet::from(["Players".to_string()])
+        );
+        assert_eq!(import_insertion_line(src), 7);
+        assert_eq!(
+            service_import_edit(src, "RunService", '"'),
+            json!({
+                "range": { "start": { "line": 6, "character": 0 }, "end": { "line": 6, "character": 0 } },
+                "newText": "    RunService,\n",
+            })
         );
     }
 
@@ -1244,6 +1374,35 @@ namespace Inner as end
             "{edits:?}"
         );
         assert_eq!(edits.len(), 2);
+    }
+
+    /// A move of `Placement.aly` also rewrote the unrelated
+    /// `../../shared/util/../util/Path` of an importer to its short
+    /// form. Only a spec whose target moves changes.
+    #[test]
+    fn a_rename_leaves_a_spec_of_a_file_that_stays() {
+        let docs = vec![(
+            "file:///w/src/client/ui/Round.aly".to_string(),
+            PathBuf::from("/w/src/client/ui/Round.aly"),
+            concat!(
+                "import Placement from '@shared/Placement'\n",
+                "import { make_path } from '../../shared/util/../util/Path'\n",
+                "import { a } from '@shared/util/../util/Path'\n",
+            )
+            .to_string(),
+        )];
+        let aliases = |_: &Path| vec![("shared".to_string(), PathBuf::from("/w/src/shared"))];
+        let renames = vec![Rename {
+            old: PathBuf::from("/w/src/shared/Placement.aly"),
+            new: PathBuf::from("/w/src/shared/game/Placement.aly"),
+        }];
+        let edits = rename_edits(&docs, &renames, &aliases);
+        let texts: Vec<&str> = edits["file:///w/src/client/ui/Round.aly"]
+            .iter()
+            .filter_map(|e| e["newText"].as_str())
+            .collect();
+
+        assert_eq!(texts, ["@shared/game/Placement"]);
     }
 
     /// A spec through a `.luaurc` alias keeps the alias while the target

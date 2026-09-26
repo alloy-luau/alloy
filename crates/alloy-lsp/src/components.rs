@@ -14,6 +14,7 @@ use alloy_syntax::ast::{
     DefaultExport, Expr, ImportKind, ImportSpec, NamespaceDecl, Stmt, TableField, TokSpan,
 };
 use alloy_syntax::lexer::Tok;
+use std::path::{Path, PathBuf};
 
 /// The LSP completion kinds this module hands out.
 const FUNCTION: u64 = 3;
@@ -86,9 +87,11 @@ impl Member {
     }
 }
 
-/// Reads the source of the module an import spec names. The proxy
-/// answers from an open document first, then from disk.
-pub type Load<'a> = dyn Fn(&str) -> Option<String> + 'a;
+/// Reads the source of the module an import spec names, with the file
+/// that holds it. The proxy answers from an open document first, then
+/// from disk. A spec can also be an absolute path: the walk writes one
+/// for a relative spec inside another module. See `nested_spec`.
+pub type Load<'a> = dyn Fn(&str) -> Option<(String, PathBuf)> + 'a;
 
 /// Whether a module spec names a module that returns one value. A
 /// default import of one binds `require(...)` whole, so `M.T` reads a
@@ -160,7 +163,7 @@ pub fn type_prefixes(src: &str, load: &Load, plain: &Plain) -> Vec<Member> {
             continue;
         }
 
-        if walk(&src, &[name.as_str()], &read, 0, Want::Types).is_empty() {
+        if walk(&src, &[name.as_str()], &read, 0, Want::Types, None).is_empty() {
             continue;
         }
 
@@ -207,7 +210,7 @@ fn prefix_bindings(src: &str, toks: &[Tok], kind: &ImportKind) -> Vec<(String, &
 }
 
 fn reach(src: &str, path: &[&str], read: &Reader, want: Want) -> Vec<Member> {
-    let mut out = walk(&readable(src), path, read, 0, want);
+    let mut out = walk(&readable(src), path, read, 0, want, None);
 
     out.sort_by_key(Member::sort_key);
     out.dedup_by(|a, b| a.name == b.name);
@@ -389,8 +392,37 @@ fn import_bindings(src: &str, toks: &[Tok], kind: &ImportKind) -> Vec<(String, &
     }
 }
 
-/// The members of the name at the head of `path`, in one file.
-fn walk(src: &str, path: &[&str], read: &Reader, depth: u8, want: Want) -> Vec<Member> {
+/// A spec as the loader reads it. A spec of the editing file, `from`
+/// `None`, stands as written. A relative spec inside another module,
+/// or its `@self` in an `init` file, names a path from that module's
+/// folder, so it becomes that path.
+fn nested_spec(spec: &str, from: Option<&Path>) -> String {
+    let Some((file, dir)) = from.and_then(|f| Some((f, f.parent()?))) else {
+        return spec.to_string();
+    };
+    let tail = match spec.strip_prefix("@self/") {
+        Some(tail) if alloy::build::is_init(file) => tail,
+
+        _ if spec.starts_with("./") || spec.starts_with("../") => spec,
+
+        _ => return spec.to_string(),
+    };
+
+    crate::imports::lexical(dir, tail)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The members of the name at the head of `path`, in one file. `from`
+/// is that file, or `None` for the file being edited.
+fn walk(
+    src: &str,
+    path: &[&str],
+    read: &Reader,
+    depth: u8,
+    want: Want,
+    from: Option<&Path>,
+) -> Vec<Member> {
     let Some(head) = path.first().copied() else {
         return Vec::new();
     };
@@ -447,7 +479,7 @@ fn walk(src: &str, path: &[&str], read: &Reader, depth: u8, want: Want) -> Vec<M
                 let spec = spec.trim_matches(['"', '\'']).to_string();
 
                 if let Some(found) =
-                    import_members(src, toks, &im.kind, &spec, path, read, depth, want)
+                    import_members(src, toks, &im.kind, &spec, path, read, depth, want, from)
                 {
                     return found;
                 }
@@ -477,8 +509,11 @@ fn import_members(
     read: &Reader,
     depth: u8,
     want: Want,
+    from: Option<&Path>,
 ) -> Option<Vec<Member>> {
     let t = |span: TokSpan| text_of(src, toks, span);
+    let spec = nested_spec(spec, from);
+    let load = || (read.load)(&spec).map(|(text, file)| (readable(&text), file));
     let head = path.first().copied()?;
     let rest = &path[1..];
     let named = |specs: &[ImportSpec]| -> Option<String> {
@@ -506,10 +541,14 @@ fn import_members(
         // A default import binds the module whole only when the
         // module returns one value; otherwise it binds the `default`
         // field, which carries no type.
-        let bound = (read.plain)(spec);
+        let bound = (read.plain)(&spec);
 
         return Some(match bound && !deeper {
-            true => exported_members(&readable(&(read.load)(spec)?), Want::ImportedTypes),
+            true => {
+                let (next, file) = load()?;
+
+                exported_members(&next, Want::ImportedTypes, read, &file, depth + 1)
+            }
 
             false => Vec::new(),
         });
@@ -520,12 +559,12 @@ fn import_members(
     // on through the group. Luau stops a type path at `M.T`; the
     // source here is Alloy's.
     if whole {
-        let next = readable(&(read.load)(spec)?);
+        let (next, file) = load()?;
 
         return Some(match deeper {
-            true => walk(&next, rest, read, depth + 1, want),
+            true => walk(&next, rest, read, depth + 1, want, Some(&file)),
 
-            false => exported_members(&next, want),
+            false => exported_members(&next, want, read, &file, depth + 1),
         });
     }
 
@@ -537,14 +576,12 @@ fn import_members(
         ImportKind::Namespace(_, specs) => named(specs),
 
         ImportKind::Both(name, specs) => match t(*name) == head {
-            true => default_name(&readable(&(read.load)(spec)?)),
+            true => default_name(&load()?.0),
 
             false => named(specs),
         },
 
-        ImportKind::Default(name) if t(*name) == head => {
-            default_name(&readable(&(read.load)(spec)?))
-        }
+        ImportKind::Default(name) if t(*name) == head => default_name(&load()?.0),
 
         // `import type { Group } from "./m"` binds a name a type slot
         // reads, and no value at all.
@@ -558,7 +595,7 @@ fn import_members(
         return Some(Vec::new());
     }
 
-    let next = readable(&(read.load)(spec)?);
+    let (next, file) = load()?;
     let mut inner_path = vec![inner.as_str()];
 
     inner_path.extend(rest.iter().copied());
@@ -572,6 +609,7 @@ fn import_members(
 
             false => want,
         },
+        Some(&file),
     ))
 }
 
@@ -609,8 +647,9 @@ fn default_name(src: &str) -> Option<String> {
 
 /// What a module exports: its functions, its namespaces, its tables,
 /// and its structs for a value slot; its type declarations for a type
-/// slot.
-fn exported_members(src: &str, want: Want) -> Vec<Member> {
+/// slot. `from` is the module's file, and a name it passes on with
+/// `export { T } from` reads as the module it names declares it.
+fn exported_members(src: &str, want: Want, read: &Reader, from: &Path, depth: u8) -> Vec<Member> {
     let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
         return Vec::new();
     };
@@ -621,6 +660,28 @@ fn exported_members(src: &str, want: Want) -> Vec<Member> {
     let mut out = Vec::new();
 
     for stmt in stmts {
+        if let Stmt::ExportList(list) = stmt
+            && let Some(at) = list.from
+            && depth < MAX_DEPTH
+            && let Some((next, file)) =
+                (read.load)(&nested_spec(t(at).trim_matches(['"', '\'']), Some(from)))
+        {
+            let there = exported_members(&readable(&next), want, read, &file, depth + 1);
+
+            for s in &list.specs {
+                let name = t(s.name);
+
+                if let Some(m) = there.iter().find(|m| m.name == name) {
+                    out.push(Member {
+                        name: t(s.alias.unwrap_or(s.name)),
+                        ..m.clone()
+                    });
+                }
+            }
+
+            continue;
+        }
+
         let exported = match stmt {
             Stmt::ExportDefault { .. } => true,
 
@@ -1007,8 +1068,15 @@ mod tests {
     use super::*;
 
     /// No module reaches the disk in a unit test.
-    fn nothing(_: &str) -> Option<String> {
+    fn nothing(_: &str) -> Option<(String, PathBuf)> {
         None
+    }
+
+    /// A module's source, held at `/w/<spec>.aly`.
+    fn at(spec: &str, text: &str) -> Option<(String, PathBuf)> {
+        let file = crate::imports::lexical(Path::new("/w"), spec).with_extension("aly");
+
+        Some((text.to_string(), file))
     }
 
     fn names(members: &[Member]) -> Vec<&str> {
@@ -1100,7 +1168,7 @@ mod tests {
         end\n\
         export const Kit = { card = function() return 2 end }\n";
         let load = |spec: &str| match spec {
-            "./lib" => Some(lib.to_string()),
+            "./lib" => at(spec, lib),
 
             _ => None,
         };
@@ -1124,7 +1192,7 @@ mod tests {
             end\n\
         end\n";
         let load = |spec: &str| match spec {
-            "./lib" => Some(lib.to_string()),
+            "./lib" => at(spec, lib),
 
             _ => None,
         };
@@ -1205,11 +1273,11 @@ mod tests {
          return Scribe\n"
     }
 
-    fn scribe_load(spec: &str) -> Option<String> {
+    fn scribe_load(spec: &str) -> Option<(String, PathBuf)> {
         match spec {
-            "./scribe" => Some(scribe().to_string()),
+            "./scribe" => at(spec, scribe()),
 
-            "@pkg/scribe" => Some(package().to_string()),
+            "@pkg/scribe" => Some((package().to_string(), PathBuf::from("/pkg/scribe.luau"))),
 
             _ => None,
         }
@@ -1233,6 +1301,33 @@ mod tests {
         // A namespace with a type under it is a step of the path, so
         // it stands in the list beside the types themselves.
         assert_eq!(names(&found), ["Card", "Deep", "Entry", "Mode", "Store"]);
+    }
+
+    /// `export { T } from "./scored"` passes a name on. A star import of
+    /// the module reaches it, and the spec reads from the folder of the
+    /// module that writes it, not from the file being edited.
+    #[test]
+    fn a_star_import_reaches_a_name_passed_on_with_export_from() {
+        let load = |spec: &str| match spec {
+            "./game/scoring" => at(
+                spec,
+                "export { Scored, Tally as Count, LIMIT } from './scored'\nexport type Own = number\n",
+            ),
+
+            "/w/game/scored" => at(
+                spec,
+                "export trait Scored\n  function score(self): number\nend\nexport type Tally = number\nexport const LIMIT = 3\n",
+            ),
+
+            _ => None,
+        };
+        let src = "import * as Game from \"./game/scoring\"\n";
+
+        assert_eq!(
+            names(&types(src, &["Game"], &load, &none_plain)),
+            ["Count", "Own", "Scored"]
+        );
+        assert_eq!(names(&members(src, &["Game"], &load)), ["LIMIT"]);
     }
 
     /// Alloy writes a member of a namespace a module exports as

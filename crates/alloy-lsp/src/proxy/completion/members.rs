@@ -3,8 +3,15 @@ use super::*;
 impl State {
     /// `self:` inside a trait's default method. A trait has no table in
     /// the emit, so the child has no type for `self` there; the trait's
-    /// own signatures are the list.
-    pub(crate) fn trait_self_members(&self, uri: &str, line: u32, character: u32) -> Vec<Value> {
+    /// own signatures are the list. A default on an enum types `self`,
+    /// and the child lists those methods itself; each one stays once.
+    pub(crate) fn trait_self_members(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        result: &Value,
+    ) -> Vec<Value> {
         let Some(doc) = self.docs.get(uri) else {
             return Vec::new();
         };
@@ -19,21 +26,23 @@ impl State {
             return Vec::new();
         };
         let snippets = self.snippets;
+        let taken = labels_of(result);
 
         methods
             .into_iter()
-            .map(|(label, detail)| {
+            .filter(|(label, _)| !taken.contains(label))
+            .map(|(label, signature)| {
                 let mut item = json!({
                     "label": label,
                     "kind": 2,
-                    "detail": detail,
+                    "detail": format!("function {label}{signature}"),
                     "sortText": format!("0{label}"),
                     "documentation": {
                         "kind": "markdown",
                         "value": format!("A method of `trait {name}`."),
                     },
                 });
-                set_call(&mut item, &label, &detail, snippets);
+                set_call(&mut item, &label, &as_type(&signature), snippets);
 
                 item
             })
@@ -61,17 +70,7 @@ impl State {
             .filter(|(_, _, takes_self)| *takes_self)
             .map(|(label, detail, _)| (label, detail))
             .collect();
-        let mut taken: Vec<String> = result
-            .get("items")
-            .and_then(Value::as_array)
-            .or_else(|| result.as_array())
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|i| i["label"].as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut taken = labels_of(result);
         let mut items = Vec::new();
 
         for (label, detail) in methods {
@@ -168,6 +167,54 @@ impl State {
                 .and_then(Value::as_str)
                 .is_some_and(|l| statics.iter().any(|s| s == l))
         });
+    }
+
+    /// The details of a list after `->`. The name lowers to the string
+    /// of a `FindFirstChild("`, so the child details each child as
+    /// `string`. The sourcemap gives the class, when it has one.
+    pub(crate) fn child_name_details(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        result: &mut Value,
+    ) {
+        let Some(doc) = self.docs.get(uri) else {
+            return;
+        };
+        let asks_a_child = offset_of(&doc.source, line, character)
+            .and_then(|at| context::child_name_start(&doc.source, at))
+            .and_then(|start| child_call(doc, start))
+            .is_some();
+
+        if !asks_a_child {
+            return;
+        }
+
+        let sourcemap = self
+            .settings
+            .pointer("/sourcemap/sourcemapFile")
+            .and_then(Value::as_str)
+            .unwrap_or("sourcemap.json");
+        let tree = self
+            .root
+            .as_deref()
+            .and_then(|root| std::fs::read_to_string(root.join(sourcemap)).ok())
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .unwrap_or(Value::Null);
+        let items = match result {
+            Value::Array(v) => v,
+
+            Value::Object(o) => match o.get_mut("items").and_then(Value::as_array_mut) {
+                Some(v) => v,
+
+                None => return,
+            },
+
+            _ => return,
+        };
+
+        child_details(&tree, items);
     }
 
     /// The members a dotted value path reaches, for a path the child
@@ -280,25 +327,37 @@ impl State {
             return;
         };
 
-        if base.contains('.') {
-            return;
-        }
+        // `Net.Up` is the remote `Up` in a namespace or a star import:
+        // the file binds the head, and the declaration names the last.
+        // ponytail: the last name alone picks the declaration, so two
+        // namespaces with a remote of one name read the first.
+        let spec_of = |base: &str| {
+            let head = base.split('.').next().unwrap_or(base);
+            let name = base.rsplit('.').next().unwrap_or(base);
 
-        let here = remote_spec(&doc.source, &base);
-        let spec = match here {
-            Some(spec) => Some(spec),
+            match remote_spec(&doc.source, name) {
+                Some(spec) => Some(spec),
 
-            // The declaration sits in the module the file imports it
-            // from; a name no import bound is not this remote.
-            None => imports::bound_names(&doc.source)
-                .contains(&base)
-                .then(|| {
-                    self.docs
-                        .values()
-                        .find_map(|d| remote_spec(&d.source, &base))
-                })
-                .flatten(),
+                // The declaration sits in the module the file imports it
+                // from; a name no import bound is not this remote.
+                None => imports::bound_names(&doc.source)
+                    .iter()
+                    .any(|b| b == head)
+                    .then(|| {
+                        self.docs
+                            .values()
+                            .find_map(|d| remote_spec(&d.source, name))
+                    })
+                    .flatten(),
+            }
         };
+        // `const vote = Net.Vote` makes `vote.` the list of `Net.Vote`.
+        let head = base.split('.').next().unwrap_or(&base);
+        let spec = spec_of(&base).or_else(|| {
+            let path = aliased_path(&doc.source, offset, head)?;
+
+            spec_of(&format!("{path}{}", &base[head.len()..]))
+        });
         let Some(spec) = spec else {
             return;
         };
@@ -310,6 +369,29 @@ impl State {
                 .is_none_or(|label| spec.holds(label, side))
         });
     }
+}
+
+/// The dotted path a local holds, when a line before `offset` writes
+/// `local name = Net.Vote` or `const name = Net.Vote`.
+// ponytail: the nearest such line wins and no scope is read, so a local
+// of the name in another function can answer; the compiler's side check
+// reads the scopes.
+fn aliased_path(source: &str, offset: usize, name: &str) -> Option<String> {
+    source.get(..offset)?.lines().rev().find_map(|line| {
+        let t = line.trim();
+        let t = t.strip_prefix("export ").unwrap_or(t);
+        let rest = t
+            .strip_prefix("local ")
+            .or_else(|| t.strip_prefix("const "))?;
+        let (lhs, rhs) = rest.split_once('=')?;
+        let rhs = rhs.trim();
+        let path = rhs.starts_with(|c: char| c.is_alphabetic() || c == '_')
+            && rhs
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '.');
+
+        (lhs.trim() == name && path).then(|| rhs.to_string())
+    })
 }
 
 /// Whether a completion answer is the scope of an expression and not a
@@ -624,8 +706,68 @@ pub(crate) fn hide_private(detail: &str, private: &HashSet<String>) -> String {
     )
 }
 
+/// Sets the detail of each child name to its class in the sourcemap.
+/// The list names every child of one instance, so each node whose
+/// children hold all the names may be that instance. A name takes a
+/// class when those nodes agree on it, and else shows no detail.
+pub(crate) fn child_details(tree: &Value, items: &mut [Value]) {
+    fn walk<'a>(node: &'a Value, names: &[&str], out: &mut HashMap<&'a str, HashSet<&'a str>>) {
+        let children = node
+            .get("children")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let holds_all = names
+            .iter()
+            .all(|n| children.iter().any(|c| c["name"] == *n));
+
+        for child in children {
+            if holds_all
+                && let Some(name) = child["name"].as_str()
+                && let Some(class) = child["className"].as_str()
+            {
+                out.entry(name).or_default().insert(class);
+            }
+
+            walk(child, names, out);
+        }
+    }
+
+    let names: Vec<String> = items
+        .iter()
+        .filter_map(|i| i["label"].as_str().map(str::to_string))
+        .collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let mut classes = HashMap::new();
+
+    if !names.is_empty() {
+        walk(tree, &names, &mut classes);
+    }
+
+    for item in items {
+        let class = item["label"]
+            .as_str()
+            .and_then(|l| classes.get(l))
+            .filter(|c| c.len() == 1)
+            .and_then(|c| c.iter().next().map(|c| c.to_string()));
+        let Some(obj) = item.as_object_mut() else {
+            continue;
+        };
+
+        match class {
+            Some(class) => {
+                obj.insert("detail".to_string(), json!(class));
+            }
+
+            None => {
+                obj.remove("detail");
+            }
+        }
+    }
+}
+
 /// The entries a module path can continue with: the project's aliases
-/// and `@self` when nothing is typed, the children of
+/// when nothing is typed, and `@self` in an `init` file, the children of
 /// the sourcemap under `@game/`, and otherwise the directories and the
 /// modules of the resolved directory. Each is `(label, kind, detail)`.
 pub(crate) fn module_entries(
@@ -636,13 +778,17 @@ pub(crate) fn module_entries(
     own: Option<&Path>,
 ) -> Vec<(String, u64, String)> {
     let mut out = Vec::new();
+    // The compiler reads `@self` only in an `init` file.
+    let has_self = own.is_some_and(alloy::build::is_init);
 
     if head.is_empty() {
-        out.push((
-            "@self/".to_string(),
-            19,
-            "this file's directory".to_string(),
-        ));
+        if has_self {
+            out.push((
+                "@self/".to_string(),
+                19,
+                "this file's directory".to_string(),
+            ));
+        }
         out.push(("../".to_string(), 19, "the parent directory".to_string()));
 
         for (name, target) in project_aliases(dir, root) {
@@ -724,7 +870,7 @@ pub(crate) fn module_entries(
 
     // A directory to list: relative, `@self`, or an alias.
     let base = if let Some(rest) = head.strip_prefix("@self/") {
-        Some(imports::lexical(dir, rest))
+        has_self.then(|| imports::lexical(dir, rest))
     } else if let Some(rest) = head.strip_prefix('@') {
         let (alias, tail) = rest.split_once('/').unwrap_or((rest, ""));
 
@@ -942,11 +1088,26 @@ pub(crate) fn enclosing_trait(source: &str, line: u32) -> Option<(String, Vec<(S
             continue;
         }
 
-        let detail = format!("function {name}{}", &rest[label.len()..]);
-        methods.push((label, detail));
+        let signature = rest[label.len()..].to_string();
+        methods.push((label, signature));
     }
 
     (!methods.is_empty()).then_some((name, methods))
+}
+
+/// The labels a completion answer already holds.
+fn labels_of(result: &Value) -> Vec<String> {
+    result
+        .get("items")
+        .and_then(Value::as_array)
+        .or_else(|| result.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|i| i["label"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Whether the caret takes a member of `self`, after a `.` or a `:`.

@@ -58,14 +58,19 @@ pub(crate) fn body_locals(body: &str) -> Vec<String> {
             .next()
             .is_some_and(|c| c.is_alphabetic() || c == '_')
             && w.chars().all(|c| c.is_alphanumeric() || c == '_')
-            && !matches!(w, "function" | "in" | "do" | "end" | "local" | "for")
+            && !matches!(
+                w,
+                "function" | "in" | "do" | "end" | "local" | "const" | "for"
+            )
     };
     let mut out = Vec::new();
     let mut i = 0;
 
     while i < words.len() {
         match words[i] {
-            "local" => {
+            // A `const` binds a name the same way, and the caller may
+            // hold one of the same name.
+            "local" | "const" => {
                 let mut j = i + 1;
 
                 if words.get(j) == Some(&"function") {
@@ -227,11 +232,12 @@ fn body_return(body: &str) -> BodyReturn {
     }
 }
 
-/// The one expression a macro body is, when the parser read it as a
-/// statement: `print(x)` or `new Pt { x = 0 }`. In expression position
-/// that expression is the body's value. A body of any other shape has
-/// no value, and the caller reports it.
-fn body_value(body: &str) -> Option<String> {
+/// The last expression of a macro body, when the parser read it as a
+/// statement: `print(x)` or `new Pt { x = 0 }`, with the byte it starts
+/// at. In expression position that expression is the body's value, and
+/// the statements before it run first. A body that ends in any other
+/// shape has no value, and the caller reports it.
+fn body_value(body: &str) -> Option<(usize, String)> {
     let lexed = alloy_syntax::lexer::lex(body).ok()?;
     let (chunk, errors) =
         alloy_syntax::parser::parse_lenient(body, &lexed.toks, Default::default());
@@ -240,8 +246,12 @@ fn body_value(body: &str) -> Option<String> {
         return None;
     }
 
-    match chunk.block.stmts.as_slice() {
-        [alloy_syntax::ast::Stmt::Call(e, _)] => Some(e.span().text(body, &lexed.toks).to_string()),
+    match chunk.block.stmts.last() {
+        Some(alloy_syntax::ast::Stmt::Call(e, _)) => {
+            let at = lexed.toks[e.span().start as usize].start as usize;
+
+            Some((at, e.span().text(body, &lexed.toks).to_string()))
+        }
 
         _ => None,
     }
@@ -438,14 +448,14 @@ impl<'s> Desugar<'s> {
                         return "nil".to_string();
                     }
 
-                    // A body of one expression the parser read as a
-                    // statement gives that expression. Behind the
-                    // `return` of the nested compile a `new` lowers to
-                    // its one-call form; alone it lowers to statements,
-                    // and statements cannot stand in an expression.
+                    // A body that ends in a call the parser read as a
+                    // statement gives that call. Behind the `return` of
+                    // the nested compile a `new` lowers to its one-call
+                    // form; alone it lowers to statements, and
+                    // statements cannot stand in an expression.
                     BodyReturn::None if !body.is_empty() => match body_value(body) {
-                        Some(value) => {
-                            body = "";
+                        Some((at, value)) => {
+                            body = body[..at].trim_end();
                             tail = Some(value);
                         }
 
@@ -472,6 +482,13 @@ impl<'s> Desugar<'s> {
             let mut out = String::new();
             let parts = body_parts(text);
             let mut open: Vec<&str> = Vec::new();
+            let breaks = alloy_syntax::lexer::lex(text)
+                .map(|l| {
+                    alloy_syntax::parser::parse_lenient(text, &l.toks, Default::default())
+                        .0
+                        .stmt_breaks
+                })
+                .unwrap_or_default();
 
             for (i, &(gap, word)) in parts.iter().enumerate() {
                 out.push_str(gap);
@@ -517,6 +534,14 @@ impl<'s> Desugar<'s> {
                     if is_simple_text(a) {
                         out.push_str(a);
                     } else {
+                        // The body is one line, so `local n = 0 f()` with
+                        // `f` a function literal reads `0 (function() ...
+                        // end)()`. Luau takes that `(` as a call of the
+                        // statement in front, and a `;` ends it first.
+                        if breaks.contains(&i) {
+                            out.insert(out.len() - gap.len(), ';');
+                        }
+
                         out.push_str(&format!("({a})"));
                     }
                 } else if let Some(r) = renames.get(word) {
@@ -974,6 +999,39 @@ mod tests {
             .collect()
     }
 
+    /// `$matches(e, Ok(_))` alone expanded to `( if ... )`, which is no
+    /// Luau statement: check passed, and flux said "Ambiguous syntax".
+    /// A value intrinsic alone now reports as `x + 1` alone does.
+    #[test]
+    fn a_value_intrinsic_alone_is_no_statement() {
+        for line in ["$matches(e, Ok(_))", "$nameof(e.tag)", "$stringify(e)"] {
+            let src = format!("local e: Result<number, string> = Ok(1)\n{line}\nprint(e)\n");
+            assert_eq!(
+                messages(&src),
+                vec!["this expression is not a statement"],
+                "{line}"
+            );
+        }
+
+        let used = "local e: Result<number, string> = Ok(1)\nprint($matches(e, Ok(_)))\n";
+        assert!(messages(used).is_empty(), "{:?}", messages(used));
+    }
+
+    /// A `const` in a macro body kept its name, so `$m(tmp)` read the
+    /// macro's own `tmp` in place of the caller's.
+    #[test]
+    fn a_const_in_a_macro_body_takes_a_fresh_name() {
+        assert_eq!(super::body_locals("const tmp = 1 print(x)"), vec!["tmp"]);
+
+        let src = "macro m(x)\n    const tmp = 1\n    print(tmp, x)\nend\nlocal tmp = 2\n$m(tmp)\n";
+        let out = crate::compile(src).unwrap();
+        assert!(
+            out.ship.contains("tmp__m1 = 1 print(tmp__m1, tmp)"),
+            "{}",
+            out.ship
+        );
+    }
+
     /// `$map` takes pairs. A flat list reads as one pair and built a
     /// map of one entry in silence.
     #[test]
@@ -1092,11 +1150,12 @@ mod tests {
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         assert!(out.ship.contains("local _n1 = "), "{}", out.ship);
 
-        // A body of two statements has no value, and the call says so
-        // instead of shipping statements Luau cannot read.
+        // A body that ends in a statement other than a call has no
+        // value, and the call says so instead of shipping statements
+        // Luau cannot read.
         assert_eq!(
             messages(
-                "macro two(x)\n    print(x)\n    print(x)\nend\n\nlocal t = $two(1)\nprint(t)\n"
+                "macro two(x)\n    print(x)\n    local y = x\nend\n\nlocal t = $two(1)\nprint(t)\n"
             ),
             vec![
                 "the macro `two` expands to statements; in an expression its body must end in a value"
@@ -1177,6 +1236,31 @@ mod tests {
 
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         assert!(out.ship.contains("print(\"x here\", 1)"), "{}", out.ship);
+    }
+
+    /// A macro body travels as one line, so `f() f()` with `f` a
+    /// function literal read `(function() ... end)() (...)()`. Luau
+    /// took that as one call chain: it ran `f` once, then called nil.
+    /// An expansion that opens with `(` after `print(hits)` read as a
+    /// call too. A `;` now ends the statement in front of each one.
+    #[test]
+    fn a_macro_ends_the_statement_in_front_of_a_paren() {
+        let src = "macro thrice(f)\n    f()\n    if true then\n        f()\n        f()\n    end\nend\n\nlocal hits = 0\nprint(hits)\n$thrice(function() hits += 1 end)\nreturn hits\n";
+        let out = crate::compile(src).unwrap();
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.ship.contains("print(hits)\n;(function()"),
+            "{}",
+            out.ship
+        );
+
+        let hits: i64 = mlua::Lua::new()
+            .load(out.ship.as_str())
+            .eval()
+            .unwrap_or_else(|e| panic!("{e}\n{}", out.ship));
+
+        assert_eq!(hits, 3, "{}", out.ship);
     }
 
     /// A macro substitutes; there is no call for the checker to count.
@@ -1450,5 +1534,22 @@ mod tests {
 
         assert!(!out.check.contains("nil"), "{}", out.check);
         assert!(!out.check.contains("return"), "{}", out.check);
+    }
+
+    /// `const low = lo` then `math.max(low, ...)`: the body ends in a
+    /// call, and the parser reads a call as a statement. The call said
+    /// "expands to statements", though the body ends in a value.
+    #[test]
+    fn a_body_that_ends_in_a_call_gives_its_value() {
+        for tail in ["math.max(low, math.min(hi, x))", "tostring(low):upper()"] {
+            let src = format!(
+                "macro clamp(x, lo, hi)\n    const low = lo\n    {tail}\nend\nlocal a = $clamp(5, 0, 3)\nprint(a)\n"
+            );
+            let out = crate::compile(&src).unwrap();
+
+            assert!(out.diagnostics.is_empty(), "{tail}: {:?}", out.diagnostics);
+            assert!(out.ship.contains("(function() "), "{}", out.ship);
+            assert!(out.ship.contains(" return "), "{}", out.ship);
+        }
     }
 }

@@ -303,6 +303,12 @@ pub struct Naming {
     pub attribute: Styles,
     pub r#macro: Styles,
     pub remote: Styles,
+    /// A `local` that nothing assigns again takes the const style. The
+    /// `prefer_const` lint or `[fmt] prefer_const` makes it a `const`,
+    /// and a rename to the variable style would then fire again. The
+    /// config sets it from those two keys, and no file writes it.
+    #[serde(skip)]
+    pub locals_as_const: bool,
 }
 
 impl Default for Naming {
@@ -331,6 +337,9 @@ impl Default for Naming {
             attribute: snake.clone(),
             r#macro: snake,
             remote: pascal,
+            // Both `prefer_const` and `[fmt] prefer_const` are on by
+            // default.
+            locals_as_const: true,
         }
     }
 }
@@ -413,6 +422,11 @@ struct Walk<'a> {
     roles: Vec<Role>,
     /// The names an `export { }` list or an `export default` sends out.
     exported: Vec<&'a str>,
+    /// The byte offset of each `local` that `prefer_const` makes a
+    /// `const`, when `[lint.naming]` reads such a local as one.
+    const_locals: HashSet<u32>,
+    /// The declarations of those locals, by index into `decls`.
+    promoted: Vec<usize>,
 }
 
 impl<'a> Walk<'a> {
@@ -492,11 +506,18 @@ impl<'a> Walk<'a> {
     fn stmt(&mut self, s: &'a Stmt, end: usize, top: bool, ns: bool) {
         match s {
             Stmt::Local(l) => {
-                let kind = if l.is_const {
+                // `prefer_const` writes `const` over the `local` word,
+                // which sits in front of the first name.
+                let first = l.names.first().map_or(l.span.start, |b| b.name.start);
+                let promoted = !l.is_const
+                    && (l.span.start..first)
+                        .any(|i| self.const_locals.contains(&self.toks[i as usize].start));
+                let kind = if l.is_const || promoted {
                     Kind::Const
                 } else {
                     Kind::Variable
                 };
+                let before = self.decls.len();
                 // `local Players = game:GetService("Players")` takes the
                 // case of the service or the module it names.
                 let named_after =
@@ -510,6 +531,10 @@ impl<'a> Walk<'a> {
                         false => Reach::Scope(vec![(l.span.end as usize, end)]),
                     };
                     self.binding(b.name, b.destructure.as_ref(), kind, reach);
+                }
+
+                if promoted {
+                    self.promoted.extend(before..self.decls.len());
                 }
             }
 
@@ -1184,6 +1209,17 @@ fn markup_returns(toks: &[Tok], block: &Block, markup: &Markup, out: &mut HashSe
                 markup_returns(toks, &f.body.block, markup, out);
             }
 
+            // `local Row = function(props) return <Frame /> end`.
+            Stmt::Local(l) if l.names.len() == 1 && l.values.len() == 1 => {
+                if let Expr::Function { body, .. } = &l.values[0] {
+                    if returns(toks, &body.block, markup) {
+                        out.insert(l.names[0].name.start as usize);
+                    }
+
+                    markup_returns(toks, &body.block, markup, out);
+                }
+            }
+
             other => {
                 for c in stmt_children(other) {
                     if let Child::Block(b) = c {
@@ -1195,12 +1231,76 @@ fn markup_returns(toks: &[Tok], block: &Block, markup: &Markup, out: &mut HashSe
     }
 }
 
+/// A binding's name, the token that declares it, and the token ranges
+/// its scope holds; `None` for a scope the walk does not know.
+pub(crate) type ScopedBinding = (String, usize, Option<Vec<(usize, usize)>>);
+
+/// Each value binding of a block, other than an import, a remote or a
+/// namespace, with the token ranges its scope holds, end exclusive: a
+/// local, a parameter, a loop variable, a function. A namespace holds
+/// remotes as `Net.Up`, so it is no shadow. `None` stands for a scope
+/// the walk does not know, such as a name a pattern binds, and a
+/// reader takes it to hold every token.
+pub(crate) fn scoped_bindings(src: &str, toks: &[Tok], block: &Block) -> Vec<ScopedBinding> {
+    let mut w = Walk {
+        src,
+        toks,
+        decls: Vec::new(),
+        roles: vec![Role::Unknown; toks.len()],
+        exported: Vec::new(),
+        const_locals: HashSet::new(),
+        promoted: Vec::new(),
+    };
+    w.block(&block.stmts, toks.len(), true, false);
+
+    let imports: HashSet<usize> = block
+        .stmts
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::Import(i) => Some(crate::desugar::import_names(i)),
+
+            _ => None,
+        })
+        .flatten()
+        .map(|t| t.start as usize)
+        .collect();
+
+    w.decls
+        .iter()
+        .filter(|d| !imports.contains(&d.tok))
+        .filter(|d| {
+            !d.kind.is_some_and(|k| {
+                k.is_member()
+                    || k.is_type()
+                    || matches!(
+                        k,
+                        Kind::Remote | Kind::Namespace | Kind::Attribute | Kind::Macro
+                    )
+            })
+        })
+        .map(|d| {
+            let reach = match &d.reach {
+                Reach::Scope(ranges) => Some(ranges.clone()),
+
+                Reach::File => Some(vec![(0, toks.len())]),
+
+                Reach::None => None,
+            };
+
+            (w.text(d.tok).to_string(), d.tok, reach)
+        })
+        .collect()
+}
+
+/// `fixed` holds the byte each member name starts at that an attribute
+/// contract asks for: the contract fixes the name, so a rename breaks it.
 pub(crate) fn lints(
     src: &str,
     toks: &[Tok],
     chunk: &Chunk,
     naming: &Naming,
     markup: &Markup,
+    fixed: &HashSet<u32>,
 ) -> Vec<Lint> {
     let mut w = Walk {
         src,
@@ -1208,6 +1308,15 @@ pub(crate) fn lints(
         decls: Vec::new(),
         roles: vec![Role::Unknown; toks.len()],
         exported: Vec::new(),
+        const_locals: match naming.locals_as_const {
+            true => crate::flux::prefer_const_fixes(src)
+                .iter()
+                .map(|f| f.start)
+                .collect(),
+
+            false => HashSet::new(),
+        },
+        promoted: Vec::new(),
     };
 
     for t in &chunk.type_names {
@@ -1234,18 +1343,24 @@ pub(crate) fn lints(
     // In an `.alx` file a function that returns markup, or that a tag
     // names, is a component and takes the component styles.
     let mut components = HashSet::new();
+    let classes = class_tables(src, toks, &chunk.block.stmts);
 
     if !markup.regions.is_empty() {
         markup_returns(toks, &chunk.block, markup, &mut components);
     }
 
-    for d in &w.decls {
+    for (at, d) in w.decls.iter().enumerate() {
         let Some(kind) = d.kind else { continue };
         let name = w.text(d.tok);
+        // A local that holds a component is one too.
         let kind = match kind {
-            Kind::Function if components.contains(&d.tok) || markup.tags.contains(name) => {
+            Kind::Function | Kind::Variable | Kind::Const
+                if components.contains(&d.tok) || markup.tags.contains(name) =>
+            {
                 Kind::Component
             }
+
+            Kind::Variable | Kind::Const if classes.contains(&d.tok) => Kind::Struct,
 
             other => other,
         };
@@ -1254,7 +1369,10 @@ pub(crate) fn lints(
             continue;
         };
 
-        if name.starts_with('_') || styles.fits(name) {
+        if name.starts_with('_')
+            || styles.fits(name)
+            || (d.is_member() && fixed.contains(&toks[d.tok].start))
+        {
             continue;
         }
 
@@ -1289,12 +1407,23 @@ pub(crate) fn lints(
             "a"
         };
 
+        // A `local` that `prefer_const` makes a `const` says why it is one.
+        let what = match kind == Kind::Const && w.promoted.contains(&at) {
+            true => "never assigned again, so it is a const".to_string(),
+
+            false if classes.contains(&d.tok) => {
+                "a class table, which takes the struct style".to_string()
+            }
+
+            false => format!("{article} {key}"),
+        };
+
         out.push(Lint {
             name: LINT,
             start: toks[d.tok].start,
             end: toks[d.tok].end,
             message: format!(
-                "`{name}` is {article} {key}, and {key}s are {} here: `{fixed}`",
+                "`{name}` is {what}, and {key}s are {} here: `{fixed}`",
                 styles.describe()
             ),
             fix,
@@ -1302,6 +1431,49 @@ pub(crate) fn lints(
     }
 
     out
+}
+
+/// The name token of each top-level local that holds a class or a
+/// module table: the file writes `X.__index = X` or a colon method
+/// `function X:m()` on it. Such a name reads as a type, `Timer.new()`,
+/// so it takes the struct style. A plain data table stays a variable.
+fn class_tables(src: &str, toks: &[Tok], stmts: &[Stmt]) -> HashSet<usize> {
+    let text = |span: TokSpan| span.text(src, toks);
+    let mut owners: HashSet<&str> = HashSet::new();
+
+    for stmt in stmts {
+        match stmt.under_default() {
+            Stmt::Assign(a) => {
+                if let ([Expr::Index { object, key, .. }], [Expr::Name(v)]) =
+                    (a.targets.as_slice(), a.values.as_slice())
+                    && let (Expr::Name(o), IndexKey::Field(k)) = (object.as_ref(), key)
+                    && text(*k) == "__index"
+                    && text(*o) == text(*v)
+                {
+                    owners.insert(text(*o));
+                }
+            }
+
+            Stmt::Function(f) if f.is_method && f.path.len() == 2 => {
+                owners.insert(text(f.path[0]));
+            }
+
+            _ => {}
+        }
+    }
+
+    stmts
+        .iter()
+        .filter_map(|stmt| match stmt.under_default() {
+            Stmt::Local(l) if l.names.len() == 1 && l.names[0].destructure.is_none() => {
+                let name = l.names[0].name;
+
+                owners.contains(text(name)).then_some(name.start as usize)
+            }
+
+            _ => None,
+        })
+        .collect()
 }
 
 /// The source with each name that breaks its `[lint.naming]` style
@@ -1339,6 +1511,7 @@ pub fn renamed(src: &str, options: &crate::config::FmtConfig) -> Option<String> 
         &parsed.chunk,
         &options.lint.naming,
         &Markup::default(),
+        &HashSet::new(),
     )
     .into_iter()
     .filter(|l| {
@@ -1350,6 +1523,26 @@ pub fn renamed(src: &str, options: &crate::config::FmtConfig) -> Option<String> 
     let (text, n) = crate::lint::apply_fixes(src, &fixes);
 
     (n > 0).then_some(text)
+}
+
+/// The rename lints of `src` once the `prefer_const` rewrites `consts`
+/// land. A local that becomes a `const` then takes the const style, as
+/// in `alloy fmt`. `local` and `const` have one length, so each offset
+/// holds in `src`.
+pub fn lints_after_consts(src: &str, consts: &[Fix], naming: &Naming) -> Vec<Lint> {
+    let text = crate::std_names::apply(src, consts);
+    let Ok(parsed) = alloy_syntax::parse_lenient(&text, crate::fmt::parse_options()) else {
+        return Vec::new();
+    };
+
+    lints(
+        &text,
+        &parsed.lexed.toks,
+        &parsed.chunk,
+        naming,
+        &Markup::default(),
+        &HashSet::new(),
+    )
 }
 
 #[cfg(test)]
@@ -1447,6 +1640,7 @@ mod tests {
     fn each_kind_reads_its_own_default() {
         let src = concat!(
             "local playerCount = 1\n",
+            "playerCount += 1\n",
             "const maxHp = 2\n",
             "const MAX_HP = 3\n",
             "local function LoadMap(mapName: string) return mapName end\n",
@@ -1484,16 +1678,23 @@ mod tests {
 
         // `_` marks a name as unused, a service or a module keeps its
         // own case, `self` is the receiver, and a function stored on a
-        // table is a member of the table.
+        // table is a member of the table. `M` carries a colon method,
+        // so it is a module table and takes the struct style. A plain
+        // data table stays a local and takes the variable style.
         assert_eq!(
-            hits(
-                "local _unusedThing = 1\nlocal Players = game:GetService(\"Players\")\nlocal M = {}\nfunction M:Destroy() end\nfunction M.OnLoad() end\nprint(Players)\n"
+            hits_with(
+                "local _unusedThing = 1\nlocal Players = game:GetService(\"Players\")\nlocal M = {}\nfunction M:Destroy() end\nfunction M.OnLoad() end\nlocal Config = { a = 1 }\nprint(Players, Config)\n",
+                &Naming {
+                    locals_as_const: false,
+                    ..Naming::default()
+                }
             ),
-            vec!["`M` is a variable, and variables are snake_case here: `m`"]
+            vec!["`Config` is a variable, and variables are snake_case here: `config`"]
         );
 
         let camel = Naming {
             variable: Styles(vec![Style::Camel]),
+            locals_as_const: false,
             ..Naming::default()
         };
         assert_eq!(
@@ -1502,6 +1703,111 @@ mod tests {
                 &camel
             ),
             vec!["`player_count2` is a variable, and variables are camelCase here: `playerCount2`"]
+        );
+    }
+
+    /// A `requires` clause fixes a member's name. The lint asked for
+    /// `init` where the `each` example needs `Init`, and the rename then
+    /// broke the contract. A member no clause names still reports.
+    #[test]
+    fn a_name_a_contract_requires_keeps_its_case() {
+        let src = concat!(
+            "enum Lifecycle\n    Init\n    Start\nend\n",
+            "attribute provider(lifecycles: Lifecycle[]) on impl as\n",
+            "    requires private function each lifecycles(self)\nend\n",
+            "attribute service on impl as\n    requires function Boot(self)\nend\n",
+            "struct Data\n    n: number\nend\n",
+            "@provider({ lifecycles = [ Lifecycle.Init, Lifecycle.Start ] })\n@service\n",
+            "impl Data\n",
+            "    private function Init(self) print(self.n) end\n",
+            "    private function Start(self) print(self.n) end\n",
+            "    function Boot(self): () print(self.n) end\n",
+            "    function Other(self): () print(self.n) end\n",
+            "end\n",
+        );
+        assert_eq!(
+            hits(src),
+            vec!["`Other` is a method, and methods are snake_case here: `other`"]
+        );
+    }
+
+    /// The skip keyed by name alone, so one `@service impl Door` turned
+    /// the lint off for `Start` on every type in the file. A `Start` that
+    /// no contract asks for reports again.
+    #[test]
+    fn a_contract_fixes_the_name_on_its_own_type_alone() {
+        let src = concat!(
+            "attribute service on impl as\n    requires function Start(self)\nend\n",
+            "struct Door\n    n: number\nend\n",
+            "struct Window\n    n: number\nend\n",
+            "@service\nimpl Door\n    function Start(self): () print(self.n) end\nend\n",
+            "impl Window\n    function Start(self): () print(self.n) end\nend\n",
+        );
+        let out = crate::compile(src).unwrap();
+        let hits: Vec<(u32, String)> = out
+            .lints
+            .into_iter()
+            .filter(|l| l.name == LINT)
+            .map(|l| (l.start, l.message))
+            .collect();
+        let window = src.rfind("Start").unwrap() as u32;
+        assert_eq!(
+            hits,
+            vec![(
+                window,
+                "`Start` is a method, and methods are snake_case here: `start`".to_string()
+            )]
+        );
+    }
+
+    /// A `local` that nothing assigns again becomes a `const` under
+    /// `prefer_const`, so it takes the const style. The variable style
+    /// named `maxHealth`, and `prefer_const` then `alloy fmt` renamed it
+    /// again to `MAX_HEALTH`.
+    #[test]
+    fn a_local_that_prefer_const_makes_a_const_takes_the_const_style() {
+        let src = "local max_health = 100\nlocal walk_speed = 16\nwalk_speed = 20\nprint(max_health, walk_speed)\n";
+        let naming = Naming {
+            variable: Styles(vec![Style::Camel]),
+            r#const: Styles(vec![Style::Screaming]),
+            ..Naming::default()
+        };
+
+        assert_eq!(
+            hits_with(src, &naming),
+            vec![
+                "`max_health` is never assigned again, so it is a const, and consts are SCREAMING_SNAKE_CASE here: `MAX_HEALTH`",
+                "`walk_speed` is a variable, and variables are camelCase here: `walkSpeed`",
+            ]
+        );
+
+        // With `prefer_const` and `[fmt] prefer_const` both off, the
+        // local stays a local.
+        let off = |text: &str| {
+            crate::config::Config::parse(
+                &format!("[lint.naming]\nvariable = \"camelCase\"\n{text}"),
+                std::path::Path::new("alloy.toml"),
+            )
+            .unwrap()
+            .lint
+            .naming
+        };
+
+        assert!(off("").locals_as_const);
+        assert!(off("[fmt]\nprefer_const = false\n").locals_as_const);
+        assert!(
+            !off("[fmt]\nprefer_const = false\n[lint.rules]\nprefer_const = \"allow\"\n")
+                .locals_as_const
+        );
+        assert_eq!(
+            hits_with(
+                src,
+                &Naming {
+                    locals_as_const: false,
+                    ..naming
+                }
+            )[0],
+            "`max_health` is a variable, and variables are camelCase here: `maxHealth`"
         );
     }
 
@@ -1619,5 +1925,38 @@ mod tests {
         assert_eq!(out.matches("PlayerState").count(), 6, "{out}");
         assert!(!out.contains("player_state"), "{out}");
         assert!(crate::compile(&out).unwrap().diagnostics.is_empty());
+    }
+
+    /// `alloy fmt` renamed `local Timer = {}` with `Timer.__index =
+    /// Timer` to `timer` everywhere. A table the file writes a class
+    /// shape or a colon method on reads as a type, so it takes the
+    /// struct style. A plain data table stays a variable.
+    #[test]
+    fn a_class_or_module_table_takes_the_struct_style() {
+        let class = "local Timer = {}\nTimer.__index = Timer\nfunction Timer.new(d: number)\n    return setmetatable({ left = d }, Timer)\nend\nreturn Timer\n";
+        assert_eq!(fixed(class), class);
+        let module = "local Shop = {}\nfunction Shop:open() end\nreturn Shop\n";
+        assert_eq!(fixed(module), module);
+
+        let lower = "local timer = {}\ntimer.__index = timer\nreturn timer\n";
+        let lints: Vec<Lint> = crate::compile(lower)
+            .unwrap()
+            .lints
+            .into_iter()
+            .filter(|l| l.name == LINT)
+            .collect();
+        assert_eq!(
+            lints[0].message,
+            "`timer` is a class table, which takes the struct style, and structs are PascalCase here: `Timer`"
+        );
+        assert_eq!(
+            fixed(lower),
+            "local Timer = {}\nTimer.__index = Timer\nreturn Timer\n"
+        );
+
+        assert_eq!(
+            fixed("local Prices = { sword = 1 }\nprint(Prices.sword)\n"),
+            "local prices = { sword = 1 }\nprint(prices.sword)\n"
+        );
     }
 }

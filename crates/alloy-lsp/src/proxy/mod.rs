@@ -49,10 +49,10 @@ use diagnostics::{
 };
 #[allow(unused_imports)]
 use documents::{
-    RUNTIME_ALIAS, UPDATE_IMPORTS, config_dir_from, export_surface, map_from_shadow,
-    map_into_shadow, map_uris_into_mirror, mirror_above, mirror_base, mirror_dir, mirror_luau_text,
-    mirrored_sourcemap, mount_alias_settings, normalize, project_aliases, purge_stale_mirrors,
-    relative, shift_lines,
+    RUNTIME_ALIAS, UPDATE_IMPORTS, claim_mirror, config_dir_from, export_surface, map_follow_up,
+    map_from_shadow, map_into_shadow, map_uris_into_mirror, mirror_above, mirror_base, mirror_dir,
+    mirror_luau_text, mirrored_sourcemap, mount_alias_settings, normalize, project_aliases,
+    purge_stale_mirrors, relative, shift_lines,
 };
 #[allow(unused_imports)]
 use hints::{
@@ -61,18 +61,19 @@ use hints::{
 };
 #[allow(unused_imports)]
 use hover::{
-    OPEN_ATTRIBUTES, attach_std_member_docs, binds_a_value, case_arm_of_binding, case_binding_span,
-    case_binding_text, close_empty_packs, close_item_packs, declared_annotation,
-    declared_attribute_targets, declared_field_hover, declared_field_owner,
-    declared_parameter_hover, declared_signature, declares_a_name_at, drop_bound_intersections,
-    empty_parameter_names, field_key, fold_std_shapes, foreign_method_hover, import_alias_source,
-    invents_a_type, is_byte_count, keep_annotation, let_else_binding, literal_key,
-    literal_key_path, lowers_a_block, method_owner, module_hover, name_by_declaration,
-    name_method_doc, name_method_receiver, name_self_receiver, name_solver_local,
-    name_solver_struct, name_solver_variable, name_trait_method, names_a_key, optional_index_hover,
-    prefer_constructed_struct, receiver_type, record_entry, remote_parameter_hover, remote_spec,
-    restates_itself, restore_struct_arguments, restyle_hover, restyle_signatures, service_hover,
-    std_member_hover, unlocal_parameter, used_field_hover, used_field_owner, without_self,
+    OPEN_ATTRIBUTES, attach_std_member_docs, bind_hover_receiver, binds_a_value,
+    case_arm_of_binding, case_binding_span, case_binding_text, child_call, child_lookup_hover,
+    close_empty_packs, close_item_packs, declared_annotation, declared_attribute_targets,
+    declared_field_hover, declared_field_owner, declared_parameter_hover, declared_signature,
+    declares_a_name_at, drop_bound_intersections, empty_parameter_names, field_key,
+    fold_std_shapes, foreign_method_hover, import_alias_source, invents_a_type, is_byte_count,
+    keep_annotation, let_else_binding, literal_key, literal_key_path, lowers_a_block, method_owner,
+    module_hover, name_by_declaration, name_method_doc, name_method_receiver, name_self_receiver,
+    name_solver_local, name_solver_struct, name_solver_variable, name_trait_method, names_a_key,
+    optional_index_hover, prefer_constructed_struct, receiver_type, record_entry,
+    remote_parameter_hover, remote_spec, restates_itself, restore_struct_arguments, restyle_hover,
+    restyle_signatures, service_hover, split_top, std_member_hover, unlocal_parameter,
+    used_field_hover, used_field_owner, without_self,
 };
 #[allow(unused_imports)]
 use navigation::{

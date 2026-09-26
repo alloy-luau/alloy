@@ -202,7 +202,7 @@ impl<'s> Formatter<'s> {
     /// A `{` after a name that is a fields form, a type, or a cast is not
     /// a call: `new P { }`, `x: { a: number }`, `satisfies { }`.
     fn is_type_or_struct_context(&self, i: usize) -> bool {
-        if self.line_has_before(i, "case") {
+        if self.line_has_before(i, "case") || self.in_local_pattern(i) {
             return true;
         }
 
@@ -245,6 +245,37 @@ impl<'s> Formatter<'s> {
         }
 
         false
+    }
+
+    /// Whether the `{` at `i` sits in the pattern of a `local` or a
+    /// `const` on its line, before the `=` of the value: `local Pt { x }
+    /// = p` or `if local Seg { a = Pt { x } } = s`. Parentheses there
+    /// would make the struct pattern a variant pattern.
+    fn in_local_pattern(&self, i: usize) -> bool {
+        let is_local = |j: usize| self.items[j].is("local") || self.items[j].is("const");
+        let mut j = i;
+
+        while j > 0 && self.items[j].newlines_before == 0 && !is_local(j) {
+            j -= 1;
+        }
+
+        if !is_local(j) {
+            return false;
+        }
+
+        let mut depth = 0i32;
+
+        for it in self.items[j + 1..i].iter().filter(|it| !it.is_comment()) {
+            if opens(&it.text) {
+                depth += 1;
+            } else if closes(&it.text) {
+                depth -= 1;
+            } else if depth == 0 && it.is("=") {
+                return false;
+            }
+        }
+
+        true
     }
 
     /// Whether the `{` at `i` opens the name list of an `import` or an
@@ -323,10 +354,25 @@ impl<'s> Formatter<'s> {
             }
 
             let start = i;
-            let mut j = i + 1;
+            let mut j = i;
+            // A name list may run over several lines: a line break
+            // inside the braces does not end the statement.
+            let mut depth = 0i32;
 
-            while j < self.items.len() && self.items[j].newlines_before == 0 {
+            loop {
+                let it = &self.items[j];
+
+                if !it.is_comment() && opens(&it.text) {
+                    depth += 1;
+                } else if !it.is_comment() && closes(&it.text) {
+                    depth -= 1;
+                }
+
                 j += 1;
+
+                if j == self.items.len() || (self.items[j].newlines_before > 0 && depth <= 0) {
+                    break;
+                }
             }
 
             let path = (start..j)

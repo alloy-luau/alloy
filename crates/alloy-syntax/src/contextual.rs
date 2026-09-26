@@ -55,6 +55,10 @@ pub fn is_contextual(word: &str) -> bool {
             | "namespace"
             | "private"
             | "public"
+            | "case"
+            | "default"
+            | "with"
+            | "where"
     )
 }
 
@@ -188,8 +192,64 @@ pub fn keyword_at(src: &str, toks: &[Tok], i: usize) -> bool {
 
         "requires" => requires_clause_follows(src, toks, i),
 
+        // `case 1 then`, the `default` arm, `match x with`, and the
+        // `where` of a guard or a loop filter. `local where = 1` and
+        // `print(case)` are the names.
+        "case" | "default" | "with" | "where" => !stands_as_value(src, toks, i),
+
         _ => true,
     }
+}
+
+/*
+Reports if the match word at token `i` stands where a value does.
+
+The token before decides first: an operator, an opening bracket, or a
+word that takes a value, `local` among them, puts a value there. None of
+those comes before the keyword, which follows the end of a statement or
+of an expression. Then the token after decides: `=`, `.`, `:`, a comma,
+or a closing bracket follows a name and never the keyword. A `(` follows
+a called name, except after `where`, whose guard can open with one. A
+`[` or a `{` opens a pattern after `case`, so neither decides.
+*/
+fn stands_as_value(src: &str, toks: &[Tok], i: usize) -> bool {
+    let word = text(src, toks, i);
+    let before = i.checked_sub(1).map_or("", |k| text(src, toks, k));
+
+    if matches!(
+        before,
+        "local"
+            | "const"
+            | "return"
+            | "match"
+            | "for"
+            | "in"
+            | "if"
+            | "elseif"
+            | "while"
+            | "until"
+            | "not"
+            | "("
+            | "["
+            | "{"
+            | ","
+            | "="
+            | "#"
+    ) || binop_priority(before).is_some()
+        || is_compound_op(before)
+    {
+        return true;
+    }
+
+    if newline_after(src, toks, i) {
+        return false;
+    }
+
+    let after = text(src, toks, i + 1);
+
+    matches!(after, "=" | "." | ":" | "," | ")" | "]" | "}" | ";")
+        || is_compound_op(after)
+        || (after == "(" && word != "where")
 }
 
 /*
@@ -605,6 +665,13 @@ pub fn name_before(word: &str, after: &str) -> bool {
         return false;
     }
 
+    // A pattern opens with `[`, and a guard with either bracket.
+    if (word == "case" && rest.starts_with('['))
+        || (word == "where" && rest.starts_with(['(', '[']))
+    {
+        return false;
+    }
+
     rest.starts_with(['(', '=', '.', ':', '[', ',', ')', '}', ';'])
 }
 
@@ -881,5 +948,32 @@ mod tests {
         assert!(!is_kw("local x = new\nprint(x)\n", "new"));
         assert!(!is_kw("local x = try\nprint(x)\n", "try"));
         assert!(!is_kw("local x = match\nprint(x)\n", "match"));
+    }
+
+    /// The words of a `match` and of a guard are names where a value
+    /// stands, and keywords in their own places.
+    #[test]
+    fn the_match_words_are_names_where_a_value_stands() {
+        for word in ["where", "case", "default", "with"] {
+            assert!(!is_kw(&format!("local {word} = 1"), word), "{word}");
+            assert!(!is_kw(&format!("print({word})"), word), "{word}");
+            assert!(!is_kw(&format!("x = {word} + 1"), word), "{word}");
+            assert!(!is_kw(&format!("{word}.x = 1"), word), "{word}");
+            assert!(name_before(word, " = 1"), "{word}");
+        }
+
+        let arms = "match x with\ncase [a] then print(a)\ndefault print(2)\nend\n";
+        assert!(is_kw(arms, "with"));
+        assert!(is_kw(arms, "case"));
+        assert!(is_kw(arms, "default"));
+        assert!(is_kw("export default 1", "default"));
+        assert!(is_kw("for x in xs where (x > 1) do end", "where"));
+        assert!(is_kw(
+            "match x with\ncase n where n > 1 then print(n)\nend\n",
+            "where"
+        ));
+
+        assert!(!name_before("where", " (x > 1) do"));
+        assert!(!name_before("case", " [a, b] then"));
     }
 }

@@ -41,6 +41,12 @@ impl<'a> Parser<'a> {
                 None
             };
             let stmt_start = self.pos;
+
+            if stmts.last().is_some_and(|s| !matches!(s, Stmt::Empty(_))) {
+                self.stmt_breaks.push(stmt_start);
+            }
+
+            let marks = self.marks();
             let parsed = self.stmt();
 
             // The last thing in a value block may be an expression, not
@@ -48,18 +54,38 @@ impl<'a> Parser<'a> {
             // stand in front of it, a block that ends in `end` included,
             // so the reader tries the expression wherever the statement
             // parser refuses.
+            //
+            // `if c then a else b` is an if-expression, and the lenient
+            // statement parser reads it as an if-statement: it reports
+            // each branch and recovers. A statement that had to recover
+            // is no statement here either, as in a macro body.
             let parsed = match parsed {
                 Err(e) if value_block => {
                     let after = self.pos;
                     self.pos = stmt_start;
 
-                    match self.value_tail() {
+                    match self.value_tail(marks) {
                         Some(s) => Ok(s),
 
                         None => {
                             self.pos = after;
 
                             Err(e)
+                        }
+                    }
+                }
+
+                Ok(s) if value_block && self.diagnostics.len() > marks.reports => {
+                    let after = self.pos;
+                    self.pos = stmt_start;
+
+                    match self.value_tail(marks) {
+                        Some(tail) => Ok(tail),
+
+                        None => {
+                            self.pos = after;
+
+                            Ok(s)
                         }
                     }
                 }
@@ -143,14 +169,24 @@ impl<'a> Parser<'a> {
     /// compiler sees one shape for the block's value. The expression has
     /// to be the last thing in the block; anything else is the statement
     /// error the caller already holds.
-    fn value_tail(&mut self) -> Option<Stmt> {
+    ///
+    /// `marks` are the records before the statement parse. That parse
+    /// and the probe here both read the tokens, so a tail that fits
+    /// drops both records and reads the tokens once more.
+    fn value_tail(&mut self, marks: Marks) -> Option<Stmt> {
         let start = self.pos;
-        let value = self.expr().ok()?;
-
+        let probe = self.marks();
         // The body ends at its `end`, or, as a match arm, at the next arm.
-        if !self.at_block_end() {
+        let fits = self.expr().is_ok() && self.at_block_end();
+
+        self.rewind_to(if fits { marks } else { probe });
+
+        if !fits {
             return None;
         }
+
+        self.pos = start;
+        let value = self.expr().ok()?;
 
         Some(Stmt::Return(Return {
             values: vec![value],
@@ -524,6 +560,34 @@ impl<'a> Parser<'a> {
 
             "export" if self.text_at(1) == "{" => self.export_list(start, false),
 
+            // `export * from "./m"` is another language's barrel. The
+            // report names the forms Alloy takes, with the path written.
+            "export" if self.text_at(1) == "*" => {
+                let from = (2..6)
+                    .find(|&n| self.text_at(n) == "from")
+                    .map(|n| self.text_at(n + 1))
+                    .filter(|s| s.starts_with(['"', '\'']))
+                    .unwrap_or("\"./m\"");
+                let message = match self.text_at(2) == "as" && self.name_at(3) {
+                    true => {
+                        let local = self.text_at(3);
+
+                        format!(
+                            "Alloy has no `export * as`; write `import * as {local} from {from}` and then `export {{ {local} }}`"
+                        )
+                    }
+
+                    false => format!(
+                        "Alloy has no `export *`; name each export, `export {{ A, B }} from {from}`, or write `import * as M from {from}` and then `export {{ M }}`"
+                    ),
+                };
+
+                Err(ParseError {
+                    offset: self.toks[start].start as usize,
+                    message,
+                })
+            }
+
             "export" if self.text_at(1) == "type" && self.text_at(2) == "{" => {
                 self.bump();
                 self.export_list(start, true)
@@ -817,6 +881,26 @@ impl<'a> Parser<'a> {
         }
 
         let exported = self.eat("export") || was_global;
+
+        // `@attr export default <declaration>`: the attributes go on the
+        // declaration, and its span opens on the first of them, as under
+        // `export`. The module exports it as its default.
+        if exported && self.at("default") && !self.newline_after(0) {
+            self.bump();
+
+            if !self.default_decl_follows() {
+                return Err(self.err(
+                    "an attribute needs a declaration; `export default` of a value takes none",
+                ));
+            }
+
+            let decl = self.attributed_stmt(start, attrs)?;
+
+            return Ok(Stmt::ExportDefault {
+                value: DefaultExport::Decl(Box::new(decl)),
+                span: TokSpan::new(start, self.pos),
+            });
+        }
 
         match self.text() {
             "struct" if self.name_at(1) => {

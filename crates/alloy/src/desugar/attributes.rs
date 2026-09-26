@@ -419,7 +419,8 @@ impl<'s> Desugar<'s> {
             if !targets.iter().any(|t| t == target) {
                 let list: Vec<&str> = targets.iter().map(String::as_str).collect();
                 let message = format!(
-                    "the attribute `{name}` has no meaning on a {target}; it goes on {}",
+                    "the attribute `{name}` has no meaning on {} {target}; it goes on {}",
+                    article(target),
                     list_names(&list)
                 );
                 self.diagnose(a.span, &message);
@@ -447,7 +448,8 @@ impl<'s> Desugar<'s> {
 
         if target != "function" {
             let message = format!(
-                "Luau's attribute list goes on a function, and this is a {target}; write the Alloy form, `@name`"
+                "Luau's attribute list goes on a function, and this is {} {target}; write the Alloy form, `@name`",
+                article(target)
             );
             self.diagnose(a.span, &message);
 
@@ -677,13 +679,62 @@ impl<'s> Desugar<'s> {
 
         let head = owner.split('.').next().unwrap_or(owner);
 
-        // `import * as M`: `@M.tag` names the module's own attribute.
-        if self.star_path(name) {
-            return None;
+        // `import * as serde from "@alloy/std/serde"`: `attr_name` reads
+        // every attribute the module holds, so this path names none.
+        if let Some(module) = self.std_namespaces.get(head) {
+            let spec = match module.is_empty() {
+                true => crate::std_names::PREFIX.to_string(),
+
+                false => format!("{}/{module}", crate::std_names::PREFIX),
+            };
+            let held: Vec<&str> = crate::std_names::ATTRIBUTES
+                .iter()
+                .filter(|(m, _)| module.is_empty() || m == module)
+                .flat_map(|(_, names)| names.iter().copied())
+                .collect();
+
+            return Some(match held.is_empty() {
+                true => format!("\"{spec}\" has no attribute `{member}`"),
+
+                false => format!(
+                    "\"{spec}\" has no attribute `{member}`; its attributes are {}",
+                    list_names(&held)
+                ),
+            });
         }
 
-        // A named import binds a module's attribute under its own name.
+        // A private attribute of an imported namespace, as the local
+        // namespace reports it.
+        if self
+            .options
+            .import_private_attributes
+            .iter()
+            .any(|p| p == name)
+        {
+            return Some(format!("`{member}` is private to `{owner}`"));
+        }
+
+        // `import * as M`: `@M.tag` names the module's own attribute,
+        // and `@M.Ns.tag` one of its namespaces. The import index lists
+        // every attribute an Alloy module and its namespaces export.
+        if self.star_path(name) {
+            return self.star_attr_error(owner, member);
+        }
+
         if self.imported_names.contains(head) {
+            // `import { Kit }` of a namespace: the index holds each
+            // attribute it exports, as it does through `* as M`.
+            let held = self.held_attributes(owner);
+
+            if !held.is_empty() {
+                return Some(format!(
+                    "`{owner}` exports no attribute `{member}`; it exports {}",
+                    list_names(&held)
+                ));
+            }
+
+            // A named import binds a module's attribute under its own
+            // name.
             return Some(format!(
                 "an attribute of a module is used by its bare name; import it with `import {{ {member} }} from ...`"
             ));
@@ -694,6 +745,64 @@ impl<'s> Desugar<'s> {
 
             false => format!("`{owner}` is no namespace, so `{name}` names no attribute"),
         })
+    }
+
+    /*
+    The report for `@M.tag` or `@M.Ns.tag` that the import index does not
+    hold. The index is whole for the module itself, for each namespace it
+    declares, and for a namespace that holds an attribute. A name the
+    module sends on from elsewhere, `export { Inner }`, is out of its
+    reach, so a path through one passes unchecked.
+    */
+    fn star_attr_error(&self, owner: &str, member: &str) -> Option<String> {
+        let (head, path) = owner.split_once('.').unwrap_or((owner, ""));
+        let (_, namespaces, exports) = self
+            .options
+            .import_star_modules
+            .iter()
+            .find(|(local, _, _)| local == head)?;
+        let held = self.held_attributes(owner);
+        let first = path.split('.').next().unwrap_or(path);
+        let whole = path.is_empty() || !held.is_empty() || namespaces.iter().any(|n| n == path);
+
+        if !whole && namespaces.iter().any(|n| n == first) {
+            return Some(format!(
+                "`{head}` declares no namespace `{path}`, so `@{owner}.{member}` names no attribute"
+            ));
+        }
+
+        if !whole && exports.iter().any(|n| n == first) {
+            return None;
+        }
+
+        if !whole {
+            return Some(format!(
+                "`{head}` exports no `{first}`, so `@{owner}.{member}` names no attribute"
+            ));
+        }
+
+        Some(match held.is_empty() {
+            true => format!("`{owner}` exports no attribute `{member}`"),
+
+            false => format!(
+                "`{owner}` exports no attribute `{member}`; it exports {}",
+                list_names(&held)
+            ),
+        })
+    }
+
+    /// The attributes a namespace path holds one level down, by name.
+    fn held_attributes(&self, owner: &str) -> Vec<&str> {
+        let prefix = format!("{owner}.");
+        let mut held: Vec<&str> = self
+            .attr_decls
+            .keys()
+            .filter_map(|k| k.strip_prefix(&prefix))
+            .filter(|rest| !rest.contains('.'))
+            .collect();
+        held.sort_unstable();
+
+        held
     }
 
     /// Whether an attribute reaches a target. `check_attrs` reports the
@@ -923,6 +1032,7 @@ impl<'s> Desugar<'s> {
                 Child::Expr(e) => {
                     self.check_enum_member(e);
                     self.check_await(e);
+                    self.check_remote_side(e);
                     self.check_children_of(expr_children(e));
                 }
 
@@ -948,7 +1058,15 @@ impl<'s> Desugar<'s> {
     /// `Shape.Triangle` on an enum the file declares: the member is a
     /// variant, a method the impl writes, or nothing at all.
     pub(crate) fn check_enum_member(&mut self, e: &Expr) {
-        const BUILT_IN: &[&str] = &["is", "clone", "__index", "__tostring", "__eq", "__call"];
+        const BUILT_IN: &[&str] = &[
+            "is",
+            "clone",
+            "debug",
+            "__index",
+            "__tostring",
+            "__eq",
+            "__call",
+        ];
 
         let Expr::Index {
             object,
@@ -958,34 +1076,45 @@ impl<'s> Desugar<'s> {
         else {
             return;
         };
-        let Expr::Name(n) = object.as_ref() else {
+        // `E.Reached` names an enum through `import * as E`.
+        let Some(ename) = self.dotted_name(object) else {
             return;
         };
-        let ename = self.text_of(*n).to_string();
         let Some(variants) = self.enum_decls.get(&ename) else {
             return;
         };
 
-        // The methods of an imported enum stay in the module that
-        // declares it: `project_impls` carries only the impls other
-        // files add. The checker reads them off the import's type, so a
-        // member of an imported enum is its report, not this one. A
-        // macro body sees the enums of the file it expands in the same
-        // way, without their impls.
-        let elsewhere = self
-            .options
-            .import_enums
-            .iter()
-            .chain(&self.options.macro_enums)
-            .any(|(n, _)| *n == ename);
-
-        if elsewhere {
+        // A macro body sees the enums of the file it expands in, without
+        // their impls, so a member there is the checker's report.
+        if self.options.macro_enums.iter().any(|(n, _)| *n == ename) {
             return;
         }
 
         let member = self.text_of(*field).to_string();
 
+        // The methods of an imported enum stay in the module that
+        // declares it, and the import index keys them the way this file
+        // spells the enum: `R.flip` for `import { Reached as R }`. The
+        // index holds the defaults its trait impls take, too.
+        let imported = self.options.import_enums.iter().any(|(n, _)| *n == ename)
+            && self
+                .options
+                .import_callables
+                .iter()
+                .any(|(k, _)| *k == format!("{ename}.{member}"));
+        let from_trait = self.takes_default(&ename, &member);
+        // An impl in another file, and the defaults its trait brings.
+        let declared = self.declared_type_name(&ename);
+        let elsewhere = self
+            .options
+            .foreign_impls
+            .iter()
+            .any(|x| x.name == member && x.head().0 == declared);
+
         if BUILT_IN.contains(&member.as_str())
+            || imported
+            || from_trait
+            || elsewhere
             || variants.iter().any(|(v, _)| *v == member)
             || self
                 .impl_methods
@@ -1001,6 +1130,23 @@ impl<'s> Desugar<'s> {
             list_names(&names)
         );
         self.diagnose(*field, &message);
+    }
+
+    /// Whether an `impl Named for Mode` of this file gives `Mode` the
+    /// trait's default `member`.
+    pub(crate) fn takes_default(&self, ename: &str, member: &str) -> bool {
+        self.impl_traits.get(ename).is_some_and(|ts| {
+            ts.iter().any(|t| {
+                self.traits
+                    .get(t)
+                    .or_else(|| {
+                        let imported = self.options.import_trait_defaults.iter();
+
+                        imported.filter(|(n, _)| n == t).map(|(_, d)| d).next()
+                    })
+                    .is_some_and(|d| d.iter().any(|m| m == member))
+            })
+        })
     }
 
     pub(crate) fn scan_expr_for_reduce(&mut self, e: &Expr) {
@@ -1094,6 +1240,8 @@ impl<'s> Desugar<'s> {
 
             ImportKind::Namespace(n, specs) => {
                 let module = self.text_of(*n).to_string();
+                let spec = self.text_of(i.path).trim_matches(['"', '\'']).to_string();
+                self.star_specs.insert(module.clone(), spec);
                 self.star_modules.insert(module.clone());
                 self.imported_names.insert(module);
                 self.note_specs(specs);
@@ -1119,7 +1267,26 @@ impl<'s> Desugar<'s> {
             return None;
         }
 
-        let bounds = super::types::generic_bounds(self.text_of(body.generics?));
+        // A trait of a namespace is keyed by its flat name, `Zoo_Named`,
+        // and the call check reads the bound after the body closes.
+        let bounds: Vec<(String, String)> =
+            super::types::generic_bounds(self.text_of(body.generics?))
+                .into_iter()
+                .map(|(n, b)| {
+                    let parts: Vec<String> = b
+                        .split('&')
+                        .map(|p| {
+                            let p = p.trim();
+
+                            self.ns_member_name(p)
+                                .or_else(|| self.ns_path_name(p))
+                                .unwrap_or_else(|| p.to_string())
+                        })
+                        .collect();
+
+                    (n, parts.join(" & "))
+                })
+                .collect();
         let asks: Vec<Option<String>> = body
             .params
             .iter()
@@ -1173,7 +1340,12 @@ impl<'s> Desugar<'s> {
                 };
                 let (ser, de) = (derives("Serialize"), derives("Deserialize"));
                 let (clone, default) = (derives("Clone"), derives("Default"));
+                let eq = derives("Eq") || derives("PartialEq");
                 let name = self.decl_name(s.name);
+
+                if eq {
+                    self.equatable.insert(name.clone());
+                }
 
                 if clone {
                     self.cloneable.insert(name.clone());
@@ -1345,6 +1517,16 @@ impl<'s> Desugar<'s> {
                 // declaration fills them.
                 Stmt::Enum(e) => {
                     let name = self.decl_name(e.name);
+
+                    if e.attributes.iter().any(|a| {
+                        a.name.is_some_and(|n| self.text_of(n) == "derive")
+                            && a.args
+                                .iter()
+                                .any(|x| matches!(self.derive_name(x).as_str(), "Eq" | "PartialEq"))
+                    }) {
+                        self.equatable.insert(name.clone());
+                    }
+
                     let variants: Vec<(String, usize)> = e
                         .variants
                         .iter()
@@ -1354,6 +1536,20 @@ impl<'s> Desugar<'s> {
                     // An `impl` above the enum writes onto a nil table.
                     let at = self.byte_start(e.span);
                     self.struct_at.entry(name.clone()).or_insert(at);
+                    let payloads = e
+                        .variants
+                        .iter()
+                        .map(|v| {
+                            let types = v
+                                .payload
+                                .iter()
+                                .map(|t| self.qualify_members(self.text_of(*t).trim()))
+                                .collect();
+
+                            (self.text_of(v.name).to_string(), types)
+                        })
+                        .collect();
+                    self.enum_payloads.insert(name.clone(), payloads);
                     self.enum_decls.insert(name, variants);
                 }
 
@@ -1408,7 +1604,7 @@ impl<'s> Desugar<'s> {
                     // solver names the type argument. A trait impl adds
                     // methods this scan cannot see, and closes that door.
                     if let Some(t) = i.trait_name {
-                        let met = self.text_of(t).to_string();
+                        let met = self.impl_target_name(t);
                         self.impl_traits
                             .entry(target.clone())
                             .or_default()
@@ -1643,7 +1839,14 @@ impl<'s> Desugar<'s> {
     /// and the export list names it flat, `Geo_Kind<T>`: some tail of
     /// the path, joined with `_`, is the exported head.
     fn imported_type_is_generic(&self, name: &str) -> bool {
-        let parts: Vec<&str> = name.split('.').collect();
+        // `import { Opt as O }` keys the enum by `O`, and the module
+        // exports it as `Opt<T>`.
+        let mut parts: Vec<&str> = name.split('.').collect();
+
+        if let Some(declared) = self.import_renames.get(parts[0]) {
+            parts[0] = declared;
+        }
+
         let tails: Vec<String> = (0..parts.len()).map(|i| parts[i..].join("_")).collect();
 
         self.options
@@ -1671,8 +1874,16 @@ impl<'s> Desugar<'s> {
 
             // A struct another file declares derives for this file too:
             // a field of it clones, defaults, and serializes through it.
-            if let Some(shape) = self.options.shapes.iter().find(|s| s.name == name) {
-                for d in &shape.derives {
+            // The import says which struct: a private one of the same
+            // name elsewhere gave its derives, and a clone shared a table.
+            let derives = self
+                .own_module()
+                .and_then(|m| self.project_type(m, &local, 0))
+                .filter(|s| s.variants.is_empty())
+                .map(|s| s.derives.clone());
+
+            if let Some(derives) = derives {
+                for d in &derives {
                     let set = match d.as_str() {
                         "Clone" => &mut self.cloneable,
 
@@ -1713,7 +1924,14 @@ impl<'s> Desugar<'s> {
                     return format!("__neg<{}>", negated.trim());
                 }
 
-                if BUILTIN.contains(&name) && !self.traits.contains_key(name) {
+                // A trait of a namespace renders under one flat name,
+                // `Zoo_Named`, and Luau has no `Zoo.Named` type path.
+                if let Some(flat) = self
+                    .ns_member_name(name)
+                    .or_else(|| self.ns_path_name(name))
+                {
+                    format!("{flat}{}", &part[name.len()..])
+                } else if BUILTIN.contains(&name) && !self.traits.contains_key(name) {
                     format!("{}.{part}", self.std())
                 } else {
                     part.to_string()
@@ -1767,7 +1985,9 @@ impl<'s> Desugar<'s> {
             return self.knows_type(base);
         }
 
-        self.structs.contains(head)
+        // Inside a namespace a member reads by its own name.
+        self.ns_member_name(head).is_some()
+            || self.structs.contains(head)
             || self.enums.contains_key(head)
             || self.enum_decls.contains_key(head)
             || self.traits.contains_key(head)
@@ -2048,6 +2268,19 @@ impl<'s> Desugar<'s> {
             first_tok += 1;
         }
 
+        // `@attr export default function f()`: both words go, and
+        // `local` takes their place. The module exports `f` as its
+        // default, so the name goes out under no key of its own.
+        let default = !exported
+            && self
+                .toks
+                .get(first_tok as usize)
+                .is_some_and(|t| t.text(self.src) == "export");
+
+        if default {
+            first_tok += 2;
+        }
+
         // The first line declared the name: a `local` here would open
         // a second slot and leave the first one nil.
         if hoisted && is_local {
@@ -2071,7 +2304,7 @@ impl<'s> Desugar<'s> {
 
         let forced = std::mem::take(&mut self.ns_force_local);
 
-        if (((is_test || exported) && !is_local) || forced) && !hoisted {
+        if (((is_test || exported || default) && !is_local) || forced) && !hoisted {
             lead.push_str("local ");
         }
 
@@ -2564,6 +2797,23 @@ print(a)
             "{:?}",
             messages(target)
         );
+
+        // A target that starts with a vowel takes `an`.
+        for (src, target) in [
+            ("@inline\nenum E as\n    A\nend\n", "an enum"),
+            (
+                "@inline\ninterface I as\n    x: number\nend\n",
+                "an interface",
+            ),
+            (
+                "struct S as\n    x: number\nend\n@inline\nimpl S as\nend\n",
+                "an impl",
+            ),
+        ] {
+            let want =
+                format!("the attribute `inline` has no meaning on {target}; it goes on `function`");
+            assert!(messages(src).contains(&want), "{want}\n{:?}", messages(src));
+        }
 
         let both = "@inline\n@noinline\nlocal function seven() end\nprint(seven)\n";
         assert!(

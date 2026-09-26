@@ -14,6 +14,7 @@
 //! its default. A table anywhere else is ordinary code.
 
 use alloy::config::{FmtConfig, IndentType};
+use alloy::config_aly::{alloy_value, branches, enum_values, item_schema, misfit, types};
 use alloy::fmt::requote;
 use alloy_syntax::lexer::{Tok, TokKind};
 use serde_json::{Value, json};
@@ -451,87 +452,6 @@ pub fn node_at<'a>(schema: &'a Value, path: &[Seg]) -> Option<&'a Value> {
     Some(node)
 }
 
-/// The schema of the items of a list node, directly or through the one
-/// `anyOf` branch that is a list.
-fn item_schema(node: &Value) -> Option<&Value> {
-    node.get("items").or_else(|| {
-        branches(node)
-            .iter()
-            .find(|b| b.get("type").and_then(Value::as_str) == Some("array"))
-            .and_then(|b| b.get("items"))
-    })
-}
-
-fn branches(node: &Value) -> Vec<&Value> {
-    ["anyOf", "oneOf"]
-        .iter()
-        .filter_map(|k| node.get(*k).and_then(Value::as_array))
-        .flatten()
-        .collect()
-}
-
-/// The JSON types a node takes, its own or its branches'.
-fn types(node: &Value) -> Vec<&str> {
-    match node.get("type") {
-        Some(Value::String(t)) => vec![t.as_str()],
-
-        Some(Value::Array(ts)) => ts.iter().filter_map(Value::as_str).collect(),
-
-        _ => branches(node).into_iter().flat_map(types).collect(),
-    }
-}
-
-/// The values a node takes by name: its own `enum`, else those of its
-/// `oneOf` or `anyOf` branches, so a level that may also be a table
-/// still lists its words.
-fn enum_values(node: &Value) -> Vec<&Value> {
-    match node.get("enum").and_then(Value::as_array) {
-        Some(values) => values.iter().collect(),
-
-        None => branches(node)
-            .into_iter()
-            .filter_map(|b| b.get("enum").and_then(Value::as_array))
-            .flatten()
-            .collect(),
-    }
-}
-
-/// How a type reads in a report: `string`, `"a" | "b"`, `table`.
-fn type_label(node: &Value) -> String {
-    let values = enum_values(node);
-
-    if !values.is_empty() {
-        return values
-            .iter()
-            .map(|v| v.to_string())
-            .collect::<Vec<_>>()
-            .join(" | ");
-    }
-
-    let words: Vec<String> = types(node)
-        .into_iter()
-        .map(|t| match t {
-            "object" => "table".to_string(),
-
-            "array" => match item_schema(node).map(types).as_deref() {
-                Some([one]) => format!("{{ {one} }}"),
-
-                _ => "list".to_string(),
-            },
-
-            "integer" => "number".to_string(),
-
-            other => other.to_string(),
-        })
-        .collect();
-
-    match words.is_empty() {
-        true => "any".to_string(),
-
-        false => words.join(" | "),
-    }
-}
-
 /// How `luau_type` lays out a table.
 #[derive(Clone, Copy)]
 enum Layout {
@@ -711,19 +631,6 @@ fn optional(ty: &str) -> String {
         true => format!("({ty})?"),
 
         false => format!("{ty}?"),
-    }
-}
-
-/// A value as Alloy writes it: a string in quotes, the rest as JSON.
-fn alloy_value(v: &Value) -> String {
-    match v {
-        Value::String(s) => format!("\"{s}\""),
-
-        Value::Array(items) if items.is_empty() => "{}".to_string(),
-
-        Value::Object(map) if map.is_empty() => "{}".to_string(),
-
-        other => other.to_string(),
     }
 }
 
@@ -1017,12 +924,12 @@ fn check_table(lexed: &Lexed, open: usize, node: &Value, path: &[Seg], out: &mut
                 Some(child) => child,
 
                 None => {
-                    if closed(node) {
+                    if alloy::config_aly::closed(node) {
                         let t = &lexed.toks[at];
                         out.push(Problem {
                             start: t.start as usize,
                             end: lexed.toks[lexed.key_end(at)].end as usize,
-                            message: unknown_key(node, k, path),
+                            message: alloy::config_aly::unknown_key(node, k, &table_name(path)),
                         });
                     }
 
@@ -1065,14 +972,6 @@ impl Lexed<'_> {
     }
 }
 
-/// Whether a table node takes only the keys it names.
-fn closed(node: &Value) -> bool {
-    node.get("properties").is_some()
-        && !node
-            .get("additionalProperties")
-            .is_some_and(|a| a.is_object() || a == &Value::Bool(true))
-}
-
 fn table_name(path: &[Seg]) -> String {
     let keys: Vec<&str> = path
         .iter()
@@ -1088,44 +987,6 @@ fn table_name(path: &[Seg]) -> String {
 
         false => format!("`{}`", keys.join(".")),
     }
-}
-
-fn unknown_key(node: &Value, key: &str, path: &[Seg]) -> String {
-    let names: Vec<&String> = node
-        .get("properties")
-        .and_then(Value::as_object)
-        .map(|p| p.keys().collect())
-        .unwrap_or_default();
-    let near = names
-        .iter()
-        .map(|n| (strsim_distance(n, key), n))
-        .filter(|(d, _)| *d <= 2)
-        .min_by_key(|(d, _)| *d)
-        .map(|(_, n)| format!("; did you mean `{n}`?"))
-        .unwrap_or_default();
-
-    format!("`{key}` is no key of {}{near}", table_name(path))
-}
-
-/// The edit distance of two short words.
-fn strsim_distance(a: &str, b: &str) -> usize {
-    let b: Vec<char> = b.chars().collect();
-    let mut row: Vec<usize> = (0..=b.len()).collect();
-
-    for (i, ca) in a.chars().enumerate() {
-        let mut prev = row[0];
-        row[0] = i + 1;
-
-        for (j, cb) in b.iter().enumerate() {
-            let here = row[j + 1];
-            row[j + 1] = (prev + usize::from(ca != *cb))
-                .min(row[j] + 1)
-                .min(here + 1);
-            prev = here;
-        }
-    }
-
-    row[b.len()]
 }
 
 /// A literal value that does not fit its key: a single token, followed
@@ -1145,60 +1006,19 @@ fn check_literal(lexed: &Lexed, at: usize, node: &Value, path: &[Seg]) -> Option
 
         _ => return None,
     };
-    let kinds = types(node);
-    let fits = kinds.iter().any(|k| match *k {
-        "integer" => {
-            got == "number" && !text.contains(['.', 'e', 'E'])
-                || got == "number" && text.starts_with("0x")
-        }
-
-        "number" => got == "number",
-
-        other => other == got,
-    });
     let name = match path.last() {
         Some(Seg::Key(k)) => format!("`{k}`"),
 
         _ => "this item".to_string(),
     };
+    let whole = !text.contains(['.', 'e', 'E']) || text.starts_with("0x");
     let t = lexed.toks.get(at)?;
-    let problem = |message: String| Problem {
+
+    misfit(node, &name, got, whole, string).map(|message| Problem {
         start: t.start as usize,
         end: t.end as usize,
         message,
-    };
-
-    if !kinds.is_empty() && !fits {
-        let wanted = match kinds.as_slice() {
-            ["integer"] => "whole number".to_string(),
-
-            _ => type_label(node),
-        };
-
-        return Some(problem(format!("{name} takes a {wanted}; this is a {got}")));
-    }
-
-    let values = enum_values(node);
-    // A branch that takes any string makes the list a set of hints: a
-    // lint name lists the known ones and still takes an ingot's.
-    let open = branches(node).iter().any(|b| {
-        b.get("type").and_then(Value::as_str) == Some("string") && b.get("enum").is_none()
-    });
-
-    if let Some(s) = string
-        && !open
-        && !values.is_empty()
-        && !values.iter().any(|v| v.as_str() == Some(s))
-    {
-        let list: Vec<String> = values.iter().map(|v| alloy_value(v)).collect();
-
-        return Some(problem(format!(
-            "{name} takes one of {}; `\"{s}\"` is none of them",
-            list.join(", ")
-        )));
-    }
-
-    None
+    })
 }
 
 #[cfg(test)]

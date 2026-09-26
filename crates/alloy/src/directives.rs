@@ -623,9 +623,22 @@ impl Directives {
             }
 
             let Some((name, level)) = part.split_once('=') else {
+                // `allow(name)` is the attribute's spelling, `@allow`;
+                // the directive writes the level after the name.
+                let fixed = match part.split_once('(') {
+                    Some((level @ ("allow" | "warn" | "deny"), rest))
+                        if rest.trim_end().ends_with(')') =>
+                    {
+                        format!("{}={level}", rest.trim_end().trim_end_matches(')').trim())
+                    }
+
+                    _ => format!("{part}=warn"),
+                };
                 self.errors.push((
                     at,
-                    format!("the `{LINT}` directive says `{part}`, which has no level; write `{part}=warn`"),
+                    format!(
+                        "the `{LINT}` directive says `{part}`, which has no level; write `{fixed}`"
+                    ),
                 ));
 
                 continue;
@@ -1128,6 +1141,18 @@ mod tests {
         let no_level = scan("--@alloy-lint raw_require\n");
         assert_eq!(no_level.errors.len(), 1);
         assert!(no_level.errors[0].1.contains("has no level"));
+
+        // The attribute's spelling gets the directive's, not a
+        // suggestion that is itself an error.
+        let attribute = scan("--@alloy-lint allow(prefer_const)\n");
+        assert_eq!(attribute.errors.len(), 1);
+        assert!(
+            attribute.errors[0]
+                .1
+                .ends_with("write `prefer_const=allow`"),
+            "{}",
+            attribute.errors[0].1
+        );
 
         assert_eq!(scan("--@alloy-lint\n").errors.len(), 1);
     }

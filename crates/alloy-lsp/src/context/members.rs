@@ -387,8 +387,15 @@ pub fn guarded_member_column(head: &str, shadow_line: &str, sep: char) -> Option
     }
 
     let receiver = guarded.trim_end_matches(['?', '!']);
+    // `p->Hud?.` binds the child to a temp, the way a call does.
+    let tail = receiver.trim_end_matches(is_word_byte);
+    let child = tail.ends_with("->") || tail.ends_with("=>");
 
-    if path.is_empty() && !receiver.ends_with([')', ']']) && !receiver.contains(['?', '!']) {
+    if path.is_empty()
+        && !child
+        && !receiver.ends_with([')', ']'])
+        && !receiver.contains(['?', '!'])
+    {
         return None;
     }
 
@@ -639,6 +646,16 @@ mod tests {
         assert_eq!(
             guarded_member_column("local a = o!.mid!.", chained, '.'),
             Some(chained.rfind("_1).stats").unwrap() + "_1).".len())
+        );
+
+        // A child lookup before the guard binds a temp as a call does.
+        let child = concat!(
+            "local _1 = (if player == nil then nil else (player:FindFirstChild(\"leaderstats\") :: any)) ",
+            "print((if _1 == nil then nil else _1.__alloy_hole()))",
+        );
+        assert_eq!(
+            guarded_member_column("print(player->leaderstats?.", child, '.'),
+            Some(child.find("_1.__alloy_hole").unwrap() + 3)
         );
 
         // A plain call keeps its own receiver, so nothing moves.

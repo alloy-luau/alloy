@@ -165,6 +165,178 @@ fn context_labels(src: &str, head: &str) -> Vec<String> {
         .filter_map(|i| i["label"].as_str().map(str::to_string))
         .collect()
 }
+/// A star import of a std module reaches its types in a type slot, and
+/// no value of the module.
+#[test]
+fn a_std_star_import_lists_its_types_in_a_type_slot() {
+    let src = concat!(
+        "import * as coll from \"@alloy/std/collections\"\n",
+        "import * as res from \"@alloy/std/result\"\n",
+        "local m: coll.\n",
+        "local function f(r: res.)\nend\n",
+    );
+    let labels = context_labels(src, "m: coll.");
+
+    for name in ["HashMap", "Set", "BitSet", "Queue", "Heap", "Array"] {
+        assert!(labels.contains(&name.to_string()), "{labels:?}");
+    }
+
+    assert!(!labels.contains(&"Symbol".to_string()), "{labels:?}");
+    assert_eq!(context_labels(src, "r: res."), ["Result"]);
+}
+/// A list offers no name it already holds, whichever side of the
+/// caret holds it.
+#[test]
+fn a_list_offers_no_name_it_already_holds() {
+    let derive = context_labels(
+        "@derive(Eq, serde.Serialize, )\nstruct A as\n    x: number\nend\n",
+        "Serialize, ",
+    );
+    assert!(!derive.contains(&"Eq".to_string()), "{derive:?}");
+    assert!(!derive.contains(&"Serialize".to_string()), "{derive:?}");
+    assert!(derive.contains(&"Clone".to_string()), "{derive:?}");
+
+    let luau = context_labels("@[, native]\nlocal function f() end\n", "@[");
+    assert_eq!(luau, ["checked", "deprecated"]);
+
+    let names = context_labels(
+        "import { HashMap, Set,  } from \"@alloy/std/collections\"\n",
+        "Set, ",
+    );
+    assert!(!names.contains(&"HashMap".to_string()), "{names:?}");
+    assert!(!names.contains(&"Set".to_string()), "{names:?}");
+    assert!(names.contains(&"Queue".to_string()), "{names:?}");
+}
+/// `@serde.` offers what goes on the declaration under it, as a bare
+/// `@` does.
+#[test]
+fn a_dotted_attribute_follows_the_declaration_under_it() {
+    let src = concat!(
+        "import * as serde from \"@alloy/std/serde\"\n",
+        "@serde.\n",
+        "struct A as\n",
+        "    @serde.\n",
+        "    x: number\n",
+        "end\n",
+    );
+    let at = |nth: usize| {
+        let offset = src.match_indices("@serde.").nth(nth).unwrap().0 + "@serde.".len();
+        let (st, uri) = one_file(src);
+        let ctx = context::detect(src, offset).expect("an attribute path");
+        let mut labels: Vec<String> = st
+            .context_items(uri, offset, &ctx)
+            .iter()
+            .filter_map(|i| i["label"].as_str().map(str::to_string))
+            .collect();
+        labels.sort();
+
+        labels
+    };
+
+    assert_eq!(at(0), ["deny_unknown_fields", "rename_all"]);
+    assert_eq!(at(1), ["rename", "skip"]);
+}
+
+/// `@K.` lists what the namespace holds: its attributes that go on the
+/// declaration under it, and the namespaces inside it. `@K.Inner.`
+/// walks down one more. Both completed nothing.
+#[test]
+fn a_namespace_path_completes_its_attributes() {
+    let src = concat!(
+        "namespace K\n",
+        "    attribute tag on struct\n",
+        "    attribute mark on field\n",
+        "    private attribute hidden on struct\n",
+        "    namespace Inner\n",
+        "        attribute deep on struct\n",
+        "    end\n",
+        "end\n",
+        "@K.\n",
+        "struct A\n",
+        "    x: number\n",
+        "end\n",
+        "@K.Inner.\n",
+        "struct B\n",
+        "    x: number\n",
+        "end\n",
+    );
+    let labels = |needle: &str| {
+        let offset = src.find(needle).unwrap() + needle.len();
+        let (st, uri) = one_file(src);
+        let ctx = context::detect(src, offset).expect("an attribute path");
+        let mut labels: Vec<String> = st
+            .context_items(uri, offset, &ctx)
+            .iter()
+            .filter_map(|i| i["label"].as_str().map(str::to_string))
+            .collect();
+        labels.sort();
+
+        labels
+    };
+
+    assert_eq!(labels("@K."), ["Inner", "tag"]);
+    assert_eq!(labels("@K.Inner."), ["deep"]);
+}
+
+/// A bare `@` lists a namespace that holds an attribute for the spot:
+/// the file's own, and one a named import brings. A namespace whose
+/// attributes go elsewhere stays out.
+#[test]
+fn a_bare_sigil_lists_a_namespace_of_attributes() {
+    let dir = std::env::temp_dir().join(format!("alloy-attr-namespace-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n",
+    )
+    .expect("alloy.toml");
+    std::fs::write(
+        dir.join("src/tags.aly"),
+        "export namespace Tags\n    attribute station on struct\nend\n",
+    )
+    .expect("tags.aly");
+    let src = concat!(
+        "import { Tags } from \"./tags\"\n",
+        "namespace K\n",
+        "    attribute tag on struct\n",
+        "end\n",
+        "namespace F\n",
+        "    attribute only on field\n",
+        "end\n",
+        "@\n",
+        "struct A\n",
+        "    x: number\n",
+        "end\n",
+    );
+    let path = dir.join("src/main.aly");
+    std::fs::write(&path, src).expect("main.aly");
+    let mut st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        ..State::default()
+    };
+    let uri = path_to_uri(&path);
+    let (options, jsx) = st.options_for(&uri);
+    st.docs.insert(
+        uri.clone(),
+        Doc::new(src.to_string(), 1, &options, &jsx, None),
+    );
+
+    let offset = src.find("@\n").unwrap() + 1;
+    let ctx = context::detect(src, offset).expect("an attribute");
+    let items = st.context_items(&uri, offset, &ctx);
+    let label = |l: &str| items.iter().find(|i| i["label"] == l);
+
+    assert_eq!(
+        label("@K").map(|i| &i["textEdit"]["newText"]),
+        Some(&json!("@K."))
+    );
+    assert!(label("@Tags").is_some(), "{items:?}");
+    assert!(label("@F").is_none(), "{items:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
 /// A whole keyword with more names behind it keeps the list, and
 /// takes the first row. `else` is `elseif` as far as the letters go,
 /// so the reader still needs to see both.
@@ -926,6 +1098,82 @@ pub(crate) fn a_remote_offers_the_members_its_side_reaches() {
     assert!(chat.holds("fire", None) && chat.holds("on", None));
     assert!(!chat.holds("call", None));
 }
+/// A remote in a namespace keeps its side in the list: the server's
+/// `Net.Up.` offered `fire` for a remote that goes from the client.
+#[test]
+pub(crate) fn a_remote_in_a_namespace_offers_its_side() {
+    let (mut st, one) = one_file("");
+    st.docs.remove(one);
+    let doc = |src: &str| {
+        Doc::new(
+            src.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        )
+    };
+    let uri = "file:///main.server.aly";
+    let src = "import { Net } from \"./net\"\nnamespace Own\n    remote Ping(n: number) from server\nend\nNet.Up.fire(\"x\")\nOwn.Ping.fire_all(1)\n";
+    st.docs.insert(
+        "file:///net.aly".to_string(),
+        doc("export namespace Net\n    remote Up(id: string) from client\nend\n"),
+    );
+    st.docs.insert(uri.to_string(), doc(src));
+    let labels = |line: u32, character: u32| -> Vec<String> {
+        let mut result = json!(
+            ["spec", "instance", "fire", "fire_all", "on", "wait"].map(|l| json!({ "label": l }))
+        );
+        st.filter_remote_members(uri, line, character, &mut result);
+
+        result
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["label"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    assert_eq!(labels(4, 7), ["spec", "instance", "on", "wait"]);
+    assert_eq!(labels(5, 9), ["spec", "instance", "fire", "fire_all"]);
+}
+
+/// A local that holds a remote keeps the remote's side in the list: the
+/// server's `vote.` offered `fire` after `const vote = Net.Up`, for a
+/// remote that goes from the client.
+#[test]
+pub(crate) fn an_alias_of_a_remote_offers_its_side() {
+    let (mut st, one) = one_file("");
+    st.docs.remove(one);
+    let doc = |src: &str| {
+        Doc::new(
+            src.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        )
+    };
+    let uri = "file:///main.server.aly";
+    let src = "import { Net } from \"./net\"\nconst vote = Net.Up\nvote.on(print)\n";
+    st.docs.insert(
+        "file:///net.aly".to_string(),
+        doc("export namespace Net\n    remote Up(id: string) from client\nend\n"),
+    );
+    st.docs.insert(uri.to_string(), doc(src));
+    let mut result = json!(
+        ["spec", "instance", "fire", "fire_all", "on", "wait"].map(|l| json!({ "label": l }))
+    );
+    st.filter_remote_members(uri, 2, 5, &mut result);
+    let labels: Vec<&str> = result
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["label"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(labels, ["spec", "instance", "on", "wait"]);
+}
 /// The first line of the emit binds the module of each global under
 /// `_g1`, and a module's own `global local` values under `_gs`. No
 /// source writes either name, so no list offers one.
@@ -1364,7 +1612,7 @@ pub(crate) fn a_value_offers_no_constructor() {
 
     // `player.` on line 5, past the dot.
     let mut result = child();
-    clean_completion(&mut result, doc, 5, 13, true);
+    clean_completion(&mut result, doc, &[], 5, 13, true);
     assert_eq!(labels(&result), ["name"]);
 
     // `Player.` names the type, and the constructor stays.
@@ -1372,7 +1620,7 @@ pub(crate) fn a_value_offers_no_constructor() {
     let (st, uri) = one_file(src);
     let doc = st.docs.get(uri).expect("doc");
     let mut result = child();
-    clean_completion(&mut result, doc, 4, 17, true);
+    clean_completion(&mut result, doc, &[], 4, 17, true);
     let mut got = labels(&result);
     got.sort();
     assert_eq!(got, ["name", "new"]);
@@ -1380,18 +1628,25 @@ pub(crate) fn a_value_offers_no_constructor() {
 
 /// A trait has no table in the emit, so the child has no type for
 /// `self` inside a default method. The trait's own signatures are the
-/// list.
+/// list. The detail names the method, not the trait.
 #[test]
 fn self_inside_a_trait_lists_the_trait_methods() {
     let src = "trait T as\n    function f(self): number\n\n    function g(self): number\n        return self:\n    end\nend\n";
     let (st, uri) = one_file(src);
-    let items = st.trait_self_members(uri, 4, 20);
+    let items = st.trait_self_members(uri, 4, 20, &Value::Null);
     let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
     assert_eq!(labels, vec!["f", "g"]);
-    assert_eq!(items[0]["detail"], "function T(self): number");
+    assert_eq!(items[0]["detail"], "function f(self): number");
+
+    // A default on an enum types `self`, and the child lists the
+    // methods itself. Each one stays once.
+    let child = json!([{ "label": "f", "kind": 2, "detail": "() -> number" }]);
+    let items = st.trait_self_members(uri, 4, 20, &child);
+    let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
+    assert_eq!(labels, vec!["g"]);
 
     // Outside the trait, and after a name that is not `self`, nothing.
-    assert!(st.trait_self_members(uri, 6, 0).is_empty());
+    assert!(st.trait_self_members(uri, 6, 0, &Value::Null).is_empty());
 }
 
 /// An index before the member: `profile["a"].`, `map?[k].` and
@@ -2514,6 +2769,44 @@ fn a_name_read_as_a_member_takes_the_value_import() {
     );
 }
 
+/// `Frost.new()` on a class module offered `import { type Frost }` next
+/// to the default import, and the child put its raw `require` first.
+/// The type import binds no value, so the file then reported "imported
+/// as a type". A value use now offers the default import alone, and
+/// the child's require fixes go.
+#[test]
+fn a_value_use_of_a_class_offers_no_type_import() {
+    let st = files(&[
+        (
+            "file:///Frost.aly",
+            "local Frost = {}\nFrost.__index = Frost\nexport type Frost = typeof(setmetatable({} :: { slow: number }, Frost))\nfunction Frost.new(): Frost\n    return setmetatable({ slow = 1 }, Frost)\nend\nreturn Frost\n",
+        ),
+        ("file:///use.aly", "local f = Frost.new()\nprint(f)\n"),
+    ]);
+    let report = json!({
+        "message": "TypeError: Unknown global 'Frost'; consider assigning to it first",
+        "range": { "start": { "line": 0, "character": 10 }, "end": { "line": 0, "character": 15 } },
+    });
+    let mut actions = st.import_actions("file:///use.aly", &[report]);
+    let titles = |actions: &[Value]| -> Vec<String> {
+        actions
+            .iter()
+            .map(|a| a["title"].as_str().unwrap_or("").to_string())
+            .collect()
+    };
+
+    assert_eq!(titles(&actions), ["Add `import Frost from './Frost'`"]);
+
+    actions.insert(
+        0,
+        json!({ "title": "Add require for 'Frost' from \"script.Parent.Frost\"", "isPreferred": true }),
+    );
+    actions.push(json!({ "title": "Add all missing requires" }));
+    super::super::dispatch::drop_child_requires(&mut actions);
+
+    assert_eq!(titles(&actions), ["Add `import Frost from './Frost'`"]);
+}
+
 /// `Unknown type 'Vec2'` where another module exports `Vec2`: the
 /// quick fix writes the import line the completion list would insert.
 #[test]
@@ -2560,6 +2853,98 @@ pub(crate) fn an_unresolved_name_offers_the_import_that_binds_it() {
         st.import_actions("file:///use.aly", &[other]).is_empty(),
         "a report with no unresolved name"
     );
+}
+
+/// The report said "add it to that import `./obby`", and the fix wrote
+/// `import { STAGES } from "./obby/stages"`. The report on `new Stage`
+/// named `"./obby/init"`, which is no module. The fix now names the
+/// module the report names, and a name that comes through an import of
+/// the file joins that import.
+#[test]
+fn the_import_fix_names_the_module_the_report_names() {
+    let dir = std::env::temp_dir().join(format!("alloy-fix-barrel-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src/obby")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"out\"\n",
+    )
+    .expect("toml");
+    std::fs::write(
+        dir.join("src/obby/stages.aly"),
+        "export const STAGES = 1\nexport const OTHER = 2\nexport struct Stage as\n    id: number\nend\n",
+    )
+    .expect("module");
+    std::fs::write(
+        dir.join("src/obby/init.aly"),
+        "export { STAGES, OTHER, Stage } from \"./stages\"\n",
+    )
+    .expect("barrel");
+
+    let mut st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        ..State::default()
+    };
+    let mut fix = |file: &str, src: &str, name: &str| -> Value {
+        let path = dir.join("src").join(file);
+        std::fs::write(&path, src).expect("source");
+        let uri = format!("file://{}", path.display());
+        let options = EmitOptions {
+            file_name: path.to_string_lossy().into_owned(),
+            ..EmitOptions::default()
+        };
+        st.docs.insert(
+            uri.clone(),
+            Doc::new(
+                src.to_string(),
+                1,
+                &options,
+                &alloy::luaux::Config::default(),
+                None,
+            ),
+        );
+        let message = alloy::modules::missing_import_message(
+            &format!("Unknown global '{name}'"),
+            &path,
+            src,
+        )
+        .or_else(|| {
+            alloy::modules::module_that_exports(&path, name).map(|spec| {
+                format!("unknown struct `{name}`; \"{spec}\" exports it: `import {{ {name} }} from \"{spec}\"`")
+            })
+        })
+        .expect("a report");
+        let actions = st.import_actions(
+            &uri,
+            &[json!({ "message": format!("TypeError: {message}") })],
+        );
+
+        assert_eq!(actions.len(), 1, "{actions:?}");
+
+        json!([message, actions[0]["edit"]["changes"][&uri][0]["newText"]])
+    };
+
+    assert_eq!(
+        fix(
+            "use.aly",
+            "import { OTHER } from \"./obby\"\nprint(OTHER, STAGES)\n",
+            "STAGES"
+        ),
+        json!([
+            "`STAGES` is not imported; \"./obby\" exports it, so add it to that import",
+            "import { OTHER, STAGES } from \"./obby\""
+        ])
+    );
+    assert_eq!(
+        fix("make.aly", "print(new Stage { id = 1 })\n", "Stage"),
+        json!([
+            "unknown struct `Stage`; \"./obby\" exports it: `import { Stage } from \"./obby\"`",
+            "import { Stage } from './obby'\n"
+        ])
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `Unknown type 'Point'` on an annotation: the quick fix imports the
@@ -2628,6 +3013,27 @@ pub(crate) fn an_unresolved_type_name_offers_the_type_import() {
     assert_eq!(
         fix(src, "TypeError: Unknown type 'Pair'")[0].1["newText"],
         json!("import { other, type Pair } from \"./point\"")
+    );
+
+    // A list over several lines takes the name on a line of its own,
+    // indented as the last entry, with its trailing comma.
+    let src = "import {\n    other, -- the other\n} from \"./point\"\n\nlocal p: Point = nil\nprint(p, other)\n";
+    assert_eq!(
+        fix(src, unknown)[0].1,
+        json!({
+            "range": { "start": { "line": 2, "character": 0 }, "end": { "line": 2, "character": 0 } },
+            "newText": "    type Point,\n",
+        })
+    );
+    // With no trailing comma, the comma joins the last entry and its
+    // comment stays on its line.
+    let src = "import {\n    other -- the other\n} from \"./point\"\n\nlocal p: Point = nil\nprint(p, other)\n";
+    assert_eq!(
+        fix(src, unknown)[0].1,
+        json!({
+            "range": { "start": { "line": 1, "character": 9 }, "end": { "line": 2, "character": 0 } },
+            "newText": ", -- the other\n    type Point\n",
+        })
     );
 }
 
@@ -2805,6 +3211,153 @@ fn a_macro_and_an_unclosed_call_answer_from_the_declaration() {
     // receiver; the proxy reads no declaration for one.
     let (st3, uri3) = super::support::one_file("local w = 1\nprint(w:combine(\n");
     assert!(st3.declared_signature_help(uri3, 1, 16).is_none());
+}
+
+/// `new Spinner(part, ` in a file that imports `Spinner` through a
+/// barrel had no help: the barrel declares no `impl Spinner`. The
+/// module the barrel names answers for it.
+#[test]
+fn a_constructor_through_a_barrel_has_signature_help() {
+    const SRC: &str = "import { Spinner } from \"./obby\"\nlocal sp = new Spinner(part, \n";
+    let dir = std::env::temp_dir().join(format!("alloy-barrel-sig-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src/obby")).expect("temp dir");
+    std::fs::write(
+        dir.join("src/obby/platforms.aly"),
+        concat!(
+            "export struct Spinner\n    speed: number\nend\n",
+            "export impl Spinner\n",
+            "    function new(part: BasePart, speed: number): Spinner\n",
+            "        return new Spinner { speed = speed }\n",
+            "    end\n",
+            "end\n",
+        ),
+    )
+    .expect("module");
+    std::fs::write(
+        dir.join("src/obby/init.aly"),
+        "export { Spinner } from \"./platforms\"\n",
+    )
+    .expect("module");
+    let uri = format!("file://{}", dir.join("src/main.aly").display());
+    let st = files(&[(&uri, SRC)]);
+
+    let help = st
+        .declared_signature_help(&uri, 1, SRC.lines().nth(1).expect("line").len() as u32)
+        .expect("help");
+    assert_eq!(
+        help["signatures"][0]["label"],
+        json!("function Spinner.new(part: BasePart, speed: number): Spinner")
+    );
+    assert_eq!(help["activeParameter"], json!(1));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The child answers no signature help on the base of an index, `Mode`
+/// in `Mode.speed(Mode.Walk, 2)`, and none for the call the source opens
+/// around `new Car { }`, which lowers to `Car.__new({ })`. The caret
+/// moves past the base, and past the lowered call.
+#[test]
+fn a_signature_caret_leaves_an_index_base_and_a_lowered_constructor() {
+    use super::super::hover::past_index_base;
+
+    let shadow = "print(Mode.speed(Mode.Walk, 2))\nprint(Car.drive(Car.__new({ n = 2 }), 3))\n";
+
+    assert_eq!(past_index_base(shadow, (0, 17)), Some((0, 21)));
+    assert_eq!(past_index_base(shadow, (0, 19)), Some((0, 21)));
+    assert_eq!(past_index_base(shadow, (0, 22)), None);
+    assert_eq!(past_index_base(shadow, (0, 28)), None);
+    assert_eq!(past_index_base(shadow, (1, 26)), Some((1, 36)));
+}
+
+/// A caret at the start of an argument that is itself a call sat on the
+/// callee of the inner call, and the child answered for that call. The
+/// caret moves to the `(` or the space in front of the argument, where
+/// the child answers for the outer call.
+#[test]
+fn a_signature_caret_at_a_call_argument_answers_for_the_outer_call() {
+    use super::super::hover::before_call_argument;
+
+    let shadow = concat!(
+        "local p = make_path(CFrame.new(), Vector3.new(0, 0, 1))\n",
+        "if (f()) then end\n",
+        "print(Mode.speed(Mode.Walk, 2))\n",
+        "local q = make_path(\n",
+        "  origin,\n",
+        "  Vector3.new(0, 0, 40)\n",
+        ")\n",
+        "take({ a, g() })\n",
+    );
+
+    assert_eq!(before_call_argument(shadow, (0, 20)), Some((0, 19)));
+    assert_eq!(before_call_argument(shadow, (0, 34)), Some((0, 33)));
+    // Inside the inner call, and in its callee, the inner call answers.
+    assert_eq!(before_call_argument(shadow, (0, 26)), None);
+    assert_eq!(before_call_argument(shadow, (0, 46)), None);
+    // A `(` that groups opens no call.
+    assert_eq!(before_call_argument(shadow, (1, 4)), None);
+    // An argument that calls nothing keeps the index-base route.
+    assert_eq!(before_call_argument(shadow, (2, 17)), None);
+    assert_eq!(before_call_argument(shadow, (2, 6)), Some((2, 5)));
+    // An argument on a line of its own.
+    assert_eq!(before_call_argument(shadow, (5, 2)), Some((5, 1)));
+    // An item of a table is no argument.
+    assert_eq!(before_call_argument(shadow, (7, 10)), None);
+}
+
+/// Signature help on a variant of an imported enum showed the emit's
+/// `_1: number`. The declaration the import brings names the payload.
+#[test]
+fn an_imported_variant_signature_reads_its_payload_types() {
+    let (mut st, uri) = one_file("print(Enemy.Grunt(5, 8))\n");
+    st.docs
+        .get_mut(uri)
+        .expect("doc")
+        .import_decls
+        .push(alloy::declarations::Declaration {
+            name: "Enemy.Grunt".to_string(),
+            hover: "```alloy\nEnemy.Grunt(number, number)\n```\nA variant of `enum Enemy`."
+                .to_string(),
+            offset: 0,
+        });
+    let mut help = json!({ "signatures": [{
+        "label": "function Enemy.Grunt(_1: number, _2: number): Enemy",
+        "parameters": [{ "label": [21, 31] }, { "label": [33, 43] }],
+    }] });
+    st.rewrite_variant_signatures(uri, &mut help);
+
+    assert_eq!(
+        help["signatures"][0]["label"],
+        json!("Enemy.Grunt(number, number)")
+    );
+    assert_eq!(
+        help["signatures"][0]["parameters"],
+        json!([{ "label": "number" }, { "label": "number" }])
+    );
+}
+
+/// `player->leaderstats?.` listed no member: the check casts a child
+/// that a member follows to `any`. The copy the completion reads drops
+/// the cast and keeps every other byte in its place.
+#[test]
+fn a_child_lookup_loses_its_cast_for_a_member_completion() {
+    use super::super::hover::uncast_children;
+
+    let shadow = concat!(
+        "local _1 = (if p == nil then nil else (p:FindFirstChild(\"a)\") :: any)) print(_1.Name)\n",
+        "local w = (p:WaitForChild(\"Hud\") :: any).Size\n",
+        "local k = (x :: any)\n",
+    );
+    let copy = uncast_children(shadow);
+
+    assert_eq!(copy.len(), shadow.len());
+    assert!(copy.contains("(p:FindFirstChild(\"a)\")       )"), "{copy}");
+    assert!(
+        copy.contains("(p:WaitForChild(\"Hud\")       ).Size"),
+        "{copy}"
+    );
+    assert!(copy.contains("(x :: any)"), "{copy}");
 }
 
 /// A declaration's parameter list is no call: `remote test(` shows no
@@ -3227,6 +3780,42 @@ pub(crate) fn an_import_list_with_no_module_lists_the_project() {
     assert_eq!(cog["textEdit"]["newText"], json!("Cog"));
 }
 
+/// `@self/x` in an `init` script names `x` in its own folder, as the
+/// compiler reads it. The list gave only `type` there, where `./x`
+/// gave the exports. Any other file has no `@self`.
+#[test]
+fn an_init_script_lists_the_exports_of_a_self_import() {
+    let src = "import {  } from '@self/wheel'\n";
+    let at = src.find(" }").expect("the braces") + 1;
+
+    for (file, listed) in [
+        ("file:///s/init.server.aly", true),
+        ("file:///s/main.aly", false),
+    ] {
+        let st = files(&[
+            (file, src),
+            ("file:///s/wheel.aly", "export const Cog = 1\n"),
+        ]);
+        let ctx = context::detect(src, at).expect("a context");
+        let labels: Vec<Value> = st
+            .context_items(file, at, &ctx)
+            .iter()
+            .map(|i| i["label"].clone())
+            .collect();
+
+        assert_eq!(labels.contains(&json!("Cog")), listed, "{file}: {labels:?}");
+    }
+
+    // An empty path offers `@self/` in the same files alone.
+    let offers_self = |own: &str| {
+        module_entries(Path::new("/s"), None, "", "", Some(Path::new(own)))
+            .iter()
+            .any(|(label, _, _)| label == "@self/")
+    };
+    assert!(offers_self("/s/init.server.aly"));
+    assert!(!offers_self("/s/main.aly"));
+}
+
 /// A generated import takes the project's `[fmt] quote_style`. The
 /// auto-import quick fix and the `from` clause of an import list both
 /// write it. A project that names no style writes the single quote,
@@ -3512,7 +4101,7 @@ fn a_colon_list_leaves_out_a_static_of_no_parameters() {
         { "label": "default", "kind": 2, "detail": "() -> Stats" },
         { "label": "clone", "kind": 2, "detail": "(Stats) -> Stats" },
     ]);
-    clean_completion(&mut result, doc, 4, 8, false);
+    clean_completion(&mut result, doc, &[], 4, 8, false);
     let labels: Vec<&str> = result
         .as_array()
         .unwrap()
@@ -3558,4 +4147,106 @@ fn a_filter_being_typed_offers_the_loop_names() {
 
     assert!(labels.contains(&"x".to_string()), "{labels:?}");
     assert!(labels.contains(&"xs".to_string()), "{labels:?}");
+}
+
+/// After `->` the child answers inside the string of `FindFirstChild("`
+/// and details each child as `string`. The sourcemap gives the class,
+/// and a name whose class it cannot pin down shows no detail.
+#[test]
+fn a_child_name_takes_its_class_from_the_sourcemap() {
+    let tree = json!({
+        "name": "Game", "className": "DataModel", "children": [
+            { "name": "ReplicatedStorage", "className": "ReplicatedStorage", "children": [
+                { "name": "Assets", "className": "Folder", "children": [
+                    { "name": "Swords", "className": "Folder" },
+                ] },
+                { "name": "Alloy", "className": "ModuleScript" },
+            ] },
+            { "name": "Workspace", "className": "Workspace", "children": [
+                { "name": "Swords", "className": "Model" },
+            ] },
+        ]
+    });
+    let item = |label: &str| json!({ "label": label, "kind": 21, "detail": "string" });
+    let details = |labels: &[&str]| -> Vec<Option<String>> {
+        let mut items: Vec<Value> = labels.iter().map(|l| item(l)).collect();
+        super::super::completion::child_details(&tree, &mut items);
+
+        items
+            .iter()
+            .map(|i| i.get("detail").and_then(Value::as_str).map(str::to_string))
+            .collect()
+    };
+
+    assert_eq!(
+        details(&["Assets", "Alloy"]),
+        [Some("Folder".to_string()), Some("ModuleScript".to_string())]
+    );
+    // Two instances hold a `Swords`, of two classes.
+    assert_eq!(details(&["Swords"]), [None]);
+    // A name the sourcemap does not hold shows no detail.
+    assert_eq!(details(&["Nope"]), [None]);
+}
+
+/// `new Row { n = 1 }` lowers to `Row.__new({ n = 1 })`, and the child
+/// answered for that call. Before the braces the call the source opens
+/// answers, with its active parameter. Inside them no call is open.
+#[test]
+fn a_struct_constructor_shows_the_call_around_it() {
+    use super::super::completion::in_constructor_braces;
+
+    let src = "struct Row\n  n: number\nend\n\nlocal function add(r: Row, k: number): number\n  return r.n + k\nend\n\nprint(add(new Row { n = 1 }, 2))\n";
+    let (st, uri) = one_file(src);
+    let help = |character: u32| {
+        let mut result =
+            json!({ "signatures": [{ "label": "function Row.__new(f: { n: number }): Row" }] });
+        let mended = st.mend_constructor_signature(uri, 8, character, &mut result);
+
+        (mended, result)
+    };
+
+    for character in [10, 14] {
+        let (mended, at_call) = help(character);
+        assert!(mended);
+        assert_eq!(
+            at_call["signatures"][0]["label"],
+            json!("function add(r: Row, k: number): number")
+        );
+        assert_eq!(at_call["activeParameter"], json!(0));
+    }
+    assert_eq!(help(20), (true, Value::Null));
+    assert_eq!(help(26), (true, Value::Null));
+
+    // A call inside the braces is open, and a plain table is no struct.
+    assert!(in_constructor_braces("f(new A.B { x = [", 17));
+    assert!(!in_constructor_braces("f(new Row { n = g(", 18));
+    assert!(!in_constructor_braces("f({ ", 4));
+    assert!(!in_constructor_braces("f(renew { ", 10));
+}
+
+/// `new V(1, 2)` lowers to `V.new(1, 2)`. The arguments now copy in
+/// place, so a caret inside them maps into that call and the child
+/// answers. A file that stops at `new V(1, )` has no artifact; the `new`
+/// an impl of `V` declares answers there, as `V.new(` would.
+#[test]
+fn a_new_call_shows_the_constructor() {
+    let head = "struct V\n  x: number\nend\n\nimpl V\n  function new(x: number, y: number): V\n    return new V { x = x }\n  end\nend\n\n";
+    let closed = format!("{head}local a = new V(1, 2)\n");
+    let out = alloy::compile_with(&closed, &alloy::EmitOptions::default()).expect("compile");
+    let one = closed.find("(1, 2)").expect("call") as u32 + 1;
+
+    assert!(out.check.contains("local a = V.new(1, 2)"), "{}", out.check);
+    assert!(
+        out.map.to_output(one).is_some(),
+        "the `1` maps into the call"
+    );
+
+    let (st, uri) = one_file(&format!("{head}local b = new V(1, )\n"));
+    let help = st.declared_signature_help(uri, 10, 19).expect("help");
+
+    assert_eq!(
+        help["signatures"][0]["label"],
+        json!("function V.new(x: number, y: number): V")
+    );
+    assert_eq!(help["activeParameter"], json!(1));
 }

@@ -74,6 +74,9 @@ pub fn section_kinds(number: &str) -> Vec<&'static str> {
 /// first match wins, from the most specific wording to the least.
 const KIND_RULES: &[(&[&str], &str)] = &[
     (&["internal:"], "InternalError"),
+    // A struct field with no name. The report quotes the field, so a
+    // name like `result` or `remote` would reach a rule below.
+    (&["a struct takes each field by name"], "StructError"),
     // A negation the analyzer cannot build, said before it tries.
     (&["negates twice", "luau cannot negate"], "TypeError"),
     // A name after the rest of a pattern: the parser's report, which
@@ -95,12 +98,23 @@ const KIND_RULES: &[(&[&str], &str)] = &[
         "TypeError",
     ),
     // The removal report names a declaration kind, which the rules
-    // below would read as the kind's own family.
-    (&["`global` is removed"], "ImportError"),
+    // below would read as the kind's own family. The `export *` report
+    // names the forms Alloy takes, and the same holds.
+    (&["`global` is removed", "has no `export *"], "ImportError"),
+    // An attribute's argument list that never closes. The report names
+    // the attribute, which could reach any rule below.
+    // A block with no `end`. The report names the word that opened
+    // it, `export` or `struct`, which a rule below would read.
+    (
+        &["and never closes it; write", "needs an `end`"],
+        "SyntaxError",
+    ),
     // Luau's attribute list and `@allow`. The words of a lint name in
-    // the report could reach any rule below.
+    // the report could reach any rule below. A std module's attribute
+    // path names the module, which the std rule below would read.
     (
         &[
+            "has no attribute `",
             "in this list twice",
             "`deprecated` takes",
             "`native` takes no argument",
@@ -146,7 +160,15 @@ const KIND_RULES: &[(&[&str], &str)] = &[
     ),
     (&["a comment starts with"], "SyntaxError"),
     (&["interpolation hole is empty"], "SyntaxError"),
-    (&["has no `++`"], "SyntaxError"),
+    (
+        &[
+            "has no `++`",
+            "has no `let`",
+            "has no `mut`",
+            "type arguments at a call take",
+        ],
+        "SyntaxError",
+    ),
     // A pattern that binds the name the match head aliased, and two
     // values of one head under one name. No rule below reads either
     // sentence, and the default kind is not the one the parser
@@ -350,6 +372,26 @@ mod tests {
         }
     }
 
+    /// An attribute list that never closes is the parser's report,
+    /// whatever the attribute's name reads as.
+    #[test]
+    fn an_unclosed_attribute_is_a_syntax_error() {
+        let message = "`@deprecated` opens `{` and never closes it; write `})` after its arguments";
+
+        assert_eq!(super::kind_for(message), "SyntaxError");
+    }
+
+    /// A missing `end` is the parser's report. `export` on line 1 read
+    /// as an import report, ImportError(3.2).
+    #[test]
+    fn a_missing_end_is_a_syntax_error() {
+        for word in ["export", "function", "struct", "enum"] {
+            let message = format!("`{word}` on line 1 needs an `end`");
+
+            assert_eq!(super::kind_for(&message), "SyntaxError", "{message}");
+        }
+    }
+
     /// The `Future` entry documents every member the std declares. The
     /// two drift apart the moment the std grows a method, and the doc
     /// is the only place a reader looks.
@@ -360,7 +402,7 @@ mod tests {
 
         // The members of the type: `read name: (...) -> ...`.
         let at = crate::RUNTIME
-            .find("export type Future<T> = {")
+            .find("export type Future<T, R... = ()> = {")
             .expect("Future type");
         let body = &crate::RUNTIME[at..];
         let end = body.find("\n}").expect("end of the type");
@@ -392,14 +434,86 @@ mod tests {
         }
     }
 
+    /// A fresh project imports each std name, so a lead example that
+    /// reads a std value without its import reports an `ImportError`
+    /// when a reader copies it.
+    #[test]
+    fn every_std_lead_example_imports_the_value_it_reads() {
+        for (module, names) in crate::std_names::MODULES {
+            for name in *names {
+                let Some(text) = super::lookup(name) else {
+                    continue;
+                };
+                let lead = text
+                    .strip_prefix("```alloy\n")
+                    .and_then(|t| t.split("```").next())
+                    .unwrap_or_default();
+
+                if crate::std_names::owned(name) || !lead.contains(&format!("{name}.")) {
+                    continue;
+                }
+
+                let import = format!("import {{ {name} }} from \"@alloy/std/{module}\"");
+                assert!(lead.contains(&import), "`{name}` reads without `{import}`");
+            }
+        }
+    }
+
+    /// A reader copies the lead example of an entry into a fresh project,
+    /// so the first `alloy` block of each entry checks there as written.
+    /// A form, a fragment, or code that needs a second file takes a bare
+    /// fence instead. The type check of `alloy flux` is too slow for a
+    /// unit test, so this test runs `alloy check` alone.
+    #[test]
+    fn every_lead_example_checks_in_a_fresh_project() {
+        let dir = std::env::temp_dir().join(format!("alloy-doc-leads-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("alloy.toml"), crate::config::TEMPLATE).unwrap();
+        let config = crate::config::Config::load(&dir.join("alloy.toml")).unwrap();
+        let mut failed = Vec::new();
+
+        for (key, text) in super::TABLE {
+            let Some(lead) = text
+                .split("```alloy\n")
+                .nth(1)
+                .and_then(|t| t.split("```").next())
+            else {
+                continue;
+            };
+
+            std::fs::write(dir.join("src/example.aly"), lead).unwrap();
+            let report = crate::build::check_project(&dir, &config).unwrap();
+            let errors: Vec<&str> = report
+                .diagnostics
+                .iter()
+                .map(|(_, d)| d.message.as_str())
+                .chain(report.failures.iter().map(|(_, f)| f.as_str()))
+                .collect();
+
+            if !errors.is_empty() {
+                failed.push(format!("`{key}`: {}", errors.join("; ")));
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(failed.is_empty(), "{}", failed.join("\n"));
+    }
+
     /// Every member's example is Alloy the compiler accepts. A doc
     /// example that does not compile is worse than none: a reader
-    /// copies it.
+    /// copies it. A fresh project makes no std name ambient, so the
+    /// compile does not either, and an example imports what it reads.
     #[test]
     fn every_member_example_compiles() {
+        let options = crate::EmitOptions {
+            std_globals: crate::std_names::Globals::None,
+            ..crate::EmitOptions::default()
+        };
+
         for (owner, members) in super::MEMBERS {
             for m in *members {
-                let out = crate::compile(m.example)
+                let out = crate::compile_with(m.example, &options)
                     .unwrap_or_else(|e| panic!("{owner}.{}: {}", m.name, e.located(m.example)));
 
                 assert!(

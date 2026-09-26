@@ -63,10 +63,11 @@ impl<'a> Parser<'a> {
         &mut self,
         f: impl FnOnce(&mut Self) -> Result<T, ParseError>,
     ) -> Result<T, ParseError> {
-        let saved = self.no_method_call;
+        let saved = (self.no_method_call, self.match_head);
         self.no_method_call = 0;
+        self.match_head = 0;
         let r = f(self);
-        self.no_method_call = saved;
+        (self.no_method_call, self.match_head) = saved;
 
         r
     }
@@ -170,7 +171,7 @@ impl<'a> Parser<'a> {
 
     pub(super) fn simple_expr(&mut self) -> Result<Expr, ParseError> {
         let start = self.pos;
-        let mut e = match self.text() {
+        let e = match self.text() {
             "nil" => {
                 self.bump();
 
@@ -207,8 +208,8 @@ impl<'a> Parser<'a> {
 
             "@" => {
                 let attributes = self.attributes()?;
-                self.expect("function")?;
-                let body = self.function_body(start)?;
+                let keyword = self.expect("function")?;
+                let body = self.function_body(keyword)?;
                 Expr::Function {
                     attributes,
                     body: Box::new(body),
@@ -234,8 +235,8 @@ impl<'a> Parser<'a> {
 
             "async" if self.text_at(1) == "function" && !self.newline_after(0) => {
                 let is_async = Some(TokSpan::new(self.bump(), self.pos));
-                self.bump();
-                let mut body = self.function_body(start)?;
+                let keyword = self.bump();
+                let mut body = self.function_body(keyword)?;
                 body.is_async = is_async;
                 Expr::Function {
                     attributes: Vec::new(),
@@ -319,10 +320,22 @@ impl<'a> Parser<'a> {
             },
         };
 
-        // `expr :: T`, `expr is T`, and `expr satisfies T` bind more tightly
-        // than any binary operator.
+        self.type_suffixes(start, e)
+    }
+
+    /*
+    `expr :: T`, `expr is T`, and `expr satisfies T` bind more tightly
+    than any binary operator.
+
+    The loop has a frame of its own. `simple_expr` sits on the stack once
+    per level of nesting, and a larger frame there overflowed the stack
+    of a test thread before the depth guard stopped the parse.
+    */
+    #[inline(never)]
+    fn type_suffixes(&mut self, start: usize, mut e: Expr) -> Result<Expr, ParseError> {
         loop {
-            if self.at("::") {
+            if self.at("::") || self.as_cast_here() {
+                self.as_cast_report()?;
                 self.bump();
                 let ty = self.type_()?;
                 e = Expr::TypeAssert {
@@ -354,6 +367,34 @@ impl<'a> Parser<'a> {
         }
 
         Ok(e)
+    }
+
+    /// `as T` after a value on one line: a cast another language writes.
+    /// `as` is a name in Luau, but no Luau statement reads `x as T`, so
+    /// a name after the word marks the cast. A match head keeps `as` for
+    /// the alias of its value.
+    fn as_cast_here(&self) -> bool {
+        self.at("as")
+            && self.match_head == 0
+            && !self.newline_before_pos()
+            && matches!(self.kind_at(1), Some(TokKind::Ident))
+    }
+
+    /// `n as number` is another language's cast. The report names the
+    /// Luau form, and the editor reads `as` as `::`, so one cast is one
+    /// report.
+    fn as_cast_report(&mut self) -> Result<(), ParseError> {
+        if !self.at("as") {
+            return Ok(());
+        }
+
+        if !self.lenient {
+            return Err(self.err(AS_CAST));
+        }
+
+        self.report(AS_CAST);
+
+        Ok(())
     }
 
     /// The report for `f(x)?`, Rust's early return, with the call the
@@ -791,7 +832,17 @@ impl<'a> Parser<'a> {
                 // `expr!` asserts non-nil. `!=` is the one typo worth naming.
                 "!" => {
                     if self.text_at(1) == "=" && self.adjacent(0) {
-                        return Err(self.err("`!=` is not an operator; write `~=`"));
+                        let message = "`!=` is not an operator; write `~=`";
+
+                        if !self.lenient {
+                            return Err(self.err(message));
+                        }
+
+                        // The editor reads on as if `~=` stood here, so
+                        // the typo draws one report, not a stray `end`.
+                        self.report(message);
+
+                        break;
                     }
 
                     self.bump();
@@ -830,6 +881,14 @@ impl<'a> Parser<'a> {
                         span: TokSpan::new(start, self.pos),
                     };
                 }
+
+                // `Signal.new<string>()`: see `single_angle_call`. Any
+                // other `<` is a comparison, which the caller reads.
+                "<" => match self.single_angle_call(start) {
+                    Some(e) => return Err(e),
+
+                    None => break,
+                },
 
                 "(" | "{" => {
                     /*
@@ -883,6 +942,145 @@ impl<'a> Parser<'a> {
         }
 
         Ok(e)
+    }
+
+    /*
+    `id<number>(5)` and `Signal.new<string>()` write the type arguments
+    of a call in one `<...>`, the way a declaration does. Luau reads the
+    first as two comparisons and cannot parse the second.
+
+    The test is the parser's own: the callee touches the `<`, a type
+    list follows, and its `>` touches the `(`. `a < b and c > (d)` has
+    no type list, and a comparison has spaces around its operator. The
+    probe restores the cursor and the type records, so a miss parses
+    on as a comparison.
+
+    Every valid Luau file compiles, so where the tokens also read as
+    Luau the parse keeps the comparisons and records the spot for the
+    `single_angle_call` lint. The error stays for the rest. The probe
+    keeps its frame out of `suffix_chain`, which each level of nesting
+    holds.
+    */
+    #[inline(never)]
+    fn single_angle_call(&mut self, start: usize) -> Option<ParseError> {
+        let lt = self.pos;
+
+        if !self.adjacent_before() {
+            return None;
+        }
+
+        let saved = (
+            self.type_edits.len(),
+            self.type_names.len(),
+            self.diagnostics.len(),
+        );
+        let list = self.type_args_inner().is_ok() && self.at("(") && self.adjacent_before();
+        let gt = self.pos - 1;
+
+        self.pos = lt;
+        self.type_edits.truncate(saved.0);
+        self.type_names.truncate(saved.1);
+        self.diagnostics.truncate(saved.2);
+
+        if !list {
+            return None;
+        }
+
+        // The argument list runs to the `)` that closes its `(`.
+        let mut depth = 0;
+        let close = self.toks[gt + 1..].iter().position(|t| {
+            depth += match t.text(self.src) {
+                "(" => 1,
+
+                ")" => -1,
+
+                _ => 0,
+            };
+
+            depth == 0
+        });
+        let text = |a: u32, b: u32| &self.src[a as usize..b as usize];
+        let callee = text(self.toks[start].start, self.toks[lt].start);
+        let types = text(self.toks[lt].end, self.toks[gt].start);
+        let written = close.map_or("", |i| text(self.toks[gt].end, self.toks[gt + 1 + i].end));
+        // A long or open argument list stays out of the sentence.
+        let args = match written.is_empty() || written.contains('\n') || written.len() > 40 {
+            true => "(...)",
+
+            false => written,
+        };
+
+        let message =
+            format!("type arguments at a call take `<<...>>`: write `{callee}<<{types}>>{args}`");
+
+        if self.reads_as_comparisons(lt, gt) {
+            let span = TokSpan::new(lt, gt + 1);
+
+            // A probe of a match arm reads the same tokens again.
+            if !self.angle_calls.iter().any(|(s, _)| *s == span) {
+                self.angle_calls.push((span, message));
+            }
+
+            return None;
+        }
+
+        Some(ParseError {
+            offset: self.toks[lt].start as usize,
+            message,
+        })
+    }
+
+    /// Whether `<...>(...)` after a callee also reads as Luau, the way
+    /// `id < number > (5)` does: an operand of a comparison up to each
+    /// comma and to the `>`, and one after it. `()` and `string?` read
+    /// as no value. The probe restores the cursor and every record.
+    fn reads_as_comparisons(&mut self, lt: usize, gt: usize) -> bool {
+        let saved = (
+            self.pos,
+            self.depth,
+            self.type_edits.len(),
+            self.type_names.len(),
+            self.diagnostics.len(),
+            self.angle_calls.len(),
+        );
+        let limit = binop_priority("<").map_or(0, |(_, right)| right);
+        self.pos = lt + 1;
+
+        let mut reads = loop {
+            if self.sub_expr(limit).is_err() {
+                break false;
+            }
+
+            if self.pos >= gt || !self.eat(",") {
+                break self.pos == gt;
+            }
+        };
+
+        if reads {
+            self.pos = gt + 1;
+            reads = self.sub_expr(limit).is_ok();
+        }
+
+        reads &= self.diagnostics.len() == saved.4;
+        (self.pos, self.depth) = (saved.0, saved.1);
+        self.type_edits.truncate(saved.2);
+        self.type_names.truncate(saved.3);
+        self.diagnostics.truncate(saved.4);
+        self.angle_calls.truncate(saved.5);
+
+        reads
+    }
+
+    /// Reports if the token at the cursor touches the one before it.
+    fn adjacent_before(&self) -> bool {
+        match (
+            self.pos.checked_sub(1).and_then(|i| self.toks.get(i)),
+            self.toks.get(self.pos),
+        ) {
+            (Some(a), Some(b)) => a.end == b.start,
+
+            _ => false,
+        }
     }
 
     /// The name after `->` or `=>`: a Name, a string, or `[expr]`.

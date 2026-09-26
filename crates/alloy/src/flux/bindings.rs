@@ -6,6 +6,7 @@
 
 use alloy_syntax::lexer::TokKind;
 
+use super::Callable;
 use super::scan::Scan;
 use crate::lint::Lint;
 
@@ -137,38 +138,494 @@ impl<'s> Scan<'s> {
     /// annotation, or the struct a `new` builds. `None` when the file
     /// does not say.
     pub(crate) fn declared_type(&self, name: &str) -> Option<&'s str> {
+        (0..self.toks.len())
+            .filter(|&i| self.is_name(i) && self.t(i) == name)
+            .find_map(|i| self.decl_type(i))
+    }
+
+    /// The type the name at `at` carries: the declaration it reads says,
+    /// or the first declaration of the name in the file when no local
+    /// or parameter in scope binds it.
+    pub(crate) fn type_at(&self, at: usize) -> Option<&'s str> {
+        match self.binding_at(at) {
+            Some(d) => self.decl_type(d),
+
+            None => self.declared_type(self.t(at)),
+        }
+    }
+
+    /// The type the declaration at `i` gives its name: an annotation on
+    /// a parameter or a local, or the struct a `new` builds.
+    fn decl_type(&self, i: usize) -> Option<&'s str> {
+        let introduced = matches!(self.prev(i), "(" | "," | "local" | "const");
+
+        if introduced && self.at(i + 1, ":") {
+            let mut j = i + 2;
+
+            while matches!(self.t(j), "read" | "write") {
+                j += 1;
+            }
+
+            // `print(c:ready())` reads as `(c: ready)` from the tokens
+            // alone; the `(` after the name says it is a method call,
+            // not an annotation.
+            if self.is_name(j) && !self.at(j + 1, "(") {
+                return Some(self.last_segment(j));
+            }
+        }
+
+        (matches!(self.prev(i), "local" | "const")
+            && self.at(i + 1, "=")
+            && self.at(i + 2, "new")
+            && self.is_name(i + 3))
+        .then(|| self.last_segment(i + 3))
+    }
+
+    /// Each function a `@deprecated` marks: its `function` token and
+    /// the note.
+    fn deprecations(&self) -> Vec<(usize, String)> {
+        let mut out = Vec::new();
+
         for i in 0..self.toks.len() {
-            if !self.is_name(i) || self.t(i) != name {
+            if !(self.at(i, "@") && self.at(i + 1, "deprecated")) {
                 continue;
             }
 
-            let introduced = matches!(self.prev(i), "(" | "," | "local" | "const");
+            let (note, mut j) = match self.at(i + 2, "(").then(|| self.matching(i + 2)) {
+                Some(Some(close)) => (self.deprecation_note(i + 3, close), close + 1),
 
-            if introduced && self.at(i + 1, ":") {
-                let mut j = i + 2;
+                _ => (String::new(), i + 2),
+            };
 
-                while matches!(self.t(j), "read" | "write") {
+            // Other attributes and the modifiers of the method.
+            loop {
+                if self.at(j, "@") && self.is_name(j + 1) {
+                    j += 2;
+
+                    if self.at(j, "(") {
+                        let Some(close) = self.matching(j) else { break };
+                        j = close + 1;
+                    }
+                } else if matches!(self.t(j), "private" | "public" | "async" | "export") {
                     j += 1;
-                }
-
-                // `print(c:ready())` reads as `(c: ready)` from the
-                // tokens alone; the `(` after the name says it is a
-                // method call, not an annotation.
-                if self.is_name(j) && !self.at(j + 1, "(") {
-                    return Some(self.last_segment(j));
+                } else {
+                    break;
                 }
             }
 
-            if matches!(self.prev(i), "local" | "const")
-                && self.at(i + 1, "=")
-                && self.at(i + 2, "new")
-                && self.is_name(i + 3)
+            if self.at(j, "function") {
+                out.push((j, note));
+            }
+        }
+
+        out
+    }
+
+    /// Every function a call can name, keyed the way the call spells
+    /// it: `heal`, `Box.new`, `Box:value`, or `t.f` for a function in
+    /// the table a local holds. A method that takes `self` answers to
+    /// `Box.value` as well. A function inside a `trait` has no body a
+    /// call reaches, so it is left out.
+    pub(crate) fn callables(&self) -> Vec<(String, Callable)> {
+        let notes = self.deprecations();
+        let mut out: Vec<(String, Callable)> = Vec::new();
+        let mut add = |key: String, c: Callable| match out.iter_mut().find(|(k, _)| *k == key) {
+            // Two declarations of one name make the count a range.
+            Some((_, seen)) => {
+                seen.params = None;
+                seen.exported |= c.exported;
+                seen.deprecated = seen.deprecated.take().or(c.deprecated);
+            }
+
+            None => out.push((key, c)),
+        };
+
+        for f in 0..self.toks.len() {
+            if !self.at(f, "function") || matches!(self.prev(f), "." | ":" | "type") {
+                continue;
+            }
+
+            let mut open = f + 1;
+
+            while self.is_name(open) || self.at(open, ".") || self.at(open, ":") {
+                open += 1;
+            }
+
+            let name_end = open;
+
+            // The generic parameters of `function pick<T>(...)`.
+            if self.at(open, "<") {
+                let mut depth = 0i32;
+
+                while open < self.toks.len() {
+                    depth += match self.t(open) {
+                        "<" => 1,
+
+                        ">" => -1,
+
+                        _ => 0,
+                    };
+                    open += 1;
+
+                    if depth == 0 {
+                        break;
+                    }
+                }
+            }
+
+            if !self.at(open, "(") {
+                continue;
+            }
+
+            let params = self.param_count(open);
+            let exported = self.prev(f) == "export"
+                || (self.prev(f) == "async" && f >= 2 && self.at(f - 2, "export"));
+            let make = |params: Option<usize>, exported: bool| Callable {
+                params,
+                deprecated: notes
+                    .iter()
+                    .find(|(at, _)| *at == f)
+                    .map(|(_, n)| n.clone()),
+                exported,
+            };
+            let written = self.slice(f + 1, name_end);
+            let block = self.enclosing_block(f, &["function", "struct", "impl", "trait"]);
+
+            // `function one()` in `namespace Ns` is `Ns.one` outside it.
+            // A `local function` there is no member.
+            if name_end == f + 2
+                && self.prev(f) != "local"
+                && let Some((path, exported)) = self.namespace_path(f)
             {
-                return Some(self.last_segment(i + 3));
+                let exported = exported && self.prev(f) != "private";
+                add(format!("{path}.{written}"), make(params, exported));
+            }
+
+            if written.contains(':') {
+                // `function Box:value(n)` takes `self` without writing it.
+                let params = params.map(|p| p + 1);
+                add(written.replacen(':', ".", 1), make(params, true));
+                add(written.to_string(), make(params, true));
+            } else if name_end == f + 2
+                && block.is_some_and(|b| matches!(self.t(b), "struct" | "impl"))
+            {
+                let Some(owner) = self.enclosing_owner(f) else {
+                    continue;
+                };
+                let name = self.t(f + 1);
+
+                if self.at(open + 1, "self") {
+                    add(format!("{owner}:{name}"), make(params, true));
+                }
+
+                add(format!("{owner}.{name}"), make(params, true));
+            } else if block.is_some_and(|b| self.at(b, "trait")) {
+                continue;
+            } else if name_end > f + 1 {
+                add(written.to_string(), make(params, exported));
+            } else if f >= 2 && self.at(f - 1, "=") && self.is_name(f - 2) {
+                // `local heal = function` and `{ heal = function }`.
+                let name = self.t(f - 2);
+
+                if matches!(self.prev(f - 2), "local" | "const") {
+                    add(name.to_string(), make(params, false));
+                } else if matches!(self.prev(f - 2), "{" | ",")
+                    && let Some(table) = self.table_local(f - 2)
+                {
+                    add(format!("{table}.{name}"), make(params, false));
+                }
+            }
+        }
+
+        // A write to `t.f` after the table puts another function there.
+        for i in 0..self.toks.len() {
+            if let Some(end) = self.path_end(i)
+                && end > i + 1
+                && self.at(end, "=")
+                && self.statement_start(i)
+                && let Some((_, c)) = out.iter_mut().find(|(k, _)| k == self.slice(i, end))
+            {
+                c.params = None;
+            }
+        }
+
+        out
+    }
+
+    /// The namespaces that hold the member at `j`, as `Outer.Inner`,
+    /// and whether the outermost one is exported. `None` when a
+    /// function, a struct, an impl or a trait holds it first.
+    fn namespace_path(&self, j: usize) -> Option<(String, bool)> {
+        const HOLDERS: &[&str] = &["function", "struct", "impl", "trait", "namespace"];
+        let holder = |at: usize| {
+            self.enclosing_block(at, HOLDERS)
+                .filter(|&b| self.at(b, "namespace"))
+        };
+        let mut ns = holder(j)?;
+        let mut names = vec![self.t(ns + 1)];
+
+        while let Some(outer) = holder(ns) {
+            names.push(self.t(outer + 1));
+            ns = outer;
+        }
+
+        names.reverse();
+
+        Some((names.join("."), self.prev(ns) == "export"))
+    }
+
+    /// The innermost block of one of `kinds` that encloses token `j`.
+    fn enclosing_block(&self, j: usize, kinds: &[&str]) -> Option<usize> {
+        (0..j)
+            .rev()
+            .find(|&i| kinds.contains(&self.t(i)) && self.st.ends[i].is_some_and(|e| j < e))
+    }
+
+    /// The local a table constructor goes into, `t` in `local t = {`,
+    /// for the field name at `k` inside it.
+    fn table_local(&self, k: usize) -> Option<&'s str> {
+        let mut depth = 0i32;
+
+        for i in (0..k).rev() {
+            match self.t(i) {
+                ")" | "]" | "}" => depth += 1,
+
+                "(" | "[" => depth -= 1,
+
+                "{" if depth == 0 => {
+                    return (i >= 3
+                        && self.at(i - 1, "=")
+                        && self.is_name(i - 2)
+                        && matches!(self.t(i - 3), "local" | "const"))
+                    .then(|| self.t(i - 2));
+                }
+
+                "{" => depth -= 1,
+
+                _ => {}
             }
         }
 
         None
+    }
+
+    /// The parameters of the list that opens at `open`, `self` counted.
+    /// `None` when a vararg or a default makes the count a range. A
+    /// destructured parameter counts as the one argument it takes.
+    fn param_count(&self, open: usize) -> Option<usize> {
+        let close = self.matching(open)?;
+        let mut depth = 0i32;
+        let mut slots = usize::from(close > open + 1);
+
+        for k in open + 1..close {
+            let t = self.t(k);
+
+            if t.ends_with('(') || t.ends_with('[') || t.ends_with('{') || t == "<" {
+                depth += 1;
+            } else if matches!(t, ")" | "]" | "}" | ">") {
+                depth -= 1;
+            } else if depth == 0 && t == "," {
+                slots += 1;
+            } else if depth == 0 && (t == "..." || t == "=") {
+                return None;
+            }
+        }
+
+        Some(slots)
+    }
+
+    /// The `)` of the call whose `(` is at `open`, and the arguments the
+    /// call passes. A string holds no bracket, and an interpolated
+    /// string opens at its head and closes at its tail, so a comma in a
+    /// hole stays inside it.
+    fn call_args(&self, open: usize) -> Option<(usize, usize)> {
+        let mut depth = 0i32;
+        let mut commas = 0;
+
+        for k in open..self.toks.len() {
+            let text = self.t(k);
+            depth += match self.toks[k].kind {
+                TokKind::InterpHead => 1,
+
+                TokKind::InterpTail => -1,
+
+                TokKind::Str { .. } | TokKind::InterpStr | TokKind::InterpMid => 0,
+
+                _ if text.ends_with('(') || text.ends_with('[') || text.ends_with('{') => 1,
+
+                _ if matches!(text, ")" | "]" | "}") => -1,
+
+                _ => 0,
+            };
+
+            if depth == 0 {
+                return Some((k, if k == open + 1 { 0 } else { commas + 1 }));
+            }
+
+            if depth == 1 && text == "," {
+                commas += 1;
+            }
+        }
+
+        None
+    }
+
+    /// A call with more arguments than the function takes. Luau's
+    /// solver reports too few and misses too many, and the extra values
+    /// are dropped in silence. The count is exact for a function the
+    /// file or an imported module declares once with a fixed list: a
+    /// plain name, `M.f`, a static, a method on a value the file types,
+    /// and a function in a local table.
+    pub(crate) fn argument_count(&self, out: &mut Vec<Lint>) {
+        let own = self.callables();
+        let find = |key: &str| {
+            own.iter()
+                .chain(self.callables)
+                .find(|(k, _)| k == key)
+                .and_then(|(_, c)| c.params)
+        };
+
+        for i in 0..self.toks.len() {
+            if !self.is_name(i)
+                || matches!(
+                    self.prev(i),
+                    "." | ":" | "?." | "?:" | "function" | "local" | "const"
+                )
+            {
+                continue;
+            }
+
+            let Some(end) = self.path_end(i) else {
+                continue;
+            };
+            let (key, open, colon) = if self.at(end, "(") {
+                // A parameter of that name is some other value.
+                if end > i + 1
+                    && self
+                        .binding_at(i)
+                        .is_some_and(|d| !(self.at(d + 1, "=") && self.at(d + 2, "{")))
+                {
+                    continue;
+                }
+
+                (self.slice(i, end).to_string(), end, false)
+            } else if end == i + 1
+                && self.at(end, ":")
+                && self.is_name(end + 1)
+                && self.at(end + 2, "(")
+            {
+                let ty = match self.t(i) {
+                    "self" => self.enclosing_owner(i),
+
+                    _ => self.type_at(i),
+                };
+                let Some(ty) = ty else { continue };
+
+                (format!("{ty}:{}", self.t(end + 1)), end + 2, true)
+            } else {
+                continue;
+            };
+            let Some(takes) = find(&key) else { continue };
+            let Some((close, given)) = self.call_args(open) else {
+                continue;
+            };
+            // A `:` call passes the value as `self`, which no one wrote.
+            let takes = if colon {
+                takes.saturating_sub(1)
+            } else {
+                takes
+            };
+
+            if given <= takes {
+                continue;
+            }
+
+            let word = |n: usize| if n == 1 { "argument" } else { "arguments" };
+            self.lint(
+                out,
+                "argument_count",
+                i,
+                close,
+                format!(
+                    "`{}` takes {takes} {}; this call passes {given}",
+                    self.slice(i, open),
+                    word(takes)
+                ),
+                None,
+            );
+        }
+    }
+
+    /// `b:value()` where `value` is a method its impl marks
+    /// `@deprecated`, and the file types `b` as the struct: an
+    /// annotation, or the struct a `new` builds. The impl may sit in
+    /// this file or in a module the file imports. Luau reports
+    /// `Box.value(b)`, but its lint does not follow a method call
+    /// through the metatable.
+    pub(crate) fn deprecated_call(&self, out: &mut Vec<Lint>) {
+        let own = self.callables();
+        let marked: Vec<(&str, &str)> = own
+            .iter()
+            .chain(self.callables.iter())
+            .filter(|(k, _)| k.contains(':'))
+            .filter_map(|(k, c)| Some((k.as_str(), c.deprecated.as_deref()?)))
+            .collect();
+
+        if marked.is_empty() {
+            return;
+        }
+
+        for i in 0..self.toks.len() {
+            if !self.is_name(i)
+                || matches!(self.prev(i), "." | ":" | "?." | "?:")
+                || !self.at(i + 1, ":")
+                || !self.is_name(i + 2)
+                || !self.at(i + 3, "(")
+            {
+                continue;
+            }
+
+            let Some(ty) = self.type_at(i) else { continue };
+            let key = format!("{ty}:{}", self.t(i + 2));
+            let Some((_, note)) = marked.iter().find(|(k, _)| *k == key) else {
+                continue;
+            };
+
+            self.lint(
+                out,
+                "deprecated_call",
+                i + 2,
+                i + 2,
+                format!("`{key}` is deprecated{note}"),
+                None,
+            );
+        }
+    }
+
+    /// The note of `@deprecated(...)` between `from` and `close`: a
+    /// string, or a table of `reason` and `use`.
+    fn deprecation_note(&self, from: usize, close: usize) -> String {
+        if close == from + 1
+            && let Some(text) = self.string_content(from)
+        {
+            return format!("; {text}");
+        }
+
+        let key = |k: &str| {
+            (from..close)
+                .find(|&t| self.at(t, k) && self.at(t + 1, "="))
+                .and_then(|t| self.string_content(t + 2))
+        };
+
+        match (key("reason"), key("use")) {
+            (Some(r), Some(u)) => format!("; {r}; use `{u}`"),
+
+            (Some(r), None) => format!("; {r}"),
+
+            (None, Some(u)) => format!("; use `{u}`"),
+
+            (None, None) => String::new(),
+        }
     }
 
     /// `x.count` or `x:reset()` outside the impl of the struct that
@@ -480,25 +937,42 @@ impl<'s> Scan<'s> {
     }
 
     /// How the statement at the name `i` writes into the value the name
-    /// holds: `X.a.b = v` and `X[k] = v` assign into it, `X:push(v)`
-    /// calls a method that changes it. The binding itself stands.
+    /// holds: `X.a.b = v`, `X[k] = v`, and `X.n += 1` assign into it,
+    /// `X:push(v)` calls a method that changes it. The binding itself
+    /// stands.
     fn value_write(&self, i: usize) -> Option<ValueWrite<'s>> {
+        // A method call changes the value wherever it stands, so
+        // `local r = bag:add(s)` writes into `bag` as `bag:add(s)` does.
+        if !matches!(self.prev(i), "." | ":" | "?." | "?:")
+            && self.at(i + 1, ":")
+            && MUTATING_METHODS.contains(&self.t(i + 2))
+            && self.is_member(i + 2)
+        {
+            return Some(ValueWrite::Method(self.t(i + 2)));
+        }
+
         if !self.statement_start(i) {
             return None;
         }
 
         let assigned = match self.path_end(i) {
-            Some(end) if end > i + 1 && self.at(end, "=") => true,
+            Some(end) if end > i + 1 && self.assigns_at(end) => true,
 
-            _ => self.at(i + 1, "[") && self.matching(i + 1).is_some_and(|c| self.at(c + 1, "=")),
+            _ => {
+                self.at(i + 1, "[") && self.matching(i + 1).is_some_and(|c| self.assigns_at(c + 1))
+            }
         };
 
-        if assigned {
-            return Some(ValueWrite::Assign);
-        }
+        assigned.then_some(ValueWrite::Assign)
+    }
 
-        (self.at(i + 1, ":") && self.is_name(i + 2) && MUTATING_METHODS.contains(&self.t(i + 2)))
-            .then(|| ValueWrite::Method(self.t(i + 2)))
+    /// Whether token `k` assigns: `=`, a compound operator such as `+=`
+    /// or `..=`, or `??=`, which lexes as `?`, `?`, and `=`.
+    fn assigns_at(&self, k: usize) -> bool {
+        matches!(
+            self.t(k),
+            "=" | "+=" | "-=" | "*=" | "/=" | "//=" | "%=" | "^=" | "..="
+        ) || (self.at(k, "?") && self.at(k + 1, "?") && self.at(k + 2, "="))
     }
 
     /// The names a `local` at `i` binds, with their tokens. A destructure
@@ -521,8 +995,20 @@ impl<'s> Scan<'s> {
         }
 
         // `local Pat(x) = e` binds through a pattern, not by this name.
-        if self.is_name(j) && self.at(j + 1, "(") {
+        // So does `local Pt { x } = e`: `Pt` names the struct, and the
+        // braces hold the names. Either one can take a dotted path.
+        let mut head = j;
+
+        while self.is_name(head) && self.at(head + 1, ".") && self.is_name(head + 2) {
+            head += 2;
+        }
+
+        if self.is_name(head) && self.at(head + 1, "(") {
             return out;
+        }
+
+        if self.is_name(head) && self.at(head + 1, "{") {
+            return self.pattern_names(head + 1).0;
         }
 
         // `local { a, b = c } = t` and `local [ x, ...rest ] = t` bind
@@ -597,7 +1083,15 @@ impl<'s> Scan<'s> {
                     continue;
                 }
 
-                _ if self.is_name(j) && !self.at(j + 1, "=") => out.push(j),
+                // A name before `(`, `{` or `.`, or after `.`, names a
+                // variant or a struct in a nested pattern: `Some(v)`,
+                // `Pt { x }`, `Kind.Big`.
+                _ if self.is_name(j)
+                    && !matches!(self.t(j + 1), "=" | "(" | "{" | ".")
+                    && self.prev(j) != "." =>
+                {
+                    out.push(j)
+                }
 
                 _ => {}
             }
@@ -776,12 +1270,24 @@ impl<'s> Scan<'s> {
             // the emit declares the name on the first line, so the
             // read counts, as it does for `function f`.
             let from_start = is_function && !self.inside_any_block(i);
+            // A body above a top-level `local` or `const` reads a global
+            // of that name, since a local is not hoisted. The checker
+            // reports that read and says to move the declaration up, so
+            // the name counts as read.
+            let top_value = !is_function && self.t(i) != "for" && !self.inside_any_block(i);
 
             for n in names {
                 let name = self.t(n);
                 let from = if from_start { 0 } else { n + 1 };
+                let read_above = top_value
+                    && (0..i).any(|j| {
+                        self.toks[j].kind == TokKind::Ident
+                            && self.t(j) == name
+                            && !self.is_member(j)
+                            && self.inside_block(j, &["function"])
+                    });
 
-                if name.starts_with('_') || self.read_after(n, from) {
+                if name.starts_with('_') || self.read_after(n, from) || read_above {
                     continue;
                 }
 
@@ -811,7 +1317,8 @@ impl<'s> Scan<'s> {
     /// `local x = v` that nothing assigns again reads as `const x = v`:
     /// the word says the binding holds one value, and a later write
     /// becomes a compile error. The scan is file-wide, as the one for
-    /// reads is, so a write to any local of the name keeps it quiet.
+    /// reads is, so a write to any local of the name keeps it quiet. A
+    /// later `local` of the name holds the writes in its own block.
     pub(crate) fn prefer_const(&self, out: &mut Vec<Lint>) {
         for i in 0..self.toks.len() {
             if !self.at(i, "local")
@@ -843,6 +1350,7 @@ impl<'s> Scan<'s> {
                             self.t(j) == self.t(n)
                                 && !self.is_member(j)
                                 && self.value_write(j).is_some()
+                                && !self.shadowed(n, j)
                         })
                 })
             {
@@ -871,7 +1379,7 @@ impl<'s> Scan<'s> {
 
     /// Whether a statement after the name at `n` assigns a name of its
     /// text: `x = 1`, `x += 1`, or a target of `a, x = f()`.
-    fn written_after(&self, n: usize) -> bool {
+    pub(super) fn written_after(&self, n: usize) -> bool {
         let name = self.t(n);
 
         (n + 1..self.toks.len()).any(|j| {
@@ -886,25 +1394,33 @@ impl<'s> Scan<'s> {
                 k += 2;
             }
 
-            // `??=` lexes as three tokens, `?`, `?`, and `=`.
-            let op = self.t(k);
-            let assigns = op == "="
-                || matches!(op, "+=" | "-=" | "*=" | "/=" | "//=" | "%=" | "^=" | "..=")
-                || (op == "?" && self.at(k + 1, "?") && self.at(k + 2, "="));
-
-            if !assigns {
+            if !self.assigns_at(k) || self.shadowed(n, j) {
                 return false;
             }
 
             // The first target opens the statement; `local x =` again
-            // declares a new local instead.
+            // declares a new local instead. A name right after the end of
+            // an expression opens one too: `function() n += 1 end` holds
+            // the write on the line of the `function`.
             let mut first = j;
 
             while first >= 2 && self.at(first - 1, ",") && self.is_name(first - 2) {
                 first -= 2;
             }
 
-            self.statement_start(first) && !matches!(self.prev(first), "local" | "const")
+            let after_expression = first > 0
+                && (matches!(self.prev(first), ")" | "]" | "}")
+                    || matches!(
+                        self.toks[first - 1].kind,
+                        TokKind::Str { .. }
+                            | TokKind::InterpStr
+                            | TokKind::InterpTail
+                            | TokKind::Number
+                    )
+                    || self.is_name(first - 1));
+
+            (self.statement_start(first) || after_expression)
+                && !matches!(self.prev(first), "local" | "const")
         })
     }
 

@@ -177,7 +177,7 @@ pub fn rewrite_emitted_name(
     let text = source.lines().nth(line.saturating_sub(1))?;
 
     if let Some(name) = quoted_after(message, "Unknown global '") {
-        if names_word(text, &format!("new {name}")) {
+        if names_word(text, &format!("new {name}")) && declares_type_only(source, name) {
             return Some((format!("`{name}` is a type, not a struct"), None));
         }
 
@@ -219,6 +219,17 @@ pub fn rewrite_emitted_name(
                 None,
             ));
         }
+
+        // A function reads a top-level `const` or `local` that a line
+        // below it declares. A local is in scope from its declaration
+        // on, so the read is a global, and the checker's advice is to
+        // assign that global.
+        if let Some(word) = declared_below(source, line, name) {
+            return Some((
+                format!("`{name}` is declared below this function; move the {word} above it"),
+                None,
+            ));
+        }
     }
 
     // `new n { }`, where `n` is a value: the emit asks it for `new`.
@@ -226,10 +237,100 @@ pub fn rewrite_emitted_name(
         && message.ends_with("does not have key 'new'")
         && let Some(name) = word_after(text, "new ")
     {
-        return Some((format!("`new` needs a struct; `{name}` is a {owner}"), None));
+        let a = crate::desugar::article(owner);
+
+        return Some((
+            format!("`new` needs a struct; `{name}` is {a} {owner}"),
+            None,
+        ));
     }
 
     None
+}
+
+/// `new Nope { }` with no struct of that name in scope. The emit reads
+/// the struct's table, so the checker reports an unknown global on
+/// `new`. The report names the struct, moves onto its name, and names
+/// the module of the project that exports it, if one does. A name the
+/// file declares as a type alone is `rewrite_emitted_name`'s.
+pub fn unknown_struct_report(
+    message: &str,
+    path: &std::path::Path,
+    source: &str,
+    line: usize,
+) -> Option<Resited> {
+    let text = source.lines().nth(line.saturating_sub(1))?;
+
+    // `new Ty.Nope { }` reads a key of the module's table, and Luau
+    // reports the key with the whole table printed.
+    if let Some(name) = quoted_after(message, "Key '")
+        && message.contains("' not found in table")
+        && let Some((owner, at)) = dotted_new(text, name)
+    {
+        let verb = if source.contains(&format!("import * as {owner} ")) {
+            "exports"
+        } else {
+            "has"
+        };
+
+        return Some(Resited {
+            kind: "TypeError",
+            message: format!("`{owner}` {verb} no struct `{name}`"),
+            at: Some((line, at)),
+        });
+    }
+
+    let name = quoted_after(message, "Unknown global '")?;
+    let at = word_column(text, &format!("new {name}"))? + "new ".len();
+
+    if declares_type_only(source, name) {
+        return None;
+    }
+
+    let hint = match crate::modules::import_that_exports(path, source, name) {
+        Some(spec) => format!("; \"{spec}\" exports it, so add it to that import"),
+
+        None => crate::modules::module_that_exports(path, name)
+            .map(|spec| format!("; \"{spec}\" exports it: `import {{ {name} }} from \"{spec}\"`"))
+            .unwrap_or_default(),
+    };
+
+    // `new Nope.Stack { }`: `Nope` heads a path, so the report does not
+    // call it a struct.
+    let message = match text.get(at - 1 + name.len()..) {
+        Some(rest) if rest.starts_with('.') => {
+            format!("`{name}` is not a module, namespace or import in scope{hint}")
+        }
+
+        _ => format!("unknown struct `{name}`{hint}"),
+    };
+
+    Some(Resited {
+        kind: "TypeError",
+        message,
+        at: Some((line, at)),
+    })
+}
+
+/// `new Ty.Nope` on a line: the path in front of `name`, `Ty`, and the
+/// one-based column of `name`.
+fn dotted_new(line: &str, name: &str) -> Option<(String, usize)> {
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+
+    line.match_indices("new ").find_map(|(at, _)| {
+        if line[..at].ends_with(ident) {
+            return None;
+        }
+
+        let from = at + "new ".len();
+        let rest = &line[from..];
+        let path = &rest[..rest
+            .find(|c: char| !ident(c) && c != '.')
+            .unwrap_or(rest.len())];
+        let owner = path.strip_suffix(name)?.strip_suffix('.')?;
+
+        (!owner.is_empty()).then(|| (owner.to_string(), from + owner.len() + 2))
+    })
 }
 
 /// The text between `opener` and the next quote.
@@ -274,6 +375,33 @@ fn declares_type_only(source: &str, name: &str) -> bool {
                     !tail.starts_with(|c: char| c.is_alphanumeric() || c == '_')
                 })
             })
+        })
+    })
+}
+
+/// The word, `const` or `local`, of a top-level declaration of the name
+/// below a line that a top-level function holds. The nearest line at
+/// column 0 at or above the line is the head of that function.
+fn declared_below(source: &str, line: usize, name: &str) -> Option<&'static str> {
+    let lines: Vec<&str> = source.lines().collect();
+    let head = lines
+        .get(..line.min(lines.len()))?
+        .iter()
+        .rev()
+        .find(|l| l.starts_with(|c: char| !c.is_whitespace()))?;
+
+    if !names_word(head, "function") {
+        return None;
+    }
+
+    lines.get(line..)?.iter().find_map(|l| {
+        let l = l.strip_prefix("export ").unwrap_or(l);
+
+        ["const", "local"].into_iter().find(|word| {
+            l.strip_prefix(word)
+                .and_then(|rest| rest.strip_prefix(' '))
+                .and_then(|rest| rest.strip_prefix(name))
+                .is_some_and(|tail| !tail.starts_with(|c: char| c.is_alphanumeric() || c == '_'))
         })
     })
 }
@@ -697,26 +825,71 @@ fn literal_argument(value: &str) -> Option<&'static str> {
     }
 }
 
+/// The keys at the top level of a printed table type. The `>` of a
+/// `->` closes no bracket. The checker cuts a long type short, so the
+/// closing `}` may be gone.
+fn top_level_keys(table: &str) -> Vec<&str> {
+    let body = table.trim_end_matches('\'').trim();
+    let Some(body) = body.strip_prefix('{') else {
+        return Vec::new();
+    };
+    let body = body.strip_suffix('}').unwrap_or(body);
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    let mut prev = ' ';
+
+    for (i, c) in body.char_indices() {
+        match c {
+            '>' if prev == '-' => {}
+
+            '(' | '{' | '[' | '<' => depth += 1,
+
+            ')' | '}' | ']' | '>' => depth = depth.saturating_sub(1),
+
+            ',' if depth == 0 => {
+                parts.push(&body[start..i]);
+                start = i + 1;
+            }
+
+            _ => {}
+        }
+
+        prev = c;
+    }
+
+    parts.push(&body[start..]);
+
+    parts
+        .into_iter()
+        .filter_map(|part| part.split_once(':').map(|(k, _)| k.trim()))
+        .filter(|k| !k.is_empty() && k.chars().all(|c| c.is_alphanumeric() || c == '_'))
+        .collect()
+}
+
 /// A remote's whole surface reaches a missing-member message. The
 /// reader knows it by the name they declared.
 fn rewrite_remote_key(message: &str, line: &str) -> Option<String> {
     let key = message.strip_prefix("Key '")?.split('\'').next()?;
     let table = message.split_once("' not found in table '")?.1;
+    let members = top_level_keys(table);
     // Every side of a remote carries `instance`, typed by the kind, and
     // at least one of the verbs; the fold may have named the whole
     // surface already.
-    let surface = [
-        "instance: RemoteEvent?",
-        "instance: UnreliableRemoteEvent?",
-        "instance: RemoteFunction?",
-    ]
-    .iter()
-    .any(|marker| table.contains(marker))
-        && ["on:", "fire", "call:", "wait:"]
-            .iter()
-            .any(|verb| table.contains(verb));
+    let surface = table.starts_with("Remote'")
+        || (members.contains(&"instance") && members.iter().any(|m| REMOTE_VERBS.contains(m)));
+    // A module that exports remotes prints each one inside its own
+    // table. The reader missed a name of the module, not of a remote.
+    let module = !surface
+        && [
+            "instance: RemoteEvent?",
+            "instance: UnreliableRemoteEvent?",
+            "instance: RemoteFunction?",
+        ]
+        .iter()
+        .any(|marker| table.contains(marker));
 
-    if !(table.starts_with("Remote'") || surface) {
+    if !surface && !module {
         return None;
     }
 
@@ -738,26 +911,21 @@ fn rewrite_remote_key(message: &str, line: &str) -> Option<String> {
         return None;
     }
 
-    let members: Vec<&str> = table
-        .trim_start_matches('{')
-        .split(',')
-        .filter_map(|part| part.split_once(':').map(|(k, _)| k.trim()))
-        .filter(|k| !k.is_empty() && k.chars().all(|c| c.is_alphanumeric() || c == '_'))
-        .collect();
     // `Ping.cal(1)` calls, and `calls`, `spec`, and `instance` are data:
     // a call names a verb, and at a tie the verb wins over the data.
-    let called = line.contains(&format!("{key}("));
+    let called = !module && line.contains(&format!("{key}("));
     let near = members
         .iter()
         .filter(|m| !called || REMOTE_VERBS.contains(m))
         .map(|m| (edit_distance(m, key), !REMOTE_VERBS.contains(m), *m))
         .filter(|(d, ..)| *d <= 2)
         .min();
+    let noun = if module { "module" } else { "remote" };
 
     Some(match near {
-        Some((.., m)) => format!("remote `{receiver}` has no `{key}`; did you mean `{m}`?"),
+        Some((.., m)) => format!("{noun} `{receiver}` has no `{key}`; did you mean `{m}`?"),
 
-        None => format!("remote `{receiver}` has no `{key}`"),
+        None => format!("{noun} `{receiver}` has no `{key}`"),
     })
 }
 
@@ -887,12 +1055,23 @@ pub(crate) fn edit_distance(a: &str, b: &str) -> usize {
 /// The constructor field a column falls in: `new Plain { a = "x" }` at
 /// the column of `"x"` gives `("a", "Plain")`. The checker reports the
 /// value alone, and the reader wants to know which field it was for.
+/// The name is the path the source wrote, `N.Entry`, and the innermost
+/// `new` that holds the column answers, so a line may build two.
 fn constructor_field(line: &str, col: usize) -> Option<(String, String)> {
-    let at = line.find("new ")?;
+    let starts: Vec<usize> = line.match_indices("new ").map(|(at, _)| at).collect();
+
+    starts
+        .into_iter()
+        .rev()
+        .find_map(|at| field_of_new(line, at, col))
+}
+
+/// The field of the `new` at byte `at` that a column falls in.
+fn field_of_new(line: &str, at: usize, col: usize) -> Option<(String, String)> {
     let rest = &line[at + 4..];
     let name: String = rest
         .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
         .collect();
 
     if name.is_empty() {
@@ -969,6 +1148,23 @@ pub(crate) fn keep_innermost(diagnostics: &mut Vec<TypeDiag>) {
     });
 }
 
+/// A method call on an optional value draws `could be nil` and then
+/// `Expected this to be 'T', but got 'nil'` at the same spot. The first
+/// names the problem; the second says it again, so it goes.
+pub(crate) fn drop_nil_echo(diagnostics: &mut Vec<TypeDiag>) {
+    let nil_spots: Vec<(PathBuf, usize, usize)> = diagnostics
+        .iter()
+        .filter(|d| d.message.contains("could be nil"))
+        .map(|d| (d.rel.clone(), d.line, d.col))
+        .collect();
+
+    diagnostics.retain(|d| {
+        !(d.message.starts_with("Expected this to be ")
+            && d.message.ends_with(", but got 'nil'")
+            && nil_spots.contains(&(d.rel.clone(), d.line, d.col)))
+    });
+}
+
 /// The `UnknownModule` report for a require the checker could not
 /// resolve, from the module path the source wrote and the source's own
 /// path relative to the root: what was asked for, and where it was
@@ -986,8 +1182,40 @@ pub fn unknown_module_message(
     };
     let shown = |p: &Path| p.to_string_lossy().replace('\\', "/");
 
+    // An `init` file is the module of its folder, and the tree holds no
+    // instance named `init`, so the require names the folder.
+    if let Some(dir) = spec.strip_suffix("/init") {
+        let folder = match dir {
+            "." | ".." => format!("{dir}/"),
+
+            _ => dir.to_string(),
+        };
+
+        return format!(
+            "\"{spec}\" names no module; an `init` file is the module of its folder, so write \"{folder}\""
+        );
+    }
+
     if let Some(rest) = spec.strip_prefix('@') {
         let alias = rest.split('/').next().unwrap_or(rest);
+
+        // `@self` is no alias: it names the folder of an `init` file.
+        if alias == "self" {
+            let tail = rest.strip_prefix("self/").unwrap_or("");
+            let dir = source_rel.parent().unwrap_or(Path::new(""));
+
+            return match crate::build::is_init(source_rel) {
+                true => format!(
+                    "\"{spec}\" names no module; {what} at {}",
+                    shown(&dir.join(tail))
+                ),
+
+                false => format!(
+                    "\"{spec}\" names no module; `@self` is the folder of an `init` file, and {} is no `init`, so write \"./{tail}\"",
+                    shown(source_rel)
+                ),
+            };
+        }
 
         // `@game` is reserved, so "declare the alias" is the wrong
         // advice here: the path is a service or a place in the tree.
@@ -1036,10 +1264,16 @@ pub fn quoted_on_line(source: &str, line: usize) -> Option<String> {
 }
 
 /// Every quoted string on a zero-based line, in the order they read.
+/// An import over several lines reads whole: the emit writes its
+/// `require` on the line of `import`, and the path sits on the last.
 pub fn quoted_paths_on_line(source: &str, line: usize) -> Vec<String> {
     let Some(text) = source.lines().nth(line) else {
         return Vec::new();
     };
+    let statement = alloy_syntax::scan::import_statements(source)
+        .into_iter()
+        .find(|s| s.line == line && source[s.start..s.end].contains('\n'));
+    let text = statement.as_ref().map_or(text, |s| s.text.as_str());
     let mut out = Vec::new();
     let mut rest = text;
 
@@ -1163,13 +1397,14 @@ fn module_tail(spec: &str) -> &str {
 /// holds it. Only the phrases that quote a name the source wrote count;
 /// a quoted type is not a place.
 pub(crate) fn named_column(text: &str, message: &str) -> Option<usize> {
-    const OPENERS: [&str; 6] = [
+    const OPENERS: [&str; 7] = [
         "Unknown global '",
         "Unknown type '",
         "Key '",
         "does not have key '",
         "Cannot add property '",
         "Variable '",
+        "Function '",
     ];
 
     let name = OPENERS
@@ -1201,11 +1436,32 @@ pub fn resite_report(
         .or_else(|| variant_call_report(message, shapes, text, line, col))
         .or_else(|| array_element_report(message, text, line, col))
         .or_else(|| unmet_bound_report(message, source, text, line, col))
+        .or_else(|| unit_enum_bound_report(message, shapes))
         .or_else(|| covered_arm_report(message, text, line))
         .or_else(|| destroy_report(message, text))
         .or_else(|| contains_report(message, text))
         .or_else(|| after_report(message, text))
         .or_else(|| mixed_return_report(message, source, text, line, col))
+        .or_else(|| deprecated_report(message, text, line, col))
+}
+
+/// A deprecated function a tag calls, `<OldRow />`. The lowering writes
+/// the call, so the report sits on the markup's first `<`; the name it
+/// quotes is on the line, and the report moves onto it.
+fn deprecated_report(message: &str, text: &str, line: usize, col: usize) -> Option<Resited> {
+    let name = quoted_after(message, "Function '")?;
+
+    if !message.contains("' is deprecated") {
+        return None;
+    }
+
+    let at = word_column(text, name)?;
+
+    (at != col).then(|| Resited {
+        kind: "DeprecatedApi",
+        message: message.to_string(),
+        at: Some((line, at)),
+    })
 }
 
 /*
@@ -1262,9 +1518,14 @@ fn mixed_return_report(
 }
 
 /// Whether the function that holds the line writes no return type. The
-/// header is the nearest line above that names `function`, and a return
-/// type follows the `)` of the parameters.
+/// tree answers when the source parses. Otherwise the header is the
+/// nearest line above that names `function`, and a return type follows
+/// the `)` of the parameters.
 fn function_without_return_type(source: &str, line: usize) -> bool {
+    if let Some(untyped) = untyped_by_tree(source, line) {
+        return untyped;
+    }
+
     let lines: Vec<&str> = source.lines().collect();
     let head = (0..line.saturating_sub(1))
         .rev()
@@ -1275,6 +1536,57 @@ fn function_without_return_type(source: &str, line: usize) -> bool {
     // function type with no parameters spells the same two characters,
     // so the test reads as no rewrite, not as a wrong one.
     head.is_some_and(|h| !h.contains("):"))
+}
+
+/// Whether the innermost function around the code of `line` writes no
+/// return type, by the tree. A closure above the line, such as the
+/// callback of `xs:for_each(...)`, closes before it and is not the one.
+/// `false` at the top level, and `None` when the source does not parse.
+fn untyped_by_tree(source: &str, line: usize) -> Option<bool> {
+    use crate::desugar::{Child, expr_children, stmt_children};
+
+    let parsed = alloy_syntax::parse_one(source).ok()?;
+    let toks = &parsed.lexed.toks;
+    let text = source.lines().nth(line.checked_sub(1)?)?;
+    let at = source
+        .split_inclusive('\n')
+        .take(line - 1)
+        .map(str::len)
+        .sum::<usize>()
+        + (text.len() - text.trim_start().len());
+    let holds = |span: alloy_syntax::ast::TokSpan| {
+        span.start < span.end
+            && toks[span.start as usize].start as usize <= at
+            && at < toks[span.end as usize - 1].end as usize
+    };
+    // Functions nest, so the last one the walk enters is the innermost.
+    let mut untyped = false;
+    let mut stack: Vec<Child<'_>> = parsed
+        .chunk
+        .block
+        .stmts
+        .iter()
+        .flat_map(stmt_children)
+        .collect();
+
+    while let Some(child) = stack.pop() {
+        match child {
+            Child::Expr(e) if holds(e.span()) => stack.extend(expr_children(e)),
+
+            Child::Block(b) if holds(b.span) => {
+                stack.extend(b.stmts.iter().flat_map(stmt_children));
+            }
+
+            Child::Function(f) if holds(f.block.span) => {
+                untyped = f.ret_type.is_none();
+                stack.extend(f.block.stmts.iter().flat_map(stmt_children));
+            }
+
+            _ => {}
+        }
+    }
+
+    Some(untyped)
 }
 
 /// `x in t` on a value the std cannot search. The emit calls `contains`,
@@ -1306,7 +1618,8 @@ fn contains_report(message: &str, text: &str) -> Option<Resited> {
     Some(Resited {
         kind: "TypeError",
         message: format!(
-            "`in` needs an Array, a Set, a HashMap, or a string; `{operand}` is a {got}"
+            "`in` needs an Array, a Set, a HashMap, or a string; `{operand}` is {} {got}",
+            crate::desugar::article(got)
         ),
         at: None,
     })
@@ -1325,7 +1638,10 @@ fn after_report(message: &str, text: &str) -> Option<Resited> {
 
     Some(Resited {
         kind: "TypeError",
-        message: format!("`after` needs a number of seconds; `{seconds}` is a {got}"),
+        message: format!(
+            "`after` needs a number of seconds; `{seconds}` is {} {got}",
+            crate::desugar::article(got)
+        ),
         at: None,
     })
 }
@@ -1363,7 +1679,8 @@ fn destroy_report(message: &str, text: &str) -> Option<Resited> {
     Some(Resited {
         kind: "TypeError",
         message: format!(
-            "`destroy` needs an Instance or a value with a destroy method; `{operand}` is a {got}"
+            "`destroy` needs an Instance or a value with a destroy method; `{operand}` is {} {got}",
+            crate::desugar::article(got)
         ),
         at: None,
     })
@@ -1446,6 +1763,37 @@ fn unmet_bound_report(
         kind: "BoundError",
         message: format!("`{got}` does not implement `{want}`{tail}"),
         at: Some((line, col + open + 1 + lead)),
+    })
+}
+
+/*
+An enum with a unit variant given for a trait bound, `<T: Named>`. The
+checker says "`Mode` does not satisfy the bound `Named`", which reads as
+a missing impl, and `impl Named for Mode` is right there.
+
+The error itself holds: a bound reaches the trait's methods through the
+value, and a unit variant is a string, which carries none of them. So
+the report stays and says why.
+*/
+fn unit_enum_bound_report(message: &str, shapes: &[crate::declarations::Shape]) -> Option<Resited> {
+    let text = crate::shapes::friendly_text(message);
+    let (head, tail) = text.split_once("` does not satisfy the bound `")?;
+    let got = head.rsplit_once('`')?.1;
+    let bound = tail.split_once('`')?.0;
+    let unit = shapes.iter().any(|s| match s {
+        crate::declarations::Shape::Enum { name, variants, .. } => {
+            name == got && variants.iter().any(|(_, payload)| payload.is_empty())
+        }
+
+        _ => false,
+    });
+
+    unit.then(|| Resited {
+        kind: "BoundError",
+        message: format!(
+            "`{got}` has a unit variant, a string at runtime, so it cannot meet the bound `{bound}`: a bound reaches the trait's methods through the value, and a string carries none of them"
+        ),
+        at: None,
     })
 }
 
@@ -2015,6 +2363,35 @@ mod tests {
         );
     }
 
+    /// A closure above a `return` named `function` on its line, so the
+    /// scan read it as the header, found no return type, and blamed an
+    /// earlier `return` that the closure holds. The typed function
+    /// around the line owns the report.
+    #[test]
+    fn a_closure_above_a_return_is_not_its_function() {
+        let shapes = Vec::new();
+        let message = "Expected this to be 'number[]', but got '{number}'";
+        let one_line = "local function f(xs: number[]): number[]\n    xs:for_each(function(x: number) return end)\n    const out = {}\n    return out\nend\nprint(f)\n";
+        let sort = "local function f(xs: number[]): number[]\n    const out = {}\n    table.sort(out, function(a: number, b: number)\n        return a < b\n    end)\n    return out\nend\nprint(f)\n";
+
+        assert_eq!(resite_report(message, &shapes, one_line, 4, 12), None);
+        assert_eq!(resite_report(message, &shapes, sort, 6, 12), None);
+
+        // A `return` inside the closure answers to the closure.
+        let inside = "local function f(): number\n    local g = function(a: boolean)\n        if a then\n            return \"x\"\n        end\n        return 1\n    end\n    return 2\nend\nprint(f)\n";
+        let got = resited(
+            "Expected this to be 'string', but got 'number'",
+            inside,
+            6,
+            9,
+        );
+        assert!(
+            got.message.starts_with("this `return` gives `number`"),
+            "{}",
+            got.message
+        );
+    }
+
     /// `Chat:call(...)` with a colon is the mistake a reader makes; the
     /// report named `Remote`, the emit's own name for the surface.
     #[test]
@@ -2055,6 +2432,37 @@ mod tests {
         assert_eq!(
             rewrite_remote_key(&message, "    print(#Ping.cal)"),
             Some("remote `Ping` has no `cal`; did you mean `calls`?".to_string())
+        );
+    }
+
+    /// A module that exports remotes prints each one inside its own
+    /// table, and the report called the module a remote: "remote `N`
+    /// has no `Nope`". The report now names a module. A `->` inside a
+    /// member closes no bracket, so the keys stay at the top level.
+    #[test]
+    fn a_module_of_remotes_is_no_remote() {
+        let surface = "{ calls: RemoteCalls, fire: (Holder) -> (), instance: RemoteEvent?, on: ((Player, Holder) -> ()) -> RBXScriptConnection, spec: RemoteSpec, wait: () -> Awaitable<Player> }";
+        let table = format!("{{ R1: {surface}, R2: {surface} }}");
+        let message = format!("Key 'Nope' not found in table '{table}'");
+
+        assert_eq!(
+            rewrite_remote_key(&message, "print(N.Nope)"),
+            Some("module `N` has no `Nope`".to_string())
+        );
+
+        let message = format!("Key 'R3' not found in table '{table}'");
+        assert_eq!(
+            rewrite_remote_key(&message, "N.R3.fire(h)"),
+            Some("module `N` has no `R3`; did you mean `R1`?".to_string())
+        );
+
+        // The checker cuts a long type short; a remote still reads as
+        // one.
+        let cut = "{ calls: RemoteCalls, fire: (n: number) -> (), instance: RemoteEvent?, on: ((Player, n";
+        let message = format!("Key 'fira' not found in table '{cut}'");
+        assert_eq!(
+            rewrite_remote_key(&message, "Ping.fira(1)"),
+            Some("remote `Ping` has no `fira`; did you mean `fire`?".to_string())
         );
     }
 
@@ -2448,6 +2856,30 @@ end
         assert_eq!(got.at, Some((9, 16)));
     }
 
+    /// `announce(Mode.On)` under `<T: Named>` read "`Mode` does not
+    /// satisfy the bound `Named`" beside `impl Named for Mode`. A bound
+    /// reaches the methods through the value, which a string cannot
+    /// answer, so the report stays and names the unit variant. A struct
+    /// keeps the checker's words.
+    #[test]
+    fn a_unit_enum_under_a_trait_bound_names_the_unit_variant() {
+        let source = "trait Named as\n    function hi(self): string\n        return \"hi\"\n    end\nend\nenum Mode as On, Off end\nimpl Named for Mode as\nend\nstruct Plain as\n    n: number\nend\n";
+        let shapes = crate::declarations::shapes(source);
+        let raw = |got: &str| {
+            format!(
+                "Expected this to be '{got} & Named', but got '{got}'; this is because the 2nd component of the intersection is `Named`, which is not a subtype of `{got}`"
+            )
+        };
+        let got = resite_report(&raw("Mode"), &shapes, source, 6, 1).expect("a rewrite");
+
+        assert_eq!(
+            got.message,
+            "`Mode` has a unit variant, a string at runtime, so it cannot meet the bound `Named`: a bound reaches the trait's methods through the value, and a string carries none of them"
+        );
+        assert_eq!(got.kind, "BoundError");
+        assert_eq!(resite_report(&raw("Plain"), &shapes, source, 6, 1), None);
+    }
+
     #[test]
     fn an_arm_an_earlier_one_covers_reads_as_an_arm() {
         let source = "local function grade(name: string): number\n    return match name with\n        case \"gold\" then 3\n        case \"silver\" then 2\n        case \"gold\" then 1\n        default 0\n    end\nend\n";
@@ -2561,6 +2993,16 @@ end
         assert_eq!(
             unknown_module_message("./data.json", Path::new("src/app/main.aly"), None),
             "\"./data.json\" names no module; no JSON file at src/app/data.json"
+        );
+        // The file is there: the tree names it by its folder. The report
+        // said no file stood at `src/init`.
+        assert_eq!(
+            unknown_module_message("./init", Path::new("src/main.aly"), None),
+            "\"./init\" names no module; an `init` file is the module of its folder, so write \"./\""
+        );
+        assert_eq!(
+            unknown_module_message("../ui/init", Path::new("src/app/main.aly"), None),
+            "\"../ui/init\" names no module; an `init` file is the module of its folder, so write \"../ui\""
         );
         assert_eq!(
             quoted_on_line("import { a } from \"./x\"\nlocal y = 1\n", 0),
@@ -2938,6 +3380,95 @@ end
         );
     }
 
+    /// `new Nope { }` with nothing named `Nope` names the struct, on the
+    /// name. A module of the project that exports the name gives the
+    /// import to write.
+    #[test]
+    fn a_new_of_an_unknown_name_says_unknown_struct() {
+        let dir = std::env::temp_dir().join(format!("alloy-unknown-struct-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/c")).unwrap();
+        std::fs::write(
+            dir.join("alloy.toml"),
+            "[build]\nin = \"src\"\nout = \"build\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("src/tags.aly"),
+            "export struct Coins\n    amount: number\nend\n",
+        )
+        .unwrap();
+        let src = "const c = new Coins { amount = 1 }\nconst d = new Nope { a = 1 }\n";
+        let path = dir.join("src/c/imp.aly");
+        let report = |name: &str, line: usize| {
+            let message = format!("Unknown global '{name}'; consider assigning to it first");
+            let r = unknown_struct_report(&message, &path, src, line).unwrap();
+
+            (r.message, r.at)
+        };
+
+        assert_eq!(
+            report("Coins", 1),
+            (
+                "unknown struct `Coins`; \"../tags\" exports it: `import { Coins } from \"../tags\"`"
+                    .to_string(),
+                Some((1, 15))
+            )
+        );
+        assert_eq!(
+            report("Nope", 2),
+            ("unknown struct `Nope`".to_string(), Some((2, 15)))
+        );
+
+        // The head of a path is no struct: it names the module or the
+        // namespace that holds one.
+        let dotted = "const e = new Nope.Stack {}\nconst f = new Coins.Stack {}\n";
+        let head = |name: &str, line: usize| {
+            let message = format!("Unknown global '{name}'; consider assigning to it first");
+
+            unknown_struct_report(&message, &path, dotted, line)
+                .unwrap()
+                .message
+        };
+        assert_eq!(
+            head("Nope", 1),
+            "`Nope` is not a module, namespace or import in scope"
+        );
+        assert_eq!(
+            head("Coins", 2),
+            "`Coins` is not a module, namespace or import in scope; \"../tags\" exports it: `import { Coins } from \"../tags\"`"
+        );
+
+        // A type alias of the file is a type, not a struct.
+        let alias = "type Nope = { a: number }\nconst d = new Nope { a = 1 }\n";
+        assert!(unknown_struct_report("Unknown global 'Nope'", &path, alias, 2).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `new Ty.Nope { }` through a star import printed the module's
+    /// whole table: "Key 'Nope' not found in table '{ Blade: Blade }'".
+    #[test]
+    fn a_new_of_a_dotted_unknown_name_names_its_owner() {
+        let src = "import * as Ty from \"./types\"\nconst d = new Ty.Nope {}\nconst e = new Zoo.Deep.Nope {}\n";
+        let path = std::path::Path::new("src/a.aly");
+        let report = |line: usize| {
+            let message = "Key 'Nope' not found in table '{ Blade: Blade, Hit: Hit }'";
+            let r = unknown_struct_report(message, path, src, line).unwrap();
+
+            (r.message, r.at)
+        };
+
+        assert_eq!(
+            report(2),
+            ("`Ty` exports no struct `Nope`".to_string(), Some((2, 18)))
+        );
+        assert_eq!(
+            report(3),
+            ("`Zoo.Deep` has no struct `Nope`".to_string(), Some((3, 24)))
+        );
+    }
+
     #[test]
     fn an_is_test_against_no_type_says_so() {
         let src = "local v: any = 1\nif v is Nothing then print(\"?\") end\n";
@@ -3015,6 +3546,36 @@ end
         );
     }
 
+    /// A function reads a `const` that a line below it declares. Luau
+    /// reads a global there and advises assigning to it. The report now
+    /// says to move the declaration. A read at the top level, and a
+    /// name with no declaration below, keep the checker's words.
+    #[test]
+    fn a_const_below_the_function_that_reads_it_says_so() {
+        let src = "local function speed(): number\n    return LIMIT * 2\nend\nconst LIMIT = 16\nlocal step = 1\nprint(speed(), step)\n";
+        let unknown =
+            |name: &str| format!("Unknown global '{name}'; consider assigning to it first");
+
+        assert_eq!(
+            rewrite_emitted_name(&unknown("LIMIT"), src, 2),
+            Some((
+                "`LIMIT` is declared below this function; move the const above it".to_string(),
+                None
+            ))
+        );
+        assert_eq!(
+            rewrite_emitted_name(&unknown("step"), &src.replace("LIMIT * 2", "step"), 2),
+            Some((
+                "`step` is declared below this function; move the local above it".to_string(),
+                None
+            ))
+        );
+        assert_eq!(rewrite_emitted_name(&unknown("nope"), src, 2), None);
+
+        let top = "print(LIMIT)\nconst LIMIT = 16\n";
+        assert_eq!(rewrite_emitted_name(&unknown("LIMIT"), top, 1), None);
+    }
+
     #[test]
     fn a_new_on_a_value_names_what_it_holds() {
         let src = "local n = 5\nlocal r = new n {}\n";
@@ -3046,6 +3607,18 @@ end
             Some(("b".into(), "Plain".into()))
         );
         assert_eq!(constructor_field("local p = { a = 1 }", 13), None);
+
+        // A namespace member reads by its path, and a second `new` on
+        // the line names its own struct.
+        let line = "print(new N.Entry { wins = 1 }, new Top { wins = 1 })";
+        assert_eq!(
+            constructor_field(line, 28),
+            Some(("wins".into(), "N.Entry".into()))
+        );
+        assert_eq!(
+            constructor_field(line, 50),
+            Some(("wins".into(), "Top".into()))
+        );
     }
 
     #[test]
@@ -3069,5 +3642,36 @@ end
         keep_innermost(&mut diagnostics);
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].col, 55);
+    }
+
+    /// `gui:WaitForChild("Hud")` on an `Instance?` drew two errors at one
+    /// spot. The echo goes; one at another spot stays.
+    #[test]
+    fn a_nil_call_reports_once() {
+        let diag = |col: usize, message: &str| TypeDiag {
+            rel: PathBuf::from("a.aly"),
+            line: 5,
+            col,
+            kind: "TypeError".into(),
+            message: message.into(),
+        };
+        let mut diagnostics = vec![
+            diag(12, "Value of type 'Instance?' could be nil"),
+            diag(12, "Expected this to be 'Instance', but got 'nil'"),
+            diag(30, "Expected this to be 'number', but got 'nil'"),
+        ];
+        drop_nil_echo(&mut diagnostics);
+        let got: Vec<(usize, &str)> = diagnostics
+            .iter()
+            .map(|d| (d.col, d.message.as_str()))
+            .collect();
+
+        assert_eq!(
+            got,
+            [
+                (12, "Value of type 'Instance?' could be nil"),
+                (30, "Expected this to be 'number', but got 'nil'"),
+            ]
+        );
     }
 }

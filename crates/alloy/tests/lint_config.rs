@@ -346,6 +346,25 @@ fn fmt_renames_while_the_naming_lint_is_on() {
     assert!(fmt("a.d.aly", "declare function loadMap(): ()\n", on).contains("loadMap"));
 }
 
+/// `prefer_const` goes before the renames, so a local that becomes a
+/// `const` takes the const style in the first run, and a second run
+/// writes the same text.
+#[test]
+fn fmt_writes_a_const_in_the_const_style_once() {
+    let toml = "[lint.naming]\nvariable = \"camelCase\"\nconst = \"SCREAMING_SNAKE_CASE\"\n";
+    let src = "local max_hp = 100\nprint(max_hp)\n";
+    let c = parse(toml);
+    let mut options = c.fmt.for_source(src);
+    options.lint = c.lint;
+
+    let once = alloy::fmt::format_named("a.aly", src, &options).unwrap();
+    assert_eq!(once, "const MAX_HP = 100\nprint(MAX_HP)\n");
+    assert_eq!(
+        alloy::fmt::format_named("a.aly", &once, &options).unwrap(),
+        once
+    );
+}
+
 /// A markup lint fires under the table backend, so a project of one
 /// `.alx` file shows what silences it. The result holds each error, then
 /// each lint as `lint: <name>: <message>`.

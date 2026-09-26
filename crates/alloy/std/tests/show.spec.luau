@@ -33,6 +33,28 @@ describe("printing", function()
 		expect(tostring(alloy.Iter.range(1, 3))).toBe("Iter { lazy }")
 	end)
 
+	it("prints a plain table the way an Array or a HashMap prints", function()
+		expect(alloy.show({ 1, "a" })).toBe('[ 1, "a" ]')
+		expect(alloy.show({})).toBe("[]")
+		expect(alloy.show({ b = 2, a = 1 })).toBe("{ a = 1, b = 2 }")
+		expect(alloy.show({ { 1 } })).toBe("[ [ 1 ] ]")
+		local loop = {}
+		loop[1] = loop
+		expect(string.sub(alloy.show(loop), 1, 9)).toBe("[ table: ")
+	end)
+
+	it("names the enum of a unit variant in a field or a payload slot", function()
+		expect(alloy.show_struct("Stack", { item = "Junk", n = 1 }, { "item", "n" }, { item = "Item" })).toBe(
+			"Stack { item = Item.Junk, n = 1 }"
+		)
+		expect(alloy.show_variant("Item", { tag = "Tool", _1 = "Axe", _2 = 1 }, { Tool = { [1] = "Kind" } })).toBe(
+			"Item.Tool(Kind.Axe, 1)"
+		)
+		expect(alloy.show_variant("Item", { tag = "Named", _1 = "Axe" }, { Tool = { [1] = "Kind" } })).toBe(
+			'Item.Named("Axe")'
+		)
+	end)
+
 	it("nests: a struct inside an array inside a Result", function()
 		local Vec2 = {}
 		Vec2.__index = Vec2

@@ -335,23 +335,9 @@ impl State {
                 (*name, 7, text)
             })
             .chain(
-                [
-                    "Display",
-                    "Debug",
-                    "Clone",
-                    "Eq",
-                    "PartialEq",
-                    "Ord",
-                    "Serialize",
-                    "Drop",
-                    "Deletable",
-                    "Add",
-                    "Sub",
-                    "Mul",
-                    "Div",
-                ]
-                .into_iter()
-                .map(|name| (name, 8, keywords::doc(name).map(str::to_string))),
+                STD_TRAITS
+                    .iter()
+                    .map(|name| (*name, 8, keywords::doc(name).map(str::to_string))),
             )
             .collect();
 
@@ -425,6 +411,29 @@ impl State {
     }
 }
 
+/// The traits a bound and an `impl` take, which a type slot offers
+/// beside the std types.
+pub(crate) const STD_TRAITS: [&str; 13] = [
+    "Display",
+    "Debug",
+    "Clone",
+    "Eq",
+    "PartialEq",
+    "Ord",
+    "Serialize",
+    "Drop",
+    "Deletable",
+    "Add",
+    "Sub",
+    "Mul",
+    "Div",
+];
+
+/// Whether a std name is a type a slot can take.
+pub(crate) fn is_std_type(name: &str) -> bool {
+    alloy::desugar::AMBIENT_TYPES.contains(&name) || STD_TRAITS.contains(&name)
+}
+
 /// The type functions Luau's solver holds, with what each one reads.
 /// `union` and `intersect` are not among them: the checker reports
 /// `Unknown type 'union'`.
@@ -487,22 +496,9 @@ pub(crate) fn complete_std_module(doc: &Doc, line: u32, character: u32, result: 
         return;
     }
 
-    let alias = &path[from..];
-    let Some(module) = crate::proxy::navigation::module_bindings(&doc.source)
-        .into_iter()
-        .find(|(bound, _)| bound == alias)
-        .and_then(|(_, spec)| alloy::std_names::module_of_spec(&spec).map(str::to_string))
-    else {
+    let Some(names) = std_module_names(&doc.source, &path[from..]) else {
         return;
     };
-    let Some(names) = alloy::std_names::names_in(&module) else {
-        return;
-    };
-    // An attribute is no value of the runtime; `@std.name` reaches it.
-    let names: Vec<&str> = names
-        .into_iter()
-        .filter(|n| !alloy::std_names::is_std_attribute(n))
-        .collect();
 
     if result.is_null() {
         *result = json!([]);
@@ -538,6 +534,24 @@ pub(crate) fn complete_std_module(doc: &Doc, line: u32, character: u32, result: 
 
         items.push(item);
     }
+}
+
+/// The names the std module that `import * as alias` binds exports,
+/// its attributes aside: an attribute is no value of the runtime, and
+/// `@alias.name` reaches it. `None` when the alias binds no std module.
+pub(crate) fn std_module_names(src: &str, alias: &str) -> Option<Vec<&'static str>> {
+    let spec = crate::proxy::navigation::module_bindings(src)
+        .into_iter()
+        .find(|(bound, _)| bound == alias)?
+        .1;
+    let names = alloy::std_names::names_in(alloy::std_names::module_of_spec(&spec)?)?;
+
+    Some(
+        names
+            .into_iter()
+            .filter(|n| !alloy::std_names::is_std_attribute(n))
+            .collect(),
+    )
 }
 
 /// The std type a member position reads, with whether the receiver is

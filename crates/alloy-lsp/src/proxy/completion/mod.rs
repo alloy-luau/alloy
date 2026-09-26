@@ -18,6 +18,8 @@ mod std_completions;
 
 pub(crate) use context_items::MatchKind;
 pub(crate) use deprecated::says_deprecated;
+#[cfg(test)]
+pub(crate) use members::child_details;
 pub(crate) use members::{
     call_snippet, drop_receiver, hide_private, hide_record, lands_on_member, member_position,
     module_entries, payload_types, plain_snippet, private_fields, sep_of, set_call,
@@ -25,6 +27,7 @@ pub(crate) use members::{
 pub(crate) use namespaces::namespace_before;
 pub(crate) use std_completions::{
     StdReach, complete_std_members, complete_std_module, fix_edits, roblox_enum_names,
+    std_module_names,
 };
 
 use super::documents::{normalize, project_aliases};
@@ -187,7 +190,10 @@ impl State {
                 item["detail"] = json!("(any) -> boolean");
                 item["documentation"] = json!({
                     "kind": "markdown",
-                    "value": format!("Whether a value is a `{enum_name}`."),
+                    "value": format!(
+                        "Whether a value is {} `{enum_name}`.",
+                        alloy::desugar::article(&enum_name)
+                    ),
                 });
 
                 continue;
@@ -303,7 +309,8 @@ impl State {
 
     /// Signature help on a variant constructor: the child shows the
     /// emit's `_1: Player`; the variant's own shape, `Msg.Move(Player,
-    /// number)`, replaces it, one parameter per payload type.
+    /// number)`, replaces it, one parameter per payload type. An enum
+    /// the file imports reads the same way.
     pub(crate) fn rewrite_variant_signatures(&self, uri: &str, result: &mut Value) {
         let Some(doc) = self.docs.get(uri) else {
             return;
@@ -319,6 +326,7 @@ impl State {
             let Some(d) = doc
                 .decls
                 .iter()
+                .chain(doc.import_decls.iter())
                 .filter(|d| d.name.contains('.'))
                 .find(|d| label.contains(&format!("{}(", d.name)))
             else {
@@ -352,14 +360,37 @@ impl State {
         let doc = self.docs.get(uri)?;
         let offset = offset_of(&doc.source, line, character)?;
         let (key, active) = open_call(&doc.source, offset)?;
+        // A barrel's `export { Spinner } from` declares nothing, so the
+        // module it names answers for the name.
+        let home = uri_to_path(uri).and_then(|path| {
+            let head = key.trim_start_matches(['$', '@']);
+            let entry = super::navigation::import_entries(&doc.source)
+                .into_iter()
+                .find(|e| e.bound == head)?;
+
+            alloy::modules::import_home(&path, &entry.spec, &entry.name).map(|(text, _)| text)
+        });
+        let sources = || {
+            std::iter::once(doc.source.as_str())
+                .chain(doc.import_sources.iter().map(String::as_str))
+                .chain(home.as_deref())
+        };
         // The declaration index reads a parse, and a file with an
         // unclosed call has none; the source line still has the
         // signature. A module the file imports answers the same way.
         let (label, parameters) = match key.starts_with('@') {
             true => attribute_signature(doc, &key, offset),
 
-            false => std::iter::once(doc.source.as_str())
-                .chain(doc.import_sources.iter().map(String::as_str))
+            // `new V(1, )` calls the `new` an impl of `V` declares.
+            false if constructs(&doc.source, offset) => sources()
+                .find_map(|src| callable_signature(constructor_line(src, &key)?))
+                .map(|(label, parameters)| {
+                    let label = label.replacen("function new(", &format!("function {key}.new("), 1);
+
+                    (label, parameters)
+                }),
+
+            false => sources()
                 .find_map(|src| callable_signature(declared_line(src, &key)?))
                 .or_else(|| intrinsic_signature(&key)),
         }?;
@@ -380,6 +411,47 @@ impl State {
             "activeSignature": 0,
             "activeParameter": active,
         }))
+    }
+
+    /// Replaces the help around a struct constructor, and says whether
+    /// it did. `new Row { n = 1 }` lowers to `Row.__new({ n = 1 })`, and
+    /// the child answers for that call, which the source never writes.
+    /// Inside the braces no call is open, so the help is empty. Before
+    /// them, as in `add(new Row`, the call the source opens answers.
+    pub(crate) fn mend_constructor_signature(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        result: &mut Value,
+    ) -> bool {
+        let Some(doc) = self.docs.get(uri) else {
+            return false;
+        };
+        let Some(at) = offset_of(&doc.source, line, character) else {
+            return false;
+        };
+
+        if in_constructor_braces(&doc.source, at) {
+            *result = Value::Null;
+
+            return true;
+        }
+
+        let lowered = result
+            .pointer("/signatures")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|s| s["label"].as_str().is_some_and(|l| l.contains(".__new(")));
+
+        if lowered {
+            *result = self
+                .declared_signature_help(uri, line, character)
+                .unwrap_or(Value::Null);
+        }
+
+        lowered
     }
 
     /// Completion items for the extensions on a primitive. The child does
@@ -780,9 +852,13 @@ fn receiver_is_a_local(doc: &Doc, line: u32, character: u32) -> bool {
 /// list holds members alone, each without the receiver its signature
 /// carries. A detail the reader cannot write goes, and an empty
 /// documentation, which opens an empty panel, goes too.
+///
+/// `reach` holds the shapes the imported modules import: a remote of
+/// one can hand the file a struct that the file never imports.
 pub(crate) fn clean_completion(
     result: &mut Value,
     doc: &Doc,
+    reach: &[&alloy::declarations::Shape],
     line: u32,
     character: u32,
     snippets: bool,
@@ -826,6 +902,7 @@ pub(crate) fn clean_completion(
             .shapes
             .iter()
             .chain(doc.import_shapes.iter())
+            .chain(reach.iter().copied())
             .map(|s| s.name())
             .collect();
 
@@ -1033,10 +1110,47 @@ pub(crate) fn open_call(src: &str, offset: usize) -> Option<(String, u32)> {
 /// commas that level has taken: the byte range of the word and the
 /// active parameter. `None` with no `(` open, or with no word before it.
 pub(crate) fn open_paren_word(src: &str, offset: usize) -> Option<(usize, usize, u32)> {
+    let (open, _, active) = open_brackets(src, offset)
+        .into_iter()
+        .rev()
+        .find(|(_, c, _)| *c == '(')?;
+    let before = src[..open].trim_end();
+
+    if !before.ends_with(|c: char| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+
+    let (start, end) = keywords::word_range(src, before.len() - 1);
+
+    Some((start, end, active))
+}
+
+/// Whether `offset` sits in the braces of `new Row { ... }` with no call
+/// open inside them. A `[` or a `{` nested in the braces counts too.
+pub(crate) fn in_constructor_braces(src: &str, offset: usize) -> bool {
+    let opens = open_brackets(src, offset);
+    let after_call = opens.iter().rposition(|b| b.1 == '(').map_or(0, |i| i + 1);
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+
+    opens[after_call..].iter().any(|&(at, bracket, _)| {
+        let before = src[..at].trim_end();
+        let head = before.trim_end_matches(|c: char| is_word(c) || c == '.');
+
+        bracket == '{'
+            && head.len() < before.len()
+            && head
+                .trim_end()
+                .strip_suffix("new")
+                .is_some_and(|rest| !rest.ends_with(is_word))
+    })
+}
+
+/// The brackets still open at `offset`, the innermost last: where each
+/// one opened, the bracket, and how many commas its level has taken.
+/// A string or a comment opens none.
+pub(crate) fn open_brackets(src: &str, offset: usize) -> Vec<(usize, char, u32)> {
     let head = &src[..offset.min(src.len())];
-    // One frame per open bracket: where a `(` opened, and how many
-    // commas the level has taken.
-    let mut opens: Vec<(Option<usize>, u32)> = Vec::new();
+    let mut opens: Vec<(usize, char, u32)> = Vec::new();
     let mut quote: Option<char> = None;
     let mut chars = head.char_indices();
 
@@ -1061,15 +1175,14 @@ pub(crate) fn open_paren_word(src: &str, offset: usize) -> Option<(usize, usize,
                     }
                 }
 
-                '(' => opens.push((Some(i), 0)),
-                '[' | '{' => opens.push((None, 0)),
+                '(' | '[' | '{' => opens.push((i, c, 0)),
 
                 ')' | ']' | '}' => {
                     opens.pop();
                 }
 
                 ',' => {
-                    if let Some((_, count)) = opens.last_mut() {
+                    if let Some((_, _, count)) = opens.last_mut() {
                         *count += 1;
                     }
                 }
@@ -1079,19 +1192,7 @@ pub(crate) fn open_paren_word(src: &str, offset: usize) -> Option<(usize, usize,
         }
     }
 
-    let (open, active) = opens
-        .iter()
-        .rev()
-        .find_map(|(open, count)| open.map(|o| (o, *count)))?;
-    let before = head[..open].trim_end();
-
-    if !before.ends_with(|c: char| c.is_alphanumeric() || c == '_') {
-        return None;
-    }
-
-    let (start, end) = keywords::word_range(src, before.len() - 1);
-
-    Some((start, end, active))
+    opens
 }
 
 /// Whether the name starting at `start` is the one a declaration
@@ -1128,6 +1229,42 @@ pub(crate) fn declares_params(src: &str, start: usize) -> bool {
     let (s, e) = keywords::word_range(src, before.len() - 1);
 
     matches!(&src[s..e], "function" | "remote" | "macro" | "attribute")
+}
+
+/// Whether the innermost call open at `offset` is `new V(`.
+fn constructs(src: &str, offset: usize) -> bool {
+    open_paren_word(src, offset).is_some_and(|(start, _, _)| {
+        src[..start]
+            .trim_end()
+            .strip_suffix("new")
+            .is_some_and(|rest| !rest.ends_with(|c: char| c.is_alphanumeric() || c == '_'))
+    })
+}
+
+/// The line an `impl` of `name` declares its `new` on, which `new V(...)`
+/// calls. The search in each block stops at the next `impl`.
+pub(crate) fn constructor_line<'a>(src: &'a str, name: &str) -> Option<&'a str> {
+    let lexed = alloy_syntax::lexer::lex(src).ok()?;
+    let toks = &lexed.toks;
+    let text = |i: usize| toks[i].text(src);
+    // The header names the target on the line of `impl`.
+    let names = |i: usize| {
+        (i + 1..toks.len())
+            .take_while(|&j| !src[toks[j - 1].end as usize..toks[j].start as usize].contains('\n'))
+            .any(|j| text(j) == name)
+    };
+    let at = (0..toks.len())
+        .filter(|&i| text(i) == "impl" && names(i))
+        .find_map(|i| {
+            (i + 1..toks.len().saturating_sub(1))
+                .take_while(|&j| text(j) != "impl")
+                .find(|&j| text(j) == "function" && text(j + 1) == "new")
+        })?;
+    let at = toks[at].start as usize;
+    let start = src[..at].rfind('\n').map_or(0, |i| i + 1);
+    let end = src[at..].find('\n').map_or(src.len(), |i| at + i);
+
+    Some(&src[start..end])
 }
 
 /// The line a source declares a callable name on: a `function`, a

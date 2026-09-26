@@ -26,7 +26,7 @@ use crate::rojo::{Mounted, ProjectFile};
 /// What `.alloy/.gitignore` holds: the files under `.alloy` that no
 /// repository wants. The ingot store is build output; the lock file
 /// beside it is not, so it stays in version control.
-pub const ALLOY_DIR_IGNORE: &str = "sourcemap.json\ningots/\n";
+pub const ALLOY_DIR_IGNORE: &str = "sourcemap.json\ningots/\noutputs.txt\n";
 
 /// The DataModel path of a mount, split: `@game/A/B` is `["A", "B"]`.
 /// `None` when the string does not start with `@game/`.
@@ -39,6 +39,43 @@ pub fn segments(mount: &str) -> Option<Vec<String>> {
         .collect();
 
     if parts.is_empty() { None } else { Some(parts) }
+}
+
+/// Where the runtime lands when `[project] runtime` names no place:
+/// where a node already mounts `out/alloy.luau`, else inside the node
+/// that mounts the output folder, or the input folder, which the build
+/// project points at the output. That folder carries the file, and a
+/// node of its own would put a second copy beside it. Else the default
+/// place.
+fn runtime_place(mounts: &[Mounted], input: &Path, out: &Path) -> Vec<String> {
+    let at = |disk: &Path| {
+        mounts
+            .iter()
+            .find(|m| m.disk == disk)
+            .map(|m| m.place.clone())
+    };
+
+    at(&out.join("alloy.luau"))
+        .or_else(|| {
+            at(out).or_else(|| at(input)).map(|mut place| {
+                place.push("alloy".to_string());
+                place
+            })
+        })
+        .or_else(|| segments(crate::config::DEFAULT_RUNTIME))
+        .unwrap_or_default()
+}
+
+/// Whether a folder of `disks` already carries the runtime at
+/// `runtime`: `alloy` inside the node that mounts one of them. A
+/// project file that writes a node for it too holds two copies.
+pub(crate) fn carries_runtime(mounts: &[Mounted], disks: &[&Path], runtime: &[String]) -> bool {
+    runtime.split_last().is_some_and(|(last, parent)| {
+        last == "alloy"
+            && mounts
+                .iter()
+                .any(|m| m.place == parent && disks.contains(&m.disk.as_path()))
+    })
 }
 
 /// The tree of one project, read once per build.
@@ -97,19 +134,26 @@ impl Tree {
         // An alias-only entry names no place, so a table of those alone
         // is not a tree: the project file at the root still is.
         if config.mount.values().any(|m| !m.alias_only()) {
+            let mounts: Vec<Mounted> = config
+                .mount
+                .values()
+                .filter_map(|m| {
+                    Some(Mounted {
+                        place: segments(&m.1)?,
+                        disk: PathBuf::from(m.0.replace('\\', "/")),
+                    })
+                })
+                .collect();
+            let runtime = match &config.project.runtime {
+                Some(r) => segments(r).unwrap_or_default(),
+
+                None => runtime_place(&mounts, &input, &out),
+            };
+
             return Self {
                 name: config.project.name.clone(),
-                mounts: config
-                    .mount
-                    .values()
-                    .filter_map(|m| {
-                        Some(Mounted {
-                            place: segments(&m.1)?,
-                            disk: PathBuf::from(m.0.replace('\\', "/")),
-                        })
-                    })
-                    .collect(),
-                runtime: segments(config.project.runtime()).unwrap_or_default(),
+                mounts,
+                runtime,
                 aliases,
                 project: None,
                 source_of_truth: config.project.source_of_truth,
@@ -123,24 +167,12 @@ impl Tree {
             .as_ref()
             .map(ProjectFile::mounts)
             .unwrap_or_default();
-        // The runtime lands where the project says, else where the tree
-        // already puts `alloy.luau`, else inside the node that mounts
-        // the output folder, else at the default place.
-        let runtime = match (&config.project.runtime, &project) {
-            (Some(r), _) => segments(r).unwrap_or_default(),
+        // The runtime lands where the project says, else as
+        // `runtime_place` finds it.
+        let runtime = match &config.project.runtime {
+            Some(r) => segments(r).unwrap_or_default(),
 
-            (None, Some(p)) => p
-                .place_of(&out.join("alloy.luau"))
-                .or_else(|| {
-                    p.place_of(&out).map(|mut place| {
-                        place.push("alloy".to_string());
-                        place
-                    })
-                })
-                .or_else(|| segments(crate::config::DEFAULT_RUNTIME))
-                .unwrap_or_default(),
-
-            (None, None) => segments(crate::config::DEFAULT_RUNTIME).unwrap_or_default(),
+            None => runtime_place(&mounts, &input, &out),
         };
 
         Self {
@@ -156,6 +188,23 @@ impl Tree {
             input,
             out,
         }
+    }
+
+    /// The output folders the build project names, relative to the root:
+    /// each folder mount under `[build] in`, moved under `[build] out`.
+    /// A mount with no source in it has no output, and `rojo build`
+    /// stops at the missing path, so the build makes each folder.
+    pub fn out_dirs(&self, root: &Path) -> Vec<PathBuf> {
+        if self.project.is_none() && !self.source_of_truth {
+            return Vec::new();
+        }
+
+        self.mounts
+            .iter()
+            .filter(|m| m.disk.extension().is_none() && !root.join(&m.disk).is_file())
+            .filter_map(|m| m.disk.strip_prefix(&self.input).ok())
+            .map(|rest| self.out.join(rest))
+            .collect()
     }
 
     /// The mount that holds `rel`, the one with the longest disk path,
@@ -277,6 +326,25 @@ pub fn instance_path(tree: &Tree, rel: &Path) -> Option<Vec<String>> {
     place_of(tree, rel)
 }
 
+/// The side the place of a file gives it. Code under
+/// `ServerScriptService` or `ServerStorage` runs on the server alone, and
+/// code under `StarterPlayerScripts` or `StarterGui` on the client alone.
+/// Any other place is shared.
+pub fn place_side(tree: &Tree, rel: &Path) -> Option<crate::directives::Side> {
+    let place = place_of(tree, rel)?;
+    let names: Vec<&str> = place.iter().map(String::as_str).collect();
+
+    match names.as_slice() {
+        ["ServerScriptService" | "ServerStorage", ..] => Some(crate::directives::Side::Server),
+
+        ["StarterGui", ..] | ["StarterPlayer", "StarterPlayerScripts", ..] => {
+            Some(crate::directives::Side::Client)
+        }
+
+        _ => None,
+    }
+}
+
 /// The require string for the runtime in the ship artifact of a file in
 /// the tree: the runtime's own `@game/...` path, which Luau takes as it
 /// is. `None` when the file is outside the tree, or the tree names no
@@ -332,10 +400,6 @@ fn normalize(path: &Path) -> PathBuf {
 /// folders on disk and the instances past a mount differ; `@alloy` is
 /// the runtime's place.
 pub fn rewrite_requires(tree: &Tree, source: &Path, text: &str) -> String {
-    let from = crate::build::module_base(source);
-    let from = from.parent().unwrap_or(Path::new(""));
-    let home = tree.holder(source).map(|(m, _)| m as *const Mounted);
-
     map_requires(text, |path| {
         let replaced = match path.strip_prefix('@') {
             Some("alloy") if !tree.runtime.is_empty() => {
@@ -348,22 +412,67 @@ pub fn rewrite_requires(tree: &Tree, source: &Path, text: &str) -> String {
                 resolve_alias(tree, alias, tail)
             }
 
-            None if path.starts_with("./") || path.starts_with("../") => {
-                let target = normalize(&from.join(crate::data::strip_spec(path)));
-                let there = tree.holder(&target).map(|(m, _)| m as *const Mounted);
-
-                match home.is_some() && there.is_some() && home != there {
-                    true => place_of(tree, &target).map(|p| format!("@game/{}", p.join("/"))),
-
-                    false => None,
-                }
-            }
-
-            None => None,
+            None => cross_mount(tree, source, &crate::build::module_base(source), path),
         };
 
         Some(crate::data::strip_spec(replaced.as_deref().unwrap_or(path)).to_string())
     })
+}
+
+/// The require path of a relative spec that leaves the mount of the
+/// file at `source`. The spec starts from the folder of `from`. A target
+/// in another mount takes its `@game/...` place. A spec that climbs out
+/// of its own mount and back in takes the path inside the mount. The
+/// instance of a mount has another name than its folder, `Shared` for
+/// `src/shared`, so the spec as written finds nothing. `None` for any
+/// other path.
+fn cross_mount(tree: &Tree, source: &Path, from: &Path, path: &str) -> Option<String> {
+    if !path.starts_with("./") && !path.starts_with("../") {
+        return None;
+    }
+
+    let spec = crate::data::strip_spec(path);
+    let dir = from.parent().unwrap_or(Path::new(""));
+    let target = normalize(&dir.join(spec));
+    let home = tree.holder(source)?.0;
+    let there = tree.holder(&target)?.0;
+
+    if !std::ptr::eq(home, there) {
+        return place_of(tree, &target).map(|p| format!("@game/{}", p.join("/")));
+    }
+
+    let mut depth = dir.strip_prefix(&home.disk).ok()?.components().count();
+    let climbs_out = Path::new(spec).components().any(|c| match c {
+        Component::ParentDir if depth == 0 => true,
+
+        Component::ParentDir => {
+            depth -= 1;
+
+            false
+        }
+
+        Component::Normal(_) => {
+            depth += 1;
+
+            false
+        }
+
+        _ => false,
+    });
+
+    climbs_out.then(|| crate::build::relative_require(from, &target))
+}
+
+/// Each import spec of `text` that leaves the mount of the file at
+/// `source`, with the path its `require` writes: see `cross_mount`. The
+/// check artifact writes that path, as the ship does: luau-lsp reads a
+/// relative path in a file the sourcemap holds as a place in the tree,
+/// where two mounts are no siblings.
+pub fn mount_requires(tree: &Tree, source: &Path, text: &str) -> Vec<(String, String)> {
+    crate::modules::import_specs(text)
+        .into_iter()
+        .filter_map(|spec| cross_mount(tree, source, source, &spec).map(|place| (spec, place)))
+        .collect()
 }
 
 /// Rewrites the path of every `require("...")` of a text through `f`,
@@ -471,8 +580,18 @@ pub fn rojo_project(tree: &Tree, root: &Path, base: &Path, compiled: bool) -> Va
         insert(&mut out, &m.place, leaf);
     }
 
-    if !tree.runtime.is_empty() {
-        let runtime = tree.out.join("alloy.luau");
+    // The build project points a mount of `[build] in` at the output,
+    // so that folder carries the runtime there too.
+    let carriers: &[&Path] = match compiled {
+        true => &[&tree.out, &tree.input],
+
+        false => &[&tree.out],
+    };
+    let runtime = tree.out.join("alloy.luau");
+    let mounted = tree.mounts.iter().any(|m| m.disk == runtime)
+        || carries_runtime(&tree.mounts, carriers, &tree.runtime);
+
+    if !tree.runtime.is_empty() && !mounted {
         insert(
             &mut out,
             &tree.runtime,
@@ -654,6 +773,112 @@ pub fn sourcemap(tree: &Tree, root: &Path) -> std::io::Result<Value> {
     game.insert("children".into(), Value::Array(children));
 
     Ok(Value::Object(game))
+}
+
+/// The sourcemap luau-lsp reads for the project, before its paths move
+/// into a mirror. A tree that mounts a folder writes it, as `alloy
+/// build` does, so a file added since the last build has its place.
+/// Any other root reads the file the last build or Rojo left there.
+/// The language server and `alloy flux` both start from this text.
+pub fn luau_sourcemap(root: &Path, config: &Config) -> Option<String> {
+    let tree = Tree::load(root, config);
+
+    if !tree.mounts.is_empty() {
+        let map = sourcemap(&tree, root).ok()?;
+
+        return Some(serde_json::to_string_pretty(&map).ok()? + "\n");
+    }
+
+    // A root that still holds the `.alloy/sourcemap.json` an older build
+    // wrote uses that one.
+    ["sourcemap.json", ".alloy/sourcemap.json"]
+        .iter()
+        .find_map(|name| std::fs::read_to_string(root.join(name)).ok())
+}
+
+/// A sourcemap with each script path passed through `f`, as luau-lsp
+/// reads it. A text that does not parse comes back as it is.
+pub fn map_sourcemap(text: &str, f: &dyn Fn(&str) -> String) -> String {
+    fn walk(v: &mut Value, f: &dyn Fn(&str) -> String) {
+        match v {
+            Value::Array(items) => items.iter_mut().for_each(|i| walk(i, f)),
+
+            Value::Object(map) => {
+                for (k, v) in map.iter_mut() {
+                    match (k.as_str(), v) {
+                        ("filePaths", Value::Array(paths)) => {
+                            for p in paths.iter_mut() {
+                                if let Value::String(s) = p {
+                                    *s = f(s);
+                                }
+                            }
+                        }
+
+                        ("children", Value::Array(kids)) => {
+                            kids.iter_mut().for_each(|k| walk(k, f));
+                            distinct_scripts(kids);
+                        }
+
+                        (_, v) => walk(v, f),
+                    }
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    let Ok(mut json) = serde_json::from_str::<Value>(text) else {
+        return text.to_string();
+    };
+    walk(&mut json, f);
+
+    serde_json::to_string(&json).unwrap_or_else(|_| text.to_string())
+}
+
+/// luau-lsp names a module by its instance path, so two siblings of one
+/// name are one module to it: `duel.client.aly` then checks the text of
+/// `duel.server.aly`. No code requires a script, so a script that shares
+/// its name with a sibling takes its side as well, `duel.client`.
+fn distinct_scripts(kids: &mut [Value]) {
+    let names: Vec<Option<String>> = kids
+        .iter()
+        .map(|k| k["name"].as_str().map(str::to_string))
+        .collect();
+
+    for (kid, name) in kids.iter_mut().zip(&names) {
+        let side = match kid["className"].as_str() {
+            Some("Script") => "server",
+
+            Some("LocalScript") => "client",
+
+            _ => continue,
+        };
+
+        if let Some(name) = name
+            && names.iter().filter(|n| n.as_ref() == Some(name)).count() > 1
+        {
+            kid["name"] = Value::String(format!("{name}.{side}"));
+        }
+    }
+}
+
+/// The Luau file luau-lsp reads for a script path of a sourcemap. An
+/// Alloy source compiles to `.luau`, and a data file becomes a module,
+/// as in the build. Any other path stays.
+pub fn luau_script_path(path: &str) -> String {
+    if let Some(b) = path.strip_suffix(".d.aly") {
+        format!("{b}.d.luau")
+    } else if let Some(b) = path
+        .strip_suffix(".aly")
+        .or_else(|| path.strip_suffix(".alx"))
+        .or_else(|| path.strip_suffix(".json"))
+        .or_else(|| path.strip_suffix(".toml"))
+    {
+        format!("{b}.luau")
+    } else {
+        path.to_string()
+    }
 }
 
 /// The files `alloy build` writes for the tree, as (path relative to
@@ -919,6 +1144,26 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// luau-lsp keys a module on its instance path, so `duel.client`
+    /// and `duel.server` must not share one. A module keeps its name.
+    #[test]
+    fn scripts_of_one_stem_reach_luau_lsp_apart() {
+        let text = r#"{"name":"game","children":[
+            {"name":"duel","className":"LocalScript","filePaths":["src/duel.client.aly"]},
+            {"name":"duel","className":"Script","filePaths":["src/duel.server.aly"]},
+            {"name":"duel","className":"ModuleScript","filePaths":["src/duel.aly"]},
+            {"name":"hud","className":"LocalScript","filePaths":["src/hud.client.aly"]}]}"#;
+        let map: Value = serde_json::from_str(&map_sourcemap(text, &luau_script_path)).unwrap();
+        let names: Vec<&str> = map["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["duel.client", "duel.server", "duel", "hud"]);
+        assert_eq!(map["children"][0]["filePaths"][0], "src/duel.client.luau");
+    }
+
     /// A root whose tree is its own project file, with the aliases in
     /// `.luaurc`.
     fn with_project_file(dir: &Path) -> Tree {
@@ -1067,6 +1312,19 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
         );
         let t = Tree::load(&dir, &Config::default());
         assert_eq!(t.runtime, vec!["ReplicatedStorage", "Build", "alloy"]);
+        // The folder carries the file, so the build project adds no
+        // second node for it.
+        let built = t.project.as_ref().unwrap().build_tree(
+            &dir,
+            &dir.join(".alloy"),
+            &t.input,
+            &t.out,
+            &t.runtime,
+        );
+        assert_eq!(
+            built["tree"]["ReplicatedStorage"]["Build"],
+            json!({ "$path": "../build" })
+        );
 
         // `[project] runtime` wins over the tree.
         let config = Config::parse(
@@ -1077,6 +1335,61 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
         assert_eq!(
             Tree::load(&dir, &config).runtime,
             vec!["ServerStorage", "Rt"]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A node that mounts `[build] in` mounts the output in the build
+    /// project, and so carries `build/alloy.luau`. The runtime went to
+    /// `ReplicatedStorage/Alloy` too, so Rojo made two copies of it,
+    /// and nothing required the one under the node.
+    #[test]
+    fn the_runtime_lands_once_under_a_node_that_mounts_the_input() {
+        let dir = temp("runtime-in");
+        write(
+            &dir,
+            "default.project.json",
+            r#"{ "name": "p", "tree": { "$className": "DataModel",
+                 "ReplicatedStorage": { "$className": "ReplicatedStorage",
+                   "Game": { "$path": "src" } } } }"#,
+        );
+        let t = Tree::load(&dir, &Config::default());
+        assert_eq!(t.runtime, vec!["ReplicatedStorage", "Game", "alloy"]);
+        assert_eq!(
+            std_require_for(&t, Path::new("src/a.aly")).unwrap(),
+            "@game/ReplicatedStorage/Game/alloy"
+        );
+        let built = t.project.as_ref().unwrap().build_tree(
+            &dir,
+            &dir.join(".alloy"),
+            &t.input,
+            &t.out,
+            &t.runtime,
+        );
+        assert_eq!(
+            built["tree"]["ReplicatedStorage"],
+            json!({ "$className": "ReplicatedStorage", "Game": { "$path": "../build/" } })
+        );
+
+        // A mount table does the same.
+        let config = Config::parse(
+            "[mount]\ngame = [\"src\", \"@game/ReplicatedStorage/Game\"]\n",
+            Path::new("alloy.toml"),
+        )
+        .unwrap();
+        let t = Tree::load(&dir, &config);
+        assert_eq!(t.runtime, vec!["ReplicatedStorage", "Game", "alloy"]);
+        let built = rojo_project(&t, &dir, &dir.join(".alloy"), true);
+        assert_eq!(
+            built["tree"]["ReplicatedStorage"]["Game"],
+            json!({ "$path": "../build/" })
+        );
+        // The source project mounts `src`, which holds no runtime.
+        let source = rojo_project(&t, &dir, &dir, false);
+        assert_eq!(
+            source["tree"]["ReplicatedStorage"]["Game"]["alloy"],
+            json!({ "$path": "build/alloy.luau" })
         );
 
         let _ = std::fs::remove_dir_all(&dir);

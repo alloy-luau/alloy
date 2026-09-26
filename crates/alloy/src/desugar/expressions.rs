@@ -41,8 +41,9 @@ pub(crate) fn chain_has_type_args(e: &Expr) -> bool {
     })
 }
 
-/// A module path the analyzer can follow: a string, or a chain of names
-/// and fields such as `script.Parent.Module`.
+/// A module path the analyzer can follow: a string, or a chain of names,
+/// fields, and named children such as `script.Parent=>Module`. The check
+/// artifact writes a child there as the plain call, see `require_arg`.
 pub(crate) fn is_static_module(e: &Expr) -> bool {
     if matches!(e, Expr::String(_)) {
         return true;
@@ -51,9 +52,20 @@ pub(crate) fn is_static_module(e: &Expr) -> bool {
     let (base, links) = flatten(e);
 
     matches!(base, Expr::Name(_))
-        && links
-            .iter()
-            .all(|l| matches!(l, Link::Plain(Step::Field(_))))
+        && links.iter().all(|l| {
+            matches!(
+                l,
+                Link::Plain(Step::Field(_))
+                    | Link::Plain(Step::Child {
+                        name: ChildName::Name(_) | ChildName::Str(_),
+                        ..
+                    })
+                    | Link::Optional(Step::Child {
+                        name: ChildName::Name(_) | ChildName::Str(_),
+                        ..
+                    })
+            )
+        })
 }
 
 /// A written type that is one plain name, `Box` or `Enum.Material`.
@@ -74,16 +86,6 @@ fn child_op(wait: bool) -> &'static str {
         true => "=>",
 
         false => "->",
-    }
-}
-
-/// `a` or `an` for the type name a report quotes. The test reads both
-/// cases, or a type named `E` takes `a`.
-fn article(ty: &str) -> &'static str {
-    match ty.starts_with(['a', 'e', 'i', 'o', 'u', 'A', 'E', 'I', 'O', 'U']) {
-        true => "an",
-
-        false => "a",
     }
 }
 
@@ -134,6 +136,132 @@ pub(crate) fn one_line(text: &str) -> String {
 }
 
 impl<'s> Desugar<'s> {
+    /// A field of `new S { }` constructs under its declared type, as a
+    /// `local` under an annotation does: `votes = HashMap.new()` takes
+    /// the arguments `HashMap<string, string>` names. `n` is the struct's
+    /// name here; an imported struct gives the type text its module
+    /// wrote, under the name the source writes.
+    ///
+    /// A type the module owns, `HashMap<string, Entry>`, may mean
+    /// nothing here. The check artifact then casts an empty constructor
+    /// to the field's own type, `index<S, "rows">`, which the imported
+    /// struct type carries.
+    fn expect_field_types(&mut self, n: &str, name: &Expr, table: &Expr) {
+        let written = self.text_of(name.span()).trim().to_string();
+        let types: Option<Vec<crate::declarations::FieldText>> =
+            match self.struct_field_types.get(n) {
+                Some(own) => Some(
+                    own.iter()
+                        .map(|t| (t.name.clone(), self.text_of(t.ty).to_string(), true))
+                        .collect(),
+                ),
+
+                None => self
+                    .options
+                    .import_field_types
+                    .iter()
+                    .find(|(s, _)| *s == written)
+                    .map(|(_, fields)| fields.clone()),
+            };
+        let (Expr::Table { fields, .. }, Some(types)) = (table, types) else {
+            return;
+        };
+
+        for f in fields {
+            let TableField::Named { name, value } = f else {
+                continue;
+            };
+            let field = self.text_of(*name);
+            let Some((_, ty, portable)) = types.iter().find(|(t, _, _)| t == field) else {
+                continue;
+            };
+            // An optional field takes the same constructor.
+            let Some(g) = super::types::generic_head(ty.trim().trim_end_matches('?')) else {
+                continue;
+            };
+            let at = std::ptr::from_ref(value) as usize;
+
+            if *portable {
+                self.field_expected.insert(at, g);
+
+                continue;
+            }
+
+            let bare = g.0.rsplit('.').next().unwrap_or(&g.0).to_string();
+
+            if self.options.check && self.empty_constructor(value, &bare) {
+                let owner = self.lower_type_name(&written);
+                let cast = format!("index<{owner}, {}>", luau_string(field));
+                self.field_casts.insert(at, cast);
+            }
+        }
+    }
+
+    /// A constructor call of `base` that takes nothing to read its type
+    /// arguments off: `HashMap.new()`, `new Set()`, `Queue.with_capacity(n)`.
+    /// `HashMap.from(t)` reads them off `t`, and a cast would hide what
+    /// `t` holds.
+    fn empty_constructor(&self, value: &Expr, base: &str) -> bool {
+        let from = matches!(
+            value,
+            Expr::Call { func, .. }
+                if matches!(func.as_ref(), Expr::Index { key: IndexKey::Field(f), .. } if self.text_of(*f) == "from")
+        );
+
+        !from && self.is_constructor_call(value, base)
+    }
+
+    /*
+    `[Kind.Slide(1)]` in the check artifact. A payload constructor returns
+    its own variant, so the solver typed the list `{ Slide }`, and a list
+    is invariant: `Kind[]` refused it. Each item that constructs a variant
+    is cast to its enum, `(Kind.Slide(1) :: Kind)`, in an array literal
+    and in the list part of a table literal.
+    */
+    fn note_variant_items(&mut self, e: &Expr) {
+        let items: Vec<&Expr> = match e {
+            Expr::Array { items, .. } => items.iter().collect(),
+
+            Expr::Table { fields, .. } => fields
+                .iter()
+                .filter_map(|f| match f {
+                    TableField::Positional(v) => Some(v),
+
+                    _ => None,
+                })
+                .collect(),
+
+            _ => return,
+        };
+
+        for item in items {
+            let Expr::Call {
+                func, method: None, ..
+            } = item
+            else {
+                continue;
+            };
+            let Expr::Index {
+                object,
+                key: IndexKey::Field(v),
+                ..
+            } = func.as_ref()
+            else {
+                continue;
+            };
+            let variant = self.text_of(*v);
+
+            if let Some(name) = self.dotted_name(object)
+                && let Some(variants) = self.enum_decls.get(&name)
+                && variants.iter().any(|(n, k)| n == variant && *k > 0)
+                && let Some(ty) = self.castable_enum(&name)
+            {
+                self.variant_casts
+                    .insert(std::ptr::from_ref(item) as usize, ty);
+            }
+        }
+    }
+
     /*
     Renders an expression. A hoist goes in front of the statement, so it
     runs first. That is wrong when `e` runs on some paths only, when the
@@ -142,6 +270,32 @@ impl<'s> Desugar<'s> {
     `expr_in_place`.
     */
     pub(crate) fn expr(&mut self, e: &Expr) {
+        // A field of an imported `new S { }` whose type names a type of
+        // the module: the empty constructor takes the field's own type.
+        if let Some(cast) = self.field_casts.remove(&(std::ptr::from_ref(e) as usize)) {
+            let (start, end) = (self.byte_start(e.span()), self.byte_end(e.span()));
+            self.generate(start, "((");
+            self.expr(e);
+            self.generate(end, &format!(" :: any) :: {cast})"));
+
+            return;
+        }
+
+        // An item of a list literal that constructs a variant; see
+        // `note_variant_items`.
+        if let Some(ty) = self.variant_casts.remove(&(std::ptr::from_ref(e) as usize)) {
+            let (start, end) = (self.byte_start(e.span()), self.byte_end(e.span()));
+            self.generate(start, "(");
+            self.expr(e);
+            self.generate(end, &format!(" :: {ty})"));
+
+            return;
+        }
+
+        if self.options.check {
+            self.note_variant_items(e);
+        }
+
         // A field of `new S { }` constructs under its declared type.
         if let Some(g) = self
             .field_expected
@@ -152,6 +306,28 @@ impl<'s> Desugar<'s> {
             self.expected_generic = saved;
 
             return;
+        }
+
+        // An attribute value in markup must fit the type its property or
+        // its prop declares, and a lone `{expr}` that sets `Text` must
+        // too. The check artifact passes it through `__alloy.prop`, cast
+        // to a function of that type.
+        let (start, end) = (self.byte_start(e.span()), self.byte_end(e.span()));
+        let attribute_type = match self.options.check {
+            true => self
+                .options
+                .attribute_types
+                .iter()
+                .find(|(a, b, _)| (*a, *b) == (start, end))
+                .map(|(_, _, ty)| ty.clone()),
+
+            false => None,
+        };
+
+        if let Some(ty) = &attribute_type {
+            let ty = self.lower_type(ty);
+            let std = self.std();
+            self.generate(start, &format!("({std}.prop :: ({ty}) -> ({ty}))("));
         }
 
         // A table literal runs nothing before its fields, so each field
@@ -165,6 +341,10 @@ impl<'s> Desugar<'s> {
             self.expr_in_place(e, |d| d.expr_node(e));
         } else {
             self.expr_node(e);
+        }
+
+        if attribute_type.is_some() {
+            self.generate(end, ")");
         }
 
         if calls_code(e) {
@@ -199,6 +379,14 @@ impl<'s> Desugar<'s> {
 
             Expr::Binary { op, lhs, rhs, span } if self.is_coalesce(*op) => {
                 self.coalesce(*span, lhs, rhs);
+            }
+
+            // `a != b` carries the parser's report; the emit reads `~=`,
+            // so the checker sees the rest of the file.
+            Expr::Binary { op, lhs, rhs, .. } if self.text_of(*op) == "!=" => {
+                let l = self.render_to_string(lhs);
+                let r = self.render_to_string(rhs);
+                self.generate(anchor, &format!("{l} ~= {r}"));
             }
 
             Expr::Binary { op, lhs, rhs, .. } if self.word_binop(*op).is_some() => {
@@ -251,17 +439,24 @@ impl<'s> Desugar<'s> {
                 args,
                 ..
             } if self.is_signal_new(func) => {
+                // An alias of the std `Signal` is a local the import
+                // writes, and the call reads through it.
+                let mut head = format!("{}.Signal", self.std());
+
                 if let Expr::Index { object, .. } = func.as_ref()
                     && let Expr::Name(n) = object.as_ref()
                 {
-                    self.check_std_name(*n, "Signal");
+                    match self.is_signal_alias(self.text_of(*n)) {
+                        true => head = self.text_of(*n).to_string(),
+
+                        false => self.check_std_name(*n, "Signal"),
+                    }
                 }
 
-                let std = self.std();
                 let text = self.text_of(*t).to_string();
                 let targs = pack_type_args(&self.lower_type_args(&text));
                 let a = self.args_text(args);
-                self.generate(anchor, &format!("{std}.Signal.new{targs}{a}"));
+                self.generate(anchor, &format!("{head}.new{targs}{a}"));
             }
 
             // An element read out of a bounded `T[]`. The cast is the
@@ -284,6 +479,7 @@ impl<'s> Desugar<'s> {
                     || self.chain_has_ext(e)
                     || self.is_struct_call(e)
                     || self.is_import_call(e)
+                    || self.dispatches(e)
                     || self.expected_generic.is_some() =>
             {
                 let text = self.chain_expr(e);
@@ -296,9 +492,12 @@ impl<'s> Desugar<'s> {
                 else_value,
                 ..
             } => {
+                let mut narrowed = self.guarded_narrowings(e);
                 let c = self.render_to_string(cond);
-                let a = self.render_lazy(then_value);
-                let b = self.render_lazy(else_value);
+                let a =
+                    self.with_narrowing(then_value, &mut narrowed, |d| d.render_lazy(then_value));
+                let b =
+                    self.with_narrowing(else_value, &mut narrowed, |d| d.render_lazy(else_value));
                 self.generate(anchor, &format!("(if {c} then {a} else {b})"));
             }
 
@@ -415,23 +614,7 @@ impl<'s> Desugar<'s> {
                     };
                     self.generate(anchor, &open);
 
-                    // A field's constructor takes the arguments its declared
-                    // type names, as a `local` under an annotation does.
-                    if let Expr::Table { fields, .. } = table
-                        && let Some(types) = self.struct_field_types.get(&n).cloned()
-                    {
-                        for f in fields {
-                            if let TableField::Named { name, value } = f
-                                && let Some(ft) =
-                                    types.iter().find(|t| t.name == self.text_of(*name))
-                                && let Some(g) = super::types::generic_head(self.text_of(ft.ty))
-                            {
-                                self.field_expected
-                                    .insert(std::ptr::from_ref(value) as usize, g);
-                            }
-                        }
-                    }
-
+                    self.expect_field_types(&n, name, table);
                     self.expr(table);
                     let close = if full_view {
                         format!(") :: any) :: {n}__all)")
@@ -449,7 +632,18 @@ impl<'s> Desugar<'s> {
                         self.new_head(name, *type_args, args.as_ref(), init.as_deref(), *span);
                     self.generate(anchor, &head);
 
+                    // `new V(a, b)` copies its arguments in place, so a
+                    // caret inside them maps into the `V.new(a, b)` of the
+                    // artifact, and signature help reads that call.
+                    if let (Some(CallArgs::Paren(list)), None) = (args.as_ref(), init.as_deref()) {
+                        let open = self.new_args_start(name, *type_args);
+                        let children: Vec<Child<'_>> = list.iter().map(Child::Expr).collect();
+                        self.stitch_between(open, self.byte_end(*span), &children);
+                    }
+
                     if let Some(table) = init.as_deref() {
+                        let written = self.text_of(name.span()).trim().to_string();
+                        self.expect_field_types(&written, name, table);
                         self.expr(table);
                         self.generate(self.byte_end(table.span()), ")");
                     }
@@ -459,9 +653,11 @@ impl<'s> Desugar<'s> {
             // The operand keeps its chunks, so the editor maps its names.
             Expr::Await { operand, .. } => {
                 let std = self.std();
-                self.generate(anchor, &format!("{std}.await("));
+                let one = self.one_value.remove(&(std::ptr::from_ref(e) as usize));
+                let (open, close) = if one { ("(", "))") } else { ("", ")") };
+                self.generate(anchor, &format!("{open}{std}.await("));
                 self.expr(operand);
-                self.generate(anchor, ")");
+                self.generate(anchor, close);
             }
 
             Expr::Try { operand, span } => {
@@ -598,6 +794,20 @@ impl<'s> Desugar<'s> {
 
                         _ => None,
                     };
+                    let required = match e {
+                        Expr::Call {
+                            func,
+                            method: None,
+                            args: args @ CallArgs::Paren(list),
+                            ..
+                        } if matches!(func.as_ref(), Expr::Name(n) if self.bare_require(self.text_of(*n), args)) => {
+                            Some(std::ptr::from_ref::<Expr>(&list[0]))
+                        }
+
+                        _ => None,
+                    };
+                    // The part an `is` test guards reads the name narrowed.
+                    let mut narrowed = self.guarded_narrowings(e);
                     let mut at = 0;
                     self.stitch(e.span(), &children, |d, child| {
                         at += 1;
@@ -609,7 +819,11 @@ impl<'s> Desugar<'s> {
                                 d.reads = reads;
                             }
 
-                            Child::Expr(c) => d.expr_lazy(at > lazy_from, c),
+                            Child::Expr(c) => d.with_narrowing(c, &mut narrowed, |d| {
+                                d.require_arg = required == Some(std::ptr::from_ref::<Expr>(c));
+                                d.expr_lazy(at > lazy_from, c);
+                                d.require_arg = false;
+                            }),
 
                             Child::Block(b) => d.block(b),
 
@@ -656,9 +870,16 @@ impl<'s> Desugar<'s> {
         };
 
         (matches!(object.as_ref(), Expr::Name(n)
-            if self.text_of(*n) == "Signal" && !self.is_local("Signal"))
+            if (self.text_of(*n) == "Signal" && !self.is_local("Signal"))
+                || self.is_signal_alias(self.text_of(*n)))
             || through_std(object))
             && self.text_of(*f) == "new"
+    }
+
+    /// Whether a name is the alias an import gives the std `Signal`:
+    /// `import { Signal as Sig } from "@alloy/std/signal"`.
+    pub(crate) fn is_signal_alias(&self, name: &str) -> bool {
+        self.std_aliases.get(name).is_some_and(|n| n == "Signal")
     }
 
     pub(crate) fn is_coalesce(&self, op: TokSpan) -> bool {
@@ -701,12 +922,44 @@ impl<'s> Desugar<'s> {
     */
     pub(crate) fn coalesce(&mut self, span: TokSpan, lhs: &Expr, rhs: &Expr) {
         let anchor = self.byte_start(span);
-        let left = self.reusable(lhs);
-        let right = self.render_lazy(rhs);
-        self.generate(
-            anchor,
-            &format!("(if {left} == nil then {right} else {left})"),
-        );
+
+        // Both sides keep their source map, so the tokens, the colours
+        // and the hovers inside them land on the text the author wrote.
+        // A simple left side is copied at its first read; the second
+        // read is generated.
+        let (first, left) = match self.is_simple(lhs) {
+            true => {
+                let side = self.render_to_side(lhs);
+                let text = side.text().to_string();
+
+                (Some(side), text)
+            }
+
+            false => (None, self.hoist(lhs)),
+        };
+
+        if left.contains('\n') {
+            let right = self.render_lazy(rhs);
+            self.generate(
+                anchor,
+                &format!("(if {left} == nil then {right} else {left})"),
+            );
+
+            return;
+        }
+
+        let right = self.render_side(|d| d.expr_lazy(true, rhs));
+        self.generate(anchor, "(if ");
+
+        match first {
+            Some(side) => self.r.append(side),
+
+            None => self.generate(anchor, &left),
+        }
+
+        self.generate(anchor, " == nil then ");
+        self.r.append(right);
+        self.generate(anchor, &format!(" else {left})"));
     }
 
     /*
@@ -1259,6 +1512,9 @@ impl<'s> Desugar<'s> {
         };
 
         match (args, init) {
+            // The caller copies a parenthesized list in place.
+            (Some(CallArgs::Paren(_)), None) => format!("{n}.{ctor}{t}"),
+
             (Some(a), None) => {
                 let a = self.args_text(a);
 
@@ -1297,6 +1553,14 @@ impl<'s> Desugar<'s> {
                 }
             }
         }
+    }
+
+    /// The byte offset of the `(` that opens the arguments of `new V(...)`:
+    /// the token after the name, or after its type arguments.
+    fn new_args_start(&self, name: &Expr, type_args: Option<TokSpan>) -> u32 {
+        let after = type_args.map_or(name.span().end, |t| t.end);
+
+        self.toks[after as usize].start
     }
 
     /// `{ ...a, x = 1, ...b }` becomes `spread(a, { x = 1 }, b)`, with the
@@ -1418,11 +1682,29 @@ impl<'s> Desugar<'s> {
     `?` adds its prefix to `guards`, and the chain needs no temp.
     */
     pub(crate) fn chain_parts(&mut self, e: &Expr) -> ChainParts {
+        // Both flags belong to this chain alone, not to a chain inside it.
+        let bare = std::mem::take(&mut self.require_arg);
+        let target = std::mem::take(&mut self.chain_target);
         let (base, links) = flatten(e);
         self.check_child_chain(base, &links);
         let timed_waits = self.options.wait_timeout.is_some();
-        // A timed `WaitForChild` can return nil, so the link after it guards.
-        let mut pending_guard = false;
+        let mut casts: Vec<Option<String>> = (0..links.len())
+            .map(|i| self.child_cast(&links, i, target, bare, timed_waits))
+            .collect();
+        // A timed `WaitForChild` can return nil, so the link after it
+        // guards. The first link guards an optional name, `gui=>Hud`,
+        // the way `gui->Hud` does: the doc says `=>` under a timeout
+        // guards as `->` does.
+        let mut pending_guard = timed_waits
+            && !bare
+            && matches!(
+                links.first(),
+                Some(Link::Plain(Step::Child { wait: true, .. }))
+            )
+            && matches!(base, Expr::Name(n) if self
+                .binding_types
+                .get(self.text_of(*n))
+                .is_some_and(|t| t.ends_with('?')));
 
         // What the chain has called or read when a prefix becomes a temp
         // runs in front of the statement, see `render_hoisted`.
@@ -1478,7 +1760,13 @@ impl<'s> Desugar<'s> {
                     crate::data::strip_literal(&self.render_to_string(&list[0]))
                 }
 
-                _ => self.args_text(args),
+                _ => {
+                    self.require_arg = self.bare_require("require", args);
+                    let a = self.args_text(args);
+                    self.require_arg = false;
+
+                    a
+                }
             };
             // A relative path in an `init.luau` starts one folder up, as
             // it does for an `import` statement.
@@ -1515,7 +1803,35 @@ impl<'s> Desugar<'s> {
             links.remove(0);
         }
 
-        let mut inner_simple = self.is_simple(base);
+        // `self:m(a)` in a trait default calls through the impl's table,
+        // `(__impl or self).m(self, a)`; see `trait_decl`.
+        let mut dispatched = false;
+
+        if let (
+            Expr::Name(n),
+            Some(Link::Plain(Step::Call {
+                method: Some(m),
+                type_args: None,
+                args,
+            })),
+        ) = (base, links.first())
+            && self.self_dispatch.contains(&n.start)
+        {
+            let a = match (args, self.args_text(args)) {
+                (CallArgs::Paren(list), _) if list.is_empty() => "(self)".to_string(),
+
+                (CallArgs::Paren(_), a) => format!("(self, {}", &a[1..]),
+
+                (_, a) => format!("(self, {a})"),
+            };
+            inner = format!("(__impl or self).{}{a}", self.text_of(*m));
+            self.effects = true;
+            dispatched = true;
+            links.remove(0);
+            casts.remove(0);
+        }
+
+        let mut inner_simple = self.is_simple(base) && !dispatched;
         // Names and fields only, `?` links included: safe to read again.
         // The checker narrows a field path and not a computed key, so a
         // key ends it.
@@ -1574,22 +1890,28 @@ impl<'s> Desugar<'s> {
             };
         }
 
-        let count = links.len();
-
-        for (i, link) in links.into_iter().enumerate() {
+        for (link, cast) in links.into_iter().zip(casts) {
             let link = match link {
                 Link::Plain(step) if pending_guard => Link::Optional(step),
+
+                Link::Optional(step @ Step::Child { .. }) if bare => Link::Plain(step),
 
                 other => other,
             };
             pending_guard = false;
-            self.last_link = i + 1 == count;
+            // A guarded link is optional already.
+            self.child_cast = match link {
+                Link::Optional(_) if cast.as_deref() == Some("?") => None,
+
+                _ => cast,
+            };
 
             match link {
                 Link::Plain(step) => {
                     inner_simple = inner_simple && matches!(step, Step::Field(_));
                     rereadable = rereadable && matches!(step, Step::Field(_));
-                    pending_guard = timed_waits && matches!(step, Step::Child { wait: true, .. });
+                    pending_guard =
+                        timed_waits && !bare && matches!(step, Step::Child { wait: true, .. });
                     // Past a `?`, a step runs only when the prefix is not
                     // nil, and so do its arguments.
                     inner = self.apply_step(!guards.is_empty(), &inner, &step);
@@ -1653,6 +1975,90 @@ impl<'s> Desugar<'s> {
         ChainParts { guards, inner }
     }
 
+    /// Whether a call of `callee` with `args` is a `require` of one child
+    /// lookup that the check artifact renders bare, see `require_arg`.
+    fn bare_require(&self, callee: &str, args: &CallArgs) -> bool {
+        self.options.check
+            && callee == "require"
+            && matches!(args, CallArgs::Paren(list) if matches!(list.as_slice(), [Expr::Child { .. }]))
+    }
+
+    /// The cast the check artifact puts on link `i` of a chain, when the
+    /// link is a child lookup. None keeps the plain call, and luau-lsp
+    /// types it as it types the method call: the child's class from the
+    /// sourcemap, else `Instance?` for `FindFirstChild` and a timed
+    /// `WaitForChild`, and `Instance` for a `WaitForChild` with no timeout.
+    ///
+    /// A field or a method after the child needs `any`, since `Instance`
+    /// has no `CFrame`. A `?.` or a `?:` after a child that the file
+    /// names after a Roblox class, `->Humanoid?.Health`, takes that class
+    /// instead, so luau-lsp checks the field or the method. The cast goes
+    /// through `any`, so a sourcemap that gives the child another class
+    /// reports nothing. A child lookup after it needs a receiver that is
+    /// not nil: a `->` or a timed `=>` guards it, and a `=>` with no
+    /// timeout gives one. Only a `->` before an unguarded `=>` casts to
+    /// `Instance`. `bare` drops every guard, see `require_arg`.
+    ///
+    /// luau-lsp types a timed `WaitForChild` by the sourcemap alone and
+    /// drops the nil the timeout gives. `?` casts the last link to its
+    /// own type made optional.
+    fn child_cast(
+        &self,
+        links: &[Link<'_>],
+        i: usize,
+        target: bool,
+        bare: bool,
+        timed: bool,
+    ) -> Option<String> {
+        let (Link::Plain(Step::Child { name, wait }) | Link::Optional(Step::Child { name, wait })) =
+            &links[i]
+        else {
+            return None;
+        };
+
+        let cast = match links.get(i + 1) {
+            None if target => Some("any"),
+
+            None => (timed && *wait && !bare).then_some("?"),
+
+            // A `=>` with no timeout gives an `Instance`. A timed one
+            // makes the next link optional, see `pending_guard`, and
+            // its own value too.
+            Some(next @ (Link::Plain(Step::Child { .. }) | Link::Optional(Step::Child { .. }))) => {
+                if bare {
+                    None
+                } else if *wait {
+                    timed.then_some("?")
+                } else {
+                    matches!(next, Link::Plain(_)).then_some("Instance")
+                }
+            }
+
+            Some(Link::Optional(
+                Step::Field(_)
+                | Step::Call {
+                    method: Some(_), ..
+                },
+            )) => {
+                let class = match name {
+                    ChildName::Name(s) => INSTANCE_CLASSES.iter().find(|c| **c == self.text_of(*s)),
+
+                    _ => None,
+                };
+
+                match class {
+                    Some(class) => return Some(format!("{class}?")),
+
+                    None => Some("any"),
+                }
+            }
+
+            Some(_) => Some("any"),
+        };
+
+        cast.map(str::to_string)
+    }
+
     /// Applies a step, as code that runs on some paths only when `lazy`
     /// is set. A call runs after its arguments, so a later argument
     /// counts it.
@@ -1702,6 +2108,13 @@ impl<'s> Desugar<'s> {
         let tests: Vec<String> = guards.iter().map(|g| format!("{g} == nil")).collect();
 
         format!("(if {} then nil else {inner})", tests.join(" or "))
+    }
+
+    /// Whether a call is a `self:m()` that a trait default makes
+    /// through the impl's table; see `trait_decl`.
+    fn dispatches(&self, e: &Expr) -> bool {
+        matches!(e, Expr::Call { func, method: Some(_), .. }
+            if matches!(func.as_ref(), Expr::Name(n) if self.self_dispatch.contains(&n.start)))
     }
 
     pub(crate) fn apply(&mut self, prefix: &str, step: &Step<'_>) -> String {
@@ -1773,12 +2186,18 @@ impl<'s> Desugar<'s> {
                 };
                 // `Signal.new<T...>` takes a type pack, not a list of
                 // type parameters, so its arguments go in parentheses.
-                let t = if prefix == "__alloy.Signal.new" {
+                let t = if prefix == "__alloy.Signal.new"
+                    || prefix
+                        .strip_suffix(".new")
+                        .is_some_and(|head| self.is_signal_alias(head))
+                {
                     pack_type_args(&t)
                 } else {
                     t
                 };
+                self.require_arg = m.is_empty() && self.bare_require(prefix, args);
                 let a = self.args_text(args);
+                self.require_arg = false;
 
                 format!("{prefix}{m}{t}{a}")
             }
@@ -1800,24 +2219,18 @@ impl<'s> Desugar<'s> {
                     (false, _) => format!("{prefix}:FindFirstChild({n})"),
                 };
 
-                // The source names no class. A chain that goes on past the
-                // child continues untyped, since `Instance` has no
-                // `CFrame`. A child that ends the chain is what the call
-                // returns: `->` finds an `Instance` or nil, so `is`
-                // narrows it, and `=>` an `Instance`, as Roblox types
-                // `WaitForChild` with a timeout too.
-                if self.options.check {
-                    let ty = match (*wait, self.last_link) {
-                        (_, false) => "any",
+                match self.child_cast.as_deref() {
+                    Some("?") if self.options.check => format!("({call} :: typeof({call})?)"),
 
-                        (true, true) => "Instance",
+                    // A class from the child's name goes through `any`,
+                    // see `child_cast`.
+                    Some(ty) if self.options.check && ty.ends_with('?') => {
+                        format!("(({call} :: any) :: {ty})")
+                    }
 
-                        (false, true) => "Instance?",
-                    };
+                    Some(ty) if self.options.check => format!("({call} :: {ty})"),
 
-                    format!("({call} :: {ty})")
-                } else {
-                    call
+                    _ => call,
                 }
             }
         }
@@ -1918,11 +2331,38 @@ impl<'s> Desugar<'s> {
         }
     }
 
-    /// Emits a lowered chain, copying the field name it ends with. The
-    /// lowering is generated text, and a generated byte has no output
-    /// position, so completion and hover on the member of an `a?.b` had
-    /// nowhere to land. The copied name gives them one.
+    /// Emits a lowered chain, copying the name it starts from and the
+    /// field name it ends with. The lowering is generated text, and a
+    /// generated byte has no output position, so completion and hover
+    /// on the member of an `a?.b` had nowhere to land, and `a` had no
+    /// token. The copied names give them one.
     pub(crate) fn generate_chain(&mut self, anchor: u32, text: &str, e: &Expr) {
+        // The guard reads the base first: `(if a == nil then nil else
+        // a.b)`. A base the lowering renamed or moved to a temp reads
+        // another word there, and stays generated.
+        if let (Expr::Name(n), _) = flatten(e) {
+            let word = self.text_of(*n).to_string();
+            let rest = text
+                .strip_prefix("(if ")
+                .and_then(|r| r.strip_prefix(word.as_str()))
+                .filter(|r| r.starts_with(" ==") || r.starts_with('.'));
+
+            if let Some(rest) = rest {
+                let rest = rest.to_string();
+                self.generate(anchor, "(if ");
+                self.copy(self.byte_start(*n), self.byte_end(*n));
+                self.generate_member(anchor, &rest, e);
+
+                return;
+            }
+        }
+
+        self.generate_member(anchor, text, e);
+    }
+
+    /// Emits the rest of a lowered chain, copying the field name it ends
+    /// with. See `generate_chain`.
+    fn generate_member(&mut self, anchor: u32, text: &str, e: &Expr) {
         let Expr::Index {
             key: IndexKey::Field(name),
             ..
@@ -2182,6 +2622,122 @@ mod tests {
         assert!(messages(fine).is_empty(), "{:?}", messages(fine));
     }
 
+    /// A child that ends a chain is the plain call in the check
+    /// artifact, so luau-lsp types it from the sourcemap as it types
+    /// `FindFirstChild`. A field after a child casts to `any`. A
+    /// `require` of a child path loses its guards, since luau-lsp
+    /// resolves a module from plain calls only.
+    #[test]
+    fn a_child_lookup_keeps_the_plain_call_in_the_check_artifact() {
+        let check = |src: &str, wait_timeout: Option<f64>| {
+            let options = EmitOptions {
+                check: true,
+                wait_timeout,
+                ..EmitOptions::default()
+            };
+
+            crate::compile_with(src, &options).unwrap().check
+        };
+        let src = concat!(
+            "local a = p=>Hud\n",
+            "local b = p->Hud->Bar\n",
+            "local c = p->Hud=>Bar\n",
+            "local d = p=>Hud.Size\n",
+            "local e = require(p->Hud->Mod)\n",
+            "p=>Hud.Name = \"x\"\n",
+        );
+        let out = check(src, None);
+
+        for want in [
+            "local a = p:WaitForChild(\"Hud\")\n",
+            "local _1 = (if p == nil then nil else p:FindFirstChild(\"Hud\")) local b = (if _1 == nil then nil else _1:FindFirstChild(\"Bar\"))\n",
+            "local c = (if p == nil then nil else (p:FindFirstChild(\"Hud\") :: Instance):WaitForChild(\"Bar\"))\n",
+            "local d = (p:WaitForChild(\"Hud\") :: any).Size\n",
+            "local e = require(p:FindFirstChild(\"Hud\"):FindFirstChild(\"Mod\"))\n",
+            "(p:WaitForChild(\"Hud\") :: any).Name = \"x\"\n",
+        ] {
+            assert!(out.contains(want), "{want}\n{out}");
+        }
+
+        // A timed wait guards the next link, and a `require` drops it.
+        let out = check("local h = p=>A=>B\nlocal m = require(p=>A=>B)\n", Some(5.0));
+        assert!(
+            out.contains("local h = (if _1 == nil then nil else _1:WaitForChild(\"B\", 5))"),
+            "{out}"
+        );
+        assert!(
+            out.contains("local m = require(p:WaitForChild(\"A\", 5):WaitForChild(\"B\", 5))"),
+            "{out}"
+        );
+    }
+
+    /// A `?.` or a `?:` after a child that the file names after a Roblox
+    /// class casts the child to that class, so luau-lsp checks the
+    /// member. `p->Humanoid?.Healthh` reported nothing, and the
+    /// `manual_child_lookup` fix turned a checked line into it. Another
+    /// name keeps `any`, since `Instance` has no `CFrame`, and a child
+    /// lookup after a child keeps its guard.
+    #[test]
+    fn a_member_after_a_class_named_child_takes_the_class() {
+        let options = EmitOptions {
+            check: true,
+            ..EmitOptions::default()
+        };
+        let src = concat!(
+            "local a = p->Humanoid?.Health\n",
+            "local b = p->Humanoid?:TakeDamage(5)\n",
+            "local c = p->Spawn1?.CFrame\n",
+            "local d = p->Humanoid.Health\n",
+            "local e = p->Humanoid->Animator\n",
+        );
+        let out = crate::compile_with(src, &options).unwrap().check;
+
+        for want in [
+            "local _1 = (if p == nil then nil else ((p:FindFirstChild(\"Humanoid\") :: any) :: Humanoid?)) local a = (if _1 == nil then nil else _1.Health)\n",
+            "_1 = (if p == nil then nil else ((p:FindFirstChild(\"Humanoid\") :: any) :: Humanoid?)) local b = (if _1 == nil then nil else _1:TakeDamage(5))\n",
+            "_1 = (if p == nil then nil else (p:FindFirstChild(\"Spawn1\") :: any)) local c = (if _1 == nil then nil else _1.CFrame)\n",
+            "local d = (if p == nil then nil else (p:FindFirstChild(\"Humanoid\") :: any).Health)\n",
+            "_1 = (if p == nil then nil else p:FindFirstChild(\"Humanoid\")) local e = (if _1 == nil then nil else _1:FindFirstChild(\"Animator\"))\n",
+        ] {
+            assert!(out.contains(want), "{want}\n{out}");
+        }
+    }
+
+    /// Under a timeout, `=>` on a name that may be nil guards it, as `->`
+    /// does. `const gui = player=>PlayerGui` holds an `Instance?`, and
+    /// `gui=>Hud` called `WaitForChild` on it with no check.
+    #[test]
+    fn a_timed_wait_guards_an_optional_name() {
+        let ship = |src: &str, wait_timeout: Option<f64>| {
+            let options = EmitOptions {
+                wait_timeout,
+                ..EmitOptions::default()
+            };
+
+            crate::compile_with(src, &options).unwrap().ship
+        };
+        let src = "const gui = p=>Gui\nconst a = gui=>Hud\nconst f = p->Gui\nconst b = f=>Hud\nlocal function g(o: Instance?, s: Instance)\n    print(o=>Hud, s=>Hud)\nend\n";
+        let out = ship(src, Some(5.0));
+
+        for want in [
+            "const gui = p:WaitForChild(\"Gui\", 5)\n",
+            "const a = (if gui == nil then nil else gui:WaitForChild(\"Hud\", 5))\n",
+            "const b = (if f == nil then nil else f:WaitForChild(\"Hud\", 5))\n",
+            "    print((if o == nil then nil else o:WaitForChild(\"Hud\", 5)), s:WaitForChild(\"Hud\", 5))\n",
+        ] {
+            assert!(out.contains(want), "{want}\n{out}");
+        }
+
+        // With no timeout, `=>` gives an `Instance`, and the checker
+        // names a receiver that may be nil.
+        let out = ship(src, None);
+        assert!(
+            out.contains("const a = gui:WaitForChild(\"Hud\")\n"),
+            "{out}"
+        );
+        assert!(out.contains("const b = f:WaitForChild(\"Hud\")\n"), "{out}");
+    }
+
     #[test]
     fn signal_new_takes_its_type_arguments_as_a_pack() {
         let out = crate::compile("local s = Signal.new<<Player, number>>()\nprint(s)\n").unwrap();
@@ -2191,6 +2747,15 @@ mod tests {
             "{}",
             out.check
         );
+
+        // An alias of the import takes the pack too, alone or in a chain.
+        let aliased = "import { Signal as Sig } from \"@alloy/std/signal\"\nlocal s = Sig.new<<number>>()\nlocal c = Sig.new<<string>>():Connect(print)\nprint(s, c)\n";
+        let out = crate::compile(aliased).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+        for want in ["Sig.new<<(number)>>()", "Sig.new<<(string)>>():Connect"] {
+            assert!(out.check.contains(want), "{want}\n{}", out.check);
+        }
     }
 
     #[test]

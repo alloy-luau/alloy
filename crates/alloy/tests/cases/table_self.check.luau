@@ -18,14 +18,14 @@ end
 local Klass = { }
 Klass.__index = Klass
 
-function Klass:Method()
+function Klass.Method(self: typeof(setmetatable({} :: { [any]: any }, Klass)))
 	print(self)
 end
 
 local Rebound = { }
-Rebound = { other = 1 }
+Rebound = { other = 1 } type __self_Rebound = typeof(Rebound)
 
-function Rebound:Method()
+function Rebound.Method(self: __self_Rebound)
 	print(self)
 end
 

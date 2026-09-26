@@ -25,6 +25,8 @@ pub(crate) fn run(s: &Scan) -> Vec<Lint> {
     s.numeric_for_index(&mut out);
     s.unused_variable(&mut out);
     s.private_access(&mut out);
+    s.deprecated_call(&mut out);
+    s.argument_count(&mut out);
     s.const_mutation(&mut out);
     s.duplicate_function(&mut out);
     s.prefer_const(&mut out);
@@ -748,11 +750,15 @@ impl<'s> Scan<'s> {
         }
     }
 
-    /// `local x = v` then `return x`.
+    /// `local x = v` then `return x`, and the same with `const`.
+    /// `prefer_const` writes `const` over the same `local`, and `--fix`
+    /// takes that rewrite first, so a `const` has to fire too: the
+    /// second pass then applies this one.
     fn local_then_return(&self, out: &mut Vec<Lint>) {
         for i in 0..self.toks.len() {
-            if !self.at(i, "local")
+            if !(self.at(i, "local") || self.at(i, "const"))
                 || !self.statement_start(i)
+                || self.cond_binding(i)
                 || !self.is_name(i + 1)
                 || !self.at(i + 2, "=")
             {
@@ -774,6 +780,7 @@ impl<'s> Scan<'s> {
                 continue;
             }
 
+            let word = self.t(i);
             let name = self.t(i + 1);
             let value = self.slice(i + 3, v_end).trim();
             // A call or `...` may yield several values; the local kept
@@ -788,7 +795,7 @@ impl<'s> Scan<'s> {
                 "local_then_return",
                 i,
                 v_end + 1,
-                format!("`local {name} = ...` followed by `return {name}` is `return {value}`"),
+                format!("`{word} {name} = ...` followed by `return {name}` is `return {value}`"),
                 Some(format!("return {value}")),
             );
         }
@@ -882,6 +889,7 @@ mod tests {
             &parsed.chunk,
             false,
             &crate::lint::Thresholds::default(),
+            &[],
             &[],
         )
         .into_iter()
@@ -1171,6 +1179,19 @@ mod tests {
             unused("for _, v in t do\n    print(v)\nend\n"),
             Vec::<&str>::new()
         );
+        // A function above a top-level `const` reads it. The read is a
+        // global, which the checker reports; the const is not unused.
+        assert_eq!(
+            unused(
+                "local function f(): number\n    return LIMIT\nend\nconst LIMIT = 1\nprint(f())\n"
+            ),
+            Vec::<&str>::new()
+        );
+        // A read at the top level above it is no use of the const.
+        assert_eq!(
+            unused("print(LIMIT)\nconst LIMIT = 1\n"),
+            vec!["unused_variable"]
+        );
         assert_eq!(
             unused("local function helper() end\nlocal x: number = 1\nprint(x)\n"),
             vec!["unused_function"]
@@ -1344,6 +1365,7 @@ mod tests {
             false,
             &crate::lint::Thresholds::default(),
             &privates,
+            &[],
         )
         .into_iter()
         .filter(|l| l.name == "private_access")
@@ -1452,6 +1474,130 @@ mod tests {
         );
     }
 
+    /// Luau reports `Box.value(b)` on a deprecated method and misses
+    /// `b:value()`. The lint takes the method call when the file types
+    /// the receiver, and a receiver of no known type stays quiet.
+    #[test]
+    fn a_method_call_of_a_deprecated_method_fires() {
+        let src = "struct Box as\n    n: number\nend\nimpl Box as\n    @deprecated(\"use get\")\n    function value(self): number\n        return self.n\n    end\n    function get(self): number\n        return self.n\n    end\nend\nlocal b = new Box { n = 1 }\nprint(b:value(), b:get())\nlocal function show(x: Box, y)\n    print(x:value(), y:value())\nend\nshow(b, b)\n";
+        let got: Vec<(usize, String)> = lints(src)
+            .into_iter()
+            .filter(|l| l.name == "deprecated_call")
+            .map(|l| (src[..l.start as usize].matches('\n').count() + 1, l.message))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (14, "`Box:value` is deprecated; use get".to_string()),
+                (16, "`Box:value` is deprecated; use get".to_string()),
+            ]
+        );
+    }
+
+    /// A compound write into a field is a write into the value: the
+    /// const draws `const_mutation`, and the local stays `local`. A
+    /// `local` of the name in an inner block holds its own writes.
+    /// `prefer_const` and `local_then_return` both rewrite one `local`.
+    /// `--fix` took `const` first, and `local_then_return` then read
+    /// nothing, so flux offered two rewrites and applied one.
+    #[test]
+    fn a_const_then_return_fires_so_both_rewrites_land() {
+        let src = "local function total(): number\n    local x = math.random()\n    return x\nend\nprint(total())\n";
+        let fixable = |text: &str| -> Vec<crate::lint::Lint> {
+            crate::compile(text)
+                .unwrap()
+                .lints
+                .into_iter()
+                .filter(|l| matches!(l.name, "prefer_const" | "local_then_return"))
+                .collect()
+        };
+        let offered = fixable(src).len();
+        let mut text = src.to_string();
+        let mut applied = 0;
+
+        // The passes of `--fix`: each applies what does not overlap.
+        for _ in 0..4 {
+            let (next, n) = crate::lint::apply_fixes(&text, &fixable(&text));
+
+            if n == 0 {
+                break;
+            }
+
+            applied += n;
+            text = next;
+        }
+
+        assert_eq!((offered, applied), (2, 2));
+        assert!(text.contains("    return (math.random())\n"), "{text}");
+    }
+
+    #[test]
+    fn a_compound_field_write_writes_into_the_value() {
+        // The lines one lint fires on.
+        let lines = |src: &str, lint: &str| -> Vec<usize> {
+            crate::compile(src)
+                .unwrap()
+                .lints
+                .into_iter()
+                .filter(|l| l.name == lint)
+                .map(|l| src[..l.start as usize].matches('\n').count() + 1)
+                .collect()
+        };
+        assert_eq!(
+            lines(
+                "const W = { n = 0, s = \"\" }\nW.n += 1\nW[\"s\"] ..= \"x\"\nprint(W)\n",
+                "const_mutation"
+            ),
+            [2, 3]
+        );
+        assert_eq!(
+            lines("local u = { n = 0 }\nu.n += 1\nprint(u)\n", "prefer_const"),
+            Vec::<usize>::new()
+        );
+        // The inner `z` takes the write, so the outer one is a const.
+        assert_eq!(
+            lines(
+                "local z = 1\ndo\n    local z = 2\n    z = 3\n    print(z)\nend\nprint(z)\n",
+                "prefer_const"
+            ),
+            [1]
+        );
+        // A `local` in one branch does not reach the other: the write
+        // in the `else` keeps the outer `q` a local.
+        assert_eq!(
+            lines(
+                "local q = 1\nif q then\n    local q = 2\n    print(q)\nelse\n    q = 3\nend\nprint(q)\n",
+                "prefer_const"
+            ),
+            Vec::<usize>::new()
+        );
+    }
+
+    /// A method that changes the value writes into it in any expression.
+    /// `bag:add(s)` kept `bag` a `local`, but `local r = bag:add(s)` drew
+    /// `prefer_const`, and `const_mutation` saw only the statement.
+    #[test]
+    fn a_method_call_writes_into_the_value_in_any_expression() {
+        let lines = |src: &str, lint: &str| -> Vec<usize> {
+            crate::compile(src)
+                .unwrap()
+                .lints
+                .into_iter()
+                .filter(|l| l.name == lint)
+                .map(|l| src[..l.start as usize].matches('\n').count() + 1)
+                .collect()
+        };
+        let src = "local a = {}\na:push(1)\nlocal b = {}\nlocal r = b:push(2)\nlocal c = {}\nlocal n = c:len()\nprint(a, b, r, c, n, t.b:push(3))\n";
+        assert_eq!(lines(src, "prefer_const"), [4, 5, 6]);
+        assert_eq!(
+            lines(
+                "const B = {}\nlocal r = B:push(1)\nB:push(2)\nprint(r, B:len())\n",
+                "const_mutation"
+            ),
+            [2, 3]
+        );
+    }
+
     /// One name given a body twice: the second replaces the first, and
     /// the checker's `DuplicateFunction` gives way to this one.
     #[test]
@@ -1494,6 +1640,75 @@ mod tests {
     fn an_if_expression_in_an_arm_keeps_the_impl_open() {
         let src = "enum C as\n    A(number)\n    B\nend\n\nstruct R as\n    private xs: number[]\nend\n\nimpl R as\n    public function viamatch(self, c: C): number\n        return match c with\n            case A(n) then if #self.xs > 0 then n else 0\n            case B then 0\n        end\n    end\n\n    public function stmt(self, c: C)\n        match c with\n            case A(n) then self.xs:push(n)\n            case B then print(\"b\")\n        end\n    end\nend\n\nreturn R\n";
         assert_eq!(names(src), Vec::<&str>::new());
+    }
+
+    /// The binding of a condition is not a statement. `if local r = f()`
+    /// then `return r` read as one, and `--fix` wrote `if return f() then`.
+    #[test]
+    fn a_condition_binding_takes_no_return_rewrite() {
+        for head in [
+            "if local r = f() then",
+            "if const r = t[1] then",
+            "while local r = f() do",
+            "if not local q = f() then\n        return 0\n    elseif local r = f() then",
+            "if local a = f(); local r = g(a) then",
+        ] {
+            let src = format!("local function use()\n    {head}\n        return r\n    end\nend\n");
+            assert!(!names(&src).contains(&"local_then_return"), "{src}");
+        }
+        // A plain `local` after a condition still takes it.
+        assert_eq!(
+            fixed("if ok then\n    local r = f()\n    return r\nend\n"),
+            "if ok then\n    return (f())\nend\n"
+        );
+
+        // Two statements on one line: `{}` ends the first, and the name
+        // after it opens the second. The rewrite once took both as the
+        // value, `return ({} table.insert(out, 1))`.
+        for line in [
+            "const out = {} table.insert(out, 1)",
+            "local out = f() print(out)",
+            "local out = 1 if ok then out = 2 end",
+            "local out = \"s\" print(out)",
+        ] {
+            let src = format!("local function g()\n    {line}\n    return out\nend\n");
+            assert!(!names(&src).contains(&"local_then_return"), "{src}");
+        }
+
+        // A word operator goes on with the value: it is one statement.
+        assert_eq!(
+            fixed("local function g()\n    local out = a and b\n    return out\nend\n"),
+            "local function g()\n    return a and b\nend\n"
+        );
+    }
+
+    /// A rewrite that breaks the parse does not land, and one beside it
+    /// that keeps the parse still does.
+    #[test]
+    fn a_fix_that_breaks_the_parse_is_refused() {
+        let src = "local a = 1\nif a then\n    print(a)\nend\n";
+        let fix = |from: &str, to: &str| {
+            let at = src.find(from).unwrap() as u32;
+
+            crate::Lint {
+                name: "test",
+                start: at,
+                end: at,
+                message: String::new(),
+                fix: Some(crate::lint::Fix::new(src, at, at + from.len() as u32, to)),
+            }
+        };
+        let (text, n) = apply_fixes(
+            src,
+            &[
+                fix("if a then", "if return a then"),
+                fix("local a", "const a"),
+            ],
+        );
+        assert_eq!(
+            (text.as_str(), n),
+            ("const a = 1\nif a then\n    print(a)\nend\n", 1)
+        );
     }
 
     #[test]

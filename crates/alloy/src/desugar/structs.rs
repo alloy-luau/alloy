@@ -193,7 +193,14 @@ impl<'s> Desugar<'s> {
             && !self.generic_types.contains(&target_name);
 
         // `impl Box<T>`: the parameters go on each method, so its body
-        // and its signature may name them.
+        // and its signature may name them. They are the parameters of
+        // the declaration, so they take no bound either.
+        let what = match self.enums.contains_key(&target_name) {
+            true => "an enum",
+
+            false => "a struct",
+        };
+        self.reject_type_bounds(i.generics, what);
         let impl_generics = i
             .generics
             .map(|g| strip_bounds(self.text_of(g)))
@@ -204,6 +211,7 @@ impl<'s> Desugar<'s> {
         if i.generics.is_none()
             && let Some(params) = self.struct_generics.get(&target_name).cloned()
         {
+            let params = strip_bounds(&params);
             let kind = if self.enums.contains_key(&target_name) {
                 "enum"
             } else {
@@ -215,6 +223,13 @@ impl<'s> Desugar<'s> {
             self.diagnose(i.target, &message);
         }
         let types_self = self.options.check && (foreign || local_type || !impl_generics.is_empty());
+        // A class table, `local Frost = {}` with `Frost.__index = Frost`,
+        // types `self` the way its colon methods do.
+        let table_self = match self.options.check && !types_self {
+            true => self.table_selfs.get(&written).map(|k| k.text(&written)),
+
+            false => None,
+        };
 
         self.impl_target = Some(target_name.clone());
 
@@ -253,6 +268,8 @@ impl<'s> Desugar<'s> {
                 } else {
                     format!("{target_name}{impl_generics}")
                 });
+            } else if table_self.is_some() {
+                self.self_type.clone_from(&table_self);
             }
 
             let has_self = m
@@ -567,15 +584,52 @@ impl<'s> Desugar<'s> {
                     .map(|f| self.text_of(f.path[0]).to_string())
                     .collect();
 
+                // A unit variant is a string, and the default types `self`
+                // as the trait's table, which no string meets. On an enum
+                // with a unit variant the default takes the enum as
+                // `self` and keeps the rest of its type. A struct and a
+                // payload enum keep the trait's `self`.
+                let as_enum = self
+                    .enums
+                    .get(&target_name)
+                    .is_some_and(|vs| vs.iter().any(|(_, n)| *n == 0));
+                let self_ty = match self.generic_types.contains(&target_name) {
+                    true => "any",
+
+                    false => target.as_str(),
+                };
+
                 for m in defaults {
                     if self.options.check {
                         // The impl's own method keeps its type.
-                        if !written.contains(&m) {
-                            tail.push_str(&format!(" {target}.{m} = {trait_name}.{m}"));
+                        if written.contains(&m) {
+                            continue;
                         }
+
+                        let value = format!("{trait_name}.{m}");
+                        let value = match as_enum {
+                            true => format!(
+                                "(function<A..., R...>(f: (any, A...) -> R...): ({self_ty}, A...) -> R... return f :: any end)({value})"
+                            ),
+
+                            false => value,
+                        };
+                        tail.push_str(&format!(" {target}.{m} = {value}"));
                     } else {
+                        // A default that calls `self:m()` has a factory,
+                        // see `trait_decl`, and a unit variant needs the
+                        // copy that calls through the enum's table.
+                        let value = match as_enum {
+                            true => {
+                                let factory = format!("{trait_name}[\"{m}@for\"]");
+
+                                format!("{factory} and {factory}({target}) or {trait_name}.{m}")
+                            }
+
+                            false => format!("{trait_name}.{m}"),
+                        };
                         tail.push_str(&format!(
-                            " if rawget({target}, \"{m}\") == nil then {target}.{m} = {trait_name}.{m} end"
+                            " if rawget({target}, \"{m}\") == nil then {target}.{m} = {value} end"
                         ));
                     }
                 }
@@ -759,6 +813,7 @@ impl<'s> Desugar<'s> {
     pub(crate) fn struct_decl(&mut self, st: &StructDecl) {
         self.check_field_widths(st);
         self.check_serde_attrs(st);
+        self.reject_type_bounds(st.generics, "a struct");
         let name = self.decl_name(st.name);
         let start = self.byte_start(st.span);
         let end_tok = self.toks[st.span.end as usize - 1];
@@ -1013,17 +1068,14 @@ impl<'s> Desugar<'s> {
         // the struct's impl, or `@derive(Debug)`, writes its own and this
         // one stays out; a `__tostring` set later replaces it either way.
         if !derives_debug && !self.structs_with_to_string.contains(&name) {
-            let std = self.std();
             let sn = if self.options.check && !self.generic_types.contains(&name) {
                 format!(": {}", self.self_alias(&name))
             } else {
                 String::new()
             };
-            let fields: Vec<String> = field_names.iter().map(|f| luau_string(f)).collect();
+            let show = self.show_struct_call(&name, &st.fields);
             tail.push_str(&format!(
-                " {name}.__tostring = function(s{sn}) return {std}.show_struct({}, s, {{ {} }}) end",
-                luau_string(&self.display_name(&name)),
-                fields.join(", ")
+                " {name}.__tostring = function(s{sn}) return {show} end"
             ));
         }
 
@@ -1083,6 +1135,7 @@ impl<'s> Desugar<'s> {
         }
 
         tail.push_str(&self.foreign_impl_lines(&name));
+        tail.push_str(&self.wire_registration(&name));
         self.generate(end_tok.start, &format!(" {tail}"));
 
         if st.exported {
@@ -1239,6 +1292,38 @@ impl<'s> Desugar<'s> {
         format!("{{ {} }}", parts.join(", ")).replace("{  }", "{}")
     }
 
+    /// The call that prints a struct: `show_struct("Name", s, { "a" })`.
+    /// A field whose type is an enum with a unit variant adds its enum,
+    /// `{ item = "Item" }`: the variant is a string at runtime, and the
+    /// printer writes `Item.Junk` for it.
+    fn show_struct_call(&mut self, name: &str, decls: &[Field]) -> String {
+        let std = self.std();
+        let mut fields = Vec::new();
+        let mut enums = Vec::new();
+
+        for f in decls {
+            let fname = self.text_of(f.name).to_string();
+
+            if let Some(e) = self.unit_enum_named(self.text_of(f.ty)) {
+                enums.push(format!("{fname} = {}", luau_string(&e)));
+            }
+
+            fields.push(luau_string(&fname));
+        }
+
+        let enums = match enums.is_empty() {
+            true => String::new(),
+
+            false => format!(", {{ {} }}", enums.join(", ")),
+        };
+
+        format!(
+            "{std}.show_struct({}, s, {{ {} }}{enums})",
+            luau_string(&self.display_name(name)),
+            fields.join(", ")
+        )
+    }
+
     pub(crate) fn derive_struct(
         &mut self,
         name: &str,
@@ -1268,7 +1353,7 @@ impl<'s> Desugar<'s> {
 
             false => x.to_string(),
         };
-        let (a, b, s_, this) = (view("a"), view("b"), view("s"), view("self"));
+        let (a, b, this) = (view("a"), view("b"), view("self"));
         let tn = if self.options.check { ": any" } else { "" };
         // A named derived method of a generic struct takes the struct's
         // parameters, `Box.clone<T>(self: Box<T>): Box<T>`; a bare `Box`
@@ -1370,21 +1455,15 @@ impl<'s> Desugar<'s> {
                 )
             }
 
+            // The default printer, as `alloy doc derive:Debug` says, with
+            // `debug` beside it: a field prints the way it prints inside
+            // any container.
             "Debug" => {
-                let parts: Vec<String> = fields
-                    .iter()
-                    .map(|f| format!("\"{f} = \" .. tostring({s_}.{f})"))
-                    .collect();
-                let inner = if parts.is_empty() {
-                    "\"\"".to_string()
-                } else {
-                    parts.join(" .. \", \" .. ")
-                };
-
+                let show = self.show_struct_call(name, decls);
                 let ret = if self.options.check { ": string" } else { "" };
 
                 format!(
-                    "{name}.__tostring = function(s{sn}) return \"{name} {{ \" .. {inner} .. \" }}\" end function {name}.debug(self{sn}){ret} return tostring(self) end"
+                    "{name}.__tostring = function(s{sn}) return {show} end function {name}.debug(self{sn}){ret} return tostring(self) end"
                 )
             }
 
@@ -1590,9 +1669,10 @@ impl<'s> Desugar<'s> {
                     };
                     let field = format!("{this}.{fname}");
                     let ty = self.text_of(f.ty).trim().to_string();
+                    let at = luau_string(&format!("{}.{fname}", self.display_name(name)));
                     let (out, back) = (
-                        self.serde_of("Serialize", &ty, &field, 0),
-                        self.serde_of("Deserialize", &ty, &read, 0),
+                        self.serde_of("Serialize", &ty, &field, &at, 0),
+                        self.serde_of("Deserialize", &ty, &read, &at, 0),
                     );
                     // A key an older save lacks reads nil, and the
                     // constructor then writes the field's default; a
@@ -1756,13 +1836,20 @@ impl<'s> Desugar<'s> {
     through its own function, an array maps its items, and a map or a set
     is rebuilt. A table from JSON or a DataStore has no metatable, so
     without this a loaded array had no `push` and a loaded struct no
-    methods.
+    methods. `at` names the struct and the field for a report.
     */
-    fn serde_of(&mut self, which: &str, ty: &str, x: &str, depth: usize) -> Option<String> {
+    fn serde_of(
+        &mut self,
+        which: &str,
+        ty: &str,
+        x: &str,
+        at: &str,
+        depth: usize,
+    ) -> Option<String> {
         let ty = ty.trim();
 
         if let Some(inner) = ty.strip_suffix('?') {
-            let value = self.serde_of(which, inner, x, depth)?;
+            let value = self.serde_of(which, inner, x, at, depth)?;
 
             return Some(format!("if {x} == nil then nil else {value}"));
         }
@@ -1783,17 +1870,30 @@ impl<'s> Desugar<'s> {
             return Some(format!("{ty}.{f}({x})"));
         }
 
-        // A payload variant is a table under the enum's metatable, which
-        // carries the enum's methods; a unit variant is its own string.
-        let payload_enum = self
-            .enum_decls
-            .get(ty)
-            .is_some_and(|vs| vs.iter().any(|(_, n)| *n > 0));
+        // A unit variant is its own string, and a payload variant is a
+        // table under the enum's metatable, which carries its methods.
+        // The std checks the value as the wire reader does: an old save's
+        // "Uncommon" typed `Rarity` ran the last arm of every match.
+        if which == "Deserialize"
+            && let Some(e) = self.enum_named(ty)
+            && let Some(variants) = self.enum_decls.get(&e)
+        {
+            let tags: Vec<String> = variants
+                .iter()
+                .map(|(v, n)| format!("{} = {n}", crate::data::luau_key(v)))
+                .collect();
+            let meta = match variants.iter().any(|(_, n)| *n > 0) {
+                true => e.clone(),
 
-        if payload_enum && which == "Deserialize" {
-            let text = format!("if type({x}) == \"table\" then setmetatable({x}, {ty}) else {x}");
+                false => "nil".to_string(),
+            };
+            let shown = luau_string(&self.display_name(&e));
+            let std = self.std();
 
-            return Some(self.any_cast(&format!("({text})")));
+            return Some(format!(
+                "{std}.serde_variant({x}, {{ {} }}, {meta}, {shown}, {at})",
+                tags.join(", ")
+            ));
         }
 
         let std = self.std();
@@ -1805,7 +1905,7 @@ impl<'s> Desugar<'s> {
 
         if let Some(element) = element {
             let v = format!("_v{depth}");
-            let text = match self.serde_of(which, element, &v, depth + 1) {
+            let text = match self.serde_of(which, element, &v, at, depth + 1) {
                 Some(item) => format!("{std}.Array.map({x}, function({v}) return {item} end)"),
 
                 // An array of plain values keeps its items; the way back
@@ -1837,7 +1937,7 @@ impl<'s> Desugar<'s> {
         let each = value_ty.and_then(|v| {
             let v_var = format!("_e{depth}");
 
-            self.serde_of(which, &v, &v_var, depth + 1)
+            self.serde_of(which, &v, &v_var, at, depth + 1)
                 .map(|item| format!("function({v_var}) return {item} end"))
         });
 
@@ -1869,18 +1969,13 @@ impl<'s> Desugar<'s> {
     }
 
     /// Whether `ty` names a struct through a star import, `I.Item`, and
-    /// that struct derives `which` in the file that declares it.
+    /// that struct derives `which` in the file that declares it. An enum
+    /// shape carries its derives too, and has variants.
     fn star_derives(&self, ty: &str, which: &str) -> bool {
-        let Some((module, name)) = ty.split_once('.') else {
-            return false;
-        };
-
-        self.star_modules.contains(module)
+        ty.contains('.')
             && self
-                .options
-                .shapes
-                .iter()
-                .any(|s| s.name == name && s.derives.iter().any(|d| d == which))
+                .imported_type(ty)
+                .is_some_and(|s| s.variants.is_empty() && s.derives.iter().any(|d| d == which))
     }
 
     /// The copy `Clone` writes for a field of type `ty` read at `field`,
@@ -2063,13 +2158,46 @@ impl<'s> Desugar<'s> {
                         }
                     }
 
-                    self.generate(ms, &format!("function {name}.{mname}{sig}"));
+                    // A unit variant is a string, so `self:m()` in the
+                    // default finds the string library on it. The ship
+                    // artifact builds the default from a factory that
+                    // takes the impl's table: `self:m()` becomes
+                    // `(__impl or self).m(self)`. An enum with a unit
+                    // variant passes its table; every other impl takes
+                    // the copy built with nil, which reads as before.
+                    let mut calls = HashSet::new();
+
+                    if !self.options.check {
+                        self.outer_self_calls(vec![Child::Block(&body.block)], &mut calls);
+                    }
+
+                    let factory = format!("{name}[\"{mname}@for\"]");
+
+                    match calls.is_empty() {
+                        true => self.generate(ms, &format!("function {name}.{mname}{sig}")),
+
+                        false => self.generate(
+                            ms,
+                            &format!("{factory} = function(__impl) return function{sig}"),
+                        ),
+                    }
+
                     self.write_pieces(self.byte_end(m.signature), &prologue);
                     let body_start = self.block_start_or(&body.block, self.byte_end(m.span));
                     self.copy(self.byte_end(m.signature), body_start);
+                    let dispatch = !calls.is_empty();
+                    self.self_dispatch = calls;
                     self.block(&body.block);
+                    self.self_dispatch.clear();
                     let after = self.block_end_or(&body.block, body_start);
                     self.copy(after, self.byte_end(m.span));
+
+                    if dispatch {
+                        self.generate(
+                            self.byte_end(m.span),
+                            &format!(" end {name}.{mname} = {factory}(nil)"),
+                        );
+                    }
                 }
 
                 None => self.blank_lines(ms, self.byte_end(m.span)),
@@ -2082,6 +2210,49 @@ impl<'s> Desugar<'s> {
 
         if t.exported {
             self.exports.push((name.clone(), name));
+        }
+    }
+
+    /// The `self` token of each `self:m()` call in a trait default. A
+    /// nested function that takes its own `self` holds another value, so
+    /// the walk skips it.
+    fn outer_self_calls(&self, children: Vec<Child<'_>>, out: &mut HashSet<u32>) {
+        for child in children {
+            match child {
+                Child::Block(b) => {
+                    for s in &b.stmts {
+                        if !matches!(s, Stmt::Function(f) if f.is_method) {
+                            self.outer_self_calls(stmt_children(s), out);
+                        }
+                    }
+                }
+
+                Child::Function(f) => {
+                    if f.params
+                        .first()
+                        .is_none_or(|p| self.text_of(p.name) != "self")
+                    {
+                        self.outer_self_calls(vec![Child::Block(&f.block)], out);
+                    }
+                }
+
+                Child::Expr(e) => {
+                    if let Expr::Call {
+                        func,
+                        method: Some(m),
+                        type_args: None,
+                        ..
+                    } = e
+                        && let Expr::Name(n) = func.as_ref()
+                        && self.text_of(*n) == "self"
+                        && !self.ext_methods.contains(self.text_of(*m))
+                    {
+                        out.insert(n.start);
+                    }
+
+                    self.outer_self_calls(expr_children(e), out);
+                }
+            }
         }
     }
 
@@ -2224,6 +2395,7 @@ impl<'s> Desugar<'s> {
     // --- interfaces ------------------------------------------------------------
 
     pub(crate) fn interface_decl(&mut self, i: &InterfaceDecl) {
+        self.reject_type_bounds(i.generics, "an interface");
         let name = self.decl_name(i.name);
         let start = self.byte_start(i.span);
         let end_tok = self.toks[i.span.end as usize - 1];
@@ -2448,7 +2620,7 @@ impl<'s> Desugar<'s> {
             })
             .map(|f| WireField {
                 name: self.text_of(f.name).to_string(),
-                ty: self.text_of(f.ty).trim().to_string(),
+                ty: self.qualify_members(self.text_of(f.ty).trim()),
                 width: f.attributes.iter().find_map(|a| {
                     let n = self.text_of(a.name?).to_string();
 
@@ -2799,11 +2971,125 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /*
+    The parts of an expression that an `is` test guards, each with the
+    names it narrows, for the check artifact: the right side of `and`,
+    the right side of `or` after `x is not T`, and the value of an `if`
+    expression or a ternary branch.
+
+    An expression holds no statement, so the `local` an `if` statement
+    opens with has no place here. Each read of the name in the part
+    casts instead: `v is P and v.x` reads `((v :: any) :: P).x`.
+    */
+    pub(crate) fn guarded_narrowings(
+        &self,
+        e: &Expr,
+    ) -> Vec<(*const Expr, HashMap<String, String>)> {
+        let mut out = Vec::new();
+
+        if !self.options.check {
+            return out;
+        }
+
+        let mut guard = |part: &Expr, tests: Vec<(String, String)>| {
+            if !tests.is_empty() {
+                let casts = tests
+                    .into_iter()
+                    .map(|(name, ty)| {
+                        let cast = format!("(({name} :: any) :: {ty})");
+
+                        (name, cast)
+                    })
+                    .collect();
+                out.push((std::ptr::from_ref(part), casts));
+            }
+        };
+        let positive = |c: &Expr| {
+            let mut tests = Vec::new();
+            self.positive_tests(c, &mut tests);
+
+            tests
+        };
+        let negative = |c: &Expr| self.negative_test(c).into_iter().collect::<Vec<_>>();
+
+        match e {
+            Expr::Binary { op, lhs, rhs, .. } => match self.text_of(*op) {
+                "and" => guard(rhs, positive(lhs)),
+
+                "or" => guard(rhs, negative(lhs)),
+
+                _ => {}
+            },
+
+            Expr::IfElse {
+                branches,
+                else_value,
+                ..
+            } => {
+                for (cond, value) in branches {
+                    if let Cond::Expr(c) = cond {
+                        guard(value, positive(c));
+                    }
+                }
+
+                if let [(Cond::Expr(c), _)] = branches.as_slice() {
+                    guard(else_value, negative(c));
+                }
+            }
+
+            Expr::Ternary {
+                cond,
+                then_value,
+                else_value,
+                ..
+            } => {
+                guard(then_value, positive(cond));
+                guard(else_value, negative(cond));
+            }
+
+            _ => {}
+        }
+
+        out
+    }
+
+    /// Runs `render` with the names that `narrowings` holds for `part`.
+    pub(crate) fn with_narrowing<R>(
+        &mut self,
+        part: &Expr,
+        narrowings: &mut Vec<(*const Expr, HashMap<String, String>)>,
+        render: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let at = narrowings
+            .iter()
+            .position(|(p, _)| *p == std::ptr::from_ref(part));
+        let pushed = at.map(|i| self.renames.push(narrowings.swap_remove(i).1));
+        let out = render(self);
+
+        if pushed.is_some() {
+            self.renames.pop();
+        }
+
+        out
+    }
+
+    /// The name the module declares a type under, for a type this file
+    /// imports. `import { Box as B }` binds the type as `B`, and `import
+    /// * as M` as `M.Box`; an import index keys both as `Box`.
+    pub(crate) fn declared_type_name<'n>(&'n self, name: &'n str) -> &'n str {
+        match name.split_once('.') {
+            Some((head, rest)) if self.star_modules.contains(head) => rest,
+
+            _ => self.import_renames.get(name).map_or(name, String::as_str),
+        }
+    }
+
     /// The type an `is` narrows `value` to when Luau cannot: a struct,
     /// an enum, an imported type, or a datatype the definitions declare
     /// as an alias. A class, a primitive, and a datatype class refine on
     /// their own; `table` and `function` refine to the top types, which
-    /// no index or call accepts, so those meet the value's own type.
+    /// no index or call accepts. `table` meets the value's own type, and
+    /// `function` takes one function type.
     ///
     /// An alias narrows the way the name it spells does: `is` reads
     /// through an alias, so the branch it opens has to agree.
@@ -2814,13 +3100,10 @@ impl<'s> Desugar<'s> {
         match name {
             "table" => return Some(format!("typeof({value}) & {{ [any]: any }}")),
 
-            // Both function shapes: a call yields values, and a callback
-            // parameter that returns nothing accepts it.
-            "function" => {
-                return Some(format!(
-                    "typeof({value}) & ((...any) -> ...any) & ((...any) -> ())"
-                ));
-            }
+            // One function type. Two in an intersection are an overload,
+            // and a call of it with no argument or with a number was
+            // ambiguous. This one also passes where `() -> ()` is asked.
+            "function" => return Some("(...any) -> ...any".to_string()),
 
             _ => {}
         }
@@ -2837,12 +3120,14 @@ impl<'s> Desugar<'s> {
             });
         }
 
+        let declared = self.declared_type_name(name);
+
         if self.enums.contains_key(name)
-            || self
-                .options
-                .import_types
-                .iter()
-                .any(|(_, names)| names.iter().any(|n| crate::modules::type_head(n) == name))
+            || self.options.import_types.iter().any(|(_, names)| {
+                names
+                    .iter()
+                    .any(|n| crate::modules::type_head(n) == declared)
+            })
             || ALIAS_DATATYPES.contains(&name)
         {
             return Some(name.to_string());
@@ -3053,6 +3338,26 @@ impl<'s> Desugar<'s> {
                     }
 
                     given.push(fname);
+                }
+
+                // Luau reads a value with no name as an array item, and
+                // its report says nothing of the struct. Alloy has no
+                // Rust shorthand, so the report names the full form.
+                TableField::Positional(value) => {
+                    let shape = match value {
+                        Expr::Name(v) => {
+                            let v = self.text_of(*v);
+
+                            format!("{v} = {v}")
+                        }
+
+                        _ => "field = value".to_string(),
+                    };
+                    self.diagnose(
+                        value.span(),
+                        &format!("a struct takes each field by name: write `{shape}`"),
+                    );
+                    open = true;
                 }
 
                 _ => open = true,
@@ -3590,6 +3895,94 @@ mod tests {
         assert!(whole.is_empty(), "{whole:?}");
     }
 
+    /// A field of an imported struct constructs under the type its
+    /// module declares. `new Ballot { votes = HashMap.new() }` wrote the
+    /// call bare in another file, and flux reported that the type
+    /// arguments differ; the declaring file passed them.
+    #[test]
+    fn a_field_of_an_imported_struct_takes_its_type_arguments() {
+        let options = crate::EmitOptions {
+            check: true,
+            import_struct_fields: vec![("Ballot".to_string(), vec![("votes".to_string(), false)])],
+            import_field_types: vec![(
+                "Ballot".to_string(),
+                vec![(
+                    "votes".to_string(),
+                    "HashMap<string, string>".to_string(),
+                    true,
+                )],
+            )],
+            ..Default::default()
+        };
+        let out = crate::compile_with(
+            "import { Ballot } from \"./book\"\n\nprint(new Ballot { votes = HashMap.new() })\n",
+            &options,
+        )
+        .unwrap();
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.check
+                .contains("votes = __alloy.HashMap.new<<string, string>>()"),
+            "{}",
+            out.check
+        );
+    }
+
+    /// A field type that names a type of the module, `HashMap<string,
+    /// Entry>`, may mean nothing in the file that constructs. An empty
+    /// constructor there takes the field's own type through `index`,
+    /// under the name the file writes. `from(t)` reads its type off `t`,
+    /// and a constructor of another type is an error the cast must not
+    /// hide, so neither takes a cast. The shipped Luau has none.
+    #[test]
+    fn a_field_that_names_a_module_type_takes_the_field_type() {
+        let fields = vec![
+            (
+                "votes".to_string(),
+                "HashMap<string, Entry>".to_string(),
+                false,
+            ),
+            ("seen".to_string(), "Set<Entry>?".to_string(), false),
+            (
+                "from".to_string(),
+                "HashMap<string, Entry>".to_string(),
+                false,
+            ),
+            ("wrong".to_string(), "Set<Entry>".to_string(), false),
+        ];
+        let options = crate::EmitOptions {
+            check: true,
+            import_field_types: vec![
+                ("Ballot".to_string(), fields.clone()),
+                ("B".to_string(), fields),
+            ],
+            ..Default::default()
+        };
+        let src = "import { Ballot } from \"./book\"\nimport { Ballot as B } from \"./book\"\n\nprint(new Ballot { votes = HashMap.new(), seen = Set.new(), from = HashMap.from({}), wrong = HashMap.new() })\nprint(new B { votes = HashMap.new() })\n";
+        let out = crate::compile_with(src, &options).unwrap();
+
+        for part in [
+            "votes = ((__alloy.HashMap.new() :: any) :: index<Ballot, \"votes\">)",
+            "seen = ((__alloy.Set.new() :: any) :: index<Ballot, \"seen\">)",
+            "from = __alloy.HashMap.from({})",
+            "wrong = __alloy.HashMap.new()",
+            "votes = ((__alloy.HashMap.new() :: any) :: index<B, \"votes\">)",
+        ] {
+            assert!(out.check.contains(part), "{part}\n{}", out.check);
+        }
+
+        let shipped = crate::compile_with(
+            src,
+            &crate::EmitOptions {
+                check: false,
+                ..options
+            },
+        )
+        .unwrap();
+        assert!(!shipped.ship.contains("index<"), "{}", shipped.ship);
+    }
+
     #[test]
     fn an_optional_field_can_stay_unset() {
         let src = "struct Health as\n    current: number\n    last_hit: number?\n    note: nil | string\nend\n\nlocal h = new Health { current = 1 }\n";
@@ -4008,6 +4401,34 @@ mod tests {
         assert!(!out.ship.contains("impl"), "{}", out.ship);
     }
 
+    /// `struct Shelf<T: Named>` wrote `type Shelf<T>`, and nothing read
+    /// the bound: an unknown trait passed, and so did `[1, 2]`. A Luau
+    /// alias takes no bound, so each one reports, and a function takes it.
+    #[test]
+    fn a_bound_on_a_type_parameter_reports() {
+        let src = "trait Named as\n    function name(self): string\nend\nstruct Shelf<T: Named> as\n    items: T[]\nend\nstruct Bin<T: Nothing> as\n    items: T[]\nend\nenum Opt<T: Named> as\n    Some(T)\n    None\nend\ninterface Tagged<T: Named> as\n    tag: T\nend\nimpl Shelf<T: Named> as\n    function first(self): T\n        return self.items[1]\n    end\nend\nprint(Shelf, Bin, Opt)\n";
+        let want = |what: &str, bound: &str| {
+            format!(
+                "a type parameter of {what} takes no bound; write `T` for `T: {bound}`, and put the bound on a function that needs it"
+            )
+        };
+
+        assert_eq!(
+            messages(src),
+            [
+                want("a struct", "Named"),
+                want("a struct", "Nothing"),
+                want("an enum", "Named"),
+                want("an interface", "Named"),
+                want("a struct", "Named"),
+            ]
+        );
+        assert_eq!(
+            crate::docs::kind_for(&want("a struct", "Named")),
+            "StructError"
+        );
+    }
+
     /*
     A struct constructs through `new` alone, and the report said so only
     for a bare name this file declares. The check keyed on that name, so
@@ -4077,6 +4498,23 @@ mod tests {
         );
     }
 
+    /// An exported local takes the annotation's arguments as a plain one
+    /// does. `export const` wrote `HashMap.new()`, and the checker
+    /// reported that the type arguments differ.
+    #[test]
+    fn an_exported_constructor_takes_the_annotation_arguments() {
+        for head in ["export const", "export local", "const"] {
+            let src = format!("{head} m: HashMap<string, number> = HashMap.new()\nprint(m)\n");
+            let out = crate::compile(&src).unwrap();
+            assert!(out.diagnostics.is_empty(), "{head}: {:?}", out.diagnostics);
+            assert!(
+                out.check.contains("HashMap.new<<string, number>>()"),
+                "{head}: {}",
+                out.check
+            );
+        }
+    }
+
     /// `is` reads through a type alias, and the branch it opens has to
     /// agree. `type B = Box` narrowed nothing, so a field read under
     /// `if x is B` reported on `unknown` inside a branch that holds.
@@ -4093,6 +4531,122 @@ mod tests {
             "local z = ((z :: any) :: Box)",
         ] {
             assert!(out.check.contains(want), "{want}\n{}", out.check);
+        }
+    }
+
+    /// `import { Box as B }` binds the type as `B`, and `if v is B` gave
+    /// the runtime test with no cast, so `v.n` reported on `unknown`.
+    /// The import index keys the type by the name the module declares;
+    /// a rename and a star import now read through it.
+    #[test]
+    fn a_narrowing_test_reads_through_an_import_alias() {
+        let options = crate::EmitOptions {
+            import_types: vec![("./box".to_string(), vec!["Box".to_string()])],
+            check: true,
+            ..crate::EmitOptions::default()
+        };
+        let src = "import { Box as B } from \"./box\"\nimport * as M from \"./box\"\nlocal function f(v: unknown)\n    if v is B then\n        print(v.n)\n    end\n    if v is M.Box then\n        print(v.n)\n    end\nend\nf(1)\n";
+        let out = crate::compile_with(src, &options).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+        for want in [
+            "local v = ((v :: any) :: B)",
+            "local v = ((v :: any) :: M.Box)",
+        ] {
+            assert!(out.check.contains(want), "{want}\n{}", out.check);
+        }
+    }
+
+    /// A trait default types `self` as the trait's table, and a unit
+    /// variant is a string, so `Mode.hi(Mode.On)` did not check. On an
+    /// enum with a unit variant the check artifact passes the default
+    /// through a cast that takes the enum as `self` and keeps the rest.
+    /// A struct and a payload enum take the default as it is, and the
+    /// ship artifact does not change.
+    #[test]
+    fn a_trait_default_on_a_unit_enum_takes_the_enum_as_self() {
+        let src = "trait Named as\n    function hi(self): string\n        return \"hi\"\n    end\nend\nenum Mode as On, Off end\nimpl Named for Mode as\nend\nenum Shape as\n    Dot(number)\nend\nimpl Named for Shape as\nend\nstruct Dog as\n    n: number\nend\nimpl Named for Dog as\nend\n";
+        let out = crate::compile(src).unwrap();
+        let cast = |ty: &str| {
+            format!(
+                "(function<A..., R...>(f: (any, A...) -> R...): ({ty}, A...) -> R... return f :: any end)(Named.hi)"
+            )
+        };
+
+        assert!(
+            out.check.contains(&format!("Mode.hi = {}", cast("Mode"))),
+            "{}",
+            out.check
+        );
+        assert!(out.check.contains("Shape.hi = Named.hi"), "{}", out.check);
+        assert!(out.check.contains("Dog.hi = Named.hi"), "{}", out.check);
+        assert!(!out.ship.contains("function<A..."), "{}", out.ship);
+    }
+
+    /// A unit variant is a string, so `self:name()` in a trait default
+    /// looked in the string library and `Enemy.label(Enemy.Flyer)`
+    /// failed at run time. The default now comes from a factory that
+    /// takes the impl's table, and an enum with a unit variant passes
+    /// its own. A payload variant, a struct, and a nested `self` of its
+    /// own read as before.
+    #[test]
+    fn a_trait_default_calls_self_methods_through_a_unit_enum() {
+        let src = "trait Describe as\n    function name(self): string\n    function label(self, pre: string): string\n        local t = { f = function(self) return self.n end }\n        return `{pre}[{self:name()}]` .. tostring(t:f())\n    end\n    function twice(self): string\n        return self:label(\"a\") .. self:label(\"b\")\n    end\nend\nenum Enemy as\n    Grunt(number)\n    Flyer\nend\nimpl Describe for Enemy as\n    function name(self): string\n        return if self == Enemy.Flyer then \"flyer\" else \"grunt\"\n    end\nend\nstruct Dog as\n    n: number\nend\nimpl Describe for Dog as\n    function name(self): string\n        return \"dog\"\n    end\nend\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.ship
+                .contains("`{pre}[{(__impl or self).name(self)}]` .. tostring(t:f())"),
+            "{}",
+            out.ship
+        );
+        assert!(
+            out.ship.contains(
+                "Enemy.twice = Describe[\"twice@for\"] and Describe[\"twice@for\"](Enemy) or Describe.twice"
+            ),
+            "{}",
+            out.ship
+        );
+        assert!(!out.check.contains("@for"), "{}", out.check);
+        assert_eq!(out.ship.lines().count(), src.lines().count());
+
+        // The runtime is a require away; the enum only needs a table.
+        let (head, body) = out.ship.split_once(" local Describe").unwrap();
+        assert!(head.starts_with("local __alloy = require("), "{head}");
+        let program = format!(
+            "local __alloy = {{}} local Describe{body}\nreturn Enemy.twice(Enemy.Flyer), Enemy.twice(Enemy.Grunt(1)), Dog.twice(Dog.new({{ n = 1 }}))"
+        );
+        let got: (String, String, String) = mlua::Lua::new().load(&program).eval().unwrap();
+
+        assert_eq!(got.0, "a[flyer]nilb[flyer]nil");
+        assert_eq!(got.1, "a[grunt]nilb[grunt]nil");
+        assert_eq!(got.2, "a[dog]nilb[dog]nil");
+    }
+
+    /// `impl Ranged for Frost` on a class table wrote `self` with no
+    /// type, and a colon method of the same class took an instance.
+    /// The impl method takes the same instance, with or without a colon
+    /// method beside it.
+    #[test]
+    fn an_impl_on_a_class_table_types_self_as_an_instance() {
+        let options = crate::EmitOptions {
+            check: true,
+            ..crate::EmitOptions::default()
+        };
+        let src = "trait Ranged as\n    function range(self): number\nend\nlocal Frost = {}\nFrost.__index = Frost\nfunction Frost.new(slow: number)\n    local self = setmetatable({}, Frost)\n    self.slow = slow\n    return self\nend\nimpl Ranged for Frost as\n    function range(self): number\n        return self.slow * 10\n    end\nend\nreturn Frost\n";
+        let colon = src.replace(
+            "impl Ranged",
+            "function Frost:twice(): number\n    return self.slow * 2\nend\nimpl Ranged",
+        );
+
+        for src in [src.to_string(), colon] {
+            let out = crate::compile_with(&src, &options).unwrap();
+            assert!(
+                out.check
+                    .contains("Frost.range(self: typeof(Frost.new(nil :: any)))"),
+                "{}",
+                out.check
+            );
         }
     }
 }

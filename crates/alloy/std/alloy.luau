@@ -10,13 +10,27 @@ local alloy = {}
 -- own `to_string` replaces the default the compiler writes.
 -- ---------------------------------------------------------------------------
 
---- The text of a value inside a printed container: a string in quotes,
---- anything else through `tostring`.
-function alloy.show(v: any): string
-	if type(v) == "string" then
-		return `"{string.gsub(v, '["\\]', "\\%0")}"`
+--- The keys of a map in a stable order, so a printed map reads the same
+--- every time.
+local function sorted_keys(t: { [any]: any }): { any }
+	local keys = {}
+	for k in pairs(t) do
+		table.insert(keys, k)
 	end
-	return tostring(v)
+	table.sort(keys, function(a, b)
+		if type(a) == type(b) and (type(a) == "number" or type(a) == "string") then
+			return a < b
+		end
+		return tostring(a) < tostring(b)
+	end)
+	return keys
+end
+
+--- An attribute value in markup, or a lone `{expr}` that sets `Text`.
+--- Only the check artifact calls it, cast to a function of the type the
+--- value must have, so another value is a type error there.
+function alloy.prop(v: any): any
+	return v
 end
 
 local function show_list(values: { any }, open: string, close: string): string
@@ -30,20 +44,66 @@ local function show_list(values: { any }, open: string, close: string): string
 	return open .. " " .. table.concat(parts, ", ") .. " " .. close
 end
 
+--- The entries of a map, `a = 1, [3] = "x"`, in a stable order.
+local function show_entries(t: { [any]: any }): string
+	local keys = sorted_keys(t)
+	local parts = table.create(#keys)
+	for i, k in ipairs(keys) do
+		local key = if type(k) == "string" and string.match(k, "^[%a_][%w_]*$") then k else `[{alloy.show(k)}]`
+		parts[i] = key .. " = " .. alloy.show(t[k])
+	end
+	return table.concat(parts, ", ")
+end
+
+-- The plain tables `alloy.show` prints now. A table that holds itself
+-- prints its address the second time, not a loop without end.
+local showing: { [any]: boolean } = {}
+
+--- The text of a value inside a printed container: a string in quotes,
+--- anything else through `tostring`. A plain table has no `__tostring`
+--- and `tostring` gives its address, so it prints the way an `Array` or
+--- a `HashMap` does. `from_table` gives the one for the other, and the
+--- two print alike.
+function alloy.show(v: any): string
+	if type(v) == "string" then
+		return `"{string.gsub(v, '["\\]', "\\%0")}"`
+	end
+	if type(v) == "table" and getmetatable(v) == nil and not showing[v] then
+		local count = 0
+		for _ in next, v do
+			count += 1
+		end
+		showing[v] = true
+		local text = if count == #v then show_list(v, "[", "]") else `\{ {show_entries(v)} }`
+		showing[v] = nil
+		return text
+	end
+	return tostring(v)
+end
+
+--- A value whose declared type is an enum. A unit variant is a string
+--- at runtime, and it prints under the enum's name, `Item.Junk`.
+local function show_in(v: any, enum: string?): string
+	if enum ~= nil and type(v) == "string" then
+		return enum .. "." .. v
+	end
+	return alloy.show(v)
+end
+
 --- `Name { x = 1, y = 2 }`: the default printer of a struct, over its
---- declared fields in order.
-function alloy.show_struct(name: string, s: any, fields: { string }): string
+--- declared fields in order. `enums` names the enum of each field that
+--- declares one.
+function alloy.show_struct(name: string, s: any, fields: { string }, enums: { [string]: string }?): string
 	if #fields == 0 then
 		return name .. " {}"
 	end
 	local parts = table.create(#fields)
 	for i, f in ipairs(fields) do
-		parts[i] = f .. " = " .. alloy.show(s[f])
+		parts[i] = f .. " = " .. show_in(s[f], enums and enums[f])
 	end
 	return name .. " { " .. table.concat(parts, ", ") .. " }"
 end
 
---- `Msg.Move(1, 2)`: the printer of an enum variant with a payload.
 --- A new table with `f` applied to each value, for a map of structs
 --- that `@derive(Serialize)` or `Deserialize` walks.
 function alloy.map_values(t: any, f: (any) -> any): any
@@ -52,6 +112,28 @@ function alloy.map_values(t: any, f: (any) -> any): any
 		out[k] = f(v)
 	end
 	return out
+end
+
+--- An enum value that `@derive(Deserialize)` reads from a table with no
+--- types, a save or JSON. `tags` gives each variant's payload count, as
+--- the wire layout does. A unit variant is its name, and a payload
+--- variant is a table whose tag has a payload; the table gets `enum` as
+--- its metatable again. Any other value raises and names `at`, the
+--- struct and the field, so an old "Uncommon" never reads as a variant.
+function alloy.serde_variant(v: any, tags: { [string]: number }, enum: any, name: string, at: string): any
+	if type(v) == "string" then
+		if tags[v] ~= 0 then
+			error(`{at}: "{v}" is no variant of {name}`, 0)
+		end
+		return v
+	end
+	if type(v) ~= "table" then
+		error(`{at}: {tostring(v)} is no variant of {name}`, 0)
+	end
+	if type(v.tag) ~= "string" or (tags[v.tag] or 0) == 0 then
+		error(`{at}: a table with the tag {tostring(v.tag)} is no variant of {name}`, 0)
+	end
+	return if enum ~= nil then setmetatable(v, enum) else v
 end
 
 --- Equality by content, for `@derive(Eq)` over a field that holds a
@@ -81,30 +163,18 @@ function alloy.deep_eq(a: any, b: any): boolean
 	return true
 end
 
-function alloy.show_variant(name: string, v: any): string
+--- `Msg.Move(1, 2)`: the printer of an enum variant with a payload.
+--- `enums` names the enum of each payload slot that declares one, by
+--- variant: `{ Tool = { [1] = "Kind" } }`.
+function alloy.show_variant(name: string, v: any, enums: { [string]: { [number]: string } }?): string
+	local slots = enums and enums[v.tag]
 	local parts = {}
 	local i = 1
 	while v["_" .. i] ~= nil do
-		table.insert(parts, alloy.show(v["_" .. i]))
+		table.insert(parts, show_in(v["_" .. i], slots and slots[i]))
 		i += 1
 	end
 	return `{name}.{v.tag}({table.concat(parts, ", ")})`
-end
-
---- The keys of a map in a stable order, so a printed map reads the same
---- every time.
-local function sorted_keys(t: { [any]: any }): { any }
-	local keys = {}
-	for k in pairs(t) do
-		table.insert(keys, k)
-	end
-	table.sort(keys, function(a, b)
-		if type(a) == type(b) and (type(a) == "number" or type(a) == "string") then
-			return a < b
-		end
-		return tostring(a) < tostring(b)
-	end)
-	return keys
 end
 
 -- ---------------------------------------------------------------------------
@@ -503,15 +573,27 @@ end
 -- Every member reads only, so the type is covariant: a `Future<number>`
 -- sits in a `{ Future<number | string> }`, and `race` over a mixed list
 -- yields the union.
-export type Future<T> = {
-	-- In the type alone: a generic reads `T` off a Future it is handed.
+-- `R...` holds the values after the first. `return 1, "x"` settles a
+-- `Future<number, string>`, and `Future<number>` settles with one value.
+export type Future<T, R... = ()> = {
+	-- In the type alone: a generic reads `T` off a Future it is handed,
+	-- and `await` reads every value off `__values`.
 	read __value: T,
-	read andThen: (self: Future<T>, on_resolve: ((T) -> ...any)?, on_reject: ((any) -> ...any)?) -> Future<T>,
+	read __values: (T, R...) -> (),
+	read andThen: (
+		self: Future<T, R...>,
+		on_resolve: ((T, R...) -> ...any)?,
+		on_reject: ((any) -> ...any)?
+	) -> Future<T, R...>,
 	-- The snake_case twin of `andThen`, the one camelCase name the std
 	-- carries. Both name the same function.
-	read and_then: (self: Future<T>, on_resolve: ((T) -> ...any)?, on_reject: ((any) -> ...any)?) -> Future<T>,
-	read cancel: (self: Future<T>) -> (),
-	read is_settled: (self: Future<T>) -> boolean,
+	read and_then: (
+		self: Future<T, R...>,
+		on_resolve: ((T, R...) -> ...any)?,
+		on_reject: ((any) -> ...any)?
+	) -> Future<T, R...>,
+	read cancel: (self: Future<T, R...>) -> (),
+	read is_settled: (self: Future<T, R...>) -> boolean,
 }
 
 local Future = {}
@@ -554,15 +636,18 @@ end
 local PENDING, RESOLVED, REJECTED, CANCELLED = 0, 1, 2, 3
 
 local function new_future()
-	return setmetatable({ state = PENDING, value = nil, trace = nil, waiters = {} }, Future)
+	return setmetatable({ state = PENDING, value = nil, values = nil, trace = nil, waiters = {} }, Future)
 end
 
-local function settle(self, state, value, trace)
+-- `value` is the first value, or the error. `values` is the whole
+-- result as `table.pack` holds it, when a body returns more than one.
+local function settle(self, state, value, trace, values)
 	if self.state ~= PENDING then
 		return
 	end
 	self.state = state
 	self.value = value
+	self.values = values
 	self.trace = trace
 	local waiters = self.waiters
 	self.waiters = {}
@@ -571,26 +656,45 @@ local function settle(self, state, value, trace)
 	end
 end
 
---- Runs `f` on a new thread and returns its Future.
--- `...T` takes a body that returns nothing as well as one that returns
--- a value, so an async function with no return type is a `Future`.
-function alloy.future<T>(f: (...any) -> ...T, ...: any): Future<T>
+-- Every value a settled Future carries: the whole result of its body,
+-- or the one value `resolve` or a race gave it.
+local function settled_values(f)
+	local values = f.values
+	if values then
+		return table.unpack(values, 1, values.n)
+	end
+	return f.value
+end
+
+local function run_future(f: (...any) -> ...any, ...: any)
 	local self = new_future()
 	local args = table.pack(...)
 	task_lib.spawn(function()
-		local ok, result = xpcall(function()
+		local out = table.pack(xpcall(function()
 			return f(table.unpack(args, 1, args.n))
 		end, function(e)
 			return { err = e, trace = debug.traceback(tostring(e), 2) }
-		end)
-		if ok then
-			settle(self, RESOLVED, result, nil)
+		end))
+		if not out[1] then
+			settle(self, REJECTED, out[2].err, out[2].trace)
+		elseif out.n > 2 then
+			-- `return 1, 2`: the Future keeps both, and `await` gives both.
+			settle(self, RESOLVED, out[2], nil, table.pack(table.unpack(out, 2, out.n)))
 		else
-			settle(self, REJECTED, result.err, result.trace)
+			settle(self, RESOLVED, out[2], nil)
 		end
 	end)
-	return (self :: any) :: Future<T>
+	return self
 end
+
+--- Runs `f` on a new thread and returns its Future.
+-- Two signatures: a body that returns values settles with all of them,
+-- and a body that returns nothing settles with `nil`. One `(T, R...)`
+-- signature refuses the empty body, and `...T` joins every value in `T`.
+alloy.future = (run_future :: any) :: (<T, R...>(f: (...any) -> (T, R...), ...any) -> Future<T, R...>) & ((
+	f: (...any) -> (),
+	...any
+) -> Future<nil>)
 
 function Future.resolve<T>(value: T): Future<T>
 	local self = new_future()
@@ -626,7 +730,7 @@ function Future.andThen<T>(
 	local f = self :: any
 	local function run()
 		if f.state == RESOLVED and on_resolve then
-			on_resolve(f.value)
+			on_resolve(settled_values(f))
 		elseif f.state ~= RESOLVED and on_reject then
 			on_reject(f.value)
 		end
@@ -679,10 +783,15 @@ export type Settled<T> = {
 }
 
 --- `await`: a Future, or anything with `andThen`. Yields until settled,
---- returns the value, rethrows the error it settled with.
--- The extra values type as `any`: a `wait` on a remote settles with the
--- whole payload, and `local a, b = await f` is then no error.
-function alloy.await<A>(target: A & Settled<any>): (index<A, "__value">, ...any)
+--- returns every value it settled with, rethrows the error.
+-- The values come off `__values`: `local a, b = await f` types `b` from
+-- a `Future<number, string>`, and reports it on a `Future<number>`.
+-- `__values` is optional, so a hand-written awaitable with `andThen`
+-- alone still fits, and its values stay open. `index<A, "__value">`
+-- beside an open pack reported the missing key on such an awaitable,
+-- and a type function over `__value` rebuilt the type the checker then
+-- reached its limit on.
+function alloy.await<A, V...>(target: A & Settled<any> & { read __values: ((V...) -> ())? }): V...
 	if type(target) == "table" and getmetatable(target) == Future then
 		if target.state == PENDING then
 			local thread = coroutine.running()
@@ -692,7 +801,7 @@ function alloy.await<A>(target: A & Settled<any>): (index<A, "__value">, ...any)
 			coroutine.yield()
 		end
 		if target.state == RESOLVED then
-			return target.value
+			return settled_values(target)
 		end
 		-- The value alone, at level 0. The stored trace opens with the
 		-- same message, so a rethrow of both printed the failure twice
@@ -704,19 +813,27 @@ function alloy.await<A>(target: A & Settled<any>): (index<A, "__value">, ...any)
 	end
 	if type(target) == "table" and type(target.andThen) == "function" then
 		local thread = coroutine.running()
-		local done, ok, value = false, false, nil
-		target:andThen(function(v)
-			ok, value, done = true, v, true
-			task_lib.spawn(thread)
+		local done, ok, value, values = false, false, nil, nil
+		-- An `andThen` that calls back at once finds the thread running,
+		-- and a resume of a running thread fails. Only a parked one wakes.
+		local parked = false
+		target:andThen(function(...)
+			ok, values, done = true, table.pack(...), true
+			if parked then
+				task_lib.spawn(thread)
+			end
 		end, function(e)
 			ok, value, done = false, e, true
-			task_lib.spawn(thread)
+			if parked then
+				task_lib.spawn(thread)
+			end
 		end)
 		if not done then
+			parked = true
 			coroutine.yield()
 		end
 		if ok then
-			return value
+			return table.unpack(values, 1, values.n)
 		end
 		error(value, 2)
 	end
@@ -766,8 +883,8 @@ end
 function Future.race<E>(futures: { [number]: E }): Future<index<E, "__value">>
 	local winner = new_future()
 	for _, f in futures do
-		f:andThen(function(v)
-			settle(winner, RESOLVED, v, nil)
+		f:andThen(function(v, ...)
+			settle(winner, RESOLVED, v, nil, table.pack(v, ...))
 		end, function(e)
 			settle(winner, REJECTED, e, nil)
 		end)
@@ -779,8 +896,8 @@ function Future.any<E>(futures: { [number]: E }): Future<index<E, "__value">>
 	local winner = new_future()
 	local failed = 0
 	for _, f in futures do
-		f:andThen(function(v)
-			settle(winner, RESOLVED, v, nil)
+		f:andThen(function(v, ...)
+			settle(winner, RESOLVED, v, nil, table.pack(v, ...))
 		end, function(e)
 			failed += 1
 			if failed == #futures then
@@ -791,18 +908,20 @@ function Future.any<E>(futures: { [number]: E }): Future<index<E, "__value">>
 	return (winner :: any) :: Future<any>
 end
 
--- The element is `Result2`, the one-table Result: `Result<T, any>` here
--- is a union of two intersections under an Array under a Future, and
--- `await` on that reaches the solver's step limit. The error side is
--- `any`, since a rejection carries whatever it was rejected with.
-function Future.all_settled<T>(futures: { Future<T> }): Future<Array<Result2<T, any>>>
-	return (alloy.future(function()
+-- The elements are `any`. An Array of `Result<T, any>` or of `Result2`
+-- under a Future reaches the solver's step limit at every call, an
+-- annotated one too. An annotation types the elements:
+-- `local f: Future<Array<Result<number, any>>> = Future.all_settled(xs)`.
+-- The list takes any element, so `resolve` beside `reject` fits; a
+-- `{ Future<T> }` refused that mix.
+function Future.all_settled(futures: { [number]: any }): Future<Array<any>>
+	return alloy.future(function()
 		local out = {}
 		for i, f in futures do
 			out[i] = alloy.try_await(f)
 		end
 		return setmetatable(out, alloy.Array)
-	end) :: any) :: Future<Array<Result2<T, any>>>
+	end) :: any
 end
 
 local STATE_NAMES = { [PENDING] = "pending", [RESOLVED] = "resolved", [REJECTED] = "rejected", [CANCELLED] = "cancelled" }
@@ -1125,7 +1244,9 @@ export type HashMap<K, V> = typeof(setmetatable({} :: {
 	len: (self: HashMap<K, V>) -> number,
 	keys: (self: HashMap<K, V>) -> Array<K>,
 	values: (self: HashMap<K, V>) -> Array<V>,
-	entries: (self: HashMap<K, V>) -> () -> (K?, V?),
+	-- `V`, not `V?`: a loop ends on a nil key, and a pair with a key
+	-- holds a value. Luau's own `next` has the same shape.
+	entries: (self: HashMap<K, V>) -> () -> (K?, V),
 	get_or_insert: (self: HashMap<K, V>, key: K, default: V) -> V,
 	clear: (self: HashMap<K, V>) -> (),
 	to_table: (self: HashMap<K, V>) -> { [K]: V },
@@ -1242,16 +1363,10 @@ function HashMap.to_table(self)
 end
 
 function HashMap.__tostring(self)
-	local keys = sorted_keys(self._items)
-	if #keys == 0 then
+	if next(self._items) == nil then
 		return "HashMap {}"
 	end
-	local parts = table.create(#keys)
-	for i, k in ipairs(keys) do
-		local key = if type(k) == "string" and string.match(k, "^[%a_][%w_]*$") then k else `[{alloy.show(k)}]`
-		parts[i] = key .. " = " .. alloy.show(self._items[k])
-	end
-	return "HashMap { " .. table.concat(parts, ", ") .. " }"
+	return `HashMap \{ {show_entries(self._items)} }`
 end
 
 alloy.HashMap = HashMap
@@ -3253,11 +3368,11 @@ export type Remote = {
 	fire: (...any) -> (),
 	fire_all: (...any) -> (),
 	fire_except: (...any) -> (),
-	call: (...any) -> Future<any>,
+	call: (...any) -> Future<any, ...any>,
 	on: (handler: (...any) -> ...any) -> any,
 	once: (handler: (...any) -> ...any) -> any,
 	on_ratelimited: (handler: (...any) -> ...any) -> any,
-	wait: () -> Future<any>,
+	wait: () -> Future<any, ...any>,
 }
 
 -- ---------------------------------------------------------------------------
@@ -3279,8 +3394,10 @@ local WIRE_RANGE = {
 -- A kind in a layout is a string, `u8`, `str?`, `any`, `inst:Player`, or a
 -- table: `{ fields = { { name, kind }, ... }, struct = Metatable? }` for a
 -- record, `{ item = kind }` for an array, `{ enum = Enum, tags = { A = 0,
--- B = 1 } }` for an enum with each variant's payload count, each with
--- `optional = true` when nil is fine. The codec reads each layout once into nodes, so a fire
+-- B = 1 }, slots = { B = { kind } } }` for an enum with each variant's
+-- payload count and the kind of each payload value, each with
+-- `optional = true` when nil is fine. A `struct` or an `enum` can be a key
+-- of `wire.types` in place of the table. The codec reads each layout once into nodes, so a fire
 -- parses no string.
 type WireNode = {
 	base: string,
@@ -3293,6 +3410,7 @@ type WireNode = {
 	choices: { [string]: boolean }?,
 	enum: any?,
 	tags: { [string]: number }?,
+	slots: { [string]: { WireNode } }?,
 }
 
 local function wire_node(kind: any): WireNode
@@ -3316,7 +3434,18 @@ local function wire_node(kind: any): WireNode
 		return { base = base, opt = opt }
 	end
 	if kind.enum ~= nil then
-		return { base = "enum", opt = kind.optional == true, enum = kind.enum, tags = kind.tags }
+		local slots = nil
+		if kind.slots ~= nil then
+			slots = {}
+			for tag, list in kind.slots do
+				local nodes = {}
+				for i, k in list do
+					nodes[i] = wire_node(k)
+				end
+				slots[tag] = nodes
+			end
+		end
+		return { base = "enum", opt = kind.optional == true, enum = kind.enum, tags = kind.tags, slots = slots }
 	end
 	local node: WireNode = {
 		base = if kind.fields ~= nil then "record" else "array",
@@ -3527,9 +3656,22 @@ local function wire_instance(node: WireNode, v: any): any
 	return v
 end
 
+-- The struct and enum tables a layout names by key, `"types.aly:Stats"`.
+-- A field of an imported struct can name a table the importer cannot
+-- reach, so the declaring module registers it here when it loads. The
+-- key comes from the source path, so it is the same on both sides.
+local wire_types: { [string]: any } = {}
+
 -- A struct comes back through its constructor, so a field the wire
 -- skipped takes its default; a plain metatable takes the table as it is.
+-- A key names a registered table; with none, the table stays plain.
 local function wire_struct(struct: any, t: any): any
+	if type(struct) == "string" then
+		struct = wire_types[struct]
+		if struct == nil then
+			return t
+		end
+	end
 	local meta = getmetatable(struct)
 	if type(meta) == "table" and meta.__call ~= nil then
 		return struct(t)
@@ -3537,11 +3679,15 @@ local function wire_struct(struct: any, t: any): any
 	return setmetatable(t, struct)
 end
 
+-- A payload value of an enum crosses inside the variant's table, so the
+-- reader of the variant restores it; the function comes below.
+local wire_restore: (node: WireNode, v: any) -> any
+
 -- An enum value crosses as Roblox copies a table, which drops the
 -- metatable. A unit variant is its name, and a payload variant is a
 -- table whose tag the layout lists with a payload; anything else is
--- forged. The table gets the enum's metatable back. A payload value
--- inside it keeps what Roblox gives, as a map does.
+-- forged. The table gets the enum's metatable back, and each payload
+-- value the layout names is checked and restored by its own kind.
 local function wire_variant(node: WireNode, v: any): any
 	if v == nil then
 		if node.opt then
@@ -3559,7 +3705,18 @@ local function wire_variant(node: WireNode, v: any): any
 	if type(v) ~= "table" or type(v.tag) ~= "string" or (tags[v.tag] or 0) == 0 then
 		error(`wire: {typeof(v)} is no variant of the enum`, 0)
 	end
-	return setmetatable(v, node.enum)
+	local slots = node.slots and node.slots[v.tag]
+	if slots ~= nil then
+		for i, slot in slots do
+			local key = `_{i}`
+			v[key] = wire_restore(slot, v[key])
+		end
+	end
+	local enum = node.enum
+	if type(enum) == "string" then
+		enum = wire_types[enum]
+	end
+	return if enum ~= nil then setmetatable(v, enum) else v
 end
 
 local function wire_read(node: WireNode, buf: buffer, at: number, rest: { any }, ri: number): (any, number, number)
@@ -3642,7 +3799,7 @@ end
 -- A value that crossed as Roblox encodes a table, checked against its
 -- node the way the reader checks a buffer. A record comes back with the
 -- keys its layout names alone, and with its metatable.
-local function wire_restore(node: WireNode, v: any): any
+function wire_restore(node: WireNode, v: any): any
 	local base = node.base
 	if base == "any" then
 		return v
@@ -3692,6 +3849,10 @@ local function wire_restore(node: WireNode, v: any): any
 end
 
 local wire = {}
+
+--- The tables a layout names by key. A module registers a struct or
+--- an enum here when a field of another struct names it.
+wire.types = wire_types
 
 --- Packs the arguments of one fire by the layout: the buffer, then the
 --- values the layout marks `any`, in the order the packer met them.

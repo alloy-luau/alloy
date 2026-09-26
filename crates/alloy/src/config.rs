@@ -79,6 +79,41 @@ pub(crate) fn markup_level(level: crate::lint::Level) -> luaux::config::LintLeve
     }
 }
 
+/// The zero-based line and byte column of `key` under the `[table]`
+/// header of a TOML text, or of the header when the table does not
+/// write the key. `None` when the text has no such header.
+fn key_in_table(text: &str, table: &str, key: &str) -> Option<(usize, usize)> {
+    let indent = |line: &str| line.len() - line.trim_start().len();
+    let mut header = None;
+
+    for (i, line) in text.lines().enumerate() {
+        let t = line.trim_start();
+
+        if let Some(rest) = t.strip_prefix('[') {
+            // The next table ends the one the report names.
+            if header.is_some() {
+                break;
+            }
+
+            if rest.split(']').next().is_some_and(|n| n.trim() == table) {
+                header = Some((i, indent(line)));
+            }
+
+            continue;
+        }
+
+        if header.is_some()
+            && !key.is_empty()
+            && t.strip_prefix(key)
+                .is_some_and(|r| r.trim_start().starts_with('='))
+        {
+            return Some((i, indent(line)));
+        }
+    }
+
+    header
+}
+
 /// `[alx.lints]`: the levels of the markup lints. Deprecated; write
 /// `[lint.rules] alx.<name> = "<level>"`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -934,7 +969,8 @@ pub struct Build {
     pub out: PathBuf,
     /// Glob patterns, relative to `in`, of sources to skip.
     pub exclude: Vec<String>,
-    /// Delete an output whose source is gone.
+    /// Delete every `.luau` under `out` that no source makes. Off, the
+    /// build deletes only the stale outputs it wrote itself.
     pub clean: bool,
     /// Which artifact to write: `ship` runs on Roblox, `check` is what
     /// luau-lsp sees.
@@ -1096,7 +1132,17 @@ impl Config {
             config.fmt = over_preserving(&written);
         }
 
+        config.settle_naming();
+
         Ok(config)
+    }
+
+    /// A `local` that nothing assigns again becomes a `const` when the
+    /// `prefer_const` lint or `[fmt] prefer_const` is on, so the naming
+    /// lint gives it the const style.
+    fn settle_naming(&mut self) {
+        self.lint.naming.locals_as_const = self.fmt.prefer_const
+            || crate::lint::level_of(&self.lint, "prefer_const") != crate::lint::Level::Allow;
     }
 
     /// The keys of the file that still parse and no longer belong: the
@@ -1202,6 +1248,8 @@ impl Config {
             config.fmt = over_preserving(&written);
         }
 
+        config.settle_naming();
+
         Ok(config)
     }
 
@@ -1264,6 +1312,38 @@ impl Config {
         Ok(markup)
     }
 
+    /// Where a report of `markup` sits: the file that holds the table,
+    /// and the zero-based line and byte column of the key the report
+    /// names, when the file writes one. `[alx.factory] backend =
+    /// "element" needs a fragment` sits on `backend` under
+    /// `[alx.factory]`. The report is about the table, not about each
+    /// `.alx` file that the table fails to compile.
+    pub fn markup_problem_at(
+        &self,
+        root: &Path,
+        message: &str,
+    ) -> (PathBuf, Option<(usize, usize)>) {
+        let file = match self.alx.is_set() {
+            true => Self::file_of(root),
+
+            false => root.join("luaux.toml"),
+        };
+        let table = message
+            .split_once('[')
+            .and_then(|(_, rest)| rest.split_once(']'));
+        let at = table.and_then(|(table, rest)| {
+            let key: String = rest
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+
+            key_in_table(&std::fs::read_to_string(&file).ok()?, table, &key)
+        });
+
+        (file, at)
+    }
+
     /// Finds `alloy.toml` or `.config.aly` in `start` or the nearest ancestor. The project
     /// root is the directory that holds it, and every path in the file is
     /// relative to that root.
@@ -1311,6 +1391,36 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A markup table that does not load was reported against each
+    /// `.alx` file, with no line. The table is the mistake, so the
+    /// report names the config file and the key.
+    #[test]
+    fn a_markup_problem_sits_on_its_key() {
+        let dir = std::env::temp_dir().join(format!("alloy-markup-key-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = "[build]\nin = \"src\"\n\n[alx.factory]\ncreate = \"make\"\n  backend = \"element\"\n\n[alx.elements]\nall = \"camelCase\"\n";
+        std::fs::write(dir.join(FILE_NAME), text).unwrap();
+        let config = Config::load(&dir.join(FILE_NAME)).unwrap();
+        let problem = config.markup(&dir).unwrap_err();
+
+        assert_eq!(
+            problem,
+            "[alx.factory] backend = \"element\" needs a fragment"
+        );
+        assert_eq!(
+            config.markup_problem_at(&dir, &problem),
+            (dir.join(FILE_NAME), Some((5, 2)))
+        );
+        // A key the table does not write points at the table.
+        assert_eq!(
+            config.markup_problem_at(&dir, "[alx.factory] fragment is wrong"),
+            (dir.join(FILE_NAME), Some((3, 0)))
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A `.config.aly` beside an `alloy.toml` was read by no one, and
     /// nothing said so.

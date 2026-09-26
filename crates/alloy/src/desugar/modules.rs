@@ -48,6 +48,27 @@ impl<'s> Desugar<'s> {
             return quoted;
         }
 
+        let written = literal.trim_matches(['"', '\'']);
+
+        let moved = self
+            .options
+            .mount_requires
+            .iter()
+            .find(|(s, _)| s == written)
+            .map(|(_, path)| path);
+
+        if let Some(place) = moved.filter(|p| p.starts_with('@')) {
+            return format!("{q}{place}{q}");
+        }
+
+        // A spec that climbs out of its mount and back in takes the path
+        // inside the mount, and the steps below finish it.
+        let quoted = match moved {
+            Some(path) => format!("{q}{path}{q}"),
+
+            None => quoted,
+        };
+
         // The build writes `thing.aly` as `thing.luau`, and a require
         // names a module with no extension: `./thing.aly` is `./thing`.
         let inner = &quoted[1..quoted.len() - 1];
@@ -76,12 +97,23 @@ impl<'s> Desugar<'s> {
 
         let rel = std::path::Path::new(&self.options.module_rel);
 
-        if !rel.file_stem().is_some_and(|s| s == "init") {
+        if !crate::build::is_init(rel) {
             return None;
         }
 
         let dir = rel.parent().unwrap_or(std::path::Path::new(""));
         let target = crate::modules::normalize(&dir.join(path));
+
+        // A file inside the folder is `@self/...`. The folder's instance
+        // name can differ from its name on disk, so `./src/x` fails in
+        // Roblox and under a sourcemap.
+        if let Ok(inner) = target.strip_prefix(dir)
+            && !inner.starts_with("..")
+        {
+            let inner: Vec<_> = inner.iter().map(|c| c.to_string_lossy()).collect();
+
+            return Some(format!("@self/{}", inner.join("/")));
+        }
 
         Some(crate::build::relative_require(
             &crate::build::module_base(rel),
@@ -250,6 +282,32 @@ impl<'s> Desugar<'s> {
             .collect()
     }
 
+    /// `export type Leaf_Box = Leaf.Box` for each type of the module a
+    /// star import binds as `name`, sent out as `exported`. Luau reads
+    /// no type path two modules deep, `B.Leaf.Box`, so the module's types
+    /// go out under one flat name each, as a namespace's do.
+    fn star_member_types(&self, name: &str, exported: &str) -> Vec<String> {
+        let Some(spec) = self.star_specs.get(name) else {
+            return Vec::new();
+        };
+
+        self.options
+            .import_types
+            .iter()
+            .filter(|(s, _)| s == spec)
+            .flat_map(|(_, types)| types.iter())
+            // The default entry names no type of its own.
+            .filter(|entry| crate::modules::default_type(std::slice::from_ref(entry)).is_none())
+            .map(|entry| {
+                let full = crate::modules::type_head(entry);
+                let args = crate::modules::type_args(entry);
+                let type_args = type_arguments(args);
+
+                format!("export type {exported}_{full}{args} = {name}.{full}{type_args}")
+            })
+            .collect()
+    }
+
     /// Whether a quoted spec names a module Alloy does not compile. Such
     /// a module returns one value and has no export table, so its value
     /// is what a default import binds. A spec that carries the
@@ -273,6 +331,12 @@ impl<'s> Desugar<'s> {
     /// a module whose `export default` is a struct or an enum, or `None`
     /// for any other default.
     fn default_type(&mut self, quoted: &str, local: &str, anchor: u32) -> Option<String> {
+        // A module that returns its value has no `default` field, and a
+        // bare import of it binds the value alone.
+        if self.is_plain_module(quoted) {
+            return None;
+        }
+
         let target = self.require_literal(quoted);
         self.default_entry(quoted)?;
         let temp = self.hoist_import(&target, anchor);
@@ -284,13 +348,30 @@ impl<'s> Desugar<'s> {
     /// `type P = _m1.Player`: the type of a module's default struct or
     /// enum, under the name this file binds.
     fn default_type_of(&self, quoted: &str, local: &str, temp: &str) -> Option<String> {
+        let word = self.type_word(local);
+
+        self.default_alias(quoted, local, temp)
+            .map(|alias| format!("{word} {alias}"))
+    }
+
+    /// `P<T> = _m1.Player<T>`: the type of a module's default under
+    /// `local`, read off `temp`, the table the require binds. The
+    /// `self` type of a class the module returns reads off the value.
+    fn default_alias(&self, quoted: &str, local: &str, temp: &str) -> Option<String> {
         let entry = self.default_entry(quoted)?;
+
+        if entry.contains(crate::modules::MODULE_VALUE) {
+            let value = format!("{temp}{}", self.default_suffix(quoted));
+            let ty = entry.replace(crate::modules::MODULE_VALUE, &value);
+
+            return Some(format!("{local} = {ty}"));
+        }
+
         let head = crate::modules::type_head(entry);
         let args = crate::modules::type_args(entry);
         let type_args = type_arguments(args);
-        let word = self.type_word(local);
 
-        Some(format!("{word} {local}{args} = {temp}.{head}{type_args}"))
+        Some(format!("{local}{args} = {temp}.{head}{type_args}"))
     }
 
     /// The type entry of a module's default struct or enum.
@@ -312,6 +393,17 @@ impl<'s> Desugar<'s> {
             true => "",
 
             false => ".default",
+        }
+    }
+
+    /// What a name in braces reads off the required module: `.name`.
+    /// `default` reads what a bare import reads, so of a module that
+    /// ends in `return K` it is `K` itself, not a field of it.
+    fn member_suffix(&self, quoted: &str, name: &str) -> String {
+        match name {
+            "default" => self.default_suffix(quoted).to_string(),
+
+            _ => format!(".{name}"),
         }
     }
 
@@ -626,7 +718,7 @@ impl<'s> Desugar<'s> {
 
                 types.extend(self.namespace_type_aliases(path, &name, &local, temp));
                 names.push(local);
-                values.push(format!("{temp}.{name}"));
+                values.push(format!("{temp}{}", self.member_suffix(path, &name)));
             }
         }
 
@@ -942,6 +1034,7 @@ impl<'s> Desugar<'s> {
                             types.extend(self.imported_member_types(&name, &exported));
                         }
 
+                        types.extend(self.star_member_types(&name, &exported));
                         self.exports.push((exported, name));
                     }
                 }
@@ -976,19 +1069,41 @@ impl<'s> Desugar<'s> {
                     let args = self.module_type_params(&spec, &name);
                     let type_args = type_arguments(&args);
                     let alias = format!("export type {exported}{args} = {temp}.{name}{type_args}");
+                    // An import of the name from this module already
+                    // writes the alias with the word; a second is a
+                    // redefinition.
+                    let imported = sp.alias.is_none() && self.export_listed_types.contains(&name);
 
                     if e.type_only || sp.is_type || self.module_exports_type_only(&spec, &name) {
-                        types.push(alias);
+                        if !imported {
+                            types.push(alias);
+                        }
                     } else {
                         // A struct or an enum is a value and a type,
                         // and the list sends both on.
-                        if self.module_exports_type(&spec, &name) {
+                        if !imported && self.module_exports_type(&spec, &name) {
                             types.push(alias);
                         }
 
-                        let members = self.namespace_type_aliases(&spec, &name, &exported, &temp);
-                        types.extend(members.into_iter().map(|t| format!("export {t}")));
-                        self.exports.push((exported, format!("{temp}.{name}")));
+                        if !imported {
+                            let members =
+                                self.namespace_type_aliases(&spec, &name, &exported, &temp);
+                            types.extend(members.into_iter().map(|t| format!("export {t}")));
+                        }
+
+                        // `export { default as K }`: the type of the
+                        // default goes out under `K`, as the value does.
+                        // A type another spec of the file sends out as
+                        // `K` stands, and a second one is a redefinition.
+                        if name == "default"
+                            && !self.reexported_types.contains(&exported)
+                            && let Some(alias) = self.default_alias(&spec, &exported, &temp)
+                        {
+                            types.push(format!("export type {alias}"));
+                        }
+
+                        let suffix = self.member_suffix(self.text_of(path), &name);
+                        self.exports.push((exported, format!("{temp}{suffix}")));
                     }
                 }
 
@@ -1050,8 +1165,9 @@ impl<'s> Desugar<'s> {
                 }
 
                 // `function f()` at the top level is a global; the name
-                // a module exports is its own.
-                if matches!(inner.as_ref(), Stmt::Function(_)) {
+                // a module exports is its own. A function under
+                // attributes writes the word itself, after them.
+                if matches!(inner.as_ref(), Stmt::Function(f) if f.attrs.is_empty()) {
                     self.generate(self.byte_start(inner.span()), "local ");
                 }
 
@@ -1114,6 +1230,9 @@ impl<'s> Desugar<'s> {
         if local_needs_rewrite(l) {
             self.local_stmt(l);
         } else {
+            // `export const m: HashMap<K, V> = HashMap.new()`: the call
+            // takes the annotation's arguments, as for a plain local.
+            self.expected_generic = self.annotated_constructor(l);
             let children: Vec<Child<'_>> = l.values.iter().map(Child::Expr).collect();
             self.stitch(rest, &children, |d, child| match child {
                 Child::Expr(e) => d.expr(e),
@@ -1122,6 +1241,7 @@ impl<'s> Desugar<'s> {
 
                 Child::Function(b) => d.function_block(b),
             });
+            self.expected_generic = None;
         }
     }
 
@@ -1332,6 +1452,111 @@ print(ex)
             );
             assert_eq!(text.lines().count(), src.lines().count(), "{text}");
         }
+    }
+
+    /// An attribute above `export default` was a syntax error: the
+    /// reader took `export` and then asked for `function`. The
+    /// attribute now goes on the declaration, as under `export`.
+    #[test]
+    fn an_attribute_over_export_default_goes_on_the_declaration() {
+        for (src, want) in [
+            (
+                "@derive(Debug)\nexport default struct Bag\n    n: number\nend\n",
+                "function Bag.debug(self)",
+            ),
+            (
+                "@deprecated\nexport default function old(): number\n    return 1\nend\n",
+                "\n@deprecated local function old(): number",
+            ),
+            (
+                "@inline\nexport default function small(): number\n    return 1\nend\n",
+                "\nlocal function small(): number",
+            ),
+        ] {
+            let out = crate::compile(src).unwrap();
+            assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+            assert!(out.ship.contains(want), "{}", out.ship);
+            assert!(out.ship.contains("return { default = "), "{}", out.ship);
+            assert!(!out.ship.contains("export default"), "{}", out.ship);
+            assert_eq!(
+                out.ship.lines().count(),
+                src.lines().count(),
+                "{}",
+                out.ship
+            );
+        }
+    }
+
+    /// `export { default as Klass } from "./Klass"` of a module that ends
+    /// in `return Klass` read `_m1.default`, and the barrel sent on nil:
+    /// such a module has no export table. Its returned value is its
+    /// default, as `import Klass from` reads it.
+    #[test]
+    fn the_default_of_a_returning_module_is_its_value() {
+        let options = crate::EmitOptions {
+            plain_modules: vec!["./Klass".to_string()],
+            ..crate::EmitOptions::default()
+        };
+        let compile = |src: &str| crate::compile_with(src, &options).unwrap().ship;
+
+        let barrel = compile("export { default as Klass } from \"./Klass\"\n");
+        assert!(barrel.contains("return { Klass = _m1 }"), "{barrel}");
+
+        let named = compile("import { default as K } from \"./Klass\"\nprint(K)\n");
+        assert!(named.contains("local K = _m1"), "{named}");
+        assert!(!named.contains(".default"), "{named}");
+
+        // A module with an export table keeps the field.
+        let table = compile("export { default as Other } from \"./Other\"\n");
+        assert!(table.contains("return { Other = _m1.default }"), "{table}");
+    }
+
+    /// The re-export of a default carries its type under the new name:
+    /// the type the module exports under the name it returns, the
+    /// `self` type of the class it returns, or its default struct. A
+    /// type another spec sends out under that name stands alone, and a
+    /// bare import binds the value alone, as before.
+    #[test]
+    fn a_reexported_default_sends_its_type_on() {
+        let options = crate::EmitOptions {
+            plain_modules: vec!["./Klass".to_string(), "./Class".to_string()],
+            import_types: vec![
+                (
+                    "./Klass".to_string(),
+                    vec!["Klass<T>=".to_string(), "default Klass<T>".to_string()],
+                ),
+                (
+                    "./Class".to_string(),
+                    vec!["default typeof(@.new(nil :: any))".to_string()],
+                ),
+                (
+                    "./Player".to_string(),
+                    vec!["Player".to_string(), "default Player".to_string()],
+                ),
+            ],
+            ..crate::EmitOptions::default()
+        };
+        let compile = |src: &str| crate::compile_with(src, &options).unwrap().ship;
+
+        let named = compile("export { default as K } from \"./Klass\"\n");
+        assert!(named.contains("export type K<T> = _m1.Klass<T>"), "{named}");
+
+        let class = compile("export { default as C } from \"./Class\"\n");
+        assert!(
+            class.contains("export type C = typeof(_m1.new(nil :: any))"),
+            "{class}"
+        );
+
+        let record = compile("export { default as P } from \"./Player\"\n");
+        assert!(record.contains("export type P = _m1.Player"), "{record}");
+
+        let both = compile(
+            "export { default as Klass } from \"./Klass\"\nexport type { Klass } from \"./Klass\"\n",
+        );
+        assert_eq!(both.matches("export type Klass").count(), 1, "{both}");
+
+        let bare = compile("import K from \"./Klass\"\nprint(K)\n");
+        assert!(bare.contains("local K = require(\"./Klass\")\n"), "{bare}");
     }
 
     #[test]

@@ -22,6 +22,25 @@ fn a_module_lists_what_it_exports() {
     );
 }
 
+/// An `if` in a markup hole of a `.alx` made the plain parse swallow
+/// the rest of the file, so the module "exported nothing" and the
+/// importer did not build. The markup blanks first, as for `return`.
+#[test]
+fn a_markup_hole_hides_no_export() {
+    for hole in [
+        "Text={if true then \"a\" else \"b\"} />",
+        ">{if true then \"a\" else \"b\"}</TextLabel>",
+    ] {
+        let source =
+            format!("local x = <TextLabel {hole}\nexport function View()\n    return x\nend\n");
+        assert_eq!(
+            alloy::modules::exported_names(&source),
+            vec!["View"],
+            "{hole}"
+        );
+    }
+}
+
 /// An `export { ... }` list names the types of the declarations it
 /// holds, so an import of one binds the type as `export struct` does.
 #[test]
@@ -70,6 +89,105 @@ fn an_import_names_the_module_and_what_it_exports() {
         problems[2].message,
         "`used_one` is already imported in this file"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `export { X, Y } from "./leaf"` reads each name off the module as an
+/// import does. A name the module lacks shipped as `Y = _m.Y`, nil at
+/// run time, and the check said nothing.
+#[test]
+fn a_reexport_names_what_the_module_lacks() {
+    let dir = scratch("reexport");
+    std::fs::write(dir.join("leaf.aly"), "export const X = 1\n").unwrap();
+    let source = "export { X, Y } from \"./leaf\"\n";
+    let barrel = dir.join("barrel.aly");
+    std::fs::write(&barrel, source).unwrap();
+
+    let problems = alloy::modules::import_problems(source, Path::new("barrel.aly"), &barrel, &[]);
+
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert_eq!(problems[0].kind, "ImportError");
+    assert_eq!(
+        problems[0].message,
+        "\"./leaf\" does not export `Y`; it exports `X`"
+    );
+    assert_eq!(
+        &source[problems[0].start as usize..problems[0].end as usize],
+        "Y"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `export { default as K } from "./leaf"` of a module with no
+/// `export default` and no `return` shipped `K = _m.default`, nil at
+/// run time. The report is the one `import K from` gets, with the fix
+/// in the re-export form. A module with a default, or one that returns
+/// its value, is clean.
+#[test]
+fn a_reexport_of_a_missing_default_reports() {
+    let dir = scratch("reexport-default");
+    std::fs::write(
+        dir.join("leaf.aly"),
+        "export const helper = 1
+",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("made.aly"),
+        "export default function make(): number\n    return 2\nend\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("kept.aly"), "local K = {}\nreturn K\n").unwrap();
+    let source = "export { default as K } from \"./leaf\"\nexport { default as M } from \"./made\"\nexport { default as R } from \"./kept\"\n";
+    let barrel = dir.join("barrel.aly");
+    std::fs::write(&barrel, source).unwrap();
+
+    let problems = alloy::modules::import_problems(source, Path::new("barrel.aly"), &barrel, &[]);
+
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert_eq!(problems[0].kind, "ImportError");
+    assert_eq!(
+        problems[0].message,
+        "\"./leaf\" has no default export; write `export { helper as K } from \"./leaf\"` or add `export default` to it"
+    );
+    assert_eq!(
+        &source[problems[0].start as usize..problems[0].end as usize],
+        "default"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `export { default as K } from "./Klass"` carries the type of the
+/// default under `K`: the type the module exports under the name it
+/// returns, or the `self` type of the class it returns. An importer of
+/// the barrel reads `K` as a type.
+#[test]
+fn a_reexported_default_carries_its_type() {
+    let dir = scratch("reexport-default-type");
+    std::fs::write(
+        dir.join("Klass.aly"),
+        "local Klass = {}\nKlass.__index = Klass\nexport type Klass<T> = typeof(setmetatable({} :: { v: T }, Klass))\nreturn Klass\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Class.aly"),
+        "local Class = {}\nClass.__index = Class\nfunction Class.new(n: number)\n    return setmetatable({ n = n }, Class)\nend\nfunction Class:double(): number\n    return self.n * 2\nend\nreturn Class\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("barrel.aly"),
+        "export { default as K } from \"./Klass\"\nexport { default as C } from \"./Class\"\n",
+    )
+    .unwrap();
+    let main = dir.join("main.aly");
+    let types = alloy::modules::import_types("import { K, C } from \"./barrel\"\n", &main, &[]);
+    let (_, barrel) = types.iter().find(|(s, _)| s == "./barrel").unwrap();
+
+    assert!(barrel.contains(&"K<T>".to_string()), "{barrel:?}");
+    assert!(barrel.contains(&"C".to_string()), "{barrel:?}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -441,7 +559,8 @@ fn a_named_import_reads_the_returned_keys() {
         Some(vec!["speed".to_string(), "label".to_string()])
     );
 
-    let source = "import { a, c } from \"./flat\"\nimport { speed, missing } from \"./shaped\"\nprint(a, c, speed, missing)\n";
+    // `default` is the returned value itself, as a bare import reads it.
+    let source = "import { a, c, default as whole } from \"./flat\"\nimport { speed, missing } from \"./shaped\"\nprint(a, c, whole, speed, missing)\n";
     let main = dir.join("main.aly");
     std::fs::write(&main, source).unwrap();
 
@@ -562,6 +681,117 @@ fn an_attribute_is_imported_with_its_sigil() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `@M.tag` through a star import reads the declaration `@tag` reads:
+/// the targets hold, and the defaults fill. A name the module does not
+/// export reports, and so does `@serde.x` that names no std attribute.
+/// Each one passed in silence, and `@M.price` stored no default.
+#[test]
+fn a_dotted_attribute_is_checked_against_its_declaration() {
+    let dir = scratch("dotted-attribute");
+    std::fs::write(
+        dir.join("tags.aly"),
+        "export attribute price(amount: number = 5) on struct, function\n",
+    )
+    .unwrap();
+    let main = dir.join("main.aly");
+    let source = "import * as serde from \"@alloy/std/serde\"\nimport * as M from \"./tags\"\n@derive(serde.Serialize)\nstruct Save as\n    @serde.renme(\"i\")\n    items: { string }\nend\n@M.tga\nfunction f()\nend\n@M.price\nenum E as\n    A\nend\n@M.price\nstruct Priced as\n    x: number\nend\nprint(Save, f, E, Priced)\n";
+    std::fs::write(&main, source).unwrap();
+    let options = alloy::EmitOptions::default().imports(source, &main, &[]);
+    let out = alloy::compile_with(source, &options).unwrap();
+    let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+    assert_eq!(
+        messages,
+        [
+            "\"@alloy/std/serde\" has no attribute `renme`; its attributes are `rename`, `rename_all`, `skip` and `deny_unknown_fields`",
+            "`M` exports no attribute `tga`; it exports `price`",
+            "the attribute `M.price` has no meaning on an enum; it goes on `struct` and `function`",
+        ]
+    );
+    assert!(
+        out.ship
+            .contains("__alloy.attrs(Priced, { own = { price = { 5 } }"),
+        "{}",
+        out.ship
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `@M.Ns.tag` reads a public attribute of a namespace the module
+/// exports, with its targets and defaults. A path the index knows to be
+/// wrong reports; a name the module sends on from another module is
+/// out of the index's reach, so a path through it passes. The path was
+/// accepted in silence with no default.
+#[test]
+fn a_namespace_attribute_is_checked_through_a_star_import() {
+    let dir = scratch("namespace-attribute");
+    std::fs::write(dir.join("inner.aly"), "export attribute deep on function\n").unwrap();
+    std::fs::write(
+        dir.join("tags.aly"),
+        "import * as Inner from \"./inner\"\nexport namespace Ns as\n    attribute tag(n: number = 3) on function\n    private attribute hidden on function\n    namespace Deeper as\n        attribute low on struct\n    end\nend\nexport { Inner }\n",
+    )
+    .unwrap();
+    let main = dir.join("main.aly");
+    let source = "import * as M from \"./tags\"\n@M.Ns.tag\nfunction a()\nend\n@M.Ns.Deeper.low\nstruct S as\n    x: number\nend\n@M.Inner.deep\nfunction b()\nend\n@M.Ns.tga\nfunction c()\nend\n@M.Ns.hidden\nfunction d()\nend\n@M.Nx.tag\nfunction e()\nend\n@M.Ns.Dx.low\nfunction f()\nend\n@M.Ns.tag\nstruct T as\n    x: number\nend\nprint(a, S, b, c, d, e, f, T)\n";
+    std::fs::write(&main, source).unwrap();
+    let options = alloy::EmitOptions::default().imports(source, &main, &[]);
+    let out = alloy::compile_with(source, &options).unwrap();
+    let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+    assert_eq!(
+        messages,
+        [
+            "`M.Ns` exports no attribute `tga`; it exports `tag`",
+            "`hidden` is private to `M.Ns`",
+            "`M` exports no `Nx`, so `@M.Nx.tag` names no attribute",
+            "`M` declares no namespace `Ns.Dx`, so `@M.Ns.Dx.low` names no attribute",
+            "the attribute `M.Ns.tag` has no meaning on a struct; it goes on `function`",
+        ]
+    );
+    assert!(
+        out.ship.contains("__alloy.attach(a, { tag = { 3 } })"),
+        "{}",
+        out.ship
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `@Kit.tag` through `import { Kit }` of a namespace reports as the
+/// local namespace and the star import do: a private attribute is
+/// private to `Kit`, and a missing one names the exports. Both read
+/// "an attribute of a module is used by its bare name".
+#[test]
+fn a_namespace_attribute_is_checked_through_a_named_import() {
+    let dir = scratch("named-namespace-attribute");
+    std::fs::write(
+        dir.join("kit.aly"),
+        "export namespace Kit
+    private attribute secret on struct
+    attribute open on struct
+end
+",
+    )
+    .unwrap();
+    let main = dir.join("main.aly");
+    let source = "import { Kit } from \"./kit\"\n@Kit.secret\nstruct A\n    x: number\nend\n@Kit.nope\nstruct B\n    x: number\nend\n@Kit.open\nstruct C\n    x: number\nend\nprint(A, B, C)\n";
+    std::fs::write(&main, source).unwrap();
+    let options = alloy::EmitOptions::default().imports(source, &main, &[]);
+    let out = alloy::compile_with(source, &options).unwrap();
+    let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+    assert_eq!(
+        messages,
+        [
+            "`secret` is private to `Kit`",
+            "`Kit` exports no attribute `nope`; it exports `open`",
+        ]
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `import * as M, { a }` binds the whole module and names from it, the
 /// way `import M, { a }` binds the default and names from it.
 #[test]
@@ -590,6 +820,30 @@ fn a_namespace_import_takes_a_name_list_too() {
         problems[0].message,
         "`version` is already imported in this file"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A name list over several lines reaches its module as a one-line
+/// list does, so the check artifact binds the types of the structs.
+#[test]
+fn a_list_over_several_lines_binds_the_types_it_names() {
+    let dir = scratch("multi-line");
+    std::fs::write(
+        dir.join("types.aly"),
+        "export struct Stats as\n    hp: number\nend\nexport struct Gear as\n    s: Stats\nend\n",
+    )
+    .unwrap();
+    let source = "import {\n    Stats, -- the stats\n    Gear,\n} from \"./types\"\n\nlocal function f(g: Gear): Stats\n    return g.s\nend\nprint(f)\n";
+    let options = alloy::EmitOptions {
+        import_types: alloy::modules::import_types(source, &dir.join("main.aly"), &[]),
+        ..Default::default()
+    };
+    let out = alloy::compile_with(source, &options).unwrap();
+    let line = out.check.lines().next().unwrap();
+
+    assert!(line.contains("type Stats = _m1.Stats"), "{line}");
+    assert!(line.contains("type Gear = _m1.Gear"), "{line}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -23,6 +23,26 @@ fn a_named_payload_reads_once_and_names_the_form() {
     assert!(out.ship.contains("Playing"), "{}", out.ship);
 }
 
+/// `Grunt { hp: number }` is the struct habit. It read "expected a
+/// name, found `{`" and a cascade after it. It now reads once, names the
+/// form, and the parse goes on with the types as the payload.
+#[test]
+fn a_braced_variant_reads_once_and_names_the_form() {
+    let src = "enum Enemy as\n    Grunt { hp: number, speed: number }\n    Flyer\nend\nlocal e = Enemy.Flyer\nprint(e)\n";
+    assert_eq!(
+        messages(src),
+        vec!["a variant takes its payload in parentheses, as types: `Grunt(number, number)`"]
+    );
+
+    let out = alloy::compile_with(src, &alloy::EmitOptions::default()).unwrap();
+    assert!(
+        out.ship
+            .contains("function Enemy.Grunt(_1, _2) return setmetatable({ tag = \"Grunt\", _1 = _1, _2 = _2 }, Enemy) end"),
+        "{}",
+        out.ship
+    );
+}
+
 /// A payload with no name still parses with nothing to say.
 #[test]
 fn a_plain_payload_says_nothing() {
@@ -52,4 +72,53 @@ fn an_unclosed_enum_reports_and_does_not_panic() {
     let src = "enum E as\n    A\n    B\n\nfunction later(): number\n    return 1\nend\n";
     let got = messages(src);
     assert!(got.iter().any(|m| m.contains("needs an `end`")), "{got:?}");
+}
+
+/// `@derive(Debug)` prints every variant under the enum's name. A unit
+/// variant is a string with no metatable, and `debug` gave it bare:
+/// `Quit` beside `Event.Scored(3, "bob")`.
+#[test]
+fn a_derived_debug_names_the_enum_for_every_variant() {
+    let src = concat!(
+        "@derive(Debug)\n",
+        "enum Event\n",
+        "    Scored(number, string)\n",
+        "    Quit\n",
+        "end\n",
+        "local seen = `{Event.debug(Event.Quit)}|{Event.Scored(3, \"bob\"):debug()}`\n",
+        "export const project = { name = seen }\n",
+    );
+    let config = alloy::config_aly::evaluate_source(src, std::path::Path::new(".config.aly"))
+        .expect("the code runs");
+
+    assert_eq!(
+        config["project"]["name"].as_str(),
+        Some("Event.Quit|Event.Scored(3, \"bob\")")
+    );
+}
+
+/// A unit variant in a payload slot or a field printed as a bare
+/// string, `Item.Tool("Axe", 1)`, and a field that held a plain table
+/// printed its address. The printer knows each declared type now.
+#[test]
+fn a_printed_unit_variant_names_its_enum_in_a_slot_and_a_field() {
+    let src = concat!(
+        "enum Kind\n    Axe\nend\n",
+        "@derive(Debug)\nenum Item\n    Tool(Kind, number)\n    Junk\nend\n",
+        "struct Stack\n    item: Item\nend\n",
+        "@derive(Debug)\nstruct Bag\n    slots: { Stack }\nend\n",
+        "local tool = Item.Tool(Kind.Axe, 1):debug()\n",
+        "local stack = tostring(new Stack { item = Item.Junk })\n",
+        "local bag = new Bag { slots = { new Stack { item = Item.Junk } } }:debug()\n",
+        "export const project = { name = `{tool}|{stack}|{bag}` }\n",
+    );
+    let config = alloy::config_aly::evaluate_source(src, std::path::Path::new(".config.aly"))
+        .expect("the code runs");
+
+    assert_eq!(
+        config["project"]["name"].as_str(),
+        Some(
+            "Item.Tool(Kind.Axe, 1)|Stack { item = Item.Junk }|Bag { slots = [ Stack { item = Item.Junk } ] }"
+        )
+    );
 }

@@ -373,9 +373,16 @@ pub fn analyze(
         .flatten()
     {
         let name = entry.file_name();
-        let skip = [".git", "target", "node_modules", ".luaurc", ".config.luau"]
-            .iter()
-            .any(|s| name == *s)
+        let skip = [
+            ".git",
+            "target",
+            "node_modules",
+            ".luaurc",
+            ".config.luau",
+            "sourcemap.json",
+        ]
+        .iter()
+        .any(|s| name == *s)
             || Path::new(&name) == config.build.input
             || Path::new(&name) == config.build.out
             || Path::new(&name) == config.test.out;
@@ -636,18 +643,29 @@ pub fn analyze(
         cmd.arg(format!("--definitions={}", d.display()));
     }
 
-    // `alloy build` writes `sourcemap.json` at the root. A root that
-    // still holds the `.alloy/sourcemap.json` an older build wrote uses
-    // that one.
-    let sourcemap = [
-        root.join("sourcemap.json"),
-        root.join(".alloy/sourcemap.json"),
-    ]
-    .into_iter()
-    .find(|p| p.is_file());
+    // The sourcemap the language server gives luau-lsp. Its scripts
+    // point at the artifacts, which sit under `out` here as the build
+    // writes them, so `script.Parent` and a `require` of a child resolve.
+    if let Some(text) = crate::project::luau_sourcemap(root, config) {
+        let out_dir = normalize(&root.join(&config.build.out));
+        let text = crate::project::map_sourcemap(&text, &|s| {
+            let luau = crate::project::luau_script_path(s);
+            let at = normalize(&root.join(&luau));
 
-    if let Some(sourcemap) = &sourcemap {
-        cmd.arg("--sourcemap").arg(sourcemap);
+            match at.strip_prefix(&input_dir) {
+                Ok(rest) if !at.starts_with(&out_dir) => config
+                    .build
+                    .out
+                    .join(rest)
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+
+                _ => luau,
+            }
+        });
+        let target = mirror.join("sourcemap.json");
+        std::fs::write(&target, text).map_err(|e| e.to_string())?;
+        cmd.arg("--sourcemap").arg(&target);
     }
 
     for s in &sources {
@@ -686,6 +704,9 @@ pub fn analyze(
     // The artifacts the checker could not parse; its lints over one of
     // them describe a partial tree.
     let mut unparsed: HashSet<PathBuf> = HashSet::new();
+
+    // Every report, for a report that repeats one inside its bracket.
+    let reports: Vec<Line<'_>> = text.lines().filter_map(parse_line).collect();
 
     for line in text.lines() {
         let Some(report) = parse_line(line) else {
@@ -789,6 +810,17 @@ pub fn analyze(
         } else {
             (line_no, col)
         };
+
+        // The checker writes a mistake in a match arm again at the `(`
+        // of the whole match. The report inside points at the mistake.
+        let inner = reports
+            .iter()
+            .filter(|r| r.path == report.path && r.message == message)
+            .map(|r| (r.line, r.col));
+
+        if repeats_an_inner_report(&f.check, line_no, col, inner) {
+            continue;
+        }
 
         let silence = directives
             .entry(f.rel.clone())
@@ -1027,6 +1059,27 @@ pub fn analyze(
         };
         d.message = friendly_type_message(&d.message, &reach, source, d.col);
 
+        // `new Nope { }` names a struct, not a global, and the report
+        // moves onto the name.
+        if let Some(text) = whole
+            && let Some(better) = unknown_struct_report(
+                &d.message,
+                &root.join(&config.build.input).join(&d.rel),
+                text,
+                d.line,
+            )
+        {
+            d.kind = better.kind.to_string();
+            d.message = better.message;
+
+            if let Some((line, col)) = better.at {
+                d.line = line;
+                d.col = col;
+            }
+
+            continue;
+        }
+
         if let Some(text) = whole
             && let Some(message) = crate::modules::missing_import_message(
                 &d.message,
@@ -1150,6 +1203,8 @@ pub fn analyze(
         !(d.message.starts_with("Key '") && nil_lines.contains(&(d.rel.clone(), d.line)))
     });
 
+    drop_nil_echo(&mut analysis.diagnostics);
+
     // The checker gave up on the line: what else it says there comes
     // from a solve it did not finish.
     let limit_lines: Vec<(PathBuf, usize)> = analysis
@@ -1236,6 +1291,70 @@ pub fn known_shapes(files: &[CheckSource]) -> crate::shapes::Known {
     }
 }
 
+/// Whether a report at an opening `(` of the artifact repeats a report
+/// at one of `inner`, the positions of the same message, inside that
+/// bracket. Positions are one-based.
+fn repeats_an_inner_report(
+    check: &str,
+    line: usize,
+    col: usize,
+    inner: impl Iterator<Item = (usize, usize)>,
+) -> bool {
+    let offset = |line: usize, col: usize| {
+        let start = check
+            .split_inclusive('\n')
+            .take(line.saturating_sub(1))
+            .map(str::len)
+            .sum::<usize>();
+
+        start + col.saturating_sub(1)
+    };
+    let open = offset(line, col);
+
+    if check.as_bytes().get(open) != Some(&b'(') {
+        return false;
+    }
+
+    // The matching `)`, past any bracket inside a string.
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut close = None;
+
+    for (i, &b) in check.as_bytes().iter().enumerate().skip(open) {
+        match (quote, b) {
+            (Some(q), _) if b == q => quote = None,
+
+            (Some(_), _) => {}
+
+            (None, b'"' | b'\'') => quote = Some(b),
+
+            (None, b'(') => depth += 1,
+
+            (None, b')') => {
+                depth -= 1;
+
+                if depth == 0 {
+                    close = Some(i);
+
+                    break;
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    let Some(close) = close else {
+        return false;
+    };
+
+    inner.into_iter().any(|(l, c)| {
+        let at = offset(l, c);
+
+        at > open && at < close
+    })
+}
+
 /// One line of the analyzer's output, split.
 struct Line<'a> {
     path: &'a str,
@@ -1251,7 +1370,18 @@ fn parse_line(line: &str) -> Option<Line<'_>> {
         return Some(d);
     }
 
-    let open = line.find('(')?;
+    // With a sourcemap the checker writes the file's place in the tree
+    // after its path: `/m/build/a.luau [game/ReplicatedStorage/a](3,12)`.
+    // A name in the tree may hold a `(`, so the bracket goes first.
+    let first = line.find('(')?;
+    let placed = line[..first]
+        .find(" [")
+        .and_then(|b| Some((b, b + line[b..].find("](")? + 1)));
+    let (path, open) = match placed {
+        Some((end, open)) => (&line[..end], open),
+
+        None => (&line[..first], first),
+    };
     let close = line[open..].find(')')? + open;
     let (l, c) = line[open + 1..close].split_once(',')?;
     let rest = line[close + 1..].strip_prefix(": ")?;
@@ -1262,7 +1392,7 @@ fn parse_line(line: &str) -> Option<Line<'_>> {
     }
 
     Some(Line {
-        path: &line[..open],
+        path,
         line: l.trim().parse().ok()?,
         col: c.trim().parse().ok()?,
         kind,
@@ -1338,7 +1468,19 @@ fn map_position(
     let out_off = offset_of(&f.check, line, col)?;
 
     if !is_error && f.map.is_generated(out_off as u32) {
-        return None;
+        // A deprecated component reads by its tag, `<OldRow />`. The
+        // lowering writes the call, and the name stays on the line.
+        if kind != "DeprecatedApi" {
+            return None;
+        }
+
+        let col = f
+            .source
+            .lines()
+            .nth(line.saturating_sub(1))
+            .and_then(|text| named_column(text, message))?;
+
+        return Some((line, col));
     }
 
     // `$nameof(x)` and `$stringify(x)` turn their argument into a
@@ -1427,6 +1569,24 @@ fn offset_of(text: &str, line: usize, col: usize) -> Option<usize> {
 mod tests {
     use super::*;
 
+    /// The checker writes a match arm's mistake at the arm and again at
+    /// the `(` of the whole match. Only the outer copy goes.
+    #[test]
+    fn a_report_at_a_bracket_yields_to_the_same_report_inside() {
+        let check = "local x = (\n    if a then b + \")\" else 0\n)\nprint(x + 1)\n";
+
+        assert!(repeats_an_inner_report(check, 1, 11, [(2, 15)].into_iter()));
+        // A report outside the bracket is another mistake.
+        assert!(!repeats_an_inner_report(check, 1, 11, [(4, 7)].into_iter()));
+        // A report that is not at a bracket stays.
+        assert!(!repeats_an_inner_report(
+            check,
+            2,
+            15,
+            [(2, 15)].into_iter()
+        ));
+    }
+
     #[test]
     fn the_analyzer_line_parses() {
         let d = parse_line("src/a.luau(3,12): TypeError: Expected 'number', got 'string'").unwrap();
@@ -1443,6 +1603,15 @@ mod tests {
         assert_eq!((d.line, d.col), (0, 0));
         assert_eq!(d.kind, "TypeError");
         assert!(parse_line("[INFO] Loading definitions file: @roblox - a.d.luau").is_none());
+
+        // A file the sourcemap places carries its place in the tree.
+        let d = parse_line(
+            "/m/build/a.luau [game/ReplicatedStorage/Model (1)/a](3,12): TypeError: Expected 'number'",
+        )
+        .unwrap();
+        assert_eq!(d.path, "/m/build/a.luau");
+        assert_eq!((d.line, d.col), (3, 12));
+        assert_eq!(d.message, "Expected 'number'");
     }
 
     /// Two enums with one variant set print alike. The file imports

@@ -109,6 +109,9 @@ pub(crate) struct State {
     /// in it, with the line that file starts on. The child reports on
     /// the file it read, and the report belongs on the `.d.aly`.
     pub(crate) definition_sources: Vec<(PathBuf, alloy::declarations::Segment)>,
+    /// The child runs Luau's old solver, which types some checks of the
+    /// check artifact in another form. See `EmitOptions::new_solver`.
+    pub(crate) old_solver: bool,
     /// The `@roblox/globaltype/Class.Member` entries of that file, read
     /// once on the first list that needs one. The file is 7 MB, so a
     /// read at startup would cost every session that never opens a
@@ -183,7 +186,10 @@ impl State {
             return Arc::clone(held);
         }
 
-        let held = Arc::new(alloy::build::struct_shapes(&self.project_sources()));
+        // The editor runs no wire, so the root serves as the base of
+        // each shape's module; the keys only have to agree here.
+        let base = self.root.clone().unwrap_or_default();
+        let held = Arc::new(alloy::build::struct_shapes(&self.project_sources(), &base, &[]).0);
         *self.project_shapes.borrow_mut() = Some(Arc::clone(&held));
 
         held
@@ -263,13 +269,23 @@ impl State {
     }
 
     /// The side a document sees: `ui.client.aly` is the client's and
-    /// `main.server.aly` the server's. Every other name is shared.
+    /// `main.server.aly` the server's. Any other name takes the side of
+    /// its place in the game, as the compile does.
     pub(crate) fn side_at(&self, uri: &str) -> Option<alloy::directives::Side> {
-        let name = uri_to_path(uri)
+        let path = uri_to_path(uri);
+        let name = path
+            .as_ref()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| uri.to_string());
 
-        alloy::directives::file_side(&name)
+        alloy::directives::file_side(&name).or_else(|| {
+            let path = path?;
+            let project = self.config_at(path.parent()?)?;
+            let root = project.0.parent()?;
+            let tree = alloy::project::Tree::load(root, &project.1);
+
+            alloy::project::place_side(&tree, path.strip_prefix(root).ok()?)
+        })
     }
 
     /// Writes the mirror's Luau configuration for a project root once.
@@ -609,6 +625,7 @@ impl State {
         options.foreign_impls = project.methods.clone();
         options.foreign_privates = project.privates.clone();
         options.shapes = self.project_shapes().to_vec();
+        options.new_solver = !self.old_solver;
 
         (options, jsx)
     }

@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use alloy_syntax::ast::{Chunk, Expr, ImportKind, Stmt};
 use alloy_syntax::lexer::{Tok, TokKind};
 
-use crate::build::{module_base, relative_require};
+use crate::build::relative_require;
 use crate::config::Config;
 use crate::{Diagnostic, EmitOptions};
 
@@ -615,7 +615,7 @@ fn write_modules(
     let sources = crate::build::sources(&input, &written)?;
     // The build's view of other files' structs: an imported struct
     // clones and serializes through its own derives in a test as well.
-    let shapes = crate::build::struct_shapes(&sources);
+    let (shapes, wire_scopes) = crate::build::struct_shapes(&sources, &input, &aliases);
 
     for path in sources {
         let rel = path.strip_prefix(&input).unwrap_or(&path).to_path_buf();
@@ -639,6 +639,7 @@ fn write_modules(
             std_globals: config.std.globals.clone(),
             extensions: extensions.to_vec(),
             shapes: shapes.clone(),
+            wire_scopes: wire_scopes.clone(),
             ..EmitOptions::default().imports(&source, &path, &aliases)
         };
         let compiled = crate::compile_file(
@@ -655,10 +656,7 @@ fn write_modules(
                     rewrite_requires(config, &tree, root, &source_rel, &module_rel, &out.ship);
 
                 if config.test.shim {
-                    text = with_shim(
-                        &text,
-                        &relative_require(&module_base(&module_rel), &modules.join("shim")),
-                    );
+                    text = with_shim(&text, &require_from(&module_rel, &modules.join("shim")));
                 }
 
                 let target = dir.join(&rel_out);
@@ -739,9 +737,21 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// The require path from the module at `rel` to `target`. lest reads a
+/// relative path in an `init.luau` from the file's own folder, and Luau
+/// reads it from the folder above. `@self` names the own folder in both.
+fn require_from(rel: &Path, target: &Path) -> String {
+    let path = relative_require(rel, target);
+
+    match crate::build::is_init(rel) {
+        true => format!("@self/{}", path.strip_prefix("./").unwrap_or(&path)),
+
+        false => path,
+    }
+}
+
 /// Rewrites every relative or aliased `require` of an emitted text to
 /// the path from the spec to the target. The text keeps its line count.
-/// A spec named `init.luau` requires from its folder, as Luau reads it.
 fn rewrite_requires(
     config: &Config,
     tree: &crate::project::Tree,
@@ -752,7 +762,7 @@ fn rewrite_requires(
 ) -> String {
     crate::project::map_requires(text, |path| {
         target_for(config, tree, root, source_rel, path)
-            .map(|target| relative_require(&module_base(spec_rel), &target))
+            .map(|target| require_from(spec_rel, &target))
     })
 }
 
@@ -838,16 +848,16 @@ pub fn spec(
     let aliases = crate::modules::aliases(root, &tree);
     // ponytail: every spec reads the project's structs again; cache them
     // per run if a project with many specs makes `alloy test` slow.
-    let shapes = crate::build::sources(
-        &root.join(&config.build.input),
-        &crate::build::written_dirs(root, config),
-    )
-    .map(|s| crate::build::struct_shapes(&s))
-    .unwrap_or_default();
+    let input = root.join(&config.build.input);
+    let (shapes, wire_scopes) =
+        crate::build::sources(&input, &crate::build::written_dirs(root, config))
+            .map(|s| crate::build::struct_shapes(&s, &input, &aliases))
+            .unwrap_or_default();
     let options = EmitOptions {
         file_name: source_rel.to_string_lossy().into_owned(),
         std_require: relative_require(source_rel, &runtime),
         shapes,
+        wire_scopes,
         tests: true,
         wait_timeout: config.emit.wait_timeout,
         test_runner: config.test.lest,
@@ -901,8 +911,16 @@ pub fn spec(
 
     for (test, is_async) in &out.tests {
         if *is_async {
+            // lest calls the test on a thread that cannot yield. The shim
+            // steps the threads a `task.wait` parked until the Future
+            // settles, so the `await` here returns at once.
+            let future = if config.test.shim {
+                format!("__shim.settle({test}())")
+            } else {
+                format!("{test}()")
+            };
             text.push_str(&format!(
-                "    __lest.it({}, function()\n        __alloy.await({test}())\n    end)\n",
+                "    __lest.it({}, function()\n        __alloy.await({future})\n    end)\n",
                 luau_string(test)
             ));
         } else {
@@ -1237,6 +1255,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A barrel `lib/init.aly` wrote `require("./lib/m")` and
+    /// `require("../shim")` in its test copy, from the folder above, as
+    /// Luau reads an `init.luau`. lest reads them from the file's own
+    /// folder, so no spec that reached the barrel could load. `@self`
+    /// names that folder for both.
+    #[test]
+    fn an_init_module_requires_from_its_own_folder() {
+        let dir = std::env::temp_dir().join(format!("alloy-init-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/lib")).expect("the folder");
+        std::fs::write(dir.join("src/lib/init.aly"), "export { X } from \"./m\"\n")
+            .expect("the file");
+        std::fs::write(dir.join("src/lib/m.aly"), "export const X = 1\n").expect("the file");
+        std::fs::write(
+            dir.join("src/use.aly"),
+            "import { X } from \"./lib\"\n\n@test\nfunction one()\n    $assert_eq(X, 1)\nend\n",
+        )
+        .expect("the file");
+
+        let mut config = Config::default();
+        config.test.shim = true;
+        run(&dir, &config, true).expect("the write");
+
+        let init = dir.join("tests/.modules/lib/init.luau");
+        let text = std::fs::read_to_string(&init).expect("the module");
+        let folder = init.parent().expect("the folder");
+
+        for (spec, file) in [("@self/m", "m.luau"), ("@self/../shim", "../shim.luau")] {
+            assert!(text.contains(&format!("require(\"{spec}\")")), "{text}");
+            assert!(folder.join(file).is_file(), "{spec} names no module");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// `alloy test` adds the `@lest` alias to the Luau configuration
     /// the project has. A note that names the file is the last resort,
     /// not the first.
@@ -1344,8 +1397,28 @@ mod tests {
         );
         assert!(text.contains("__lest.describe(\"m\", function()"), "{text}");
         assert!(text.contains("__lest.it(\"plain\", plain)"), "{text}");
-        assert!(text.contains("__alloy.await(later())"), "{text}");
+        // lest calls a test on a thread that cannot yield, so the shim
+        // steps the parked threads until the Future settles.
+        assert!(
+            text.contains("__alloy.await(__shim.settle(later()))"),
+            "{text}"
+        );
         assert!(!text.contains("__alloy.test("), "{text}");
+
+        // Without the shim nothing parks, and the Future goes to `await`.
+        let mut plain = Config::default();
+        plain.test.shim = false;
+        let (text, _, _) = spec(
+            &plain,
+            Path::new("/none"),
+            Path::new("src/m.aly"),
+            src,
+            None,
+            &[],
+        )
+        .unwrap()
+        .unwrap();
+        assert!(text.contains("__alloy.await(later())"), "{text}");
     }
 
     /// A `.alx` file writes a spec too. The slice follows the names the

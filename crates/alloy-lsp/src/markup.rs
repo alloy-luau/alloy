@@ -52,12 +52,46 @@ pub(crate) fn opens_markup(src: &str, lt: usize) -> bool {
         return true;
     }
 
+    // `<Frame> {R()} <TextLabel`: the `}` closes a hole among the
+    // children of an element, and the tag after it is the next child.
+    if last == '}' {
+        return ends_with_child_hole(before);
+    }
+
     let word = crate::imports::word_before(before, before.len());
 
     matches!(
         word.as_str(),
         "return" | "then" | "else" | "do" | "and" | "or" | "not"
     )
+}
+
+/// Whether `text` ends with a `{ }` hole that is a child of an element:
+/// its `{` follows the `>` of a tag or another such hole. A table
+/// constructor follows neither.
+fn ends_with_child_hole(text: &str) -> bool {
+    let mut depth = 0i32;
+
+    for (i, c) in text.char_indices().rev() {
+        match c {
+            '}' => depth += 1,
+
+            '{' => {
+                depth -= 1;
+
+                if depth == 0 {
+                    let head = text[..i].trim_end();
+
+                    return head.ends_with('>')
+                        || head.ends_with('}') && ends_with_child_hole(head);
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    false
 }
 
 /// Whether a statement of its own stands between `lt` and `offset`.
@@ -489,13 +523,13 @@ pub fn component_module(src: &str, name: &str, load: &Load) -> Option<String> {
 
     specs
         .into_iter()
-        .find(|spec| load(spec).is_some_and(|text| text.contains(&head)))
+        .find(|spec| load(spec).is_some_and(|(text, _)| text.contains(&head)))
 }
 
 /// The source that declares the component a tag names: `None` when this
 /// file declares it, and otherwise the module an import brings it from.
 pub fn component_source(src: &str, name: &str, load: &Load) -> Option<String> {
-    load(&component_module(src, name, load)?)
+    load(&component_module(src, name, load)?).map(|(text, _)| text)
 }
 
 /// The fields the type `name` declares in `src`: a `type` alias over a
@@ -867,8 +901,10 @@ pub fn hover(
                     .unwrap_or_else(|| format!("{holder}.{}", m.name));
 
                 format!(
-                    "```alloy\n{code}\n```\n`{holder}.{}`: a {}. A tag stands on a function.",
-                    m.name, m.detail
+                    "```alloy\n{code}\n```\n`{holder}.{}`: {} {}. A tag stands on a function.",
+                    m.name,
+                    alloy::desugar::article(&m.detail),
+                    m.detail
                 )
             } else if roblox::is_class(name) {
                 let props = roblox::properties(name).count();
@@ -1037,9 +1073,22 @@ pub fn completions(
             // `ClassName` belongs to no class, so nothing else offers
             // it, and the ingot's own words say what it holds.
             let mut from_ingots: HashSet<&str> = HashSet::new();
+            // An ingot rewrites the props of an element into properties
+            // before the tag is built; a component gets its props as a
+            // table, so an ingot's prop has nothing to read there.
+            // Enamel refuses one on a component.
+            let component = !roblox::is_class(class)
+                && class
+                    .rsplit('.')
+                    .next()
+                    .and_then(|n| n.chars().next())
+                    .is_some_and(char::is_uppercase);
 
             for p in props {
-                if !p.name.starts_with(prefix.as_str()) || taken.contains(p.name.as_str()) {
+                if component
+                    || !p.name.starts_with(prefix.as_str())
+                    || taken.contains(p.name.as_str())
+                {
                     continue;
                 }
 
@@ -1655,7 +1704,8 @@ mod tests {
             "export function Card(props: CardProps): any end\n",
         );
         let src = "import { Card } from \"./card\"\nlocal function App(): any\n    return (<Card  />)\nend\n";
-        let load = |spec: &str| (spec == "./card").then(|| card.to_string());
+        let load =
+            |spec: &str| (spec == "./card").then(|| (card.to_string(), "/w/card.aly".into()));
         let owner = component_source(src, "Card", &load).expect("the module");
         let items = completions(
             &Spot::AttributeSlot {
@@ -1753,7 +1803,9 @@ mod tests {
         );
         assert!(items.iter().all(|i| i["label"] != "ClassName"));
 
-        // On a component the ingot's words replace the generic ones.
+        // A component gets its props as a table, so the ingot has
+        // nothing to read there and Enamel refuses one: the list leaves
+        // it out.
         let src = "local function Badge(props: { label: string }) end";
         let items = completions(
             &Spot::AttributeSlot {
@@ -1766,8 +1818,7 @@ mod tests {
             &props,
             &[],
         );
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0]["detail"], "prop of the enamel ingot");
+        assert!(items.iter().all(|i| i["label"] != "ClassName"), "{items:?}");
     }
 
     /// A `<` the reader started and left opens markup, so a tag under
@@ -1780,6 +1831,34 @@ mod tests {
         let at = src.rfind("<NS.").unwrap();
 
         assert!(opens_markup(src, at), "the tag after a bare `<` is a tag");
+    }
+
+    /// A tag after a `{ }` child is the next child. The list then holds
+    /// the tag's properties, or the tag names at `<T`, and not every
+    /// global in scope. A table before a comparison opens nothing.
+    #[test]
+    fn a_tag_after_a_hole_child_opens_markup() {
+        let src =
+            "return (\n    <Frame>\n      {R()} {S()}\n      <TextLabel  />\n    </Frame>\n)\n";
+        let at = src.find("<TextLabel").unwrap() + "<TextLabel ".len();
+
+        assert_eq!(
+            completion_spot(src, at),
+            Some(Spot::AttributeSlot {
+                class: "TextLabel".into(),
+                prefix: String::new(),
+                existing: Vec::new(),
+            })
+        );
+
+        let typing = "return (\n    <Frame>\n      {R()}\n      <T\n    </Frame>\n)\n";
+        assert_eq!(
+            completion_spot(typing, typing.find("<T").unwrap() + 2),
+            Some(Spot::TagSlot { prefix: "T".into() })
+        );
+
+        let table = "local x = {1} < 2";
+        assert!(!opens_markup(table, table.rfind('<').unwrap()));
     }
 
     /// `a << b` is a shift. Its second `<` sits against the first, and

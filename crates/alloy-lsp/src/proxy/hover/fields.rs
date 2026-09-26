@@ -786,7 +786,9 @@ pub(crate) fn name_solver_local(
     let named = match init.strip_prefix("new ") {
         Some(after) => super::restyle::constructed_type(doc, after)?,
 
-        None => read_field_type(st, doc, line_start, &init)?,
+        None => read_field_type(st, doc, line_start, &init)
+            .or_else(|| plain_table_alias(doc, &init))
+            .or_else(|| class_instance(doc, &init, body))?,
     };
     let named = match printed.ends_with('?') && !named.ends_with('?') {
         true => format!("{named}?"),
@@ -797,15 +799,83 @@ pub(crate) fn name_solver_local(
     Some(format!("{fence}\n{head}: {named}\n```{tail}"))
 }
 
+/// `local alias = Provider`, where `Provider` is a plain table of this
+/// file. The value is the table itself, so the name is `typeof(Provider)`.
+/// The shape folds name a plain table for `self` alone.
+fn plain_table_alias(doc: &Doc, init: &str) -> Option<String> {
+    doc.tables
+        .iter()
+        .any(|(name, _)| name == init)
+        .then(|| format!("typeof({init})"))
+}
+
+/// `local a = Klass.new(1)` on a class of the `Klass.__index = Klass`
+/// shape. The checker prints the instance as a metatable over a record,
+/// in solver variables. `self` in a method of the class reads as
+/// `Klass`, so the value its `new` builds reads the same way. A table
+/// of this file must be such a class. An imported one has the
+/// metatable in the print as its proof.
+fn class_instance(doc: &Doc, init: &str, body: &str) -> Option<String> {
+    let (owner, args) = init.split_once(".new(")?;
+
+    if owner.is_empty()
+        || !owner.chars().all(|c| c.is_alphanumeric() || c == '_')
+        || !body.contains("@metatable")
+        || !body.contains("__index")
+    {
+        return None;
+    }
+
+    // The call to `new` is the whole value: `Klass.new(1):tag()` holds
+    // what `tag` returns.
+    let mut depth = 1;
+
+    for (i, c) in args.char_indices() {
+        match c {
+            '(' => depth += 1,
+
+            ')' => depth -= 1,
+
+            _ => {}
+        }
+
+        if depth == 0 {
+            if !args[i + 1..].trim().is_empty() {
+                return None;
+            }
+
+            break;
+        }
+    }
+
+    let declared = doc.source.lines().any(|l| {
+        l.strip_prefix("local ")
+            .and_then(|r| r.strip_prefix(owner))
+            .is_some_and(|r| r.trim_start().starts_with('='))
+    });
+
+    if declared && !doc.source.contains(&format!("{owner}.__index = {owner}")) {
+        return None;
+    }
+
+    Some(owner.to_string())
+}
+
 /*
 A print that names a struct only by its shape: `t2 where t1 = { new: ...
 } ; t2 = { @metatable t1, { x: number } }`. The checker writes a struct
 that way when its name is out of its reach, a member of a namespace or
 one an import brought. The field list names the struct: the one struct
 in reach that declares those fields and no others. The file's own
-declarations answer before the ones an import brings.
+declarations answer before the ones an import brings, and those before
+`reach`, the ones the imported modules import. A remote of `net` that
+sends `{ Stack }` hands the file a `Stack` that only `net` imports.
 */
-pub(crate) fn name_solver_struct(value: &str, doc: &Doc) -> Option<String> {
+pub(crate) fn name_solver_struct(
+    value: &str,
+    doc: &Doc,
+    reach: &[&alloy::declarations::Declaration],
+) -> Option<String> {
     let (fence, rest) = value.split_once('\n')?;
     let (body, tail) = rest.split_once("\n```")?;
     let (head, printed) = match body.split_once(": ") {
@@ -820,70 +890,88 @@ pub(crate) fn name_solver_struct(value: &str, doc: &Doc) -> Option<String> {
     }
 
     // `{ @metatable t1,\n{ x: number } }`: the record after the comma.
-    let meta = printed.find("@metatable ")?;
-    let comma = meta + printed[meta..].find(',')? + 1;
-    let open = comma + printed[comma..].find(|c: char| !c.is_whitespace())?;
+    let struct_named = |meta: usize| {
+        let comma = meta + printed[meta..].find(',')? + 1;
+        let open = comma + printed[comma..].find(|c: char| !c.is_whitespace())?;
 
-    if !printed[open..].starts_with('{') {
-        return None;
-    }
+        if !printed[open..].starts_with('{') {
+            return None;
+        }
 
-    let len = super::restyle::group_len(&printed[open..], '{', '}')?;
-    let mut fields: Vec<String> = context::record_entries(&printed[open..open + len])
-        .into_iter()
-        .map(|f| f.name)
-        .collect();
-    fields.sort();
-
-    let matches = |d: &&alloy::declarations::Declaration| {
-        let mut own: Vec<String> = context::record_entries(&d.hover)
+        let len = super::restyle::group_len(&printed[open..], '{', '}')?;
+        let mut fields: Vec<String> = context::record_entries(&printed[open..open + len])
             .into_iter()
             .map(|f| f.name)
             .collect();
-        own.sort();
+        fields.sort();
 
-        d.hover.contains("struct ") && own == fields
-    };
-    // A namespace member is indexed twice, under its path and under the
-    // flat name the emit gives it; the two share one hover.
-    let named = [&doc.decls, &doc.import_decls]
+        let matches = |d: &&alloy::declarations::Declaration| {
+            let mut own: Vec<String> = context::record_entries(&d.hover)
+                .into_iter()
+                .map(|f| f.name)
+                .collect();
+            own.sort();
+
+            d.hover.contains("struct ") && own == fields
+        };
+
+        // A namespace member is indexed twice, under its path and under
+        // the flat name the emit gives it; the two share one hover.
+        [
+            doc.decls.iter().collect(),
+            doc.import_decls.iter().collect(),
+            reach.to_vec(),
+        ]
         .into_iter()
-        .find_map(|decls| {
+        .find_map(|decls: Vec<&alloy::declarations::Declaration>| {
             let hits: Vec<&alloy::declarations::Declaration> =
-                decls.iter().filter(matches).collect();
+                decls.into_iter().filter(matches).collect();
             let first = hits.first()?;
             let path = hits.iter().find(|d| d.name.contains('.')).unwrap_or(first);
 
             hits.iter()
                 .all(|d| d.hover == first.hover)
                 .then(|| path.name.clone())
-        })?;
-    // The variable the metatable pair binds, `t2` of `t2 = { @metatable
+        })
+    };
+    // The variable a metatable pair binds, `t2` of `t2 = { @metatable
     // t1, ... }`, stands for the struct wherever the print reads it:
-    // `{t2}?` is `{Part}?`.
-    let var: String = printed[..meta]
-        .trim_end()
-        .strip_suffix('{')?
-        .trim_end()
-        .strip_suffix('=')?
-        .trim_end()
-        .chars()
-        .rev()
-        .take_while(|c| c.is_alphanumeric())
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
-    let mut named_first = String::new();
-    let mut rest = first;
+    // `{t2}?` is `{Part}?`. A clause can bind several: an enum field of
+    // the struct binds its own variable before the struct's.
+    let mut named_first = first.to_string();
 
-    while let Some(at) = keywords::find_word(rest, &var) {
-        named_first.push_str(&rest[..at]);
-        named_first.push_str(&named);
-        rest = &rest[at + var.len()..];
+    for (meta, _) in printed.match_indices("@metatable ") {
+        let Some(bound) = printed[..meta]
+            .trim_end()
+            .strip_suffix('{')
+            .and_then(|b| b.trim_end().strip_suffix('='))
+            .map(str::trim_end)
+        else {
+            continue;
+        };
+        let var = &bound[bound
+            .rfind(|c: char| !c.is_alphanumeric())
+            .map_or(0, |i| i + 1)..];
+
+        if var.is_empty() || keywords::find_word(&named_first, var).is_none() {
+            continue;
+        }
+
+        let Some(named) = struct_named(meta) else {
+            continue;
+        };
+        let mut out = String::new();
+        let mut rest = named_first.as_str();
+
+        while let Some(at) = keywords::find_word(rest, var) {
+            out.push_str(&rest[..at]);
+            out.push_str(&named);
+            rest = &rest[at + var.len()..];
+        }
+
+        out.push_str(rest);
+        named_first = out;
     }
-
-    named_first.push_str(rest);
 
     if super::restyle::holds_solver_variable(&named_first) {
         return None;

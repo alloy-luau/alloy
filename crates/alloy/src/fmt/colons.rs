@@ -2,6 +2,7 @@
 //! parameter, a field, or a return type, and every `:` inside a type,
 //! a generic list, a trait signature, or a type alias. `a:b()` and
 //! `a: b` lex the same, so the spacing reads the tree for the answer.
+//! The same walk finds each `if` that opens an expression.
 
 use std::collections::HashSet;
 
@@ -14,12 +15,7 @@ use crate::desugar::{Child, expr_children, stmt_children};
 
 /// The byte offsets of every annotation colon in the chunk.
 pub(crate) fn annotation_colons(src: &str, toks: &[Tok], chunk: &Chunk) -> HashSet<usize> {
-    let mut walk = Walk {
-        src,
-        toks,
-        spans: Vec::new(),
-    };
-    walk.block(&chunk.block);
+    let walk = Walk::new(src, toks, chunk);
     let mut out = HashSet::new();
 
     for span in walk.spans {
@@ -41,14 +37,37 @@ pub(crate) fn annotation_colons(src: &str, toks: &[Tok], chunk: &Chunk) -> HashS
     out
 }
 
-/// The type spans of a tree, in source order.
+/// The byte offsets of the `if` of every `if` expression in the chunk.
+/// The tail of a macro opens its line like a statement does, so only
+/// the tree tells that `if` from a statement.
+pub(crate) fn expr_ifs(src: &str, toks: &[Tok], chunk: &Chunk) -> HashSet<usize> {
+    let walk = Walk::new(src, toks, chunk);
+
+    walk.ifs.iter().map(|&i| toks[i].start as usize).collect()
+}
+
+/// The type spans of a tree, in source order, and the token of each
+/// `if` expression.
 struct Walk<'a> {
     src: &'a str,
     toks: &'a [Tok],
     spans: Vec<TokSpan>,
+    ifs: Vec<usize>,
 }
 
-impl Walk<'_> {
+impl<'a> Walk<'a> {
+    fn new(src: &'a str, toks: &'a [Tok], chunk: &Chunk) -> Self {
+        let mut walk = Walk {
+            src,
+            toks,
+            spans: Vec::new(),
+            ifs: Vec::new(),
+        };
+        walk.block(&chunk.block);
+
+        walk
+    }
+
     fn block(&mut self, b: &Block) {
         for s in &b.stmts {
             self.stmt(s);
@@ -168,7 +187,9 @@ impl Walk<'_> {
         match e {
             Expr::TypeAssert { ty, .. } | Expr::Satisfies { ty, .. } => self.spans.push(*ty),
 
-            Expr::IfElse { branches, .. } => {
+            Expr::IfElse { branches, span, .. } => {
+                self.ifs.push(span.start as usize);
+
                 for (c, _) in branches {
                     self.cond(c);
                 }

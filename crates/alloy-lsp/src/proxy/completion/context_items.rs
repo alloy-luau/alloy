@@ -1,14 +1,51 @@
 use super::*;
 
 impl State {
-    /// The items for a completion context. A sigil item replaces the
-    /// sigil too, since the editor's word never includes it.
+    /// The items for a completion context, less the names its list
+    /// already holds: `@derive(Serialize, |` offers no second
+    /// `Serialize`, and `import { Coins, |` no second `Coins`.
     pub(crate) fn context_items(
         &self,
         uri: &str,
         offset: usize,
         ctx: &context::Context,
     ) -> Vec<Value> {
+        use crate::context::Context;
+
+        let mut items = self.context_rows(uri, offset, ctx);
+        let brackets = match ctx {
+            Context::DeriveArg { .. } => Some(('(', ')')),
+
+            Context::LuauAttrList {
+                in_table: false, ..
+            } => Some(('[', ']')),
+
+            Context::LuauAttrList { in_table: true, .. } | Context::ImportNames { .. } => {
+                Some(('{', '}'))
+            }
+
+            _ => None,
+        };
+
+        if let Some((open, close)) = brackets
+            && let Some(doc) = self.docs.get(uri)
+        {
+            let written = written_entries(&doc.source, offset, open, close);
+
+            items.retain(|i| {
+                let label = i["label"].as_str().unwrap_or_default();
+                let name = label.rsplit(' ').next().unwrap_or(label);
+
+                !written.contains(&name.trim_start_matches('@'))
+            });
+        }
+
+        items
+    }
+
+    /// The rows of a completion context. A sigil item replaces the
+    /// sigil too, since the editor's word never includes it.
+    fn context_rows(&self, uri: &str, offset: usize, ctx: &context::Context) -> Vec<Value> {
         use crate::context::Context;
 
         let Some(doc) = self.docs.get(uri) else {
@@ -61,21 +98,8 @@ impl State {
                 bare,
                 ..
             } => {
-                // Only the attributes that go on what the position
-                // names. With nothing under the caret to carry one, the
-                // list holds the attributes that go anywhere: every
-                // other one names a target the reader has not written.
-                // `attribute X on function` covers a method too, so a
-                // method position takes what a function takes.
-                let fits = |targets: &[&str]| match target {
-                    Some("method") => targets.contains(&"method") || targets.contains(&"function"),
-
-                    Some(t) => targets.contains(t),
-
-                    None if *bare => targets.is_empty(),
-
-                    None => true,
-                };
+                // Only the attributes that go on what the position names.
+                let fits = |targets: &[&str]| fits_target(targets, *target, *bare);
 
                 for key in keywords::keys_with_prefix("@") {
                     let ok = match (target, *bare) {
@@ -121,24 +145,85 @@ impl State {
                         items.push(item);
                     }
                 }
+
+                // A namespace that holds an attribute for this spot is
+                // the head of a path: `@Tags` goes on to `@Tags.station`.
+                // The file's own namespaces count, and the ones a named
+                // import brings.
+                let holds = |decls: &[(String, alloy::desugar::AttrDecl)], path: &str| {
+                    decls.iter().any(|(key, decl)| {
+                        let targets: Vec<&str> = decl.targets.iter().map(String::as_str).collect();
+
+                        key.strip_prefix(path).is_some_and(|r| r.starts_with('.')) && fits(&targets)
+                    })
+                };
+                let own = alloy::modules::attribute_paths(&doc.source);
+                let mut heads: Vec<String> = own
+                    .iter()
+                    .filter_map(|(key, _)| key.split_once('.').map(|(ns, _)| ns.to_string()))
+                    .filter(|ns| holds(&own, ns))
+                    .collect();
+
+                for e in crate::proxy::navigation::import_entries(&doc.source) {
+                    let text = self
+                        .resolve_spec(uri, &e.spec)
+                        .and_then(|p| imports::module_file(&imports::module_path(&p)))
+                        .and_then(|file| self.module_text(&file));
+
+                    if let Some(text) = text
+                        && holds(&alloy::modules::exported_attribute_decls(&text), &e.name)
+                    {
+                        heads.push(e.bound);
+                    }
+                }
+
+                for head in heads {
+                    let label = format!("@{head}");
+
+                    if seen.insert(label.clone()) {
+                        let mut item = word(&label, 9, None, *sigil);
+                        item["detail"] = json!("namespace");
+                        item["textEdit"]["newText"] = json!(format!("{label}."));
+                        item["command"] = json!({
+                            "title": "Suggest",
+                            "command": "editor.action.triggerSuggest",
+                        });
+                        items.push(item);
+                    }
+                }
             }
 
             // `@serde.|` lists the std module's attributes, and `@M.|`
-            // the ones a module of the project exports.
-            Context::AttributePath { alias, .. } => {
-                let Some(spec) = crate::proxy::navigation::module_bindings(&doc.source)
+            // the ones a module of the project exports. `@Ns.|` lists
+            // what a namespace holds: its attributes and the namespaces
+            // inside it, through a star import, a named import, or the
+            // file's own declaration.
+            // The target decides here as it does after a bare `@`.
+            Context::AttributePath {
+                alias,
+                target,
+                bare,
+                ..
+            } => {
+                let (head, inner) = alias.split_once('.').unwrap_or((alias.as_str(), ""));
+                let star = crate::proxy::navigation::module_bindings(&doc.source)
                     .into_iter()
-                    .find(|(bound, _)| bound == alias)
-                    .map(|(_, spec)| spec)
-                else {
-                    return items;
-                };
+                    .find(|(bound, _)| bound == head)
+                    .map(|(_, spec)| spec);
 
-                if let Some(module) = alloy::std_names::module_of_spec(&spec) {
+                if let Some(module) = star
+                    .as_deref()
+                    .filter(|_| inner.is_empty())
+                    .and_then(alloy::std_names::module_of_spec)
+                {
                     for (m, names) in alloy::std_names::ATTRIBUTES {
                         if module.is_empty() || module == *m {
                             for name in *names {
                                 let key = format!("@{name}");
+
+                                if !fits_target(builtin_attribute_targets(&key), *target, *bare) {
+                                    continue;
+                                }
                                 let mut item = json!({ "label": name, "kind": 14 });
 
                                 if let Some(d) = keywords::doc(&key) {
@@ -150,20 +235,83 @@ impl State {
                             }
                         }
                     }
-                } else if let Some(file) = self
-                    .resolve_spec(uri, &spec)
-                    .and_then(|p| imports::module_file(&imports::module_path(&p)))
-                    && let Some(text) = self.module_text(&file)
-                {
-                    for d in alloy::declarations::summaries(&text, false) {
-                        if let Some(name) = d.name.strip_prefix('@') {
-                            items.push(json!({
-                                "label": name,
-                                "kind": 14,
-                                "documentation": { "kind": "markdown", "value": d.hover },
-                            }));
-                        }
+
+                    return items;
+                }
+
+                let module_text = |spec: &str| {
+                    self.resolve_spec(uri, spec)
+                        .and_then(|p| imports::module_file(&imports::module_path(&p)))
+                        .and_then(|file| self.module_text(&file))
+                };
+                let named = crate::proxy::navigation::import_entries(&doc.source)
+                    .into_iter()
+                    .find(|e| e.bound == head);
+                // The text that declares the attributes, and the path of
+                // the namespace in it. An import reaches what the module
+                // exports; the file reaches its own declarations.
+                let (text, path, own) = match (&star, named) {
+                    (Some(spec), _) => (module_text(spec), inner.to_string(), false),
+
+                    (None, Some(e)) => {
+                        let path = match inner.is_empty() {
+                            true => e.name,
+
+                            false => format!("{}.{inner}", e.name),
+                        };
+
+                        (module_text(&e.spec), path, false)
                     }
+
+                    (None, None) => (Some(doc.source.clone()), alias.clone(), true),
+                };
+                let Some(text) = text else {
+                    return items;
+                };
+                let decls = match own {
+                    true => alloy::modules::attribute_paths(&text),
+
+                    false => alloy::modules::exported_attribute_decls(&text),
+                };
+                let hovers = alloy::declarations::summaries(&text, false);
+                let mut namespaces = HashSet::new();
+
+                for (key, decl) in &decls {
+                    let rest = match path.is_empty() {
+                        true => Some(key.as_str()),
+
+                        false => key.strip_prefix(&format!("{path}.")),
+                    };
+                    let Some(rest) = rest else {
+                        continue;
+                    };
+
+                    if let Some((ns, _)) = rest.split_once('.') {
+                        if namespaces.insert(ns.to_string()) {
+                            items.push(json!({ "label": ns, "kind": 9 }));
+                        }
+
+                        continue;
+                    }
+
+                    let targets: Vec<&str> = decl.targets.iter().map(String::as_str).collect();
+
+                    if !fits_target(&targets, *target, *bare) {
+                        continue;
+                    }
+
+                    // A top-level declaration hovers with its comment; a
+                    // member of a namespace reads as its declaration.
+                    let hover = hovers
+                        .iter()
+                        .find(|d| key.as_str() == rest && d.name == format!("@{rest}"))
+                        .map(|d| d.hover.clone())
+                        .unwrap_or_else(|| attribute_doc(rest, decl));
+                    items.push(json!({
+                        "label": rest,
+                        "kind": 14,
+                        "documentation": { "kind": "markdown", "value": hover },
+                    }));
                 }
             }
 
@@ -669,24 +817,8 @@ impl State {
                     return items;
                 }
 
-                if let Some(spec) = spec
-                    && let Some(path) = uri_to_path(uri)
-                    && let Some(dir) = path.parent()
-                {
-                    // `@alias/x` goes through the project's aliases; a
-                    // relative spec is path arithmetic.
-                    let resolved = match spec.strip_prefix('@') {
-                        Some(rest) => {
-                            let (alias, tail) = rest.split_once('/').unwrap_or((rest, ""));
-
-                            project_aliases(dir, self.root.as_deref())
-                                .into_iter()
-                                .find(|(a, _)| a == alias)
-                                .map(|(_, base)| imports::lexical(&base, tail))
-                        }
-
-                        None => Some(imports::lexical(dir, spec)),
-                    };
+                if let Some(spec) = spec {
+                    let resolved = self.resolve_spec(uri, spec);
                     // A data file lists its top-level keys, each with
                     // the type its value reads as.
                     if let Some(format) = data_format {
@@ -780,6 +912,25 @@ impl State {
                         }
 
                         items.push(item);
+                    }
+
+                    // `m: coll.|` under `import * as coll from
+                    // "@alloy/std/collections"`: the types of that module.
+                    // The module is the runtime, which no file holds.
+                    if let Some(names) =
+                        super::std_completions::std_module_names(&doc.source, &path)
+                    {
+                        for name in names
+                            .into_iter()
+                            .filter(|n| super::std_completions::is_std_type(n))
+                        {
+                            let text = alloy::docs::type_markdown(name)
+                                .or_else(|| keywords::doc(name).map(str::to_string));
+                            let mut item = word(name, 7, text, from);
+                            let module = alloy::std_names::module_of(name).unwrap_or_default();
+                            item["detail"] = json!(format!("alloy:std:{module}"));
+                            items.push(item);
+                        }
                     }
 
                     // `local b: Enum.|`: the engine's enums. That path
@@ -1602,11 +1753,21 @@ impl State {
         alloy::modules::plain_modules_for_file(&path, &doc.source)
     }
 
-    /// through the project's aliases, and a relative spec is path
-    /// arithmetic.
+    /// The module path an import spec names from a file. `@self/x` is
+    /// `x` in the folder of an `init` file, `@alias/x` goes through the
+    /// project's aliases, and a relative spec is path arithmetic. The
+    /// walk over another module's imports passes an absolute path.
     pub(crate) fn resolve_spec(&self, uri: &str, spec: &str) -> Option<PathBuf> {
         let path = uri_to_path(uri)?;
         let dir = path.parent()?;
+
+        if Path::new(spec).is_absolute() {
+            return Some(PathBuf::from(spec));
+        }
+
+        if let Some(tail) = spec.strip_prefix("@self/") {
+            return alloy::build::is_init(&path).then(|| imports::lexical(dir, tail));
+        }
 
         match spec.strip_prefix('@') {
             Some(rest) => {
@@ -1637,6 +1798,7 @@ impl State {
 
             if imports::module_path(&p) == target {
                 exports.extend(d.exports.iter().cloned());
+                exports.extend(imports::passed_on(&d.source, &p, 0));
             }
         }
 
@@ -2556,11 +2718,18 @@ fn doc_sentence(text: &str) -> Option<String> {
 fn from_clause_at(src: &str, offset: usize) -> (usize, usize, &'static str) {
     let rest = src[offset..].split('\n').next().unwrap_or("");
     let line_end = offset + rest.len();
+    // The brace that closes the list. A list over several lines closes
+    // it on a line under the caret, with only entries between.
+    let close = src[offset..].find('}').filter(|i| {
+        src[offset..offset + i]
+            .chars()
+            .all(|c| c.is_alphanumeric() || " \t\r\n,.@_".contains(c))
+    });
 
-    match rest.find('}') {
+    match close {
         // The editor closed the brace as the reader opened it: the
         // name and the clause take the space up to it.
-        Some(i) if rest[..i].trim().is_empty() => (offset, offset + i + 1, " }"),
+        Some(i) if i <= rest.len() && rest[..i].trim().is_empty() => (offset, offset + i + 1, " }"),
 
         // The caret sits in the middle of the list, so the clause goes
         // after the brace that closes it.
@@ -2594,6 +2763,124 @@ fn attribute_target_doc(target: &str) -> Option<&'static str> {
     };
 
     Some(doc)
+}
+
+/// The names a bracketed list holds besides the entry at the caret:
+/// `Eq` of `@derive(Eq, Se|)`, `native` of `@[native, |]`, and `Coins`
+/// of `import { Coins, | }`. An entry reads as its first name, past
+/// `type` and `@`, and a dotted path as its last part. After the caret
+/// the list reads to the end of the line, since an open list runs on
+/// into the next statement.
+fn written_entries(src: &str, offset: usize, open: char, close: char) -> Vec<&str> {
+    // The bracket that opens the list: the nearest one before the caret
+    // that nothing closes.
+    let mut depth = 0;
+    let mut start = None;
+
+    for (i, c) in src[..offset].char_indices().rev() {
+        match c {
+            ')' | ']' | '}' => depth += 1,
+
+            '(' | '[' | '{' if depth > 0 => depth -= 1,
+
+            c if c == open => {
+                start = Some(i + c.len_utf8());
+
+                break;
+            }
+
+            '(' | '[' | '{' => return Vec::new(),
+
+            _ => {}
+        }
+    }
+
+    let Some(start) = start else {
+        return Vec::new();
+    };
+    let mut depth = 0;
+    let mut end = src.len();
+
+    for (i, c) in src[offset..].char_indices() {
+        match c {
+            '\n' => {
+                end = offset + i;
+
+                break;
+            }
+
+            '(' | '[' | '{' => depth += 1,
+
+            ')' | ']' | '}' if depth > 0 => depth -= 1,
+
+            c if c == close => {
+                end = offset + i;
+
+                break;
+            }
+
+            _ => {}
+        }
+    }
+
+    let mut before = split_top(&src[start..offset]);
+    before.pop();
+    let after = split_top(&src[offset..end]).into_iter().skip(1);
+
+    before
+        .into_iter()
+        .chain(after)
+        .filter_map(|entry| {
+            let entry = entry.trim_start();
+            let entry = entry.strip_prefix("type ").unwrap_or(entry).trim_start();
+            let entry = entry.trim_start_matches('@');
+            let path = entry
+                .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+                .next()?;
+
+            path.rsplit('.').next().filter(|name| !name.is_empty())
+        })
+        .collect()
+}
+
+/// Whether an attribute with these targets goes on what the position
+/// names. With nothing under the caret to carry one, only an attribute
+/// that goes anywhere fits: every other one names a target the reader
+/// has not written. `attribute X on function` covers a method too, so a
+/// method position takes what a function takes.
+/// An attribute a namespace declares, as its declaration reads.
+fn attribute_doc(name: &str, decl: &alloy::desugar::AttrDecl) -> String {
+    let params: Vec<String> = decl
+        .params
+        .iter()
+        .map(|(n, t)| match t {
+            Some(t) => format!("{n}: {t}"),
+
+            None => n.clone(),
+        })
+        .collect();
+    let params = match params.is_empty() {
+        true => String::new(),
+
+        false => format!("({})", params.join(", ")),
+    };
+
+    format!(
+        "```alloy\nattribute {name}{params} on {}\n```",
+        decl.targets.join(", ")
+    )
+}
+
+fn fits_target(targets: &[&str], target: Option<&str>, bare: bool) -> bool {
+    match target {
+        Some("method") => targets.contains(&"method") || targets.contains(&"function"),
+
+        Some(t) => targets.contains(&t),
+
+        None if bare => targets.is_empty(),
+
+        None => true,
+    }
 }
 
 #[cfg(test)]

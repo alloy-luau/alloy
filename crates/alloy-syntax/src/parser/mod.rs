@@ -141,11 +141,15 @@ pub fn parse_with(src: &str, toks: &[Tok], options: ParseOptions) -> Result<Chun
         type_names: Vec::new(),
         global_keywords: Vec::new(),
         reserved_keys: Vec::new(),
+        angle_calls: Vec::new(),
+        stmt_breaks: Vec::new(),
         no_method_call: 0,
         in_match_arm: 0,
         pattern_arg: 0,
         value_block: false,
         value_lines: 0,
+        match_head: 0,
+        closes: Vec::new(),
     };
 
     let block = p.block()?;
@@ -160,6 +164,8 @@ pub fn parse_with(src: &str, toks: &[Tok], options: ParseOptions) -> Result<Chun
         type_names: p.type_names,
         global_keywords: p.global_keywords,
         reserved_keys: p.reserved_keys,
+        angle_calls: p.angle_calls,
+        stmt_breaks: p.stmt_breaks,
     })
 }
 
@@ -173,6 +179,9 @@ pub const MAX_DIAGNOSTICS: usize = 200;
 /// every token, so the formatter reads such a file and writes the `as`
 /// in, and the server offers the same rewrite as a quick fix.
 pub const NEEDS_AS: &str = "needs `as` before its body";
+
+/// The report for `x as T`, a cast another language writes.
+const AS_CAST: &str = "`as` is not a cast here; use `::`";
 
 /*
 Parses with recovery. The tree always covers every token: a stretch the
@@ -199,11 +208,15 @@ pub fn parse_lenient(src: &str, toks: &[Tok], options: ParseOptions) -> (Chunk, 
         type_names: Vec::new(),
         global_keywords: Vec::new(),
         reserved_keys: Vec::new(),
+        angle_calls: Vec::new(),
+        stmt_breaks: Vec::new(),
         no_method_call: 0,
         in_match_arm: 0,
         pattern_arg: 0,
         value_block: false,
         value_lines: 0,
+        match_head: 0,
+        closes: Vec::new(),
     };
 
     let mut stmts = Vec::new();
@@ -243,6 +256,8 @@ pub fn parse_lenient(src: &str, toks: &[Tok], options: ParseOptions) -> (Chunk, 
         type_names: p.type_names,
         global_keywords: p.global_keywords,
         reserved_keys: p.reserved_keys,
+        angle_calls: p.angle_calls,
+        stmt_breaks: p.stmt_breaks,
     };
 
     (chunk, p.diagnostics)
@@ -269,6 +284,10 @@ struct Parser<'a> {
     global_keywords: Vec<TokSpan>,
     /// See `Chunk::reserved_keys`.
     reserved_keys: Vec<TokSpan>,
+    /// See `Chunk::angle_calls`.
+    angle_calls: Vec<(TokSpan, String)>,
+    /// See `Chunk::stmt_breaks`.
+    stmt_breaks: Vec<usize>,
     /// Above zero inside the then-branch of a ternary, where `:` closes
     /// the branch instead of opening a method call.
     no_method_call: u32,
@@ -287,6 +306,26 @@ struct Parser<'a> {
     /// or a `[` that opens a line starts the next thing, not a call or an
     /// index of the line above; Luau code outside keeps Luau's reading.
     value_lines: u32,
+    /// Above zero in the scrutinees of a match head, where `as` names
+    /// the alias of the value, `match x as v with`, and is no cast.
+    match_head: u32,
+    /// Each block `expect_end` closed: the token that opened it and its
+    /// `end`. A missing `end` reads it to find the block that took an
+    /// `end` from further out.
+    closes: Vec<(usize, usize)>,
+}
+
+/// The lengths of the records a parse appends to. A reader that reads
+/// the same tokens a second way rewinds to them, so the tokens keep one
+/// record.
+#[derive(Clone, Copy)]
+struct Marks {
+    reports: usize,
+    type_edits: usize,
+    type_names: usize,
+    angle_calls: usize,
+    stmt_breaks: usize,
+    closes: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -358,9 +397,23 @@ impl<'a> Parser<'a> {
     */
     fn expect_end(&mut self, opener: usize) -> Result<usize, ParseError> {
         if self.at("end") {
+            self.closes.push((opener, self.pos));
+
             return Ok(self.bump());
         }
 
+        // An inner block took an `end` that sits left of its own indent,
+        // so that `end` closed this block. The inner block is the one
+        // with no `end`: the first such block names the fault.
+        let stolen = self
+            .closes
+            .iter()
+            .position(|&(o, e)| o > opener && e < self.pos && self.end_left_of(o, e));
+        let opener = match stolen {
+            Some(i) => self.closes.remove(i).0,
+
+            None => opener,
+        };
         let tok = self.toks[opener.min(self.toks.len().saturating_sub(1))];
         let word = &self.src[tok.start as usize..tok.end as usize];
         let line = self.src[..tok.start as usize].matches('\n').count() + 1;
@@ -486,6 +539,11 @@ impl<'a> Parser<'a> {
             return Some((2, (3, 3)));
         }
 
+        // `!=` reads as `~=` once `suffix_chain` reported it.
+        if self.at("!") && self.text_at(1) == "=" && self.adjacent(0) {
+            return binop_priority("~=").map(|p| (2, p));
+        }
+
         let word = self.text();
 
         // A word operator obeys the same-line rule; `in` is reserved and
@@ -531,6 +589,53 @@ impl<'a> Parser<'a> {
             let e = self.err(message);
             self.diagnostics.push(e);
         }
+    }
+
+    /// The byte the line of a token starts at.
+    fn line_start(&self, i: usize) -> usize {
+        let at = self.toks[i].start as usize;
+
+        self.src[..at].rfind('\n').map_or(0, |n| n + 1)
+    }
+
+    /// The indent of the line a token stands on, in bytes.
+    fn indent_at(&self, i: usize) -> usize {
+        self.src[self.line_start(i)..]
+            .bytes()
+            .take_while(|b| matches!(b, b' ' | b'\t'))
+            .count()
+    }
+
+    /// Whether the `end` at `e` opens a line left of the indent of the
+    /// line its opener `o` stands on. By the indent, it closes a block
+    /// further out.
+    fn end_left_of(&self, o: usize, e: usize) -> bool {
+        let line = self.line_start(e);
+        let column = self.toks[e].start as usize - line;
+
+        line > self.line_start(o) && column == self.indent_at(e) && column < self.indent_at(o)
+    }
+
+    /// The lengths of the records a parse appends to.
+    fn marks(&self) -> Marks {
+        Marks {
+            reports: self.diagnostics.len(),
+            type_edits: self.type_edits.len(),
+            type_names: self.type_names.len(),
+            angle_calls: self.angle_calls.len(),
+            stmt_breaks: self.stmt_breaks.len(),
+            closes: self.closes.len(),
+        }
+    }
+
+    /// Drops the records a parse appended after `m`.
+    fn rewind_to(&mut self, m: Marks) {
+        self.diagnostics.truncate(m.reports);
+        self.type_edits.truncate(m.type_edits);
+        self.type_names.truncate(m.type_names);
+        self.angle_calls.truncate(m.angle_calls);
+        self.stmt_breaks.truncate(m.stmt_breaks);
+        self.closes.truncate(m.closes);
     }
 
     /// The one-based column a token starts at, in bytes.

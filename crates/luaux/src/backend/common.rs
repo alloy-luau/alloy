@@ -110,10 +110,10 @@ impl<'a> Props<'a> {
             }
 
             // Written or inferred, an attribute is a name and a value from here
-            // on: aliases, the property check, event wrapping, and Rule 5 all
-            // apply the same way. Inference decides *which* name, and nothing
-            // more — a shorthand that took a different path through any of this
-            // would be a second set of rules to learn.
+            // on: aliases, the property check, event wrapping, and the `Text`
+            // conflict all apply the same way. Inference decides *which* name,
+            // and nothing more — a shorthand that took a different path through
+            // any of this would be a second set of rules to learn.
             let (name, value, span) = match attribute {
                 Attribute::Spread { .. } => unreachable!("handled above"),
                 Attribute::Named { name, value, span } => {
@@ -145,15 +145,23 @@ impl<'a> Props<'a> {
                 _ => name.clone(),
             };
 
-            // Rule 5: text between the tags overrides a `Text` attribute.
+            // Text between the tags sets `Text`, so a `Text` attribute too is
+            // a conflict. The tags used to win in silence, and the attribute's
+            // expression left the output with no report.
             //
             // Compared against the **canonical** name, after aliases. Compared
             // against what was written, a project that renamed `Text` — or set
             // any `[properties] all` casing — slipped past this and emitted the
-            // property twice in one table. Luau takes the last, so the tags won
-            // by accident rather than by rule, and the duplicate key sat there
-            // looking deliberate.
+            // property twice in one table.
             if plan.text.is_some() && key == "Text" {
+                context.record(
+                    EmitError::new(
+                        "`Text` is set twice: by this attribute and by the text between the tags",
+                        span.start,
+                        span.end.saturating_sub(span.start),
+                    )
+                    .with_help("remove the attribute, or the text between the tags"),
+                );
                 continue;
             }
 
@@ -558,6 +566,20 @@ pub(super) fn plan_text(
         },
         (Interpolate::Wrap, None) => TextMode::Thunk,
     };
+
+    // Alloy patch: with no reactivity, a lone `{expr}` is the `Text` value
+    // as it stands, so the caller can check its type. A reactive library
+    // takes a source there too, and a source is no string.
+    if let (TextMode::Plain, [TextPart::Expression(_)]) = (mode, parts.as_slice()) {
+        let hole = element.children.iter().find_map(|child| match child {
+            Child::Expression { span, .. } => Some(*span),
+            _ => None,
+        });
+
+        if let Some(span) = hole {
+            context.text_hole(span.start, span.end);
+        }
+    }
 
     let (text, references) = encode_text(&parts, mode);
 

@@ -207,6 +207,10 @@ pub(crate) fn end_follows(src: &str, offset: usize, indent: &str) -> bool {
 }
 
 /// The fields of `local x = new T(...) { ... }`, under the hover of `x`.
+///
+/// The declaration is the one in scope at the hover. A search by name
+/// found the first `bag` of the file, so one function showed the value
+/// of a `bag` in another.
 pub(crate) fn append_initializer(
     value: &str,
     doc: &Doc,
@@ -215,70 +219,60 @@ pub(crate) fn append_initializer(
 ) -> Option<String> {
     let Caret { offset, start, end } = Caret::at(&doc.source, line, character)?;
     let word = &doc.source[start..end];
-    let mut from = 0;
+    let at = alloy::flux::binding_of(&doc.source, start)?;
+    let line_start = doc.source[..at].rfind('\n').map(|n| n + 1).unwrap_or(0);
+    let head = doc.source[line_start..at].trim();
+    let after = &doc.source[at + word.len()..];
 
-    while let Some(i) = doc.source[from..].find(word) {
-        let at = from + i;
-        let line_start = doc.source[..at].rfind('\n').map(|n| n + 1).unwrap_or(0);
-        let head = doc.source[line_start..at].trim();
-        let after = &doc.source[at + word.len()..];
-        let is_decl = matches!(head, "local" | "const" | "export local" | "export const")
-            && !keywords::is_word_at(&doc.source, at + word.len());
-
-        let eq = after.find('=');
-        let between = eq.map(|e| after[..e].trim_start()).unwrap_or("x");
-
-        if is_decl
-            && (between.is_empty() || between.starts_with(':'))
-            && let Some(eq) = eq
-        {
-            let rhs = after[eq + 1..].trim_start();
-
-            // The fields open on the `new` line; a brace on a later line
-            // belongs to another statement.
-            let line_end = rhs.find('\n').unwrap_or(rhs.len());
-
-            // The hover is a use of this binding: no function between
-            // the declaration and the hover takes the name as a parameter,
-            // and no later `local` rebinds it.
-            let hovered_before = offset < at;
-            let rebound = !hovered_before
-                && rebinds(
-                    &doc.source[at + word.len()..offset.max(at + word.len())],
-                    word,
-                );
-
-            if rhs.starts_with("new ")
-                && !hovered_before
-                && !rebound
-                && let Some(open) = rhs[..line_end].find('{')
-                && let Some(close) = matching_brace(rhs, open)
-            {
-                // The value joins the declaration line, the way Rust
-                // shows a `const`: `local hits: Counter = new Counter {
-                // name = "hits" }`. A long one keeps its head alone.
-                let before = &doc.source[line_start..at];
-                let indent = &before[..before.len() - before.trim_start().len()];
-                let lines: Vec<&str> = rhs[..=close]
-                    .lines()
-                    .map(|l| l.strip_prefix(indent).unwrap_or(l))
-                    .collect();
-                let init = match lines.len() > 6 {
-                    true => format!("{} ... }}", rhs[..=open].trim_end()),
-
-                    false => lines.join("\n"),
-                };
-
-                return Some(join_initializer(value, word, &init));
-            }
-
-            return None;
-        }
-
-        from = at + word.len();
+    if !matches!(head, "local" | "const" | "export local" | "export const") {
+        return None;
     }
 
-    None
+    // The `=` of `local q: T` with no value is the next statement's:
+    // `q = new T {}` on a later line sets the value, and the
+    // declaration holds none.
+    let eq = after.find('=').filter(|e| !after[..*e].contains('\n'))?;
+    let between = after[..eq].trim_start();
+
+    if !(between.is_empty() || between.starts_with(':')) {
+        return None;
+    }
+
+    let rhs = after[eq + 1..].trim_start();
+
+    // The fields open on the `new` line; a brace on a later line
+    // belongs to another statement.
+    let line_end = rhs.find('\n').unwrap_or(rhs.len());
+
+    // At a use, a `local` that takes a new value later may hold that
+    // one, so only the declaration shows the first value. A `const`
+    // keeps its value.
+    let at_use = offset > at + word.len();
+    let reassigned = at_use && !head.ends_with("const") && alloy::flux::reassigned(&doc.source, at);
+
+    if !rhs.starts_with("new ") || reassigned {
+        return None;
+    }
+
+    let open = rhs[..line_end].find('{')?;
+    let close = matching_brace(rhs, open)?;
+
+    // The value joins the declaration line, the way Rust shows a
+    // `const`: `local hits: Counter = new Counter { name = "hits" }`. A
+    // long one keeps its head alone.
+    let before = &doc.source[line_start..at];
+    let indent = &before[..before.len() - before.trim_start().len()];
+    let lines: Vec<&str> = rhs[..=close]
+        .lines()
+        .map(|l| l.strip_prefix(indent).unwrap_or(l))
+        .collect();
+    let init = match lines.len() > 6 {
+        true => format!("{} ... }}", rhs[..=open].trim_end()),
+
+        false => lines.join("\n"),
+    };
+
+    Some(join_initializer(value, word, &init))
 }
 
 /// The hover with ` = init` after the declaration line of its code
@@ -303,37 +297,6 @@ fn join_initializer(value: &str, word: &str, init: &str) -> String {
 
         None => format!("{value}\n\n```alloy\nlocal {word} = {init}\n```"),
     }
-}
-
-/// Whether a stretch of source binds `name` again: a function that
-/// takes it as a parameter, or a `local` that declares it.
-pub(crate) fn rebinds(text: &str, name: &str) -> bool {
-    text.lines().any(|line| {
-        let trimmed = line.trim_start();
-
-        if trimmed.starts_with("local ")
-            && trimmed[6..].trim_start().starts_with(name)
-            && !keywords::is_word_at(
-                trimmed,
-                6 + trimmed[6..].len() - trimmed[6..].trim_start().len() + name.len(),
-            )
-        {
-            return true;
-        }
-
-        if let Some(f) = line.find("function")
-            && let Some(open) = line[f..].find('(')
-            && let Some(close) = line[f + open..].find(')')
-        {
-            let params = &line[f + open + 1..f + open + close];
-
-            return params
-                .split(',')
-                .any(|p| p.trim().split(':').next().is_some_and(|n| n.trim() == name));
-        }
-
-        false
-    })
 }
 
 /// The index of the `}` that closes the `{` at `open`.

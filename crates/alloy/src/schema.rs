@@ -318,7 +318,7 @@ pub const TABLES: &[Table] = &[
                 "clean",
                 BOOL,
                 "false",
-                "Delete an output whose source is gone.",
+                "Delete every `.luau` under `out` that no source makes. Off, the build deletes only the stale outputs it wrote itself.",
             ),
             key(
                 "artifact",
@@ -779,7 +779,7 @@ pub const TABLES: &[Table] = &[
             unset(
                 "runtime",
                 STR,
-                "Where `alloy.luau` lands, as `@game/Service/Folder`. Emitted code requires it by an instance path. Unset means the place the project file already gives it, then the node that mounts `[build] out`, then `@game/ReplicatedStorage/Alloy`.",
+                "Where `alloy.luau` lands, as `@game/Service/Folder`. Emitted code requires it by an instance path. Unset means the place the tree already gives it, then `alloy` inside the node that mounts `[build] out` or `[build] in`, then `@game/ReplicatedStorage/Alloy`.",
             ),
             key(
                 "source_of_truth",

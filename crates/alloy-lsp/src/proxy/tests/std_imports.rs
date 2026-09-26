@@ -87,7 +87,9 @@ fn a_derive_name_writes_its_serde_import() {
             .get("additionalTextEdits")
             .is_some()
     );
-    assert!(row(&items, "Eq").get("additionalTextEdits").is_none());
+    assert!(row(&items, "Clone").get("additionalTextEdits").is_none());
+    // `Eq` stands in the list already.
+    assert!(!items.iter().any(|i| i["label"] == "Eq"));
 }
 
 /// A type slot rebuilds each row for its range, and the import edit
@@ -258,15 +260,13 @@ fn a_serde_option_imports_and_reads_through_its_module() {
     let (st, uri) = none_file(src);
     let at = |needle: &str| src.find(needle).unwrap() + needle.len();
 
+    // Above a struct: the options a struct takes.
     let offset = at("@serde.");
     let ctx = context::detect(src, offset).expect("a path context");
     let items = st.context_items(uri, offset, &ctx);
     let mut labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
     labels.sort_unstable();
-    assert_eq!(
-        labels,
-        ["deny_unknown_fields", "rename", "rename_all", "skip"]
-    );
+    assert_eq!(labels, ["deny_unknown_fields", "rename_all"]);
 
     // `rename` is imported; `skip` is not, so its row writes the import.
     let offset = at("    @ren");

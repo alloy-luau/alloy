@@ -4,7 +4,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use alloy::config::{Build, Config, Emit};
+use alloy::config::{Artifact, Build, Config, Emit};
 
 fn temp_project(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("alloy-build-{name}-{}", std::process::id()));
@@ -154,6 +154,44 @@ fn a_file_with_an_error_keeps_its_last_output() {
         "the last output stays"
     );
     assert!(!report.is_clean());
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// With `clean` off, a renamed script left its old output, and Rojo ran
+/// both scripts. The build keeps a manifest of what it wrote and removes
+/// an output no source makes now. A file the build never wrote stays,
+/// and so does the last output of a file with an error.
+#[test]
+fn a_renamed_source_takes_its_old_output_with_it() {
+    let dir = temp_project("rename");
+    fs::write(dir.join("alloy.toml"), "[build]\nclean = false\n").unwrap();
+    fs::write(dir.join("src/nested/main.server.aly"), "print(1)\n").unwrap();
+    fs::write(dir.join("src/bad.aly"), "return 1\n").unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let build = || alloy::build::run_project(&dir, &config).unwrap();
+    build();
+    fs::write(dir.join("build/mine.luau"), "-- the author's\n").unwrap();
+
+    fs::rename(dir.join("src/nested"), dir.join("src/moved")).unwrap();
+    fs::write(dir.join("src/bad.aly"), "local = 1\n").unwrap();
+    let report = build();
+
+    assert_eq!(
+        report.removed,
+        vec![PathBuf::from("nested/main.server.luau")]
+    );
+    assert!(!dir.join("build/nested").exists(), "the empty folder goes");
+    assert!(dir.join("build/moved/main.server.luau").is_file());
+    assert!(
+        dir.join("build/mine.luau").is_file(),
+        "the build never wrote it"
+    );
+    assert!(
+        dir.join("build/bad.luau").is_file(),
+        "the last good output stays"
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }
@@ -394,6 +432,9 @@ require. `import { g } from "./other"` in `src/init.aly` emitted
 
 The emit writes the path from the folder Luau resolves it from. Only an
 `init` module moves; every other file keeps the path the source wrote.
+A file inside the `init`'s own folder is `@self/...`: the folder's name
+on disk can differ from its instance name, so `./build/other` fails in
+Roblox and under a sourcemap.
 */
 #[test]
 fn an_init_module_requires_a_sibling_from_the_folder_above_it() {
@@ -440,9 +481,9 @@ fn an_init_module_requires_a_sibling_from_the_folder_above_it() {
     for (out, specs) in [
         (
             "build/init.luau",
-            ["./build/other", "./build/widget", "./build/legacy"].as_slice(),
+            ["@self/other", "@self/widget", "@self/legacy"].as_slice(),
         ),
-        ("build/deep/init.luau", ["./deep/sib", "./other"].as_slice()),
+        ("build/deep/init.luau", ["@self/sib", "./other"].as_slice()),
         // A file that is no `init` keeps the path the source wrote.
         ("build/plain.luau", ["./other"].as_slice()),
     ] {
@@ -455,13 +496,16 @@ fn an_init_module_requires_a_sibling_from_the_folder_above_it() {
             );
 
             // The folder Luau starts the require from: the file's own,
-            // and the one above it for an `init.luau`.
+            // and the one above it for an `init.luau`. `@self` is the
+            // `init`'s own folder.
             let path = dir.join(out);
             let folder = path.parent().unwrap();
-            let folder = match out.ends_with("init.luau") {
-                true => folder.parent().unwrap(),
+            let (folder, spec) = match (spec.strip_prefix("@self/"), out.ends_with("init.luau")) {
+                (Some(inner), _) => (folder, inner),
 
-                false => folder,
+                (None, true) => (folder.parent().unwrap(), *spec),
+
+                (None, false) => (folder, *spec),
             };
 
             assert!(
@@ -470,6 +514,715 @@ fn an_init_module_requires_a_sibling_from_the_folder_above_it() {
             );
         }
     }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/*
+`import { X } from "../shared/net"` in `src/server/a.server.aly` crosses
+from one mount into another. The ship wrote the `@game/...` place, but
+the check artifact kept the relative path. luau-lsp reads that path
+from the file's place in the sourcemap, where the two mounts are no
+siblings, so `alloy flux` and the editor reported `UnknownModule`.
+
+The check artifact now writes the place, as the ship does. A relative
+path inside one mount stays.
+
+`"../shared/net"` in `src/shared/c.aly` climbs out of its own mount and
+back in. Both artifacts kept it, and `Shared` has no `shared` beside it,
+so the require missed at run time. The path inside the mount replaces
+it.
+*/
+#[test]
+fn a_relative_import_across_mounts_writes_the_game_path_in_the_check() {
+    let dir = temp_project("cross-mount");
+    fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nout = \"build\"\nartifact = \"check\"\n\n[mount]\nserver = [\"src/server\", \"@game/ServerScriptService/Server\"]\nshared = [\"src/shared\", \"@game/ReplicatedStorage/Shared\"]\n",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("src/server")).unwrap();
+    fs::create_dir_all(dir.join("src/shared/sub")).unwrap();
+    fs::write(dir.join("src/shared/net.aly"), "export const X = 1\n").unwrap();
+    fs::write(
+        dir.join("src/server/a.server.aly"),
+        "import { X } from \"../shared/net\"\nprint(X)\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/shared/sub/b.aly"),
+        "import { X } from \"../net\"\nprint(X)\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/shared/c.aly"),
+        "import { X } from \"../shared/net\"\nprint(X)\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/shared/sub/d.aly"),
+        "import { X } from \"../../shared/net\"\nprint(X)\n",
+    )
+    .unwrap();
+
+    let mut config = Config::load(&dir.join("alloy.toml")).unwrap();
+
+    for artifact in [Artifact::Check, Artifact::Ship] {
+        config.build.artifact = artifact;
+        let report = alloy::build::run_project(&dir, &config).unwrap();
+
+        assert!(report.is_clean(), "{report:?}");
+
+        for (out, spec) in [
+            (
+                "build/server/a.server.luau",
+                "@game/ReplicatedStorage/Shared/net",
+            ),
+            ("build/shared/sub/b.luau", "../net"),
+            ("build/shared/c.luau", "./net"),
+            ("build/shared/sub/d.luau", "../net"),
+        ] {
+            let text = fs::read_to_string(dir.join(out)).unwrap();
+
+            assert!(
+                text.contains(&format!("require(\"{spec}\")")),
+                "{artifact:?} {out}: {text}"
+            );
+        }
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/*
+`src/server/mod.aly` has no `.server` in its name, so the remote check
+read it as shared and let it fire a remote that goes from the client.
+Under `ServerScriptService` it runs on the server alone. A module now
+takes the side of its mount's place. One under `ReplicatedStorage`
+stays shared.
+*/
+#[test]
+fn a_module_takes_the_side_of_its_mount() {
+    let dir = temp_project("mount-side");
+    fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nout = \"build\"\n\n[mount]\nclient = [\"src/client\", \"@game/StarterPlayer/StarterPlayerScripts/Client\"]\nserver = [\"src/server\", \"@game/ServerScriptService/Server\"]\nshared = [\"src/shared\", \"@game/ReplicatedStorage/Shared\"]\n",
+    )
+    .unwrap();
+
+    for folder in ["src/client", "src/server", "src/shared"] {
+        fs::create_dir_all(dir.join(folder)).unwrap();
+    }
+
+    fs::write(
+        dir.join("src/shared/net.aly"),
+        "export remote Ping(n: number) from client\nexport remote Pong(n: number) from server\n",
+    )
+    .unwrap();
+
+    for (file, spec, fires) in [
+        ("src/server/mod.aly", "../shared/net", "Ping"),
+        ("src/client/mod.aly", "../shared/net", "Pong"),
+        ("src/shared/mod.aly", "./net", "Ping"),
+    ] {
+        fs::write(
+            dir.join(file),
+            format!("import {{ {fires} }} from \"{spec}\"\n{fires}.fire(1)\n"),
+        )
+        .unwrap();
+    }
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run_project(&dir, &config).unwrap();
+    let mut found: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|(path, d)| format!("{}: {}", path.display(), d.message))
+        .collect();
+    found.sort();
+
+    assert_eq!(
+        found,
+        [
+            "client/mod.aly: `Pong` goes from the server; the client cannot fire it",
+            "server/mod.aly: `Ping` goes from the client; the server cannot fire it",
+        ],
+        "{report:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/*
+An `init.server.aly` or `init.client.aly` is the script of its folder,
+as `init.aly` is the module of its folder. The emit kept `./util` in
+such a script, and Roblox read it from the folder above, so the script
+found no module or the wrong one. `@self/util` names the script's own
+child. An author may write `@self` in an `init` file; in any other file
+it is an error that says what to write.
+*/
+#[test]
+fn an_init_script_requires_a_file_of_its_folder_by_self() {
+    let dir = temp_project("init-script");
+    fs::write(dir.join("alloy.toml"), "[build]\nout = \"build\"\n").unwrap();
+    fs::create_dir_all(dir.join("src/server")).unwrap();
+    fs::create_dir_all(dir.join("src/client/ui")).unwrap();
+    fs::write(dir.join("src/server/util.aly"), "export const X = 1\n").unwrap();
+    fs::write(dir.join("src/server/more.aly"), "export const Y = 2\n").unwrap();
+    fs::write(
+        dir.join("src/server/init.server.aly"),
+        "import { X } from \"./util\"\nimport { Y } from \"@self/more\"\n\nprint(X, Y)\n",
+    )
+    .unwrap();
+    fs::write(dir.join("src/client/panel.aly"), "export const P = 1\n").unwrap();
+    fs::write(dir.join("src/client/ui/panel.aly"), "export const P = 2\n").unwrap();
+    fs::write(
+        dir.join("src/client/ui/init.client.aly"),
+        "import { P } from \"./panel\"\n\nprint(P)\n",
+    )
+    .unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run(&dir, &config.build, &config.emit).unwrap();
+
+    assert!(report.is_clean(), "{report:?}");
+
+    for (out, spec) in [
+        ("build/server/init.server.luau", "@self/util"),
+        ("build/server/init.server.luau", "@self/more"),
+        ("build/client/ui/init.client.luau", "@self/panel"),
+    ] {
+        let text = fs::read_to_string(dir.join(out)).unwrap();
+
+        assert!(
+            text.contains(&format!("require(\"{spec}\")")),
+            "{out}: {text}"
+        );
+    }
+
+    // A file that is no `init` has no folder for `@self` to name.
+    fs::write(
+        dir.join("src/client/other.client.aly"),
+        "import { P } from \"@self/panel\"\n\nprint(P)\n",
+    )
+    .unwrap();
+    let report = alloy::build::run(&dir, &config.build, &config.emit).unwrap();
+    let messages: Vec<_> = report.diagnostics.iter().map(|(_, d)| &d.message).collect();
+
+    assert!(
+        messages.iter().any(|m| m.contains(
+            "`@self` is the folder of an `init` file, and src/client/other.client.aly is no `init`, so write \"./panel\""
+        )),
+        "{messages:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/*
+`import { E } from "./m"` beside `export { E } from "./m"` wrote
+`type E` and `export type E`, and Luau reported a redefinition of `E`.
+The import's alias now takes the `export` word, and the list writes no
+second alias.
+*/
+#[test]
+fn an_import_and_a_reexport_of_one_type_write_one_alias() {
+    let dir = temp_project("reexport-import");
+    fs::write(dir.join("alloy.toml"), "[build]\n").unwrap();
+    fs::write(
+        dir.join("src/m.aly"),
+        "export enum E\n    A\nend\n\nexport type T = { n: number }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/r.aly"),
+        "import { E, T } from \"./m\"\nexport { E, T } from \"./m\"\n\nlocal t: T = { n = 1 }\nprint(E.A, t)\n",
+    )
+    .unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run_project(&dir, &config).unwrap();
+
+    assert!(report.is_clean(), "{report:?}");
+
+    let text = fs::read_to_string(dir.join("build/r.luau")).unwrap();
+
+    for name in ["E", "T"] {
+        assert_eq!(text.matches(&format!("type {name} =")).count(), 1, "{text}");
+        assert!(text.contains(&format!("export type {name} =")), "{text}");
+    }
+
+    assert!(text.contains("return { E = _m2.E }"), "{text}");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/*
+A barrel wrote `import * as Leaf from "./leaf"` and `export { Leaf }`.
+`B.Leaf.Box` through `import * as B` of the barrel emitted as it was
+written, and Luau reads no type path two modules deep, so the output did
+not parse. The barrel now sends each type of `Leaf` out under one flat
+name, `Leaf_Box`, as a namespace does, and the path writes that name.
+*/
+#[test]
+fn a_type_path_through_a_module_a_barrel_passes_on_writes_one_name() {
+    let dir = temp_project("barrel-star");
+    fs::write(dir.join("alloy.toml"), "[build]\n").unwrap();
+    fs::write(
+        dir.join("src/leaf.aly"),
+        "export struct Box\n    n: number\nend\n\nexport struct Cell<T>\n    v: T\nend\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/barrel.aly"),
+        "import * as Leaf from \"./leaf\"\nexport { Leaf }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/use.aly"),
+        "import * as B from \"./barrel\"\nimport { Leaf } from \"./barrel\"\n\nconst b: B.Leaf.Box = new B.Leaf.Box { n = 1 }\nconst c: Leaf.Cell<number> = new Leaf.Cell { v = 2 }\nprint(b.n, c.v)\n",
+    )
+    .unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run_project(&dir, &config).unwrap();
+
+    assert!(report.is_clean(), "{report:?}");
+
+    let barrel = fs::read_to_string(dir.join("build/barrel.luau")).unwrap();
+
+    for alias in [
+        "export type Leaf_Box = Leaf.Box",
+        "export type Leaf_Cell<T> = Leaf.Cell<T>",
+    ] {
+        assert!(barrel.contains(alias), "{barrel}");
+    }
+
+    let text = fs::read_to_string(dir.join("build/use.luau")).unwrap();
+
+    assert!(text.contains("const b: B.Leaf_Box ="), "{text}");
+    assert!(text.contains("const c: Leaf_Cell<number> ="), "{text}");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/*
+A remote's wire layout reads a type name through the imports of the file
+that writes it. The layout took "the one project type of this name", so
+a private `Inner` in a file nothing imports stripped the layout: the enum
+slot went, the array item read `any`, a star path lost its wire, and the
+declaring file stopped registering its table.
+
+Every build compiles every file, so a change to a shape reaches the
+remote file on the next build.
+*/
+#[test]
+fn a_private_type_of_the_same_name_leaves_a_wire_layout_alone() {
+    let dir = temp_project("wire-scope");
+    fs::create_dir_all(dir.join("src/shared")).unwrap();
+    fs::write(dir.join("alloy.toml"), "[build]\nout = \"dist\"\n").unwrap();
+    fs::write(
+        dir.join("src/shared/inner.aly"),
+        "export struct Inner\n    n: number\nend\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/shared/kind.aly"),
+        "import { Inner } from \"./inner\"\nexport enum Kind\n    Big(Inner)\n    Small\nend\nexport struct Holder\n    k: Kind\n    list: { Inner }\nend\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/net.aly"),
+        "import * as K from \"./shared/kind\"\nimport { Holder } from \"./shared/kind\"\nimport * as S from \"./shared/inner\"\nexport remote R1(k: K.Kind) from client\nexport remote R2(h: Holder) from client\nexport remote R3(i: S.Inner) from client\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/other.aly"),
+        "struct Inner\n    label: string\nend\nprint(new Inner { label = \"x\" })\n",
+    )
+    .unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let build = || alloy::build::run(&dir, &config.build, &config.emit).unwrap();
+    let report = build();
+    assert!(report.is_clean(), "{report:?}");
+
+    let read = |file: &str| fs::read_to_string(dir.join("dist").join(file)).unwrap();
+    let net = read("net.luau");
+    let inner = "{ fields = { { \"n\", \"f64\" } }, struct = \"shared/inner.aly:Inner\" }";
+
+    for layout in [
+        format!("slots = {{ Big = {{ {inner} }} }}"),
+        format!("{{ \"list\", {{ item = {inner}, array = true }} }}"),
+        "wire = { { fields = { { \"n\", \"f64\" } }, struct = S.Inner } }".to_string(),
+    ] {
+        assert!(net.contains(&layout), "{layout}\n{net}");
+    }
+
+    assert!(
+        read("shared/inner.luau")
+            .contains("__alloy.wire.types[\"shared/inner.aly:Inner\"] = Inner")
+    );
+    assert!(!read("other.luau").contains("wire.types"));
+
+    // A field added to `Inner` reaches the layout on the next build.
+    fs::write(
+        dir.join("src/shared/inner.aly"),
+        "export struct Inner\n    n: number\n    tag: string\nend\n",
+    )
+    .unwrap();
+    let report = build();
+    assert!(
+        report.written.contains(&PathBuf::from("net.luau")),
+        "{report:?}"
+    );
+    assert!(
+        read("net.luau").contains("{ { \"n\", \"f64\" }, { \"tag\", \"str\" } }"),
+        "{}",
+        read("net.luau")
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/*
+A `.server.aly` file fired a remote that goes from the client. The shared
+module that declares it types both sides, so the call passed, and the
+server called `FireClient` with the first argument at run time. A file
+with a side runs there alone, so its wrong-side call is an error. A
+shared file may run on either side and gets none.
+*/
+#[test]
+fn a_side_file_cannot_use_a_remote_of_the_other_side() {
+    let dir = temp_project("remote-side");
+    fs::write(dir.join("alloy.toml"), "[build]\nout = \"dist\"\n").unwrap();
+    fs::write(
+        dir.join("src/rem.aly"),
+        "export remote Up(n: number) from client\nexport remote Down(n: number) from server\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/a.server.aly"),
+        "import { Up as U, Down } from \"./rem\"\nimport * as R from \"./rem\"\nU.fire(1)\nR.Down.on(function(n) print(n) end)\nDown.fire_all(1)\nU.on(function(p, n) print(p, n) end)\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/b.client.aly"),
+        "import { Up, Down } from \"./rem\"\nDown.fire(1)\nUp.fire_all(1)\nUp.fire(1)\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/shared.aly"),
+        "import { Up, Down } from \"./rem\"\nlocal function go()\n    Up.fire(1)\n    Down.fire_all(2)\nend\nreturn go\n",
+    )
+    .unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run(&dir, &config.build, &config.emit).unwrap();
+    let got: Vec<(String, &str)> = report
+        .diagnostics
+        .iter()
+        .map(|(file, d)| (file.to_string_lossy().into_owned(), d.message.as_str()))
+        .collect();
+    let at = |file: &str, message| (file.to_string(), message);
+
+    assert_eq!(
+        got,
+        [
+            at(
+                "a.server.aly",
+                "`U` goes from the client; the server cannot fire it"
+            ),
+            at(
+                "a.server.aly",
+                "`R.Down` goes from the server; the server cannot handle it"
+            ),
+            at(
+                "b.client.aly",
+                "`Down` goes from the server; the client cannot fire it"
+            ),
+            at(
+                "b.client.aly",
+                "`Up.fire_all` reaches the clients; only the server calls it"
+            ),
+        ]
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/*
+A parameter, a loop variable, or a local of a remote's name is some other
+value, so a call through it is no fire of the remote. The side check read
+the name alone and would report each of them. A use past their scopes is
+the remote again and reports.
+*/
+#[test]
+fn a_binding_that_shadows_a_remote_is_no_remote() {
+    let dir = temp_project("remote-shadow");
+    fs::write(dir.join("alloy.toml"), "[build]\nout = \"dist\"\n").unwrap();
+    fs::write(
+        dir.join("src/rem.aly"),
+        "export remote Up(n: number) from client\n",
+    )
+    .unwrap();
+    let src = "import { Up } from \"./rem\"
+local function relay(Up: { fire: (number) -> () })
+    Up.fire(1)
+end
+for _, Up in { { fire = function(_n: number) end } } do
+    Up.fire(2)
+end
+do
+    local Up = { fire = function(_n: number) end }
+    Up.fire(3)
+end
+Up.fire(4)
+relay({ fire = function(_n: number) end })
+";
+    fs::write(dir.join("src/a.server.aly"), src).unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run(&dir, &config.build, &config.emit).unwrap();
+    let got: Vec<(usize, &str)> = report
+        .diagnostics
+        .iter()
+        .map(|(_, d)| {
+            let line = src[..d.start as usize].matches('\n').count() + 1;
+
+            (line, d.message.as_str())
+        })
+        .collect();
+
+    assert_eq!(
+        got,
+        [(12, "`Up` goes from the client; the server cannot fire it")]
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/*
+A remote in a namespace skipped the side check: the server fired
+`Net.Up`, which goes from the client, and nothing reported it. The check
+reads the remote by its path, in the file and through a named import, a
+rename, or a star path. A parameter of the namespace's name is no remote.
+*/
+#[test]
+fn a_remote_in_a_namespace_keeps_its_side() {
+    let dir = temp_project("remote-namespace");
+    fs::write(dir.join("alloy.toml"), "[build]\nout = \"dist\"\n").unwrap();
+    fs::write(
+        dir.join("src/net.aly"),
+        "export namespace Net\n    remote Up(id: string) from client\n    remote Down(n: number) from server\nend\n",
+    )
+    .unwrap();
+    let src = "import { Net } from \"./net\"
+import { Net as N } from \"./net\"
+import * as S from \"./net\"
+namespace Own
+    namespace Inner
+        remote Ping(n: number) from client
+    end
+end
+Net.Up.fire(\"x\")
+N.Down.on(function(n) print(n) end)
+S.Net.Up.fire(\"y\")
+Own.Inner.Ping.fire(1)
+Net.Down.fire_all(1)
+Own.Inner.Ping.on(function(p, n) print(p, n) end)
+local function relay(Own: any)
+    Own.Inner.Ping.fire(2)
+end
+relay(nil)
+";
+    fs::write(dir.join("src/a.server.aly"), src).unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run(&dir, &config.build, &config.emit).unwrap();
+    let got: Vec<(usize, &str)> = report
+        .diagnostics
+        .iter()
+        .map(|(_, d)| {
+            let line = src[..d.start as usize].matches('\n').count() + 1;
+
+            (line, d.message.as_str())
+        })
+        .collect();
+
+    assert_eq!(
+        got,
+        [
+            (
+                9,
+                "`Net.Up` goes from the client; the server cannot fire it"
+            ),
+            (
+                10,
+                "`N.Down` goes from the server; the server cannot handle it"
+            ),
+            (
+                11,
+                "`S.Net.Up` goes from the client; the server cannot fire it"
+            ),
+            (
+                12,
+                "`Own.Inner.Ping` goes from the client; the server cannot fire it"
+            ),
+        ]
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/*
+A local that holds a remote skipped the side check: `const vote =
+Net.Up` then `vote.fire("x")` passed on the server and called
+`FireClient("x")`. An alias of a namespace, an alias of an alias, and a
+local in a function body hold the remote too. A parameter of the alias's
+name is some other value.
+*/
+#[test]
+fn a_local_that_holds_a_remote_keeps_its_side() {
+    let dir = temp_project("remote-alias");
+    fs::write(dir.join("alloy.toml"), "[build]\nout = \"dist\"\n").unwrap();
+    fs::write(
+        dir.join("src/net.aly"),
+        "export namespace Net\n    remote Up(id: string) from client\n    remote Down(n: number) from server\nend\nexport remote Top(n: number) from client\n",
+    )
+    .unwrap();
+    let src = "import { Net, Top } from \"./net\"
+const vote = Net.Up
+vote.fire(\"x\")
+local top = Top
+top.fire(1)
+const n = Net
+n.Up.fire(\"y\")
+const again = n.Up
+again.fire(\"z\")
+vote.on(function(p, id) print(p, id) end)
+local function relay(vote: any)
+    vote.fire(\"fine\")
+end
+local function down()
+    local d = Net.Down
+    d.fire_all(1)
+    d.on(function(k) print(k) end)
+end
+relay(nil)
+down()
+";
+    fs::write(dir.join("src/a.server.aly"), src).unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run(&dir, &config.build, &config.emit).unwrap();
+    let got: Vec<(usize, &str)> = report
+        .diagnostics
+        .iter()
+        .map(|(_, d)| {
+            let line = src[..d.start as usize].matches('\n').count() + 1;
+
+            (line, d.message.as_str())
+        })
+        .collect();
+
+    assert_eq!(
+        got,
+        [
+            (3, "`vote` goes from the client; the server cannot fire it"),
+            (5, "`top` goes from the client; the server cannot fire it"),
+            (7, "`n.Up` goes from the client; the server cannot fire it"),
+            (9, "`again` goes from the client; the server cannot fire it"),
+            (17, "`d` goes from the server; the server cannot handle it"),
+        ]
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/*
+An imported struct gives its derives to this file: a field of it clones
+and serializes through it. The lookup took the first project struct of
+the name. A private `Inner` in another file then decided it: a clone
+shared the imported value, or called an `Inner.clone` that was nil.
+*/
+#[test]
+fn a_private_struct_of_the_same_name_gives_no_derives() {
+    let dir = temp_project("derive-scope");
+    fs::create_dir_all(dir.join("src/shared")).unwrap();
+    fs::write(dir.join("alloy.toml"), "[build]\nout = \"dist\"\n").unwrap();
+    // `a.aly` sorts first, so its private structs came first.
+    fs::write(
+        dir.join("src/a.aly"),
+        "struct Real\n    n: number\nend\n@derive(Clone)\nstruct Bare\n    n: number\nend\nprint(new Real { n = 0 }, new Bare { n = 0 })\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/shared/inner.aly"),
+        "@derive(Clone)\nexport struct Real\n    n: number\nend\nexport struct Bare\n    n: number\nend\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/main.aly"),
+        "import { Real } from \"./shared/inner\"\nimport * as I from \"./shared/inner\"\n@derive(Clone)\nstruct Bag\n    real: Real\n    bare: I.Bare\nend\nprint(Bag)\n",
+    )
+    .unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run(&dir, &config.build, &config.emit).unwrap();
+    assert!(report.is_clean(), "{report:?}");
+
+    let main = fs::read_to_string(dir.join("dist/main.luau")).unwrap();
+    assert!(main.contains("v.real = Real.clone(v.real)"), "{main}");
+    assert!(!main.contains("I.Bare.clone"), "{main}");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/*
+The shapes of each module stay in memory between reads, keyed by the
+text and by the file each import names. A module whose import names a
+file that did not exist yet reads again once the file is there, and a
+changed text reads again.
+*/
+#[test]
+fn a_held_shape_reads_again_when_its_import_resolves() {
+    let dir = temp_project("shape-cache");
+    let base = dir.join("src");
+    let main = base.join("main.aly");
+    fs::write(
+        &main,
+        "import { Late } from \"./late\"\nexport struct Box\n    late: Late\nend\n",
+    )
+    .unwrap();
+
+    let names = || {
+        let (_, scopes) = alloy::build::struct_shapes(std::slice::from_ref(&main), &base, &[]);
+
+        scopes[0].names.clone()
+    };
+    let bound = |local: &str| {
+        vec![(
+            local.to_string(),
+            "late.aly".to_string(),
+            "Late".to_string(),
+        )]
+    };
+    assert!(names().is_empty());
+
+    fs::write(
+        base.join("late.aly"),
+        "export struct Late\n    n: number\nend\n",
+    )
+    .unwrap();
+    assert_eq!(names(), bound("Late"));
+
+    fs::write(
+        &main,
+        "import { Late as L } from \"./late\"\nexport struct Box\n    late: L\nend\n",
+    )
+    .unwrap();
+    assert_eq!(names(), bound("L"));
 
     let _ = fs::remove_dir_all(&dir);
 }

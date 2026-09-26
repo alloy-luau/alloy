@@ -247,7 +247,12 @@ impl ProjectFile {
 
         let mut tree = rewrite(&self.tree, root, base, input, out);
 
-        if !runtime.is_empty() && self.place_of(&out.join("alloy.luau")).is_none() {
+        // A node that mounts the output folder, or the input folder,
+        // which this tree points at the output, carries the runtime.
+        let carried = self.place_of(&out.join("alloy.luau")).is_some()
+            || crate::project::carries_runtime(&self.mounts(), &[out, input], runtime);
+
+        if !runtime.is_empty() && !carried {
             let path = crate::project::from_base(root, base, &out.join("alloy.luau"));
             crate::project::insert(&mut tree, runtime, serde_json::json!({ "$path": path }));
         }

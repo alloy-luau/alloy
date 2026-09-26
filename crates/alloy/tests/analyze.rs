@@ -448,6 +448,95 @@ fn in_on_a_value_that_is_no_container_reports() {
     analyze(good, "in-good");
 }
 
+/// A name that a nested variant pattern binds read as `never`, so a
+/// wrong use of it went through. It takes the payload type, `number`.
+#[test]
+fn a_nested_variant_binding_takes_its_payload_type() {
+    let src = "enum Item as\n    Sword(number)\n    Nothing\nend\nenum Purchase as\n    Bought(Item)\n    Denied(string)\nend\nlocal function show(r: Purchase): string\n    return match r with\n        case Purchase.Bought(Item.Sword(d)) then d:upper()\n        default \"x\"\n    end\nend\nlocal function label(r: Purchase): string\n    match r with\n        case Purchase.Bought(Item.Sword(d)) then\n            local s: string = d\n            return s\n        default\n            return \"x\"\n    end\nend\nprint(show(Purchase.Bought(Item.Sword(4))), label)\n";
+    let Some(reported) = reports(src, "nested-variant") else {
+        return;
+    };
+    assert_eq!(reported.len(), 2, "{reported:?}");
+    assert!(
+        reported[0].contains("'number' does not have key 'upper'"),
+        "{reported:?}"
+    );
+    assert!(
+        reported[1].contains("Expected this to be 'string', but got 'number'"),
+        "{reported:?}"
+    );
+}
+
+/// `@derive(Debug)` on an enum wrote no `debug`, so a call of it
+/// reported a missing key. It writes the one a derived struct has.
+#[test]
+fn a_derived_debug_on_an_enum_writes_debug() {
+    let good = "@derive(Debug)\nenum Item as\n    Sword(number)\n    Nothing\nend\n@derive(Debug)\nenum Opt<T> as\n    Some(T)\n    None\nend\nlocal s = Item.Sword(4)\nlocal a: string = Item.debug(s)\nlocal b: string = Item.debug(Item.Nothing)\nlocal c: string = s:debug()\nlocal d: string = Opt.Some(1):debug()\nprint(a, b, c, d)\n";
+    analyze(good, "enum-debug");
+
+    let bad = "@derive(Debug)\nenum Item as\n    Sword(number)\n    Nothing\nend\nlocal n: number = Item.debug(Item.Nothing)\nprint(n)\n";
+    let Some(reported) = reports(bad, "enum-debug-bad") else {
+        return;
+    };
+    assert_eq!(reported.len(), 1, "{reported:?}");
+    assert!(
+        reported[0].contains("Expected this to be 'number', but got 'string'"),
+        "{reported:?}"
+    );
+}
+
+/// A test on a nested path narrowed the root to `never`, so every name
+/// the arm bound went through unchecked: a generic variant under an
+/// enum, and a name one level down beside a nested pattern. Each takes
+/// its own type now.
+#[test]
+fn a_nested_generic_variant_and_its_sibling_take_their_types() {
+    let src = "enum Opt<T> as\n    Some(T)\n    Nil\nend\nenum Wrap as\n    W(Opt<string>)\n    Empty\nend\nenum Pair as\n    Both(Wrap, number)\n    Neither\nend\nlocal function a(p: Pair): boolean\n    return match p with\n        case Pair.Both(Wrap.W(Opt.Some(s)), _) then s\n        case Pair.Both(Wrap.Empty, n) then n\n        default true\n    end\nend\nlocal function b(o: Opt<Wrap>): boolean\n    match o with\n        case Opt.Some(Wrap.W(Opt.Some(t))) then\n            return t\n        default\n            return true\n    end\nend\nprint(a, b)\n";
+    let Some(reported) = reports(src, "nested-generic") else {
+        return;
+    };
+    assert_eq!(reported.len(), 3, "{reported:?}");
+
+    for (line, ty) in [(15, "string"), (16, "number"), (23, "string")] {
+        assert!(
+            reported.iter().any(|r| r.contains(&format!("({line},"))
+                && r.contains(&format!("Expected this to be 'boolean', but got '{ty}'"))),
+            "{line}: {reported:?}"
+        );
+    }
+
+    let good = "enum Opt<T> as\n    Some(T)\n    Nil\nend\nenum Wrap as\n    W(Opt<string>)\n    Empty\nend\nenum Pair as\n    Both(Wrap, number)\n    Neither\nend\nlocal function a(p: Pair): string\n    return match p with\n        case Pair.Both(Wrap.W(Opt.Some(s)), n) then s:upper() .. tostring(n + 1)\n        default \"x\"\n    end\nend\nprint(a)\n";
+    analyze(good, "nested-generic-good");
+}
+
+/// A struct or an array pattern under a variant bound `never`, or read
+/// a union no test narrowed. Each name takes its field or element type.
+#[test]
+fn a_struct_and_an_array_under_a_variant_take_their_types() {
+    let src = "struct Point\n    x: number\n    y: number\nend\ntype Rec = { name: string }\nenum Box as\n    Full(Rec)\n    List({ number })\n    Pt(Point)\n    Empty\nend\nenum Order as\n    B(Box)\n    Nothing\nend\ntype Holder = { item: Box }\nlocal function a(o: Order): boolean\n    return match o with\n        case Order.B(Box.Full({ name = m })) then m\n        case Order.B(Box.List([f, ...rest])) then rest\n        case Order.B(Box.Pt(Point { x = qx })) then qx\n        default true\n    end\nend\nlocal function b(h: Holder): boolean\n    return match h with\n        case { item = Box.Full({ name = k }) } then k\n        default true\n    end\nend\nprint(a, b)\n";
+    let Some(reported) = reports(src, "nested-struct") else {
+        return;
+    };
+    assert_eq!(reported.len(), 4, "{reported:?}");
+
+    for (line, ty) in [
+        (19, "string"),
+        (20, "Array<number>"),
+        (21, "number"),
+        (27, "string"),
+    ] {
+        assert!(
+            reported.iter().any(|r| r.contains(&format!("({line},"))
+                && r.contains(&format!("Expected this to be 'boolean', but got '{ty}'"))),
+            "{line}: {reported:?}"
+        );
+    }
+
+    // A literal item reads its slot with no test in front of it.
+    let good = "enum Box as\n    List({ number })\n    Empty\nend\nenum Order as\n    B(Box)\n    Nothing\nend\nlocal function a(o: Order): number\n    return match o with\n        case Order.B(Box.List([1, g])) then g * 2\n        default 0\n    end\nend\nprint(a)\n";
+    analyze(good, "nested-struct-good");
+}
+
 /// A `for` over an `Iter`, a `Queue`, or a `Heap` reported "Cannot
 /// iterate over a table without indexer": the checker reads an
 /// `__iter` from the type's metatable, and the std types had none.
@@ -459,6 +548,25 @@ fn a_for_loop_over_a_std_collection_binds_the_element() {
 
     let bad = "for i in Iter.range(1, 3) do\n    local s: string = i\n    print(s)\nend\n";
     let Some(reported) = reports(bad, "for-std-bad") else {
+        return;
+    };
+    assert_eq!(reported.len(), 1, "{reported:?}");
+    assert!(
+        reported[0].contains("Expected this to be 'string', but got 'number'"),
+        "{reported:?}"
+    );
+}
+
+/// `for k, v in map:entries()` binds the value as `V`, the way `for k, v
+/// in map` does. The iterator typed it `V?`, so `v + 1` reported
+/// "number? and number" on the docs' own example.
+#[test]
+fn a_loop_over_entries_binds_the_value_type() {
+    let good = "local prices: HashMap<string, number> = HashMap.new()\nprices:set(\"gem\", 5)\nfor key, value in prices:entries() do\n    print(key, value + 1)\nend\n";
+    analyze(good, "entries-good");
+
+    let bad = "local prices: HashMap<string, number> = HashMap.new()\nfor _, value in prices:entries() do\n    local s: string = value\n    print(s)\nend\n";
+    let Some(reported) = reports(bad, "entries-bad") else {
         return;
     };
     assert_eq!(reported.len(), 1, "{reported:?}");
@@ -666,6 +774,50 @@ fn a_reject_and_a_hand_written_awaitable_analyze() {
     analyze(REJECTED, "rejected");
 }
 
+/// `await` gives every value a Future settles with. `local a, b = await
+/// pair()` read `b` as `any` and got nil at run time. Now `b` takes the
+/// second value's type, and a second name on a one-value Future reports.
+#[test]
+fn an_await_types_every_value_the_future_carries() {
+    let src = "async function pair()
+    return 1, \"x\"
+end
+
+async function typed(): (number, string)
+    return 1, \"x\"
+end
+
+async function one(): number
+    return 1
+end
+
+async function main()
+    local a, b = await pair()
+    local wrong: number = b
+    local c, d = await typed()
+    local right: string = d
+    local e, f = await one()
+    print(a, wrong, c, right, e, f)
+end
+main()
+";
+    let Some(bad) = reports(src, "await-pack") else {
+        return;
+    };
+
+    assert_eq!(bad.len(), 2, "{}", bad.join("\n"));
+    assert!(
+        bad[0].contains("(15,") && bad[0].contains("'number', but got 'string'"),
+        "{}",
+        bad.join("\n")
+    );
+    assert!(
+        bad[1].contains("(18,") && bad[1].contains("only returns 1 value"),
+        "{}",
+        bad.join("\n")
+    );
+}
+
 /// A `try do` block around an `await` carries the awaited type: the
 /// two blocks read `Result<number, any>`, so both annotations report.
 /// The result of `await` is an `index<A, "__value">` type function,
@@ -699,6 +851,13 @@ main()
     assert_eq!(bad.len(), 2, "{}", bad.join("\n"));
     assert!(
         bad[0].contains("(6,") && bad[1].contains("(10,"),
+        "{}",
+        bad.join("\n")
+    );
+    // Each report is the annotation's, not a type function that failed
+    // on the pack a bare `await` returns.
+    assert!(
+        bad.iter().all(|l| l.contains("Expected this to be")),
         "{}",
         bad.join("\n")
     );
@@ -920,6 +1079,84 @@ fn a_project_with_imports_analyzes() {
         .collect();
     let emitted = std::fs::read_to_string(&main).unwrap();
     assert!(bad.is_empty(), "{}\n---\n{emitted}", bad.join("\n"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A field of an imported struct whose type names a type of its module,
+/// `HashMap<string, Entry>`, constructs with a bare `HashMap.new()`. The
+/// call took no type arguments there, and the analyzer reported that
+/// the type arguments differ. The check artifact now casts it to the
+/// field's own type, `index<Ballot, "votes">`, which keeps the field
+/// typed: a read of it as a string reports.
+#[test]
+fn a_field_of_an_imported_struct_takes_its_own_type() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let defs = root.join("../tools/types/globalTypes.d.luau");
+
+    if !defs.is_file() {
+        eprintln!("skipped: no definitions at {}", defs.display());
+
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!("alloy-analyze-fields-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src/shared")).unwrap();
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nout = \"out\"\nartifact = \"check\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join(".luaurc"), "{ \"languageMode\": \"strict\" }\n").unwrap();
+    std::fs::write(
+        dir.join("src/shared/book.aly"),
+        "import { HashMap, Set } from \"@alloy/std/collections\"\n\nexport type Entry = { n: number }\n\nexport struct Ballot as\n    votes: HashMap<string, Entry>\n    seen: Set<Entry>\n    plain: HashMap<string, string>\nend\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/main.aly"),
+        "import { HashMap, Set } from \"@alloy/std/collections\"\nimport { Ballot } from \"./shared/book\"\nlocal b = new Ballot { votes = HashMap.new(), seen = Set.new(), plain = HashMap.new() }\nlocal wrong: string = b.votes\nprint(wrong)\n",
+    )
+    .unwrap();
+
+    let config = alloy::config::Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run_project(&dir, &config).unwrap();
+    assert!(report.is_clean(), "{:?}", report.diagnostics);
+
+    let main = dir.join("out/main.luau");
+    let emitted = std::fs::read_to_string(&main).unwrap();
+    assert!(
+        emitted.contains("votes = ((__alloy.HashMap.new() :: any) :: index<Ballot, \"votes\">)")
+            && emitted.contains("plain = __alloy.HashMap.new<<string, string>>()"),
+        "{emitted}"
+    );
+
+    let run = Command::new("luau-lsp")
+        .arg("analyze")
+        .arg("--flag:LuauSolverV2=true")
+        .arg(format!("--definitions={}", defs.display()))
+        .arg(&main)
+        .output();
+
+    let Ok(run) = run else {
+        eprintln!("skipped: luau-lsp is not installed");
+
+        return;
+    };
+
+    let text =
+        String::from_utf8_lossy(&run.stdout).into_owned() + &String::from_utf8_lossy(&run.stderr);
+    let bad: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("TypeError") || l.contains("SyntaxError"))
+        .collect();
+    assert_eq!(bad.len(), 1, "{}\n---\n{emitted}", bad.join("\n"));
+    assert!(
+        bad[0].contains("(4,") && bad[0].contains("Expected this to be 'string'"),
+        "{}",
+        bad[0]
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1234,6 +1471,65 @@ fn a_rest_pattern_over_a_plain_table_analyzes() {
     analyze(RESTS, "rests");
 }
 
+/// `Future.all_settled` reached the checker's limit at every call, an
+/// annotated one too, so its own doc example failed. The elements read
+/// as `any`, and an annotation types them.
+#[test]
+fn all_settled_analyzes_and_an_annotation_types_it() {
+    let body = "local a = Future.resolve(1)\nlocal f: Future<Result<number, any>[]> = Future.all_settled([a])\nlocal g = Future.all_settled([a])\nasync do\n    local rs = await Future.all_settled([Future.resolve(1), Future.reject(\"no\")])\n    local typed = await f\n    local n: TYPE = typed[1]:unwrap_or(0)\n    print(rs:len(), g, n)\nend\n";
+    analyze(&body.replace("TYPE", "number"), "all-settled-good");
+
+    let Some(reported) = reports(&body.replace("TYPE", "string"), "all-settled-bad") else {
+        return;
+    };
+    assert_eq!(reported.len(), 1, "{reported:?}");
+    assert!(
+        reported[0].contains("Expected this to be 'string'"),
+        "{reported:?}"
+    );
+}
+
+/// An `is` test on a struct or an enum narrowed the name in an `if`
+/// statement alone. The right side of `and` and the branch of an `if`
+/// expression read it as `unknown`: "Type 'unknown' does not have key
+/// 'x'". Each read there casts now, and a wrong use still reports.
+#[test]
+fn an_is_test_narrows_the_expression_it_guards() {
+    let head = "struct P as\n    x: number\nend\n\nenum Species as\n    Cat\n    Dog\nend\n\n";
+    let good = format!(
+        "{head}local function g(v: unknown, name: string): Species\n    local a = v is P and v.x > 0\n    local b = if v is P then v.x else 0\n    local c = v is not P or v.x > 0\n    local d = if v is not P then 0 else v.x\n    local e = v is P ? v.x : 0\n    print(a, b, c, d, e)\n    return if name is Species then name else Species.Cat\nend\nprint(g(1, \"Cat\"))\n"
+    );
+    let out = alloy::compile(&good).unwrap();
+    assert!(
+        out.check
+            .contains("(getmetatable((v :: any)) == P) and ((v :: any) :: P).x > 0"),
+        "{}",
+        out.check
+    );
+    assert!(!out.ship.contains(":: P)"), "{}", out.ship);
+    analyze(&good, "is-in-expression-good");
+
+    let bad = format!(
+        "{head}local function g(v: unknown): string\n    return if v is P then v.x else \"\"\nend\nprint(g(1))\n"
+    );
+    let Some(reported) = reports(&bad, "is-in-expression-bad") else {
+        return;
+    };
+    assert!(
+        reported.iter().any(|l| l.contains("got 'number'")),
+        "{reported:?}"
+    );
+}
+
+/// `f is function` cast `f` to two function types in an intersection,
+/// an overload, so `f()` and `f(1)` were ambiguous. One function type
+/// takes every call, and passes where a callback is asked.
+#[test]
+fn a_value_narrowed_to_function_calls() {
+    let src = "local function take(cb: () -> ()) cb() end\nlocal function run(f: unknown, g: string | (number) -> ())\n    if f is function then\n        f()\n        f(1)\n        f(\"x\")\n        take(f)\n    end\n    if g is function then\n        g(1)\n    end\nend\nrun(print, \"x\")\n";
+    analyze(src, "is-function");
+}
+
 /// A `.d.aly` that names a type of another `.d.aly` could load first,
 /// and the type was unknown then, which dropped the whole file with no
 /// report. An array there typed as a bare `Array` did the same.
@@ -1282,4 +1578,146 @@ fn a_declaration_file_names_the_types_of_another() {
     assert!(errors.is_empty(), "{errors:?}");
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A match with no arm for a variant ends in a nil fallthrough, and the
+/// checker reported that nil at the last arm beside `ExhaustiveMatch`.
+/// The editor showed one report; `flux` now shows the same one.
+#[test]
+fn a_match_that_is_not_exhaustive_reports_once() {
+    let dir = std::env::temp_dir().join(format!("alloy-exhaustive-flux-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n",
+    )
+    .unwrap();
+    let src = "enum Kind\n    Pickaxe\n    Axe\n    Sword\nend\n\nlocal function h(k: Kind): number\n    return match k with\n        case Pickaxe then 1\n        case Axe then 2\n    end\nend\nprint(h(Kind.Axe))\n";
+    std::fs::write(dir.join("src/a.aly"), src).unwrap();
+
+    let config = alloy::config::Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::flux_project(&dir, &config).unwrap();
+
+    // Every line of the match holds the report, not only its first.
+    assert_eq!(report.checks[0].error_lines, vec![8, 9, 10, 11]);
+
+    let Ok(analysis) = alloy::typecheck::analyze(&dir, &config, &report.checks, &[]) else {
+        eprintln!("skipped: luau-lsp is not installed");
+
+        return;
+    };
+    let errors: Vec<String> = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| d.is_error())
+        .map(|d| format!("{}:{} {}", d.line, d.col, d.message))
+        .collect();
+
+    assert!(errors.is_empty(), "{errors:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// React takes a binding where a Roblox property wants a value. The
+/// check took any binding there, so a `Binding<string>` passed as a
+/// `Size`. The value the binding holds is checked now, in either solver,
+/// and a lone `{expr}` that sets `Text` takes a binding as `Text=` does.
+#[test]
+fn a_binding_on_a_roblox_tag_checks_its_value_in_either_solver() {
+    let src = "type Binding<T> = { getValue: (self: Binding<T>) -> T }\nlocal React = {}\nfunction React.createElement(kind: any, props: any, ...: any): any\n    return props\nend\nlocal function View(label: Binding<string>, flag: Binding<boolean>)\n    return (\n        <Frame>\n            <TextLabel Text={label} Visible={flag} />\n            <TextLabel>{label}</TextLabel>\n            <TextLabel Size={label} Text={flag} />\n            <TextLabel>{flag}</TextLabel>\n        </Frame>\n    )\nend\nprint(View)\n";
+
+    for new_solver in [true, false] {
+        let dir =
+            std::env::temp_dir().join(format!("alloy-binding-{new_solver}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("alloy.toml"),
+            format!(
+                "[build]\nin = \"src\"\nout = \"build\"\n\n[flux]\nnew_solver = {new_solver}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join("src/view.alx"), src).unwrap();
+
+        let config = alloy::config::Config::load(&dir.join("alloy.toml")).unwrap();
+        let report = alloy::build::flux_project(&dir, &config).unwrap();
+        let Ok(analysis) = alloy::typecheck::analyze(&dir, &config, &report.checks, &[]) else {
+            eprintln!("skipped: luau-lsp is not installed");
+
+            return;
+        };
+        let errors: Vec<(usize, String)> = analysis
+            .diagnostics
+            .iter()
+            .filter(|d| d.is_error())
+            .map(|d| (d.line, d.message.clone()))
+            .collect();
+        let lines: Vec<usize> = errors.iter().map(|e| e.0).collect();
+
+        assert_eq!(lines, vec![11, 11, 12], "{new_solver}: {errors:?}");
+        assert!(errors[0].1.contains("got 'Binding<string>'"), "{errors:?}");
+        assert!(errors[2].1.contains("got 'Binding<boolean>'"), "{errors:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// `impl Named for Mode` gives a unit enum the trait's default `hi`, and
+/// `Mode.hi(Mode.On)` gave "Expected this to be 'Named', but got 'Mode'":
+/// the default typed `self` as the trait's table, and a unit variant is
+/// a string. On an enum with a unit variant the default now takes the
+/// enum as `self`. A struct and a payload enum keep the trait's `self`,
+/// and the return type stays.
+#[test]
+fn a_trait_default_takes_a_unit_enum_as_self() {
+    let src = "trait Named as\n    function hi(self, n: number): string\n        return \"hi\"\n    end\nend\nenum Mode as On, Off end\nimpl Named for Mode as\nend\nenum Opt as\n    Some(number)\n    Nil\nend\nimpl Named for Opt as\nend\nstruct Dog as\n    n: number\nend\nimpl Named for Dog as\nend\nlocal a: string = Mode.hi(Mode.On, 1)\nlocal b: string = Opt.hi(Opt.Nil, 2)\nlocal c: string = Opt.hi(Opt.Some(1), 3)\nlocal d: string = Dog.hi(new Dog { n = 1 }, 4)\nprint(a, b, c, d)\n";
+    analyze(src, "trait-unit-enum");
+
+    let bad = "trait Named as\n    function hi(self): string\n        return \"hi\"\n    end\nend\nenum Mode as On, Off end\nimpl Named for Mode as\nend\nstruct Dog as\n    n: number\nend\nimpl Named for Dog as\nend\nlocal n: number = Mode.hi(Mode.On)\nprint(Mode.hi(5))\nprint(Dog.hi(5))\nprint(n)\n";
+    let Some(reported) = reports(bad, "trait-unit-enum-bad") else {
+        return;
+    };
+
+    assert_eq!(reported.len(), 3, "{}", reported.join("\n"));
+    assert!(reported[0].contains("Expected this to be 'number', but got 'string'"));
+    // The raw checker names the union; `flux` names it `Mode`.
+    assert!(reported[1].contains("Expected this to be '\"Off\" | \"On\"', but got 'number'"));
+    assert!(reported[2].contains("Expected this to be 'Named', but got 'number'"));
+}
+
+/// `impl Ranged for Frost` on a class table left `self` untyped, and
+/// `self.slow * 10` read `unknown`. The impl method takes the instance
+/// its colon methods take, so a right use passes and a wrong one
+/// reports.
+#[test]
+fn an_impl_on_a_class_table_reads_the_instance() {
+    let head = "trait Ranged as\n    function range(self): number\nend\nlocal Frost = {}\nFrost.__index = Frost\nfunction Frost.new(slow: number)\n    local self = setmetatable({}, Frost)\n    self.slow = slow\n    return self\nend\n";
+    let good = format!(
+        "{head}impl Ranged for Frost as\n    function range(self): number\n        return self.slow * 10\n    end\nend\nprint(Frost.new(2):range())\n"
+    );
+    analyze(&good, "impl-class-self");
+
+    let bad = format!(
+        "{head}impl Ranged for Frost as\n    function range(self): number\n        return self.slow:upper()\n    end\nend\nprint(Frost)\n"
+    );
+    let Some(reported) = reports(&bad, "impl-class-self-bad") else {
+        return;
+    };
+    assert_eq!(reported.len(), 1, "{}", reported.join("\n"));
+}
+
+/// The lead example of `alloy doc Heap` failed under the default strict
+/// mode, since the comparator took untyped values, and it read `Heap`
+/// with no import. A reader copies it, so it checks as written.
+#[test]
+fn the_heap_doc_example_checks_in_strict_mode() {
+    let text = alloy::docs::lookup("Heap").expect("the Heap entry");
+    let example = text
+        .strip_prefix("```alloy\n")
+        .and_then(|t| t.split("```").next())
+        .expect("a lead example");
+    assert!(example.starts_with("import { Heap } from \"@alloy/std/collections\""));
+    analyze(example, "doc-heap");
 }

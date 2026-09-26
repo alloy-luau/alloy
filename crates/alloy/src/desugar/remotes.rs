@@ -1,6 +1,6 @@
 //! Remote declarations and their wire layout.
 
-use alloy_syntax::ast::RemoteDecl;
+use alloy_syntax::ast::{Block, Expr, IndexKey, RemoteDecl};
 
 use super::types::{group_len, split_top_level};
 use super::*;
@@ -52,11 +52,13 @@ pub(crate) enum Wire {
     Array { item: Box<Wire>, optional: bool },
     /// An enum of this file or an import. The value crosses beside the
     /// buffer as Roblox copies a table, which drops the metatable; the
-    /// reader checks the variant and restores it.
+    /// reader checks the variant and restores it, and each payload value
+    /// by its own layout.
     Enum {
         name: String,
-        /// Each variant with its payload count; a unit variant is a string.
-        variants: Vec<(String, usize)>,
+        /// Each variant with the layout of each payload value; a unit
+        /// variant is a string.
+        variants: Vec<(String, Vec<Wire>)>,
         optional: bool,
     },
 }
@@ -183,7 +185,9 @@ impl Wire {
         match self {
             Wire::Scalar { .. } => Vec::new(),
 
-            Wire::Enum { name, .. } => vec![name.clone()],
+            Wire::Enum { name, variants, .. } => std::iter::once(name.clone())
+                .chain(variants.iter().flat_map(|(_, p)| p).flat_map(Wire::structs))
+                .collect(),
 
             Wire::Table {
                 fields,
@@ -235,12 +239,29 @@ impl Wire {
                 variants,
                 optional,
             } => {
-                let tags: Vec<String> =
-                    variants.iter().map(|(v, n)| format!("{v} = {n}")).collect();
+                let tags: Vec<String> = variants
+                    .iter()
+                    .map(|(v, p)| format!("{v} = {}", p.len()))
+                    .collect();
+                // A payload the layout leaves open, `any`, needs no slot.
+                let slots: Vec<String> = variants
+                    .iter()
+                    .filter(|(_, p)| p.iter().any(|w| w.luau() != "\"any\""))
+                    .map(|(v, p)| {
+                        let nodes: Vec<String> = p.iter().map(Wire::luau).collect();
+
+                        format!("{v} = {{ {} }}", nodes.join(", "))
+                    })
+                    .collect();
+                let slots = match slots.is_empty() {
+                    true => String::new(),
+
+                    false => format!(", slots = {{ {} }}", slots.join(", ")),
+                };
                 let optional = if *optional { ", optional = true" } else { "" };
 
                 format!(
-                    "{{ enum = {name}, tags = {{ {} }}{optional} }}",
+                    "{{ enum = {name}, tags = {{ {} }}{slots}{optional} }}",
                     tags.join(", ")
                 )
             }
@@ -331,6 +352,26 @@ fn offender(
     None
 }
 
+/// The layout of an enum whose table `name` reads. A unit enum crosses
+/// as one of its names; the reader refuses any other string, so a forged
+/// `"Nuke"` reaches no handler.
+fn enum_wire(name: String, variants: Vec<(String, Vec<Wire>)>, optional: bool) -> Wire {
+    if variants.iter().all(|(_, p)| p.is_empty()) {
+        let names: Vec<&str> = variants.iter().map(|(v, _)| v.as_str()).collect();
+
+        return Wire::Scalar {
+            kind: format!("one:{}", names.join(",")),
+            optional,
+        };
+    }
+
+    Wire::Enum {
+        name,
+        variants,
+        optional,
+    }
+}
+
 pub(crate) fn not_wire_type(ty: &str) -> Option<&'static str> {
     if ty.contains("->") {
         return Some("is a function type");
@@ -357,24 +398,190 @@ pub(crate) fn not_wire_type(ty: &str) -> Option<&'static str> {
 }
 
 impl<'s> Desugar<'s> {
-    /// The fields of a struct another file declares, when this file
-    /// imports it. A struct of the same name that this file never
-    /// imports is not the type the parameter names: a `Player` struct
-    /// elsewhere made `target: Player` a table layout, and the remote
-    /// then refused every real Player.
-    fn imported_shape(&self, name: &str) -> Option<Vec<crate::WireField>> {
-        if !self.imported_names.contains(name) {
+    /// The module this file is, as the project shapes name it: the
+    /// longest one its path ends with. A test build names the file
+    /// `src/types.aly`, and the module is `types.aly`.
+    pub(crate) fn own_module(&self) -> Option<&str> {
+        let path = std::path::Path::new(&self.options.file_name);
+
+        self.options
+            .wire_scopes
+            .iter()
+            .map(|s| s.module.as_str())
+            .filter(|m| !m.is_empty() && path.ends_with(m))
+            .max_by_key(|m| m.len())
+    }
+
+    /*
+    The project struct or enum that `ty` names in `module`: one the
+    module declares, or one an import there binds, followed to the
+    module that declares it. `K.Kind` reads through the star import `K`.
+
+    A layout read "the one project type of this name". A private struct of
+    the same name in an unrelated file then made the name ambiguous, and
+    the layout lost its struct, its enum slots, or its registration.
+    */
+    pub(crate) fn project_type(
+        &self,
+        module: &str,
+        ty: &str,
+        hops: usize,
+    ) -> Option<&crate::StructShape> {
+        // Two modules that import a name from each other would loop.
+        if hops > 8 {
             return None;
         }
 
-        // `import { Shot as S }` binds `S` to the struct named `Shot`.
-        let declared = self.import_renames.get(name).map_or(name, String::as_str);
+        let scope = self.options.wire_scopes.iter().find(|s| s.module == module);
 
-        self.options
+        if let Some((head, rest)) = ty.split_once('.') {
+            if let Some((_, target)) =
+                scope.and_then(|s| s.stars.iter().find(|(local, _)| local == head))
+            {
+                return self.project_type(target, rest, hops + 1);
+            }
+
+            // A namespace of the module keeps a type under one flat
+            // name, `Combat_Hit`. An imported namespace reads in the
+            // module that declares it.
+            let flat = ty.replace('.', "_");
+
+            if let Some(shape) = self
+                .options
+                .shapes
+                .iter()
+                .find(|sh| sh.module == module && sh.name == flat)
+            {
+                return Some(shape);
+            }
+
+            let (_, target, name) = scope?.names.iter().find(|(local, ..)| local == head)?;
+
+            return self.project_type(target, &format!("{name}.{rest}"), hops + 1);
+        }
+
+        if let Some(shape) = self
+            .options
             .shapes
             .iter()
-            .find(|sh| sh.name == declared)
-            .map(|sh| sh.fields.clone())
+            .find(|sh| sh.module == module && sh.name == ty)
+        {
+            return Some(shape);
+        }
+
+        let (_, target, name) = scope?.names.iter().find(|(local, ..)| local == ty)?;
+
+        self.project_type(target, name, hops + 1)
+    }
+
+    /// The struct or enum another file declares, for a name an import
+    /// of this file binds: `Item` by a named import, or `Ty.Item`
+    /// through a star import. A struct of the same name that this file
+    /// never imports is not the type the parameter names: a `Player`
+    /// struct elsewhere made `target: Player` a table layout, and the
+    /// remote then refused every real Player.
+    pub(crate) fn imported_type(&self, ty: &str) -> Option<&crate::StructShape> {
+        // `Combat.Hit` reads through an imported namespace `Combat`.
+        let bound = match ty.split_once('.') {
+            Some((head, _)) => {
+                self.star_modules.contains(head) || self.imported_names.contains(head)
+            }
+
+            None => self.imported_names.contains(ty),
+        };
+
+        if !bound {
+            return None;
+        }
+
+        self.project_type(self.own_module()?, ty, 0)
+    }
+
+    /// The layout of each variant of an enum, from the payload types. An
+    /// enum of another file names its `module`, whose names they are.
+    fn variant_wires(
+        &self,
+        variants: &[(String, Vec<String>)],
+        module: Option<&str>,
+        depth: usize,
+    ) -> Vec<(String, Vec<Wire>)> {
+        variants
+            .iter()
+            .map(|(v, types)| {
+                let wires = types
+                    .iter()
+                    .map(|t| self.wire_of_type(t, None, depth + 1, module))
+                    .collect();
+
+                (v.clone(), wires)
+            })
+            .collect()
+    }
+
+    /// The layout of each field of a struct another file declares. The
+    /// field types belong to that file.
+    fn shape_fields(&self, shape: &crate::StructShape, depth: usize) -> Vec<(String, Wire)> {
+        shape
+            .fields
+            .iter()
+            .map(|f| {
+                let w =
+                    self.wire_of_type(&f.ty, f.width.as_deref(), depth + 1, Some(&shape.module));
+
+                (f.name.clone(), w)
+            })
+            .collect()
+    }
+
+    /*
+    The registration of a struct or an enum of this file, for the wire of
+    another file. A remote there that carries a struct from here reads
+    each field's type in this file, and a field can name a table that
+    file cannot reach. Its layout names the key instead, and the reader
+    takes the table from the registry. Only a type that a struct field of
+    the project names registers, so the output of other types stays as
+    it was.
+    */
+    pub(crate) fn wire_registration(&mut self, name: &str) -> String {
+        // A namespace opens no scope, and its member is a local of the
+        // file too.
+        if self.scopes.len() != self.top_scope + 1 || self.options.macro_depth > 0 {
+            return String::new();
+        }
+
+        let Some(own) = self.own_module() else {
+            return String::new();
+        };
+        let Some(shape) = self
+            .options
+            .shapes
+            .iter()
+            .find(|sh| sh.module == own && sh.name == name)
+        else {
+            return String::new();
+        };
+        // A field names this table when its module's imports lead to it.
+        let in_a_field = self.options.shapes.iter().any(|sh| {
+            sh.fields
+                .iter()
+                .map(|f| &f.ty)
+                .chain(sh.variants.iter().flat_map(|(_, p)| p))
+                .any(|ty| {
+                    ty.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '.')
+                        .filter_map(|w| self.project_type(&sh.module, w, 0))
+                        .any(|t| std::ptr::eq(t, shape))
+                })
+        });
+        // A unit enum crosses as a string and needs no table.
+        let unit = !shape.variants.is_empty() && shape.variants.iter().all(|(_, p)| p.is_empty());
+
+        if !in_a_field || unit {
+            return String::new();
+        }
+
+        let key = luau_string(&shape.wire_key());
+
+        format!(" {}.wire.types[{key}] = {name}", self.std())
     }
 
     /// `wire_offender` with the structs of this file, so a parameter
@@ -383,11 +590,16 @@ impl<'s> Desugar<'s> {
         offender(
             ty,
             &|name| {
-                let declared = self
-                    .struct_wire
-                    .get(name)
-                    .cloned()
-                    .or_else(|| self.imported_shape(name))?;
+                let own = self.own_ns_type(name);
+                let declared = match self.struct_wire.get(own.as_deref().unwrap_or(name)) {
+                    Some(fields) => fields.clone(),
+
+                    None => self
+                        .imported_type(name)
+                        .filter(|sh| sh.variants.is_empty())?
+                        .fields
+                        .clone(),
+                };
 
                 Some(
                     declared
@@ -500,6 +712,7 @@ impl<'s> Desugar<'s> {
 
             if let Some(s) = below {
                 let pname = self.text_of(p.name).to_string();
+                let s = self.display_name(&s);
                 self.diagnose(
                     p.name,
                     &format!(
@@ -641,6 +854,185 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /// The remotes this file declares join the imported ones, a remote
+    /// in a namespace by its path. In a file with a side, the bindings
+    /// that could shadow one are noted too.
+    pub(crate) fn note_remote_sides(&mut self, block: &Block) {
+        let mut own = Vec::new();
+
+        for stmt in &block.stmts {
+            crate::modules::remote_sides(self.src, self.toks, stmt, "", &mut own);
+        }
+
+        self.remote_sides.extend(own);
+
+        if self.file_side.is_none() || self.remote_sides.is_empty() {
+            return;
+        }
+
+        self.remote_shadows = crate::naming::scoped_bindings(self.src, self.toks, block);
+
+        // `const vote = Net.Vote`: the local holds the remote, so a call
+        // through it takes the check a call through `Net.Vote` takes.
+        // The locals come in source order, so an alias of an alias
+        // reads through the first.
+        let mut locals = Vec::new();
+        locals_in(block, &mut locals);
+
+        for l in locals {
+            for (b, value) in l.names.iter().zip(&l.values) {
+                let Some(path) = self.dotted_name(value).filter(|_| b.destructure.is_none()) else {
+                    continue;
+                };
+                let name = self.text_of(b.name).to_string();
+
+                for (rest, sides) in self.remotes_under(&path, value.span().start as usize) {
+                    self.remote_aliases
+                        .insert((b.name.start as usize, format!("{name}{rest}")), sides);
+                }
+            }
+        }
+
+        let heads: HashSet<String> = self
+            .remote_sides
+            .keys()
+            .chain(self.remote_aliases.keys().map(|(_, k)| k))
+            .map(|k| k.split('.').next().unwrap_or(k).to_string())
+            .collect();
+        self.remote_shadows
+            .retain(|(name, _, _)| heads.contains(name.as_str()));
+    }
+
+    /// The token that declares the binding of `name` that holds the
+    /// token at `at`: the latest one, since an inner or a later binding
+    /// hides an outer one. `None` when no local, parameter, or loop
+    /// variable holds it, so the name is the file's own or an import.
+    fn binding_at(&self, name: &str, at: usize) -> Option<usize> {
+        self.remote_shadows
+            .iter()
+            .filter(|(n, _, reach)| {
+                n == name
+                    && reach
+                        .as_ref()
+                        .is_none_or(|ranges| ranges.iter().any(|&(a, b)| a <= at && at < b))
+            })
+            .map(|&(_, tok, _)| tok)
+            .max()
+    }
+
+    /// The remotes a dotted path at the token `at` reaches, each with
+    /// the rest of its key past the path and its sides. `Net` reaches
+    /// `.Vote`, and `Net.Vote` reaches itself with an empty rest. The
+    /// binding of the head decides the table: an alias reads its own
+    /// keys, any other binding holds no remote, and no binding reads the
+    /// file's remotes and the imported ones.
+    fn remotes_under(&self, path: &str, at: usize) -> Vec<(String, (bool, bool))> {
+        let head = path.split('.').next().unwrap_or(path);
+        let rest = |key: &str| {
+            key.strip_prefix(path)
+                .filter(|r| r.is_empty() || r.starts_with('.'))
+                .map(str::to_string)
+        };
+
+        match self.binding_at(head, at) {
+            Some(tok) => self
+                .remote_aliases
+                .iter()
+                .filter(|((t, _), _)| *t == tok)
+                .filter_map(|((_, key), sides)| Some((rest(key)?, *sides)))
+                .collect(),
+
+            None => self
+                .remote_sides
+                .iter()
+                .filter_map(|(key, sides)| Some((rest(key)?, *sides)))
+                .collect(),
+        }
+    }
+
+    /// The sides of the remote an expression names: `Ping`, `Net.Ping`,
+    /// or a local that holds one.
+    pub(crate) fn remote_named(&self, object: &Expr) -> Option<(bool, bool)> {
+        let receiver = self.text_of(object.span()).trim().to_string();
+
+        self.remotes_under(&receiver, object.span().start as usize)
+            .into_iter()
+            .find(|(rest, _)| rest.is_empty())
+            .map(|(_, sides)| sides)
+    }
+
+    /*
+    `Up.fire(1)` in a `.server.aly` file, where `Up` goes from the client.
+    A remote declared in a shared module types both sides, so the checker
+    took the call, and the server called `FireClient(1)` at run time. The
+    other way, `Down.fire(1)` on the client, the checker asked for a
+    `Player` and did not name the side.
+
+    A file with a side runs on that side alone, so the check is sound
+    there. A shared file may run on either side and gets no report. A
+    local, a parameter, or a loop variable of the remote's name is some
+    other value, so a call through it gets none either. A local that
+    holds the remote, `const up = Up`, is the remote, so a call through
+    it gets the report.
+    */
+    pub(crate) fn check_remote_side(&mut self, e: &Expr) {
+        use crate::directives::Side;
+
+        let Some(side) = self.file_side else {
+            return;
+        };
+        let Expr::Call {
+            func, method: None, ..
+        } = e
+        else {
+            return;
+        };
+        let Expr::Index {
+            object,
+            key: IndexKey::Field(verb),
+            ..
+        } = func.as_ref()
+        else {
+            return;
+        };
+        let receiver = self.text_of(object.span()).trim().to_string();
+        let Some((from_client, from_server)) = self.remote_named(object) else {
+            return;
+        };
+
+        let verb = self.text_of(*verb).to_string();
+        let (sends, receives) = match side {
+            Side::Client => (from_client, from_server),
+
+            Side::Server => (from_server, from_client),
+        };
+        let other = match side {
+            Side::Client => "server",
+
+            Side::Server => "client",
+        };
+        let here = side.name();
+        let message = match verb.as_str() {
+            "fire" | "call" | "fire_all" | "fire_except" if !sends => {
+                let act = if verb == "call" { "call" } else { "fire" };
+
+                format!("`{receiver}` goes from the {other}; the {here} cannot {act} it")
+            }
+
+            // Only the server reaches every client.
+            "fire_all" | "fire_except" if side == Side::Client => {
+                format!("`{receiver}.{verb}` reaches the clients; only the server calls it")
+            }
+
+            "on" | "once" | "wait" if !receives => {
+                format!("`{receiver}` goes from the {here}; the {here} cannot handle it")
+            }
+
+            _ => return,
+        };
+        self.diagnose(func.span(), &message);
+    }
+
     /// The wire layout of each parameter: a width attribute, `@u8`, on a
     /// number; else from the type, down into a struct, a table type, or
     /// an array of those; `any` for what crosses as it is. A `?` type or
@@ -712,7 +1104,7 @@ impl<'s> Desugar<'s> {
 
             // A default fills before the pack and after the read, so the
             // value is never nil on the wire.
-            let wire = self.wire_of_type(&ty, width.as_deref(), 0, false);
+            let wire = self.wire_of_type(&ty, width.as_deref(), 0, None);
             kinds.push(wire);
         }
 
@@ -723,18 +1115,19 @@ impl<'s> Desugar<'s> {
     /// project opens to its fields; a record type to its members; `T[]`,
     /// `{ T }`, and `Array<T>` to their item. Anything else is `any`.
     /*
-    The layout of a type as written. `foreign` marks a type written in
-    another file, a field of an imported struct: its names belong to that
-    file, so this file's enums, aliases, and structs do not answer for
-    them. There a name is a project struct, one of the two engine names a
-    file never shadows, a datatype, or a value the layout leaves alone.
+    The layout of a type as written. `foreign` names the module of a type
+    written in another file, a field of an imported struct: its names
+    belong to that file, so this file's enums, aliases, and structs do not
+    answer for them. There a name is a project type that the module's
+    imports reach, one of the two engine names a file never shadows, a
+    datatype, or a value the layout leaves alone.
     */
     pub(crate) fn wire_of_type(
         &self,
         text: &str,
         width: Option<&str>,
         depth: usize,
-        foreign: bool,
+        foreign: Option<&str>,
     ) -> Wire {
         let mut ty = text.trim();
         let mut optional = false;
@@ -838,27 +1231,33 @@ impl<'s> Desugar<'s> {
             };
         }
 
+        // A type of a namespace here renders under one flat name,
+        // `Combat_Hit`, and every index of this file keys it by that name.
+        let own = foreign.is_none().then(|| self.own_ns_type(ty)).flatten();
+        let ty = own.as_deref().unwrap_or(ty);
         let is_name = ty.chars().all(|c| c.is_alphanumeric() || c == '_');
+        let is_path = ty
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.');
 
-        if is_name && foreign {
-            // One project struct of the name; its table is not in scope
-            // here, so the value decodes without a metatable.
-            let mut named = self.options.shapes.iter().filter(|sh| sh.name == ty);
+        if let Some(module) = foreign
+            && is_path
+        {
+            // The project struct or enum the module's imports reach. Its
+            // table is not in scope here, so the layout names the key the
+            // declaring file registers the table under.
+            if let Some(shape) = self.project_type(module, ty, 0) {
+                let key = luau_string(&shape.wire_key());
 
-            if let (Some(shape), None) = (named.next(), named.next()) {
-                let fields = shape
-                    .fields
-                    .iter()
-                    .map(|f| {
-                        let w = self.wire_of_type(&f.ty, f.width.as_deref(), depth + 1, true);
+                if !shape.variants.is_empty() {
+                    let variants = self.variant_wires(&shape.variants, Some(&shape.module), depth);
 
-                        (f.name.clone(), w)
-                    })
-                    .collect();
+                    return enum_wire(key, variants, optional);
+                }
 
                 return Wire::Table {
-                    fields,
-                    struct_name: None,
+                    fields: self.shape_fields(shape, depth),
+                    struct_name: Some(key),
                     optional,
                 };
             }
@@ -872,40 +1271,42 @@ impl<'s> Desugar<'s> {
             };
         }
 
-        if is_name {
-            // A struct of this file reads its fields here; an imported one
-            // reads them in the file that declares it.
-            let (declared, fields_foreign) = match self.struct_wire.get(ty).cloned() {
-                Some(d) => (Some(d), false),
+        // A struct of this file reads its fields here. An imported one,
+        // by its name or through a star import as `Ty.Stats`, is in
+        // scope under what the file writes, and reads its fields in the
+        // file that declares it.
+        if is_name && let Some(declared) = self.struct_wire.get(ty) {
+            let fields = declared
+                .iter()
+                .map(|f| {
+                    let w = self.wire_of_type(&f.ty, f.width.as_deref(), depth + 1, None);
 
-                None => (self.imported_shape(ty), true),
+                    (f.name.clone(), w)
+                })
+                .collect();
+
+            return Wire::Table {
+                fields,
+                struct_name: Some(ty.to_string()),
+                optional,
             };
+        }
 
-            if let Some(declared) = declared {
-                let fields = declared
-                    .iter()
-                    .map(|f| {
-                        (
-                            f.name.clone(),
-                            self.wire_of_type(&f.ty, f.width.as_deref(), depth + 1, fields_foreign),
-                        )
-                    })
-                    .collect();
-
-                return Wire::Table {
-                    fields,
-                    struct_name: Some(ty.to_string()),
-                    optional,
-                };
-            }
+        if let Some(shape) = self.imported_type(ty).filter(|sh| sh.variants.is_empty()) {
+            return Wire::Table {
+                fields: self.shape_fields(shape, depth),
+                struct_name: Some(ty.to_string()),
+                optional,
+            };
         }
 
         // The file's own type wins over a Roblox class of the same name,
         // as a struct does above: an `enum Team` sent as `inst:Team` made
         // the reader refuse every packet. An alias reads as its value, a
         // unit enum crosses as its string, and any other declaration, or
-        // an import, as a value the layout leaves to the checker.
-        if ty.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        // an import, as a value the layout leaves to the checker. An
+        // enum through a star import reads under its path, `Ty.Item`.
+        if is_path {
             if let Some(value) = self.alias_values.get(ty).cloned() {
                 let value = if optional {
                     format!("({value})?")
@@ -913,24 +1314,29 @@ impl<'s> Desugar<'s> {
                     value
                 };
 
-                return self.wire_of_type(&value, width, depth + 1, false);
+                return self.wire_of_type(&value, width, depth + 1, None);
             }
 
-            // A unit enum crosses as one of its names; the reader refuses
-            // any other string, so a forged `"Nuke"` reaches no handler.
+            // An enum of this file reads its payload types here; an
+            // imported one reads them in the file that declares it. With
+            // neither, a payload value crosses as it is.
             if let Some(variants) = self.enum_decls.get(ty) {
-                let unit = variants.iter().all(|(_, n)| *n == 0);
-                let names: Vec<&str> = variants.iter().map(|(v, _)| v.as_str()).collect();
+                let variants = match self.enum_payloads.get(ty) {
+                    Some(payloads) => self.variant_wires(payloads, None, depth),
 
-                return match unit {
-                    true => scalar(&format!("one:{}", names.join(","))),
+                    None => match self.imported_type(ty).filter(|sh| !sh.variants.is_empty()) {
+                        Some(shape) => {
+                            self.variant_wires(&shape.variants, Some(&shape.module), depth)
+                        }
 
-                    false => Wire::Enum {
-                        name: ty.to_string(),
-                        variants: variants.clone(),
-                        optional,
+                        None => variants
+                            .iter()
+                            .map(|(v, n)| (v.clone(), vec![scalar("any"); *n]))
+                            .collect(),
                     },
                 };
+
+                return enum_wire(ty.to_string(), variants, optional);
             }
 
             if self.declared_types.contains(ty) || self.imported_names.contains(ty) {
@@ -997,14 +1403,16 @@ impl<'s> Desugar<'s> {
             .map(|t| self.copy_type_to_string(t).trim().to_string())
             .unwrap_or_else(|| "()".to_string());
         // A server handler of a remote function may answer with a Future.
-        // `Future<()>` is no type, so an event's `call` yields any.
+        // `Future<()>` is no type, so an event's `call` yields any. A
+        // pack, `(A, B)`, is no type argument: the Future takes `A, B`.
+        let settles = super::statements::pack_inner(&ret).unwrap_or(&ret);
         let answer = if r.is_function && ret != "()" {
-            format!("{ret} | {std}.Future<{ret}>")
+            format!("{ret} | {std}.Future<{settles}>")
         } else {
             ret.clone()
         };
         let future = if r.is_function && ret != "()" {
-            format!("{std}.Future<{ret}>")
+            format!("{std}.Future<{settles}>")
         } else {
             format!("{std}.Future<any>")
         };
@@ -1102,19 +1510,24 @@ impl<'s> Desugar<'s> {
             members.push(format!("on: {ty}"));
             members.push(format!("once: {ty}"));
             // `wait` settles with the payload the handler would get, and
-            // `await` yields the first of those values. With both sides
+            // `await` yields every value of it. With both sides
             // handling, the two payloads differ and the type stays open.
-            let waited = match (client_handles, server_handles) {
-                (true, false) => handler_params
-                    .first()
-                    .and_then(|p| p.split_once(": "))
-                    .map(|(_, t)| t.to_string()),
+            let payload = handler_params
+                .iter()
+                .filter_map(|p| p.split_once(": "))
+                .map(|(_, t)| t);
+            let waited: Vec<&str> = match (client_handles, server_handles) {
+                (true, false) => payload.collect(),
 
-                (false, true) => Some("Player".to_string()),
+                (false, true) => std::iter::once("Player").chain(payload).collect(),
 
-                _ => None,
+                _ => vec!["any", "...any"],
             };
-            let waited = waited.unwrap_or_else(|| "any".to_string());
+            let waited = match waited.is_empty() {
+                true => "any".to_string(),
+
+                false => waited.join(", "),
+            };
             members.push(format!("wait: () -> {std}.Future<{waited}>"));
         }
 
@@ -1130,9 +1543,57 @@ impl<'s> Desugar<'s> {
     // --- attributes ------------------------------------------------------------
 }
 
+/// Every `local` and `const` of a block, in source order, the ones in
+/// nested blocks and function bodies included.
+fn locals_in<'a>(block: &'a Block, out: &mut Vec<&'a alloy_syntax::ast::Local>) {
+    for stmt in &block.stmts {
+        if let alloy_syntax::ast::Stmt::Local(l) = stmt {
+            out.push(l);
+        }
+
+        for c in stmt_children(stmt) {
+            locals_in_child(c, out);
+        }
+    }
+}
+
+fn locals_in_child<'a>(c: Child<'a>, out: &mut Vec<&'a alloy_syntax::ast::Local>) {
+    match c {
+        Child::Block(b) => locals_in(b, out),
+
+        Child::Function(f) => locals_in(&f.block, out),
+
+        Child::Expr(e) => {
+            for c in expr_children(e) {
+                locals_in_child(c, out);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::EmitOptions;
+
+    /// The imports of `module`: each name with the module and the name
+    /// there, and each star import with its module.
+    fn scope(
+        module: &str,
+        names: &[(&str, &str, &str)],
+        stars: &[(&str, &str)],
+    ) -> crate::WireScope {
+        crate::WireScope {
+            module: module.into(),
+            names: names
+                .iter()
+                .map(|(l, m, n)| (l.to_string(), m.to_string(), n.to_string()))
+                .collect(),
+            stars: stars
+                .iter()
+                .map(|(l, m)| (l.to_string(), m.to_string()))
+                .collect(),
+        }
+    }
 
     fn messages(src: &str) -> Vec<String> {
         crate::compile(src)
@@ -1151,12 +1612,12 @@ mod tests {
     fn a_payload_enum_names_itself_in_the_layout() {
         let src = "enum Boost\n    None\n    Strength(number)\nend\nstruct Reward\n    boost: Boost\nend\nremote Grant(boost: Boost, maybe: Boost?) from server\nremote Give(reward: Reward, all: Boost[]) from server\n";
         let out = crate::compile(src).unwrap();
-        let node = "{ enum = Boost, tags = { None = 0, Strength = 1 } }";
+        let node = "{ enum = Boost, tags = { None = 0, Strength = 1 }, slots = { Strength = { \"f64\" } } }";
 
         assert!(messages(src).is_empty(), "{:?}", messages(src));
         assert!(
             out.ship.contains(&format!(
-                "wire = {{ {node}, {{ enum = Boost, tags = {{ None = 0, Strength = 1 }}, optional = true }} }}, pack = false"
+                "wire = {{ {node}, {{ enum = Boost, tags = {{ None = 0, Strength = 1 }}, slots = {{ Strength = {{ \"f64\" }} }}, optional = true }} }}, pack = false"
             )),
             "{}",
             out.ship
@@ -1179,6 +1640,297 @@ mod tests {
             [
                 "parameter `boost` of remote `Grant` names `Boost`, which is declared below the remote; move the declaration above it"
             ]
+        );
+    }
+
+    /// A type from another module keeps its metatable across the wire. A
+    /// star path is in scope, so the layout names it. A field of an
+    /// imported struct can name a table this file cannot reach, so the
+    /// layout names a key, and the declaring file registers the table
+    /// under it. The layouts had no enum at all, `"any"`, and a record
+    /// with no struct.
+    #[test]
+    fn a_type_from_another_module_keeps_its_metatable() {
+        let field = |name: &str, ty: &str| crate::WireField {
+            name: name.into(),
+            ty: ty.into(),
+            width: None,
+        };
+        let shape = |name: &str, fields, variants| crate::StructShape {
+            name: name.into(),
+            fields,
+            module: "types.aly".into(),
+            variants,
+            ..Default::default()
+        };
+        let variants = vec![
+            ("Sword".to_string(), vec!["number".to_string()]),
+            ("Nothing".to_string(), Vec::new()),
+        ];
+        let options = EmitOptions {
+            shapes: vec![
+                shape("Item", Vec::new(), variants),
+                shape("Stats", vec![field("hp", "number")], Vec::new()),
+                shape("Outer", vec![field("s", "Stats")], Vec::new()),
+                shape("Bag", vec![field("one", "Item")], Vec::new()),
+            ],
+            wire_scopes: vec![
+                scope("types.aly", &[], &[]),
+                scope(
+                    "net.aly",
+                    &[("Bag", "types.aly", "Bag"), ("Outer", "types.aly", "Outer")],
+                    &[("Ty", "types.aly")],
+                ),
+            ],
+            file_name: "net.aly".into(),
+            import_enums: vec![(
+                "Ty.Item".to_string(),
+                vec![("Sword".to_string(), 1), ("Nothing".to_string(), 0)],
+            )],
+            ..EmitOptions::default()
+        };
+        let src = "import { Bag, Outer } from \"./types\"\nimport * as Ty from \"./types\"\nremote R3(bag: Bag) from server\nremote R5(it: Ty.Item) from server\nremote R6(o: Outer) from server\nremote R7(s: Ty.Stats) from server\n";
+        let out = crate::compile_with(src, &options).unwrap();
+        let item = "tags = { Sword = 1, Nothing = 0 }, slots = { Sword = { \"f64\" } } }";
+
+        for layout in [
+            format!("{{ fields = {{ {{ \"one\", {{ enum = \"types.aly:Item\", {item} }} }}, struct = Bag }}"),
+            format!("wire = {{ {{ enum = Ty.Item, {item} }}"),
+            "{ fields = { { \"s\", { fields = { { \"hp\", \"f64\" } }, struct = \"types.aly:Stats\" } } }, struct = Outer }".to_string(),
+            "{ fields = { { \"hp\", \"f64\" } }, struct = Ty.Stats }".to_string(),
+        ] {
+            assert!(out.ship.contains(&layout), "{layout}\n{}", out.ship);
+        }
+
+        // The declaring file registers what a field names, on the line
+        // of its `end`, and nothing else.
+        let types = "export enum Item\n    Sword(number)\n    Nothing\nend\nexport struct Stats\n    hp: number\nend\nexport struct Outer\n    s: Stats\nend\nexport struct Bag\n    one: Item\nend\n";
+        let declaring = EmitOptions {
+            file_name: "types.aly".into(),
+            ..options
+        };
+        let out = crate::compile_with(types, &declaring).unwrap();
+        assert_eq!(
+            out.ship.lines().count(),
+            types.lines().count(),
+            "{}",
+            out.ship
+        );
+
+        for (line, name) in [(3, "Item"), (6, "Stats")] {
+            let registers = format!("__alloy.wire.types[\"types.aly:{name}\"] = {name}");
+            assert!(
+                out.ship.lines().nth(line).unwrap().contains(&registers),
+                "{}",
+                out.ship
+            );
+        }
+
+        assert_eq!(out.ship.matches("wire.types").count(), 2, "{}", out.ship);
+    }
+
+    /// A layout reads a type name through the imports of the file that
+    /// writes it. A private `Inner` in an unrelated module made the name
+    /// ambiguous: the enum slot went, the array item read `any`, and the
+    /// declaring file stopped registering. A unit enum field of an
+    /// imported struct crossed as a plain string.
+    #[test]
+    fn a_layout_reads_a_type_through_the_imports_of_its_file() {
+        let field = |name: &str, ty: &str| crate::WireField {
+            name: name.into(),
+            ty: ty.into(),
+            width: None,
+        };
+        let shape = |module: &str, name: &str, fields, variants| crate::StructShape {
+            name: name.into(),
+            fields,
+            module: module.into(),
+            variants,
+            ..Default::default()
+        };
+        let kind = "shared/kind.aly";
+        let options = EmitOptions {
+            shapes: vec![
+                shape(
+                    "other.aly",
+                    "Inner",
+                    vec![field("label", "string")],
+                    Vec::new(),
+                ),
+                shape(
+                    "shared/inner.aly",
+                    "Inner",
+                    vec![field("n", "number")],
+                    Vec::new(),
+                ),
+                shape(
+                    kind,
+                    "Kind",
+                    Vec::new(),
+                    vec![
+                        ("Big".into(), vec!["Inner".into()]),
+                        ("Small".into(), Vec::new()),
+                    ],
+                ),
+                shape(
+                    kind,
+                    "Rarity",
+                    Vec::new(),
+                    vec![("Common".into(), Vec::new()), ("Rare".into(), Vec::new())],
+                ),
+                shape(
+                    kind,
+                    "Holder",
+                    vec![field("list", "{ Inner }"), field("rarity", "Rarity?")],
+                    Vec::new(),
+                ),
+            ],
+            wire_scopes: vec![
+                scope("other.aly", &[], &[]),
+                scope("shared/inner.aly", &[], &[]),
+                scope(kind, &[("Inner", "shared/inner.aly", "Inner")], &[]),
+                scope("net.aly", &[("Holder", kind, "Holder")], &[("K", kind)]),
+            ],
+            file_name: "net.aly".into(),
+            import_enums: vec![(
+                "K.Kind".into(),
+                vec![("Big".into(), 1), ("Small".into(), 0)],
+            )],
+            ..EmitOptions::default()
+        };
+        let src = "import * as K from \"./shared/kind\"\nimport { Holder } from \"./shared/kind\"\nremote R1(k: K.Kind) from client\nremote R2(h: Holder) from client\n";
+        let out = crate::compile_with(src, &options).unwrap();
+        let inner = "{ fields = { { \"n\", \"f64\" } }, struct = \"shared/inner.aly:Inner\" }";
+
+        for layout in [
+            format!(
+                "{{ enum = K.Kind, tags = {{ Big = 1, Small = 0 }}, slots = {{ Big = {{ {inner} }} }} }}"
+            ),
+            format!(
+                "{{ fields = {{ {{ \"list\", {{ item = {inner}, array = true }} }}, {{ \"rarity\", \"one:Common,Rare?\" }} }}, struct = Holder }}"
+            ),
+        ] {
+            assert!(out.ship.contains(&layout), "{layout}\n{}", out.ship);
+        }
+
+        // The declaring file registers its table, and the private one
+        // registers nothing.
+        let registers = |file: &str, src: &str| {
+            let options = EmitOptions {
+                file_name: file.into(),
+                ..options.clone()
+            };
+
+            crate::compile_with(src, &options)
+                .unwrap()
+                .ship
+                .contains("wire.types")
+        };
+        assert!(registers(
+            "src/shared/inner.aly",
+            "export struct Inner\n    n: number\nend\n"
+        ));
+        assert!(!registers(
+            "src/other.aly",
+            "struct Inner\n    label: string\nend\n"
+        ));
+    }
+
+    /// A struct inside a variant's payload keeps its metatable: the
+    /// layout gives each payload value its own node, direct for a table
+    /// in scope and keyed for one the declaring file registers. The
+    /// payload crossed as it was, a plain table.
+    #[test]
+    fn a_payload_value_takes_its_own_layout() {
+        let src = "struct Stats
+    hp: number
+end
+enum Purchase
+    Bought(Stats, number)
+    Denied(string)
+    Pending
+end
+remote R(p: Purchase) from server
+";
+        let out = crate::compile(src).unwrap();
+        assert!(messages(src).is_empty(), "{:?}", messages(src));
+        assert!(
+            out.ship.contains("{ enum = Purchase, tags = { Bought = 2, Denied = 1, Pending = 0 }, slots = { Bought = { { fields = { { \"hp\", \"f64\" } }, struct = Stats }, \"f64\" }, Denied = { \"str\" } } }"),
+            "{}",
+            out.ship
+        );
+
+        // A struct declared below the remote is nil in the payload's
+        // layout too.
+        let below = "enum Purchase
+    Bought(Stats)
+end
+remote R(p: Purchase) from server
+struct Stats
+    hp: number
+end
+";
+        assert_eq!(
+            messages(below),
+            [
+                "parameter `p` of remote `R` names `Stats`, which is declared below the remote; move the declaration above it"
+            ]
+        );
+
+        // An imported enum reads its payload types in its own file, so a
+        // struct there takes its key, and the file registers it.
+        let options = EmitOptions {
+            shapes: vec![
+                crate::StructShape {
+                    name: "Purchase".into(),
+                    module: "shop.aly".into(),
+                    variants: vec![("Bought".into(), vec!["Stats".into()])],
+                    ..Default::default()
+                },
+                crate::StructShape {
+                    name: "Stats".into(),
+                    module: "shop.aly".into(),
+                    fields: vec![crate::WireField {
+                        name: "hp".into(),
+                        ty: "number".into(),
+                        width: None,
+                    }],
+                    ..Default::default()
+                },
+            ],
+            wire_scopes: vec![
+                scope("shop.aly", &[], &[]),
+                scope("net.aly", &[("Purchase", "shop.aly", "Purchase")], &[]),
+            ],
+            file_name: "net.aly".into(),
+            import_enums: vec![("Purchase".into(), vec![("Bought".into(), 1)])],
+            ..EmitOptions::default()
+        };
+        let src = "import { Purchase } from \"./shop\"\nremote R(p: Purchase) from server\n";
+        let out = crate::compile_with(src, &options).unwrap();
+        assert!(
+            out.ship.contains("{ enum = Purchase, tags = { Bought = 1 }, slots = { Bought = { { fields = { { \"hp\", \"f64\" } }, struct = \"shop.aly:Stats\" } } } }"),
+            "{}",
+            out.ship
+        );
+
+        let shop = "export struct Stats
+    hp: number
+end
+export enum Purchase
+    Bought(Stats)
+end
+";
+        let declaring = EmitOptions {
+            file_name: "shop.aly".into(),
+            ..options
+        };
+        let out = crate::compile_with(shop, &declaring).unwrap();
+        assert!(
+            out.ship
+                .contains("__alloy.wire.types[\"shop.aly:Stats\"] = Stats"),
+            "{}",
+            out.ship
         );
     }
 
@@ -1380,11 +2132,22 @@ remote Chain(n: Node) from client
             out.check
         );
         // The server handles a client's fire, and the sender comes first.
+        // `await` gives every value of the payload, so the Future names
+        // each one.
         let up = crate::compile("export remote Buy(offer_id: number) from client\n").unwrap();
         assert!(
-            up.check.contains("wait: () -> __alloy.Future<Player>"),
+            up.check
+                .contains("wait: () -> __alloy.Future<Player, number>"),
             "{}",
             up.check
+        );
+        let two =
+            crate::compile("export remote Join(name: string, team: number) from server\n").unwrap();
+        assert!(
+            two.check
+                .contains("wait: () -> __alloy.Future<string, number>"),
+            "{}",
+            two.check
         );
     }
 

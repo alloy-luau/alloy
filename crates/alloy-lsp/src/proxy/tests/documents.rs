@@ -38,8 +38,9 @@ pub(crate) fn the_mirror_config_names_the_runtime_and_the_mounts() {
 }
 /// Luau reads `src/init.luau` as the module `src`, so a relative
 /// require in it names a file beside `src`. The shadow of an `init.aly`
-/// writes the path from there. Without it the child resolves no module
-/// and every imported name reads as `unknown`.
+/// names a file of its own folder as `@self/...`, which holds under a
+/// sourcemap too. Without it the child resolves no module and every
+/// imported name reads as `unknown`.
 #[test]
 pub(crate) fn an_init_shadow_requires_a_sibling_through_its_folder() {
     let dir = std::env::temp_dir().join(format!("alloy-init-require-{}", std::process::id()));
@@ -69,7 +70,7 @@ pub(crate) fn an_init_shadow_requires_a_sibling_through_its_folder() {
     };
     let shadow = init("src/init.aly");
 
-    assert!(shadow.contains("require(\"./src/scheduler\")"), "{shadow}");
+    assert!(shadow.contains("require(\"@self/scheduler\")"), "{shadow}");
 
     // A file that is no `init` keeps the path the source wrote.
     let shadow = init("src/other.aly");
@@ -1046,29 +1047,54 @@ pub(crate) fn a_range_in_a_macro_expansion_covers_the_call() {
     assert_eq!(range, range_value((4, 10), (4, 26)), "{}", doc.shadow);
 }
 
-/// A mirror another root left behind a week ago goes at initialize; a
-/// fresh one and the session's own stay.
+/// A mirror another root left behind two days ago goes at initialize.
+/// A fresh one, one a live server owns, the session's own, and a
+/// folder that is no mirror stay. A week was too long: killed servers
+/// and test runs left thousands of mirrors.
 #[test]
 pub(crate) fn stale_mirrors_of_other_roots_are_purged() {
     let base = std::env::temp_dir().join(format!("alloy-lsp-purge-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
-    let own = base.join("own").join("root");
-    let old = base.join("old");
-    let fresh = base.join("fresh");
+    let own = base.join("0000000000000000").join("root");
+    let [old, dead, live, fresh, other] = [
+        "1111111111111111",
+        "2222222222222222",
+        "3333333333333333",
+        "4444444444444444",
+        "not-a-mirror",
+    ]
+    .map(|n| base.join(n));
     std::fs::create_dir_all(&own).expect("own");
-    std::fs::create_dir_all(&old).expect("old");
-    std::fs::create_dir_all(&fresh).expect("fresh");
-    let week_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 24 * 60 * 60);
-    std::fs::File::open(&old)
-        .expect("old dir")
-        .set_modified(week_ago)
-        .expect("mtime");
+
+    for dir in [&old, &dead, &live, &fresh, &other] {
+        std::fs::create_dir_all(dir).expect("dir");
+    }
+
+    std::fs::write(dead.join("server.pid"), u32::MAX.to_string()).expect("dead pid");
+    claim_mirror(&live.join("root"));
+    let two_days_ago =
+        std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 24 * 60 * 60);
+
+    for dir in [&old, &dead, &live, &other] {
+        std::fs::File::open(dir)
+            .expect("dir")
+            .set_modified(two_days_ago)
+            .expect("mtime");
+    }
 
     purge_stale_mirrors(&own);
 
     assert!(own.exists());
     assert!(fresh.exists());
+    assert!(live.exists(), "a live server owns it");
+    assert!(other.exists(), "no mirror");
     assert!(!old.exists());
+
+    // Only Linux can tell that the pid names no process.
+    if cfg!(target_os = "linux") {
+        assert!(!dead.exists());
+    }
+
     let _ = std::fs::remove_dir_all(&base);
 }
 
@@ -1125,4 +1151,41 @@ pub(crate) fn a_hint_names_a_module_type_by_its_path() {
     // The file imports the type by name, so the bare name reaches it.
     let named = "import planck, { type Scheduler } from '@pkg/planck'\n\nexport const scheduler = new planck.Scheduler()\n";
     assert_eq!(hint(named, true).0, ": Scheduler<>");
+}
+
+/// "Extract to local variable" sends `luau-lsp.rename` with the shadow's
+/// URI, a file of the mirror, and a place in the text it inserts. The
+/// command now names the source, at the new name there. A command whose
+/// place is in older text goes. The Alloy extension runs the command.
+#[test]
+pub(crate) fn a_refactor_follow_up_names_the_source() {
+    let (mut st, uri) = one_file("local function f(w: number)\n    return w * 2\nend\n");
+    let shadow = "file:///m/t.luau";
+    st.shadows.insert(shadow.to_string(), uri.to_string());
+    let action = |at: Value| {
+        json!({
+            "title": "Extract to local variable",
+            "edit": { "changes": { shadow: [
+                { "range": range_value((1, 0), (1, 0)), "newText": "    local extracted = w * 2\n" },
+                { "range": range_value((1, 11), (1, 16)), "newText": "extracted" },
+            ] } },
+            "command": { "command": "luau-lsp.rename", "arguments": [shadow, at] },
+        })
+    };
+
+    let mut moved = action(json!({ "line": 1, "character": 10 }));
+    map_follow_up(&mut moved, &st);
+
+    assert_eq!(
+        moved["command"]["arguments"],
+        json!([uri, { "line": 1, "character": 10 }])
+    );
+    // The Alloy extension runs the rename; luau-lsp's may be asleep.
+    assert_eq!(moved["command"]["command"], "alloy-luau.rename");
+
+    // Line 2 after the edit is the old `return` line: no inserted text.
+    let mut dropped = action(json!({ "line": 2, "character": 4 }));
+    map_follow_up(&mut dropped, &st);
+
+    assert!(dropped.get("command").is_none(), "{dropped}");
 }

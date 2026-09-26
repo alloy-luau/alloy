@@ -123,12 +123,20 @@ pub fn to_source(lints: &mut [Lint], src: &str, map: &crate::render::SpanMap) {
     }
 }
 
-/// Applies the fixes of `lints` to `src`, last to first so the offsets
-/// hold. Two fixes that overlap keep the first, and a fix lands with all
-/// its edits or none.
+/// Applies the fixes of `lints` to `src`. Two fixes that overlap keep
+/// the first, a fix lands with all its edits or none, and a fix that
+/// breaks the parse does not land. See `sound`.
 pub fn apply_fixes(src: &str, lints: &[Lint]) -> (String, usize) {
     let chosen = compatible(src, lints.iter().filter_map(|l| l.fix.as_ref()));
-    let mut edits: Vec<&Fix> = chosen.iter().flat_map(|f| f.edits()).collect();
+    let (kept, _) = sound(src, chosen);
+
+    (apply(src, &kept), kept.len())
+}
+
+/// The text of `src` with the edits of `fixes`, last to first so the
+/// offsets hold. The fixes must not overlap: see `compatible`.
+pub fn apply(src: &str, fixes: &[&Fix]) -> String {
+    let mut edits: Vec<&Fix> = fixes.iter().flat_map(|f| f.edits()).collect();
     edits.sort_by_key(|e| (e.start, e.end));
     let mut out = src.to_string();
 
@@ -136,7 +144,29 @@ pub fn apply_fixes(src: &str, lints: &[Lint]) -> (String, usize) {
         out.replace_range(e.start as usize..e.end as usize, &e.replacement);
     }
 
-    (out, chosen.len())
+    out
+}
+
+/// Splits `fixes` into the ones that keep `src` parsing and the ones
+/// that break it. A lint that misreads its code can write text that
+/// does not parse, as `if return f() then` once did. `--fix` and the
+/// editor refuse that rewrite and keep the file. A sound set costs one
+/// parse. A source that does not parse refuses nothing.
+pub fn sound<'a>(src: &str, fixes: Vec<&'a Fix>) -> (Vec<&'a Fix>, Vec<&'a Fix>) {
+    let parses = |fixes: &[&Fix]| alloy_syntax::parse_one(&apply(src, fixes)).is_ok();
+
+    if fixes.is_empty() || parses(&fixes) || alloy_syntax::parse_one(src).is_err() {
+        return (fixes, Vec::new());
+    }
+
+    let (kept, broken): (Vec<&Fix>, Vec<&Fix>) = fixes.iter().copied().partition(|f| parses(&[*f]));
+
+    // Two fixes that parse alone can still break the parse together.
+    if parses(&kept) {
+        (kept, broken)
+    } else {
+        (Vec::new(), fixes)
+    }
 }
 
 /// The fixes that land together, in source order: each still reads
@@ -229,7 +259,7 @@ pub enum Group {
     Roblox,
     /// Strict rules, on while `[lint] strict = true`.
     Pedantic,
-    /// The case of names, off until `[lint.rules] naming = "warn"`.
+    /// The case of names, by `[lint.naming]`. It warns by default.
     Naming,
 }
 
@@ -271,7 +301,9 @@ impl Group {
             Group::Perf => "code that runs slower than the plain form",
             Group::Roblox => "a Roblox API that is deprecated or misused",
             Group::Pedantic => "strict rules, on while `[lint] strict = true`",
-            Group::Naming => "the case of names, off until `[lint.rules] naming = \"warn\"`",
+            Group::Naming => {
+                "the case of names, by `[lint.naming]`; `[lint.rules] naming = \"allow\"` turns it off"
+            }
         }
     }
 }
@@ -369,7 +401,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Correctness,
         default: Level::Warn,
         summary: "a call passes more arguments than the function takes",
-        detail: "The extra values are evaluated and dropped, so a mistake in the argument order reads as working code. The lint counts only the functions the file declares by a plain name with a fixed parameter list; a vararg, a default, or a name declared twice makes the count a range and the lint stands down. The checker reports the other direction, a call with too few arguments.",
+        detail: "The extra values are evaluated and dropped, so a mistake in the argument order reads as working code. The lint counts a call of a function with a fixed parameter list that the file or an imported module declares: a plain name, `M.f` through `import * as M`, a static, a method on a value the file types with an annotation or a `new`, and a function in a table a local holds. A vararg, a default, or a name declared twice makes the count a range and the lint stands down. The checker reports the other direction, a call with too few arguments.",
     },
     LintInfo {
         name: "unreachable_default",
@@ -449,6 +481,13 @@ pub const LINTS: &[LintInfo] = &[
         detail: "The second body replaces the first, so the first never runs. Either the two were meant to have different names, or one is a leftover from an edit. A `@cfg` pair is exempt: only one of the two reaches a build.",
     },
     LintInfo {
+        name: "identity_compare",
+        group: Group::Correctness,
+        default: Level::Warn,
+        summary: "`==` or `~=` with a new payload variant or a new struct of a type that derives no `Eq`",
+        detail: "A payload variant, `Item.Tool(\"a\", 1)`, and a `new` struct are a new table. `==` on two tables compares identity, so a value built in the comparison equals no other: `x == Item.Tool(\"a\", 1)` is always false, and `~=` is always true. `@derive(Eq)` on the type writes an `__eq` that compares the payload or the fields. A unit variant is a string and compares by its text, so it does not fire. The lint reads the derives of a type the file declares or imports from the project.",
+    },
+    LintInfo {
         name: "circular_import",
         group: Group::Correctness,
         default: Level::Warn,
@@ -457,11 +496,25 @@ pub const LINTS: &[LintInfo] = &[
     },
     // --- suspicious ------------------------------------------------------------
     LintInfo {
+        name: "single_angle_call",
+        group: Group::Suspicious,
+        default: Level::Warn,
+        summary: "a call that writes its type arguments in one `<...>`",
+        detail: "A call takes its type arguments in `<<...>>`: `id<<number>>(5)`. Luau reads `id<number>(5)` as two comparisons, `(id < number) > 5`, and so does Alloy, because every valid Luau file compiles. Where the tokens read as no Luau, `Signal.new<string>()`, the compiler reports an error instead. The editor offers the `<<...>>` form as a quick fix; `alloy flux --fix` leaves the line, because the rewrite changes what the program does.",
+    },
+    LintInfo {
         name: "deprecated_namespace",
         group: Group::Suspicious,
         default: Level::Warn,
         summary: "a use of a namespace declared `@deprecated`",
         detail: "`@deprecated` on a `function` passes through to Luau, which reports a call to it. A namespace has no Luau form, so this lint reports the use instead. The message the attribute carries prints after the name. Inside the namespace the members read each other by their own names, and nothing fires.",
+    },
+    LintInfo {
+        name: "deprecated_call",
+        group: Group::Suspicious,
+        default: Level::Warn,
+        summary: "a `:` call of an impl method declared `@deprecated`",
+        detail: "Flux. Luau reports `Box.value(b)` on a method marked `@deprecated`, but its lint does not follow `b:value()` through the metatable. This lint reports the method call when the file types the receiver as the struct: an annotation, `b: Box`, or the struct a `new Box { }` builds. The impl may sit in this file or in a module the file imports. A receiver of no known type stays quiet. The message the attribute carries prints after the name.",
     },
     LintInfo {
         name: "and_or_ternary",
@@ -560,7 +613,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Style,
         default: Level::Warn,
         summary: "a `local` that nothing assigns again",
-        detail: "`local x = v` with no later `x = ...` holds one value, and `const x = v` says so: a write added later is a compile error instead of a quiet change. A `const` value stays mutable, so `t.x = 1` still works. `alloy flux --fix` writes `const`, and so does `alloy fmt` unless `[fmt] prefer_const = false`.",
+        detail: "`local x = v` with no later `x = ...` holds one value, and `const x = v` says so: a write added later is a compile error instead of a quiet change. A local whose value the file writes into, with `t.x = 1` or with a call such as `t:push(v)` in any expression, stays `local`, so `prefer_const` and `const_mutation` never disagree. `alloy flux --fix` writes `const`, and so does `alloy fmt` unless `[fmt] prefer_const = false`.",
     },
     LintInfo {
         name: "redundant_as",
@@ -651,7 +704,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Style,
         default: Level::Warn,
         summary: "`local x = v` followed by `return x`",
-        detail: "The local is read once, on the next line, by the `return`. `return v` says the same in one statement; a call goes in parentheses, `return (f())`, so the return keeps one value as the local did. `alloy flux --fix` rewrites it.",
+        detail: "The local is read once, on the next line, by the `return`. `return v` says the same in one statement; a call goes in parentheses, `return (f())`, so the return keeps one value as the local did. A `const x = v` reads the same. `alloy flux --fix` rewrites it.",
     },
     LintInfo {
         name: "numeric_for_index",
@@ -831,7 +884,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Naming,
         default: Level::Warn,
         summary: "a name in a case other than the one `[lint.naming]` sets for its kind",
-        detail: "Naming. `[lint.naming]` gives each kind of name a case style, or a list of styles, and a name passes when it fits one of them. The defaults follow Rust. A local, a function, a method, a parameter, a field, an attribute, and a macro take snake_case. A struct, an enum, a variant, a trait, an interface, a type, a namespace, and a remote take PascalCase. A `const` takes snake_case or SCREAMING_SNAKE_CASE, because Alloy marks any binding that the file never assigns again as `const`.\n\nA name that starts with `_` does not fire. A local bound to `require(...)` or `:GetService(...)` takes the case of its module or service, so `local Players` does not fire. In an `.alx` file a function that returns markup, or that a tag names, is a component and takes the `component` style, PascalCase by default. A method in the `impl` of a trait takes its name from the trait.\n\n`alloy flux --fix` and `alloy fmt` rename the name to the first style of its list, at each place the file reads it. The rename stays in the scope of a local or a parameter, and skips a scope that shadows it. It writes nothing when another file or saved data reads the name, so an export, a field, a variant, a method, a remote, an attribute, a macro, and a namespace member keep the lint alone. So does a declaration under an attribute other than `@allow`, such as `@test`, because the runtime may read its name. It also writes nothing when the new name is already in the file, or is a keyword or a Luau global. `[fmt] fix_naming = false` stops the renames of `alloy fmt`.\n\nThe lint answers to its old names, `camel_case_name`, `type_case`, and `pascal_case_function`, and to rustc's `non_snake_case`, `non_camel_case_types`, and `non_upper_case_globals`. So `@allow(non_snake_case)` quiets it. `alloy doc naming-conventions` lists the keys of `[lint.naming]`.",
+        detail: "Naming. `[lint.naming]` gives each kind of name a case style, or a list of styles, and a name passes when it fits one of them. The defaults follow Rust. A local, a function, a method, a parameter, a field, an attribute, and a macro take snake_case. A struct, an enum, a variant, a trait, an interface, a type, a namespace, and a remote take PascalCase. A `const` takes snake_case or SCREAMING_SNAKE_CASE, because Alloy marks any binding that the file never assigns again as `const`. A `local` that nothing assigns again takes the const style too, while `prefer_const` or `[fmt] prefer_const` is on, since either one makes it a `const`.\n\nA name that starts with `_` does not fire. A local bound to `require(...)` or `:GetService(...)` takes the case of its module or service, so `local Players` does not fire. In an `.alx` file a function that returns markup, or that a tag names, is a component and takes the `component` style, PascalCase by default. A method in the `impl` of a trait takes its name from the trait.\n\n`alloy flux --fix` and `alloy fmt` rename the name to the first style of its list, at each place the file reads it. The rename stays in the scope of a local or a parameter, and skips a scope that shadows it. It writes nothing when another file or saved data reads the name, so an export, a field, a variant, a method, a remote, an attribute, a macro, and a namespace member keep the lint alone. So does a declaration under an attribute other than `@allow`, such as `@test`, because the runtime may read its name. It also writes nothing when the new name is already in the file, or is a keyword or a Luau global. `[fmt] fix_naming = false` stops the renames of `alloy fmt`.\n\nThe lint answers to its old names, `camel_case_name`, `type_case`, and `pascal_case_function`, and to rustc's `non_snake_case`, `non_camel_case_types`, and `non_upper_case_globals`. So `@allow(non_snake_case)` quiets it. `alloy doc naming-conventions` lists the keys of `[lint.naming]`.",
     },
 ];
 
@@ -1218,6 +1271,48 @@ mod tests {
         );
     }
 
+    /// A method on a value the file types, a static, and a function in
+    /// a local table count their arguments too.
+    #[test]
+    fn a_method_a_static_and_a_table_field_count_their_arguments() {
+        let head = "struct W as\n    d: number\nend\n\nimpl W as\n    function make(d: number): W\n        return new W { d = d }\n    end\n\n    function dps(self, rate: number): number\n        return self.d * rate\n    end\nend\n\nconst w = W.make(1)\nconst v = new W { d = 2 }\nconst t = { f = function(x: number): number return x end }\n";
+
+        for (call, fires) in [
+            ("print(v:dps(1, 2))", true),
+            ("print(v:dps(1))", false),
+            ("print(W.make(1, 2))", true),
+            ("print(W.dps(v, 1, 2))", true),
+            ("print(W.dps(v, 1))", false),
+            ("print(t.f(1, 2))", true),
+            ("print(t.f(1))", false),
+            // `w` has no type the file writes, so the count stands down.
+            ("print(w:dps(1, 2))", false),
+        ] {
+            let src = format!("{head}{call}\nprint(w)\n");
+            let want: Vec<&str> = if fires {
+                vec!["argument_count"]
+            } else {
+                vec![]
+            };
+            assert_eq!(names(&src), want, "{call}");
+        }
+
+        // A parameter of the table's name is some other value, and a
+        // later write puts another function in the field.
+        assert_eq!(
+            names(
+                "const t = { f = function(x: number): number return x end }\nlocal function g(t: { f: (number, number) -> number }): number\n    return t.f(1, 2)\nend\nprint(g, t)\n"
+            ),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            names(
+                "local t = { f = function(x: number): number return x end }\nt.f = function(a: number, b: number): number return a + b end\nprint(t.f(1, 2))\n"
+            ),
+            Vec::<&str>::new()
+        );
+    }
+
     #[test]
     fn an_access_after_a_keyword_still_fires() {
         for src in [
@@ -1328,6 +1423,16 @@ mod tests {
         assert_eq!(
             cut("import * as m, { a } from \"./m\"\nprint(m.z)\n"),
             "import * as m from \"./m\"\nprint(m.z)\n"
+        );
+        // A list over several lines: a dead entry on a line of its own
+        // goes with that line, and the comment above it stays.
+        assert_eq!(
+            cut("import {\n    a, -- the a\n    b,\n    c,\n} from \"./m\"\nprint(a, c)\n"),
+            "import {\n    a, -- the a\n    c,\n} from \"./m\"\nprint(a, c)\n"
+        );
+        assert_eq!(
+            cut("import {\n    a, -- the a\n    b\n} from \"./m\"\nprint(a)\n"),
+            "import {\n    a, -- the a\n} from \"./m\"\nprint(a)\n"
         );
     }
 

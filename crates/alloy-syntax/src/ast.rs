@@ -64,6 +64,15 @@ pub struct Chunk {
     /// Each table key that is a reserved word, `{ in = 1 }`. Only a
     /// parse with `reserved_keys` reads one, and emit quotes it.
     pub reserved_keys: Vec<TokSpan>,
+    /// Each call that writes its type arguments in one `<...>` where the
+    /// tokens also read as Luau comparisons, `id<number>(5)`: the span
+    /// from the `<` to its `>`, with the report. The parse keeps the
+    /// comparisons, and the `single_angle_call` lint names the call.
+    pub angle_calls: Vec<(TokSpan, String)>,
+    /// The first token of each statement that follows another statement
+    /// in its block. Luau takes a `;` in front of such a token and
+    /// nowhere else, since a block cannot open with one.
+    pub stmt_breaks: Vec<usize>,
 }
 
 /// A piece of Alloy syntax inside a type span. Types stay spans, so the
@@ -584,6 +593,9 @@ pub struct MatchStmt {
     pub aliases: Vec<Option<TokSpan>>,
     pub arms: Vec<MatchArm>,
     pub default: Option<Block>,
+    /// A lenient parse met a mistake inside the match and read on. An
+    /// arm it dropped leaves the list short, so it proves no coverage.
+    pub recovered: bool,
     pub span: TokSpan,
 }
 
@@ -604,6 +616,8 @@ pub struct MatchExpr {
     pub aliases: Vec<Option<TokSpan>>,
     pub arms: Vec<MatchExprArm>,
     pub default: Option<Box<Expr>>,
+    /// See [`MatchStmt::recovered`].
+    pub recovered: bool,
     pub span: TokSpan,
 }
 

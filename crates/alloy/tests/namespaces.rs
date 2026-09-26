@@ -1374,3 +1374,170 @@ fn a_local_member_is_one_variable() {
 
     assert_eq!(out.trim(), "2\t3\n10\t11\t11", "{out}\n{ship}");
 }
+
+/// A struct or an enum of a namespace crosses a remote with the layout a
+/// top-level one gets. The layout read `Combat.Hit` as no type of the
+/// file: the spec had no wire, an array item read `any`, and `@u8` did
+/// nothing. A sibling that a field names by its own name reads too.
+#[test]
+fn a_namespace_type_crosses_a_remote_with_its_layout() {
+    let src = "namespace Combat\n    struct Hit\n        @u8 damage: number\n        kind: Kind\n    end\n    enum Kind\n        Slash\n        Burn(number)\n    end\nend\nremote Land(hit: Combat.Hit, rows: Combat.Hit[], k: Combat.Kind) from client\n";
+    let (ship, _, messages) = compile(src);
+    assert!(messages.is_empty(), "{messages:?}");
+
+    let kind =
+        "{ enum = Combat_Kind, tags = { Slash = 0, Burn = 1 }, slots = { Burn = { \"f64\" } } }";
+    let hit = format!(
+        "{{ fields = {{ {{ \"damage\", \"u8\" }}, {{ \"kind\", {kind} }} }}, struct = Combat_Hit }}"
+    );
+    let wire = format!("wire = {{ {hit}, {{ item = {hit}, array = true }}, {kind} }}");
+    assert!(ship.contains(&wire), "{wire}\n{ship}");
+}
+
+/// A namespace of another module: the layout reads the member in the
+/// module that declares it, through a named import and a star import,
+/// and that module registers the table a field names.
+#[test]
+fn an_imported_namespace_type_crosses_a_remote_with_its_layout() {
+    let dir = temp_project("wire");
+    fs::write(
+        dir.join("src/net.aly"),
+        "export namespace Combat\n    struct Hit\n        @u8 damage: number\n        kind: Kind\n    end\n    enum Kind\n        Slash\n        Burn(number)\n    end\nend\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/use.aly"),
+        "import { Combat } from \"./net\"\nimport * as Net from \"./net\"\nexport remote Land(hit: Combat.Hit) from client\nexport remote Star(hit: Net.Combat.Hit) from client\nprint(Combat.Kind.Burn(1) == Combat.Kind.Burn(1))\n",
+    )
+    .unwrap();
+
+    let report = build(&dir);
+    assert!(report.diagnostics.is_empty(), "{report:?}");
+
+    let read = |file: &str| fs::read_to_string(dir.join("out").join(file)).unwrap();
+    let used = read("use.luau");
+    let kind = "{ enum = \"net.aly:Combat_Kind\", tags = { Slash = 0, Burn = 1 }, slots = { Burn = { \"f64\" } } }";
+
+    for path in ["Combat.Hit", "Net.Combat.Hit"] {
+        let layout = format!(
+            "wire = {{ {{ fields = {{ {{ \"damage\", \"u8\" }}, {{ \"kind\", {kind} }} }}, struct = {path} }} }}"
+        );
+        assert!(used.contains(&layout), "{layout}\n{used}");
+    }
+
+    assert!(
+        read("net.luau").contains("wire.types[\"net.aly:Combat_Kind\"] = Combat_Kind"),
+        "{}",
+        read("net.luau")
+    );
+
+    // The enum of an imported namespace compares by identity too.
+    assert!(
+        report
+            .lints
+            .iter()
+            .any(|(_, l)| l.name == "identity_compare" && l.message.contains("`Combat.Kind`")),
+        "{:?}",
+        report.lints
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// `new N.X.Z { }` with `X` a struct names nothing. The path resolved
+/// to `N_X` and dropped `Z`, so the build made an `N.X` in silence, and
+/// empty braces said "leaves `a` unset". The path now reaches the
+/// checker whole, which reports "`N.X` has no struct `Z`".
+#[test]
+fn a_path_past_a_struct_names_no_struct() {
+    let src = "namespace N\n    struct X\n        a: number\n    end\nend\nprint(new N.X.Z { a = 1 }, new N.X.Z {})\n";
+    let (ship, _, messages) = compile(src);
+    assert!(messages.is_empty(), "{messages:?}");
+    assert!(ship.contains("construct(N.X.Z, { a = 1 })"), "{ship}");
+    assert!(!ship.contains("N_X({"), "{ship}");
+}
+
+/// A trait of a namespace bounds a generic: by its own name inside the
+/// namespace, and by its path outside. Inside, the bound read no trait;
+/// outside, the check artifact wrote `T & Zoo.Named`, a type path Luau
+/// does not have.
+#[test]
+fn a_namespace_trait_bounds_a_generic() {
+    let src = "namespace Zoo\n    trait Named\n        function name(self): string\n    end\n    function first<T: Named>(xs: T[]): string\n        return xs[1]:name()\n    end\nend\nstruct Cat\n    n: string\nend\nimpl Zoo.Named for Cat\n    function name(self): string\n        return self.n\n    end\nend\nstruct Rock\n    w: number\nend\nlocal function outer<T: Zoo.Named>(x: T): string\n    return x:name()\nend\nprint(Zoo.first, outer(new Cat { n = \"c\" }), outer(new Rock { w = 1 }))\n";
+    let (_, check, messages) = compile(src);
+    assert_eq!(
+        messages,
+        ["`Rock` does not implement `Zoo.Named`; `outer` asks for it"]
+    );
+    assert!(check.contains("(xs[1] :: (T & Zoo_Named))"), "{check}");
+    assert!(check.contains("outer<T>(x: (T & Zoo_Named))"), "{check}");
+}
+
+/// `==` on a fresh value of a namespace's struct or enum compares by
+/// identity, as it does for a top-level one: inside the namespace, by
+/// the path outside, and through `$assert_eq`, which compares with `==`.
+#[test]
+fn a_namespace_type_warns_of_an_identity_compare() {
+    let src = "namespace G\n    struct P\n        x: number\n    end\n    enum Inner\n        A\n        B(number)\n    end\n    @derive(Eq)\n    struct Q\n        x: number\n    end\n    function test(i: Inner): boolean\n        return i == Inner.B(1)\n    end\nend\nprint(new G.P { x = 1 } == new G.P { x = 1 }, new G.Q { x = 1 } == new G.Q { x = 1 })\n$assert_eq(G.Inner.B(1), G.Inner.B(1))\n";
+    let options = alloy::EmitOptions {
+        file_name: "t.aly".to_string(),
+        ..alloy::EmitOptions::default()
+    };
+    let out = alloy::compile_with(src, &options).unwrap();
+    let got: Vec<&str> = out
+        .lints
+        .iter()
+        .filter(|l| l.name == "identity_compare")
+        .map(|l| l.message.as_str())
+        .collect();
+
+    assert_eq!(
+        got,
+        [
+            "this `==` compares identity, and a value built here equals no other; `@derive(Eq)` on `G.Inner` compares the payload",
+            "this `==` compares identity, and a value built here equals no other; `@derive(Eq)` on `G.P` compares the fields",
+            "`$assert_eq` compares with `==`, which compares identity, and a value built here equals no other; `@derive(Eq)` on `G.Inner` compares the payload",
+        ]
+    );
+}
+
+/// Inside a namespace a type path reads from the namespace outward, as a
+/// value path does: `Deep.Pos` inside `Combat` names `Combat.Deep.Pos`,
+/// and so does `Pos` inside `Deep`. The emit left `Deep.Pos` as written,
+/// and the checker reported "Unknown type 'Deep.Pos'".
+#[test]
+fn a_type_path_reads_from_the_enclosing_namespace() {
+    let src = "namespace Combat\n    struct Box<T>\n        v: T\n    end\n    namespace Deep\n        struct Pos\n            @u8 x: number\n        end\n        function mid(p: Pos): Pos\n            return new Pos { x = p.x }\n        end\n    end\n    struct Hit\n        at: Deep.Pos\n        boxed: Box<Deep.Pos>\n    end\n    function place(p: Deep.Pos): Deep.Pos\n        local b: Box<Deep.Pos> = new Box<<Deep.Pos>> { v = p }\n        return new Deep.Pos { x = b.v.x }\n    end\nend\nremote Land(hit: Combat.Hit) from client\n";
+    let (ship, check, messages) = compile(src);
+    assert!(messages.is_empty(), "{messages:?}");
+
+    for text in [
+        "function Combat_Deep_mid(p: Combat_Deep_Pos): Combat_Deep_Pos",
+        "at: Combat_Deep_Pos, boxed: Combat_Box<Combat_Deep_Pos>",
+        "function Combat_place(p: Combat_Deep_Pos): Combat_Deep_Pos",
+        "local b: Combat_Box<Combat_Deep_Pos> = Combat_Box.__new<<Combat_Deep_Pos>>(",
+        "return Combat_Deep_Pos.__new({ x = b.v.x })",
+    ] {
+        assert!(check.contains(text), "{text}\n{check}");
+    }
+
+    let pos = "{ fields = { { \"x\", \"u8\" } }, struct = Combat_Deep_Pos }";
+    assert!(ship.contains(&format!("{{ \"at\", {pos} }}")), "{ship}");
+
+    // Another module reads the field in the module that declares it.
+    let dir = temp_project("relative");
+    fs::write(dir.join("src/rel.aly"), format!("export {src}")).unwrap();
+    fs::write(
+        dir.join("src/use.aly"),
+        "import { Combat } from \"./rel\"\nexport remote Land2(hit: Combat.Hit) from client\n",
+    )
+    .unwrap();
+    let report = build(&dir);
+    assert!(report.diagnostics.is_empty(), "{report:?}");
+
+    let used = fs::read_to_string(dir.join("out/use.luau")).unwrap();
+    let pos = "{ fields = { { \"x\", \"u8\" } }, struct = \"rel.aly:Combat_Deep_Pos\" }";
+    assert!(used.contains(&format!("{{ \"at\", {pos} }}")), "{used}");
+
+    let _ = fs::remove_dir_all(&dir);
+}

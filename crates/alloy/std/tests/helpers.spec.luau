@@ -54,6 +54,36 @@ describe("intrinsics", function()
 	end)
 end)
 
+describe("serde_variant", function()
+	-- `from_table` reads an enum field through this check. An old save
+	-- held "Uncommon", a variant the enum lost, and read as a Rarity.
+	local tags = { Low = 0, High = 0, Circle = 1 }
+	local Shape = {}
+
+	it("passes a unit variant and restores a payload variant", function()
+		expect(alloy.serde_variant("Low", tags, Shape, "Tier", "Card.tier")).toBe("Low")
+		local v = { tag = "Circle", _1 = 2 }
+		expect(alloy.serde_variant(v, tags, Shape, "Tier", "Card.tier")).toBe(v)
+		expect(getmetatable(v)).toBe(Shape)
+	end)
+
+	it("raises on a name, a tag, or a value no variant has", function()
+		expect(function()
+			alloy.serde_variant("Middle", tags, nil, "Tier", "Card.tier")
+		end).toThrow('Card.tier: "Middle" is no variant of Tier')
+		-- A unit name is no table, and a payload tag is no string.
+		expect(function()
+			alloy.serde_variant("Circle", tags, nil, "Tier", "Card.tier")
+		end).toThrow('Card.tier: "Circle" is no variant of Tier')
+		expect(function()
+			alloy.serde_variant({ tag = "Low" }, tags, nil, "Tier", "Card.tier")
+		end).toThrow("Card.tier: a table with the tag Low is no variant of Tier")
+		expect(function()
+			alloy.serde_variant(5, tags, nil, "Tier", "Card.tier")
+		end).toThrow("Card.tier: 5 is no variant of Tier")
+	end)
+end)
+
 describe("test registry", function()
 	it("records tests in order and returns the function", function()
 		local before = #alloy.tests()

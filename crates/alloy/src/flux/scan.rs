@@ -15,6 +15,9 @@ pub(crate) struct Scan<'s> {
     /// Per struct an imported module declares, its private field names.
     /// The file's own privates come from its tokens instead.
     pub(crate) privates: &'s [(String, Vec<String>)],
+    /// The functions the imported modules declare, keyed the way this
+    /// file calls them. See `crate::modules::import_callables`.
+    pub(crate) callables: &'s [(String, super::Callable)],
 }
 
 pub(crate) const KEYWORDS: &[&str] = &[
@@ -44,6 +47,33 @@ pub(crate) const BINARY_OPS: &[&str] = &[
 /// Tokens that close the block a statement sits in.
 pub(crate) const CLOSERS: &[&str] = &["end", "else", "elseif", "until", "case", "default"];
 
+/// The words that go on with the expression or the statement in front
+/// of them: a word operator, a clause word, or a word that closes a
+/// block. Any other name or keyword after a complete expression opens
+/// the next statement.
+const GOES_ON: &[&str] = &[
+    "and",
+    "or",
+    "not",
+    "in",
+    "is",
+    "satisfies",
+    "bor",
+    "bxor",
+    "band",
+    "shl",
+    "shr",
+    "then",
+    "do",
+    "else",
+    "elseif",
+    "until",
+    "end",
+    "with",
+    "where",
+    "as",
+];
+
 /// The parts of one `if` statement: the token after each branch's
 /// keyword, and the `end`.
 pub(crate) struct IfParts {
@@ -63,12 +93,19 @@ impl<'s> Scan<'s> {
             toks,
             st,
             privates: &[],
+            callables: &[],
         }
     }
 
     /// The same scan, with the private fields of the imported structs.
     pub(crate) fn with_privates(mut self, privates: &'s [(String, Vec<String>)]) -> Self {
         self.privates = privates;
+        self
+    }
+
+    /// The same scan, with the functions of the imported modules.
+    pub(crate) fn with_callables(mut self, callables: &'s [(String, super::Callable)]) -> Self {
+        self.callables = callables;
         self
     }
 
@@ -120,8 +157,85 @@ impl<'s> Scan<'s> {
             )
             // `local a = 1  local b = 2` is two statements on one line.
             // No expression holds a `local` or a `const`, so each one
-            // opens a statement wherever it stands.
+            // opens a declaration wherever it stands. The binding of a
+            // condition is a declaration too, but not a statement: see
+            // `cond_binding`.
             || matches!(self.t(i), "local" | "const")
+    }
+
+    /// Whether the `local` or `const` at `i` binds in a condition, as in
+    /// `if local x = f() then` or `while const v = g() do`. A rewrite of
+    /// a whole statement must skip it: the `then` or `do` follows it.
+    pub(crate) fn cond_binding(&self, i: usize) -> bool {
+        match self.prev(i) {
+            "if" | "elseif" | "while" | "not" => true,
+
+            // `if local a = f(); local b = g(a) then` stacks two.
+            ";" => (0..i - 1)
+                .rev()
+                .find(|&k| matches!(self.t(k), "local" | "const"))
+                .is_some_and(|k| self.cond_binding(k)),
+
+            _ => false,
+        }
+    }
+
+    /// The token that ends the block a declaration at `d` stands in: the
+    /// first later token that closes its level, such as the `end` of a
+    /// `do` or the `else` of an `if`. At the top level, the token count.
+    pub(crate) fn scope_end(&self, d: usize) -> usize {
+        let level = self.st.steps[d].depth_before;
+
+        (d + 1..self.toks.len())
+            .find(|&k| {
+                let step = self.st.steps[k];
+
+                step.depth_before.saturating_sub(step.closes) < level
+            })
+            .unwrap_or(self.toks.len())
+    }
+
+    /// Whether a `local` or a `const` of the name at `n`, declared after
+    /// it, holds the name at `j` in its block. The name at `j` then reads
+    /// that binding, not the one at `n`.
+    pub(crate) fn shadowed(&self, n: usize, j: usize) -> bool {
+        (n + 1..j).any(|d| {
+            self.t(d) == self.t(n)
+                && matches!(self.prev(d), "local" | "const")
+                && j < self.scope_end(d)
+        })
+    }
+
+    /// The declaration that the name at `at` reads: the last `local`,
+    /// `const`, or parameter of the name before it whose block still
+    /// holds it. `None` for a name that no such declaration binds.
+    pub(crate) fn binding_at(&self, at: usize) -> Option<usize> {
+        let name = self.t(at);
+
+        (0..at).rev().find(|&d| {
+            self.is_name(d)
+                && self.t(d) == name
+                && match self.prev(d) {
+                    "local" | "const" => at < self.scope_end(d),
+
+                    "(" | "," => self.param_scope(d).is_some_and(|end| at < end),
+
+                    _ => false,
+                }
+        })
+    }
+
+    /// The `end` of the function whose parameter list holds the name at
+    /// `d`. `None` when the name is not a parameter.
+    fn param_scope(&self, d: usize) -> Option<usize> {
+        let f = (0..d).rev().find(|&f| self.at(f, "function"))?;
+        let open = (f + 1..d).find(|&j| self.at(j, "("))?;
+
+        if self.matching(open)? < d {
+            return None;
+        }
+
+        self.st.ends[f]
     }
 
     /// A name and its `.name` members: `a.b.c`. The end is exclusive.
@@ -460,10 +574,39 @@ impl<'s> Scan<'s> {
         })
     }
 
+    /// Whether the token at `j` opens a statement on the line of the
+    /// token before it: a name or a keyword right after a complete
+    /// expression. No expression goes on from `{}` to a name, so
+    /// `const out = {} table.insert(out, 1)` is two statements. A word
+    /// that may be a name, such as `new` or `match`, completes nothing.
+    pub(crate) fn begins_after_expr(&self, j: usize) -> bool {
+        use alloy_syntax::contextual::{is_contextual, is_luau_reserved};
+
+        if j == 0 || self.toks[j].kind != TokKind::Ident || GOES_ON.contains(&self.t(j)) {
+            return false;
+        }
+
+        let prev = self.t(j - 1);
+
+        match self.toks[j - 1].kind {
+            TokKind::Number | TokKind::Str { .. } | TokKind::InterpStr | TokKind::InterpTail => {
+                true
+            }
+
+            TokKind::Ident => {
+                matches!(prev, "end" | "true" | "false" | "nil")
+                    || !(is_luau_reserved(prev) || is_contextual(prev) || GOES_ON.contains(&prev))
+            }
+
+            _ => matches!(prev, ")" | "]" | "}" | "..."),
+        }
+    }
+
     /// The exclusive end of the statement that starts at `i`: the next
     /// token on a later line that does not continue the expression, a
-    /// `;`, or a closer. A block opener inside it skips to its `end`,
-    /// and an `if` expression runs to the end of its `else` branch.
+    /// name or a keyword after a complete expression, a `;`, or a
+    /// closer. A block opener inside it skips to its `end`, and an `if`
+    /// expression runs to the end of its `else` branch.
     pub(crate) fn statement_end(&self, i: usize) -> usize {
         let mut j = i + 1;
         let mut depth = 0i32;
@@ -478,6 +621,10 @@ impl<'s> Scan<'s> {
             let text = self.t(j);
 
             if depth == 0 {
+                if self.begins_after_expr(j) {
+                    return j;
+                }
+
                 if text == "if" && !self.is_statement_if(j) {
                     open_ifs += 1;
                 } else if open_ifs > 0 && matches!(text, "else" | "elseif") {

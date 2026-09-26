@@ -325,6 +325,40 @@ pub(crate) fn a_rename_of_an_imported_name_reaches_every_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A file that imports through a barrel renamed only its own use, and
+/// its import kept the old name. Its references were empty. The walk
+/// now starts at the module that declares the name, from the importer
+/// and from the barrel's own list.
+#[test]
+fn a_rename_through_a_barrel_reaches_every_file() {
+    let (st, dir) = project("barrel-rename");
+    let uri = |rel: &str| format!("file://{}", dir.join("src").join(rel).display());
+    let edits_at = |rel: &str, offset: usize| match st.name_target(&uri(rel), offset) {
+        Some(Target::Export(file, name)) => {
+            rows(&st.export_rename(&file, &name, "release").expect("rename"))
+        }
+
+        other => panic!("{rel} at {offset}: {other:?}"),
+    };
+    let every_file = [
+        "barrel.aly 0:9-16 -> release",
+        "m.aly 12:13-20 -> release",
+        "other.aly 0:9-16 -> release",
+        "star.aly 4:13-20 -> release",
+        "use.aly 0:9-16 -> release",
+        "use.aly 10:26-33 -> release",
+        "use.aly 12:23-30 -> release",
+        "via.aly 0:9-16 -> release",
+        "via.aly 1:6-13 -> release",
+    ];
+
+    // `print(version)` in the importer, and `version` in the barrel.
+    assert_eq!(edits_at("via.aly", 42), every_file);
+    assert_eq!(edits_at("barrel.aly", 10), every_file);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The caret at the end of a name is on that name: the column typing
 /// it leaves. The rename there writes what the caret one column left
 /// writes, in every file, and definition and hover read the word too.
@@ -400,6 +434,54 @@ fn a_star_alias_opens_at_its_import_line() {
     );
     // A name no import binds this way answers nothing.
     assert_eq!(module_binding_definition(src, uri, "x"), None);
+}
+
+/// A name list over several lines holds its path on its last line. The
+/// definitions that read the statement find it there: a star alias, the
+/// default binding of `import M, { ... }`, and a service of `@game`.
+#[test]
+fn a_list_over_several_lines_goes_to_its_definitions() {
+    let range = |uri: &str, line: u32, start: u32, end: u32| {
+        json!([{ "uri": uri, "range": {
+            "start": { "line": line, "character": start },
+            "end": { "line": line, "character": end },
+        } }])
+    };
+    let uri = "file:///w/src/main.aly";
+    let src = "import * as M, {\n    a,\n} from \"./mod\"\n\nprint(M, a)\n";
+    assert_eq!(
+        module_binding_definition(src, uri, "M"),
+        Some(range(uri, 0, 12, 13))
+    );
+
+    let src = "import {\n    Players,\n    RunService as Run, -- the loop\n} from '@game'\n\nprint(Players, Run)\n";
+    assert_eq!(
+        service_definition(src, uri, "Run"),
+        Some(range(uri, 2, 18, 21))
+    );
+
+    let main = "import Panel, {\n    size,\n} from \"./ui\"\n\nprint(Panel, size)\n";
+    let dir = super::documents::alias_root(
+        "multi-line-default",
+        &[
+            (
+                "src/ui.aly",
+                "export const size = 1\n\nexport default function Panel(): number\n    return size\nend\n",
+            ),
+            ("src/main.aly", main),
+        ],
+    );
+    let main_uri = path_to_uri(&dir.join("src/main.aly"));
+    let ui_uri = path_to_uri(&dir.join("src/ui.aly"));
+    let (st, _) = super::support::one_file(main);
+    let found = st
+        .default_import_definition(&main_uri, main, main.find("Panel").expect("the binding"))
+        .expect("the default export");
+
+    assert_eq!(found[0]["uri"], json!(ui_uri), "{found}");
+    assert_eq!(found[0]["range"]["start"]["line"], json!(2), "{found}");
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `Outer.Inner.T`: the word in front of the group is a group of this
@@ -1177,14 +1259,19 @@ fn a_trait_method_renames_the_trait_every_impl_and_the_calls() {
     let call = USER.find("b:hello").expect("the call") + 2;
     let target = st.name_target("file:///u.aly", call);
 
-    let Some(Target::Method { trait_name, name }) = target else {
+    let Some(Target::Method {
+        trait_name,
+        name,
+        home,
+    }) = target
+    else {
         panic!("the caret names no trait method");
     };
 
     assert_eq!((trait_name.as_str(), name.as_str()), ("Greet", "hello"));
 
     let edit = st
-        .method_edits(&trait_name, &name, "greetings")
+        .method_edits(&trait_name, home.as_ref(), &name, "greetings")
         .expect("edit");
     let at = |uri: &str, src: &str| -> Vec<usize> {
         edit["changes"][uri]
@@ -1263,12 +1350,14 @@ fn a_method_rename_reaches_a_returned_and_a_field_receiver() {
     for at in &calls {
         let target = st.name_target("file:///main.aly", *at);
         assert!(
-            matches!(&target, Some(Target::Method { trait_name, name }) if trait_name == "Gadget" && name == "spin"),
+            matches!(&target, Some(Target::Method { trait_name, name, .. }) if trait_name == "Gadget" && name == "spin"),
             "{at}: {target:?}"
         );
     }
 
-    let edit = st.method_edits("Gadget", "spin", "twirl").expect("edit");
+    let edit = st
+        .method_edits("Gadget", None, "spin", "twirl")
+        .expect("edit");
     let at = |uri: &str, src: &str| -> Vec<usize> {
         edit["changes"][uri]
             .as_array()
@@ -1330,13 +1419,18 @@ fn a_receiver_typed_by_the_trait_is_a_site_of_its_method() {
     assert_eq!(sites.len(), 7);
 
     for at in [wanted[0], wanted[3], wanted[4]] {
-        let Some(Target::Method { trait_name, name }) = st.name_target(uri, at) else {
+        let Some(Target::Method {
+            trait_name, name, ..
+        }) = st.name_target(uri, at)
+        else {
             panic!("no trait method at {at}");
         };
         assert_eq!((trait_name.as_str(), name.as_str()), ("Speaker", "speak"));
     }
 
-    let edit = st.method_edits("Speaker", "speak", "talk").expect("edit");
+    let edit = st
+        .method_edits("Speaker", None, "speak", "talk")
+        .expect("edit");
     let got: Vec<usize> = edit["changes"][uri]
         .as_array()
         .expect("edits")
@@ -1347,6 +1441,167 @@ fn a_receiver_typed_by_the_trait_is_a_site_of_its_method() {
         })
         .collect();
     assert_eq!(got, wanted, "{edit}");
+}
+
+/// A trait in a namespace bounds a parameter by its path,
+/// `<T: Abilities.Ability>`. The bound scan compared the whole path to
+/// `Ability`, so references and rename found the declaration alone.
+#[test]
+fn a_bound_by_a_namespace_trait_path_reaches_its_method() {
+    const SRC: &str = concat!(
+        "namespace Abilities\n",
+        "    trait Ability\n",
+        "        function power(self): number\n",
+        "    end\n",
+        "end\n",
+        "local function two<T: Abilities.Ability>(a: T, b: T): number return a:power() + b:power() end\n",
+        "print(two)\n",
+    );
+    let (st, uri) = super::support::one_file(SRC);
+    let wanted: Vec<usize> = SRC.match_indices("power(").map(|(i, _)| i).collect();
+    assert_eq!(wanted.len(), 3);
+
+    for at in &wanted {
+        let Some(Target::Method {
+            trait_name, name, ..
+        }) = st.name_target(uri, *at)
+        else {
+            panic!("no trait method at {at}");
+        };
+        assert_eq!((trait_name.as_str(), name.as_str()), ("Ability", "power"));
+    }
+
+    let edit = st
+        .method_edits("Ability", None, "power", "strength")
+        .expect("edit");
+    let got: Vec<usize> = edit["changes"][uri]
+        .as_array()
+        .expect("edits")
+        .iter()
+        .map(|e| {
+            let (line, column) = position_of_value(&e["range"]["start"]).expect("position");
+            offset_of(SRC, line, column).expect("offset")
+        })
+        .collect();
+    assert_eq!(got, wanted, "{edit}");
+}
+
+/// Two files that import nothing from each other each declare a trait
+/// `Mover`. The rename walk keyed a trait by its name, so a rename in one
+/// file edited the other, and `impl Motion.Mover for Slider` read as a
+/// trait `Motion` and missed the rename of `Motion.Mover`. A barrel
+/// passes a third file's `Mover` on, and its impl follows that trait.
+#[test]
+fn a_trait_method_rename_keeps_to_its_own_trait() {
+    const A: &str = concat!(
+        "namespace Motion\n",
+        "    trait Mover\n",
+        "        function step(self)\n",
+        "    end\n",
+        "end\n",
+        "struct Slider\n",
+        "    t: number\n",
+        "end\n",
+        "impl Motion.Mover for Slider\n",
+        "    function step(self)\n",
+        "        self.t += 1\n",
+        "    end\n",
+        "end\n",
+    );
+    const B: &str = concat!(
+        "trait Mover\n",
+        "    function step(self)\n",
+        "end\n",
+        "struct Car\n",
+        "    n: number\n",
+        "end\n",
+        "impl Mover for Car\n",
+        "    function step(self)\n",
+        "        self.n += 1\n",
+        "    end\n",
+        "end\n",
+    );
+    const LEAF: &str = "export trait Mover\n    function step(self)\nend\n";
+    const BARREL: &str = "export { Mover } from \"./leaf\"\n";
+    const USER: &str = concat!(
+        "import { Mover } from \"./barrel\"\n",
+        "struct Boat\n",
+        "    n: number\n",
+        "end\n",
+        "impl Mover for Boat\n",
+        "    function step(self)\n",
+        "        self.n += 1\n",
+        "    end\n",
+        "end\n",
+    );
+    let st = super::support::files(&[
+        ("file:///a.aly", A),
+        ("file:///b.aly", B),
+        ("file:///leaf.aly", LEAF),
+        ("file:///barrel.aly", BARREL),
+        ("file:///user.aly", USER),
+    ]);
+    let renamed = |uri: &str, at: usize| -> Vec<(String, usize)> {
+        let Some(Target::Method {
+            trait_name,
+            name,
+            home,
+        }) = st.name_target(uri, at)
+        else {
+            panic!("no trait method at {uri} {at}");
+        };
+        let edit = st
+            .method_edits(&trait_name, home.as_ref(), &name, "advance")
+            .expect("edit");
+        let mut out: Vec<(String, usize)> = Vec::new();
+
+        for (u, src) in [
+            ("file:///a.aly", A),
+            ("file:///b.aly", B),
+            ("file:///leaf.aly", LEAF),
+            ("file:///user.aly", USER),
+        ] {
+            for e in edit["changes"][u]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+            {
+                let (line, column) = position_of_value(&e["range"]["start"]).expect("position");
+                out.push((u.to_string(), offset_of(src, line, column).expect("offset")));
+            }
+        }
+
+        out
+    };
+    let a = |n: usize| {
+        (
+            "file:///a.aly".to_string(),
+            A.match_indices("step").nth(n).expect("a").0,
+        )
+    };
+    let b = |n: usize| {
+        (
+            "file:///b.aly".to_string(),
+            B.match_indices("step").nth(n).expect("b").0,
+        )
+    };
+
+    assert_eq!(renamed("file:///a.aly", a(0).1), [a(0), a(1)]);
+    assert_eq!(renamed("file:///a.aly", a(1).1), [a(0), a(1)]);
+    assert_eq!(renamed("file:///b.aly", b(1).1), [b(0), b(1)]);
+    assert_eq!(
+        renamed("file:///user.aly", USER.find("step").expect("impl")),
+        [
+            (
+                "file:///leaf.aly".to_string(),
+                LEAF.find("step").expect("trait")
+            ),
+            (
+                "file:///user.aly".to_string(),
+                USER.find("step").expect("impl")
+            ),
+        ]
+    );
 }
 
 /// A definitions file names a type with no import of it, so the rename
@@ -2171,12 +2426,14 @@ fn a_struct_method_renames_the_declaration_and_every_call() {
         let target = st.name_target(uri, caret);
 
         assert!(
-            matches!(&target, Some(Target::Method { trait_name, name }) if trait_name == "Counter" && name == "bump"),
+            matches!(&target, Some(Target::Method { trait_name, name, .. }) if trait_name == "Counter" && name == "bump"),
             "{caret}: {target:?}"
         );
     }
 
-    let edit = st.method_edits("Counter", "bump", "poke").expect("edit");
+    let edit = st
+        .method_edits("Counter", None, "bump", "poke")
+        .expect("edit");
 
     assert_eq!(
         sites(&edit, "file:///counter.aly", COUNTER),
@@ -2202,7 +2459,8 @@ fn a_struct_method_renames_the_declaration_and_every_call() {
     assert!(matches!(&reset, Some(Target::Method { name, .. }) if name == "reset"));
     assert_eq!(
         sites(
-            &st.method_edits("Counter", "reset", "clear").expect("edit"),
+            &st.method_edits("Counter", None, "reset", "clear")
+                .expect("edit"),
             "file:///counter.aly",
             COUNTER
         ),
@@ -2244,11 +2502,13 @@ fn a_struct_method_reaches_a_call_through_an_import_alias() {
     let target = st.name_target("file:///dep/gadget.aly", at(GADGET, "spin(self)"));
 
     assert!(
-        matches!(&target, Some(Target::Method { trait_name, name }) if trait_name == "Gadget" && name == "spin"),
+        matches!(&target, Some(Target::Method { trait_name, name, .. }) if trait_name == "Gadget" && name == "spin"),
         "{target:?}"
     );
 
-    let edit = st.method_edits("Gadget", "spin", "whirl").expect("edit");
+    let edit = st
+        .method_edits("Gadget", None, "spin", "whirl")
+        .expect("edit");
     let (line, column) = position_of(MAIN, at(MAIN, "gizmo:spin") + 6);
 
     assert_eq!(
@@ -2298,12 +2558,14 @@ fn a_default_method_reaches_a_struct_with_an_empty_impl() {
         let target = st.name_target(uri, caret);
 
         assert!(
-            matches!(&target, Some(Target::Method { trait_name, name }) if trait_name == "Greeter" && name == "greet"),
+            matches!(&target, Some(Target::Method { trait_name, name, .. }) if trait_name == "Greeter" && name == "greet"),
             "{caret}: {target:?}"
         );
     }
 
-    let edit = st.method_edits("Greeter", "greet", "hello").expect("edit");
+    let edit = st
+        .method_edits("Greeter", None, "greet", "hello")
+        .expect("edit");
     let starts: Vec<usize> = edit["changes"][uri]
         .as_array()
         .expect("edits")
@@ -2465,7 +2727,9 @@ pub(crate) fn a_receiver_from_new_through_a_star_alias_is_a_method_use() {
         );
     }
 
-    let edit = st.method_edits("Gadget", "spin", "spin").expect("edits");
+    let edit = st
+        .method_edits("Gadget", None, "spin", "spin")
+        .expect("edits");
     let _ = std::fs::remove_dir_all(&dir);
     let changes = edit["changes"].as_object().expect("changes");
     let user_uri = format!("file://{}", dir.join("src/use.aly").display());
@@ -2663,6 +2927,67 @@ fn a_component_and_its_props_reach_the_tags() {
             "ui.alx 5:33-38 -> text",
             "ui.alx 9:17-22 -> text",
         ]
+    );
+}
+
+/// A rename of a prop's field from its type edited the type and
+/// `props.label`, and `<Bar label=...>` kept the old name. The field
+/// walk answers there without the child, so the tags now join it, for
+/// the references too.
+#[test]
+fn a_prop_renamed_from_its_type_reaches_the_tags() {
+    use super::documents::Recorder;
+
+    let src = concat!(
+        "type BarProps = {\n",
+        "    label: string,\n",
+        "}\n",
+        "\n",
+        "local function Bar(props: BarProps)\n",
+        "    return <TextLabel Text={props.label} />\n",
+        "end\n",
+        "\n",
+        "export function Screen()\n",
+        "    return <Bar label=\"Lives\" />\n",
+        "end\n",
+    );
+    let uri = "file:///ui.alx";
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let server = Server::new(
+        Box::new(std::io::sink()),
+        Box::new(Recorder(Arc::clone(&log))),
+        Vec::new(),
+        None,
+    );
+    server.state.lock().expect("state").docs = super::support::files(&[(uri, src)]).docs;
+
+    let message = json!({ "params": {
+        "textDocument": { "uri": uri },
+        "position": { "line": 1, "character": 6 },
+        "newName": "caption",
+    } });
+    assert!(server.rename_answer(uri, &message, &json!(1)));
+    assert!(server.name_references(uri, &message, &json!(2)));
+
+    let sent = String::from_utf8_lossy(&log.lock().expect("the log").clone()).into_owned();
+    let answers: Vec<Value> = sent
+        .split("Content-Length")
+        .filter_map(|m| m.find('{').map(|at| &m[at..]))
+        .filter_map(|m| serde_json::from_str(m).ok())
+        .collect();
+    let attribute = range_value((9, 16), (9, 21));
+
+    assert!(
+        answers[0]["result"]["changes"][uri]
+            .as_array()
+            .is_some_and(|edits| edits.iter().any(|e| e["range"] == attribute)),
+        "{sent}"
+    );
+    assert!(
+        answers[1]["result"]
+            .as_array()
+            .is_some_and(|locs| locs.iter().any(|l| l["range"] == attribute)),
+        "{sent}"
     );
 }
 

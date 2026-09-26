@@ -269,3 +269,36 @@ fn a_spawned_function_may_await() {
         ),
     );
 }
+
+/// The runtime calls a remote's `on` and `once` handler from a Roblox
+/// signal or invoke, on a thread of its own, so the handler may yield.
+/// The report asked for `async`, and an async handler then failed flux.
+/// A table that is no remote still gets the report.
+#[test]
+fn a_remote_handler_may_await() {
+    let head = "local function f(): Future<number>\n    return async do return 1 end\nend\nremote Ping(n: number) from server\n";
+
+    for name in ["m.aly", "ui.client.aly"] {
+        for verb in ["on", "once"] {
+            clean(
+                name,
+                &format!("{head}Ping.{verb}(function(n)\n    print(await f(), n)\nend)\n"),
+            );
+        }
+    }
+
+    // The std `Signal` writes `connect` and `once` beside `Connect`.
+    clean(
+        "m.aly",
+        &format!(
+            "{head}local s = Signal.new()\ns:connect(function()\n    print(await f())\nend)\n"
+        ),
+    );
+
+    only(
+        "m.aly",
+        &format!(
+            "{head}local t = {{ on = function(h) h() end }}\nt.on(function()\n    print(await f())\nend)\n"
+        ),
+    );
+}

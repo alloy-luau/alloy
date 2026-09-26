@@ -28,6 +28,7 @@ pub fn remap(data: &[u64], doc: &Doc, types: &[String], modifiers: &[String]) ->
     let mut line = 0u64;
     let mut start = 0u64;
     let mut tokens: Vec<Token> = Vec::new();
+    let copies = macro_copies(doc, out);
 
     for t in data.chunks_exact(5) {
         let (dl, ds, len, kind, mods) = (t[0], t[1], t[2], t[3], t[4]);
@@ -42,7 +43,14 @@ pub fn remap(data: &[u64], doc: &Doc, types: &[String], modifiers: &[String]) ->
             continue;
         };
 
+        // A token in the code copy of a macro argument is a token of
+        // the argument the author wrote.
         if out.map.is_generated(first as u32) || out.map.is_generated(last as u32) {
+            if let Some(&(from, _, to)) = copies.iter().find(|c| c.0 <= first && last < c.1) {
+                let (sl, sc) = position_of(&doc.source, to + first - from);
+                tokens.push((sl, sc, len, kind, mods));
+            }
+
             continue;
         }
 
@@ -69,8 +77,15 @@ pub fn remap(data: &[u64], doc: &Doc, types: &[String], modifiers: &[String]) ->
     }
 
     // The child's tokens stand first, so a word both of them describe
-    // keeps the child's reading.
-    tokens.extend(alloy_tokens(doc, types, modifiers));
+    // keeps the child's reading. A variant is the exception: the child
+    // reads the key the emit writes, `property`, and in a macro argument
+    // the proxy's `enumMember` is the only token. Both places now agree.
+    let variant = type_index(types, "enumMember");
+    let (variants, own): (Vec<Token>, Vec<Token>) = alloy_tokens(doc, types, modifiers)
+        .into_iter()
+        .partition(|t| Some(t.3) == variant);
+    tokens.splice(0..0, variants);
+    tokens.extend(own);
     tokens.sort_by_key(|t| (t.0, t.1));
     tokens.dedup_by_key(|t| (t.0, t.1));
 
@@ -86,6 +101,109 @@ pub fn remap(data: &[u64], doc: &Doc, types: &[String], modifiers: &[String]) ->
     }
 
     encoded
+}
+
+/// The code copy of each macro argument. `$assert(x > 0)` lowers to
+/// `assert(x > 0, "assertion failed: x > 0")`, all of it text the
+/// lowering generated. Each entry is the copy's byte range in the
+/// shadow and the byte where the argument starts in the source. An
+/// argument the lowering rewrote has no copy, and `$nameof` writes none.
+fn macro_copies(doc: &Doc, out: &alloy::Output) -> Vec<(usize, usize, usize)> {
+    let Ok(lexed) = alloy_syntax::lexer::lex(&doc.source) else {
+        return Vec::new();
+    };
+    let (src, shadow, toks) = (&doc.source, &doc.shadow, &lexed.toks);
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut copies = Vec::new();
+
+    for i in 0..toks.len() {
+        let opens = toks[i].text(src) == "$"
+            && toks
+                .get(i + 1)
+                .is_some_and(|n| n.kind == TokKind::Ident && n.start == toks[i].end)
+            && toks.get(i + 2).is_some_and(|t| t.kind == TokKind::LParen);
+
+        if !opens {
+            continue;
+        }
+
+        // Each argument at the list's own depth, as a byte range.
+        let mut args = Vec::new();
+        let mut from = toks[i + 2].end as usize;
+        let mut depth = 0;
+
+        for t in &toks[i + 2..] {
+            match t.text(src) {
+                "(" | "[" | "{" => depth += 1,
+
+                ")" | "]" | "}" => {
+                    depth -= 1;
+
+                    if depth == 0 {
+                        args.push((from, t.start as usize));
+
+                        break;
+                    }
+                }
+
+                "," if depth == 1 => {
+                    args.push((from, t.start as usize));
+                    from = t.end as usize;
+                }
+
+                _ => {}
+            }
+        }
+
+        let (line, column) = position_of(src, toks[i].start as usize);
+        let Some(line_start) = offset_of(shadow, doc.to_shadow(line, column).0, 0) else {
+            continue;
+        };
+        let line_end = shadow[line_start..]
+            .find('\n')
+            .map_or(shadow.len(), |n| line_start + n);
+
+        for (a, b) in args {
+            let text = src[a..b].trim();
+            let at = a + (src[a..b].len() - src[a..b].trim_start().len());
+
+            if text.is_empty() {
+                continue;
+            }
+
+            // A copy starts on the macro's line. It stands outside every
+            // string, the message holds the other one, and in text the
+            // lowering wrote, since copied text is another expression.
+            let mut end = (line_end + text.len()).min(shadow.len());
+
+            while !shadow.is_char_boundary(end) {
+                end += 1;
+            }
+
+            let bounded = |k: usize| {
+                let before = shadow[..k].chars().next_back();
+                let after = shadow[k + text.len()..].chars().next();
+
+                !(text.starts_with(is_word) && before.is_some_and(is_word))
+                    && !(text.ends_with(is_word) && after.is_some_and(is_word))
+            };
+            let copy = shadow[line_start..end]
+                .match_indices(text)
+                .map(|(k, _)| line_start + k)
+                .filter(|&k| {
+                    bounded(k)
+                        && !crate::context::in_string(shadow, k)
+                        && out.map.is_generated(k as u32)
+                })
+                .last();
+
+            if let Some(k) = copy {
+                copies.push((k, k + text.len(), at));
+            }
+        }
+    }
+
+    copies
 }
 
 /// The index of a token type in the child's legend. The proxy paints
@@ -127,6 +245,61 @@ fn declared_word(doc: &Doc, path: &str) -> Option<&'static str> {
             .into_iter()
             .find(|k| line.starts_with(&format!("{k} ")))
         })
+}
+
+/// What `member` draws as when an `impl` of the type at `path` writes
+/// it: `method` with `self` first, as its call sites paint, and
+/// `function` without. The hover of the type lists what its `impl`
+/// blocks write, as `public function describe(self): string`.
+fn impl_function_kind(doc: &Doc, path: &str, member: &str) -> Option<&'static str> {
+    let hover_of = |name: &str| {
+        doc.decls
+            .iter()
+            .chain(doc.import_decls.iter())
+            .find(|d| d.name == name)
+            .map(|d| d.hover.as_str())
+    };
+    let hover = hover_of(path)?;
+
+    // A default method of a trait the type implements: the `impl` writes
+    // no line for it, and the hover of the trait lists it.
+    function_kind(hover, member).or_else(|| {
+        let traits = hover
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("Implements "))?;
+
+        traits.split('`').skip(1).step_by(2).find_map(|t| {
+            let name = t.split('<').next().unwrap_or(t);
+
+            function_kind(hover_of(name)?, member)
+        })
+    })
+}
+
+/// What `member` draws as in the hover of a type or a trait: `method`
+/// with `self` first, and `function` without.
+fn function_kind(hover: &str, member: &str) -> Option<&'static str> {
+    hover.lines().find_map(|line| {
+        let mut line = line.trim_start();
+
+        for word in ["public ", "private ", "async "] {
+            line = line.strip_prefix(word).unwrap_or(line);
+        }
+
+        let rest = line.strip_prefix("function ")?.strip_prefix(member)?;
+
+        if !rest.starts_with(['(', '<']) {
+            return None;
+        }
+
+        let params = &rest[rest.find('(')? + 1..];
+
+        Some(match params.starts_with("self") {
+            true => "method",
+
+            false => "function",
+        })
+    })
 }
 
 /// The legend name a member of a dotted path draws under. A trait is a
@@ -212,8 +385,53 @@ fn alloy_tokens(doc: &Doc, types: &[String], modifiers: &[String]) -> Vec<Token>
             _ => {}
         }
 
+        // `@[native, deprecated {...}]`: Luau's list, where each entry
+        // opens with the name of an attribute. The walk goes on inside
+        // the list, so the table of `deprecated` keeps its own tokens.
+        if tok.kind == TokKind::Symbol
+            && text == "@"
+            && toks
+                .get(i + 1)
+                .is_some_and(|n| n.text(src) == "[" && n.start == tok.end)
+        {
+            let mut depth = 0;
+
+            for k in i + 1..toks.len() {
+                let t = toks[k];
+
+                // A list still being typed ends at its line.
+                if depth == 1 && src[toks[k - 1].end as usize..t.start as usize].contains('\n') {
+                    break;
+                }
+
+                match t.text(src) {
+                    "[" | "(" | "{" => depth += 1,
+
+                    "]" | ")" | "}" => depth -= 1,
+
+                    _ if t.kind == TokKind::Ident
+                        && depth == 1
+                        && matches!(toks[k - 1].text(src), "[" | ",") =>
+                    {
+                        push(t.start, t.end, "decorator", 0)
+                    }
+
+                    _ => {}
+                }
+
+                if depth == 0 {
+                    break;
+                }
+            }
+
+            i += 2;
+
+            continue;
+        }
+
         // `@Contracted` and `$triple`: the name draws, and the sigil
         // stays with the grammar, which gives it a punctuation scope.
+        // `@serde.rename` is one attribute, so its whole path draws as one.
         if tok.kind == TokKind::Symbol && matches!(text, "@" | "$") {
             let name = match toks.get(i + 1) {
                 Some(n) if n.kind == TokKind::Ident && n.start == tok.end => *n,
@@ -224,13 +442,26 @@ fn alloy_tokens(doc: &Doc, types: &[String], modifiers: &[String]) -> Vec<Token>
                     continue;
                 }
             };
+            let mut end = i + 1;
+
+            while text == "@"
+                && toks
+                    .get(end + 1)
+                    .is_some_and(|d| d.kind == TokKind::Dot && d.start == toks[end].end)
+                && toks
+                    .get(end + 2)
+                    .is_some_and(|n| n.kind == TokKind::Ident && n.start == toks[end + 1].end)
+            {
+                end += 2;
+            }
+
             push(
                 name.start,
-                name.end,
+                toks[end].end,
                 if text == "@" { "decorator" } else { "macro" },
                 0,
             );
-            i += 2;
+            i = end + 1;
 
             continue;
         }
@@ -239,6 +470,45 @@ fn alloy_tokens(doc: &Doc, types: &[String], modifiers: &[String]) -> Vec<Token>
             i += 1;
 
             continue;
+        }
+
+        // `new Pet { id = "a" }`: each key names a field. The child
+        // draws the key of the table the emit writes, and in a macro
+        // argument, which the lowering rewrites, it draws nothing.
+        if text == "new" && (i == 0 || !matches!(toks[i - 1].text(src), "." | ":")) {
+            let mut j = i + 1;
+
+            while toks
+                .get(j)
+                .is_some_and(|t| matches!(t.kind, TokKind::Ident | TokKind::Dot))
+            {
+                j += 1;
+            }
+
+            let mut depth = 0;
+            let braced = toks.get(j).is_some_and(|t| t.text(src) == "{");
+
+            for k in (j..toks.len()).filter(|_| braced) {
+                match toks[k].text(src) {
+                    "{" | "(" | "[" => depth += 1,
+
+                    "}" | ")" | "]" => depth -= 1,
+
+                    _ if depth == 1
+                        && toks[k].kind == TokKind::Ident
+                        && toks.get(k + 1).is_some_and(|t| t.text(src) == "=")
+                        && matches!(toks[k - 1].text(src), "{" | "," | ";") =>
+                    {
+                        push(toks[k].start, toks[k].end, "property", 0);
+                    }
+
+                    _ => {}
+                }
+
+                if depth == 0 {
+                    break;
+                }
+            }
         }
 
         // The name a hole reads. The child sees the same bytes, and it
@@ -436,8 +706,11 @@ fn alloy_tokens(doc: &Doc, types: &[String], modifiers: &[String]) -> Vec<Token>
                 Some(kind) => kind,
 
                 // A variant stands under no keyword of its own; the
-                // enum in front of it says what the segment is.
-                None if declared_kind(doc, &parent) == Some("enum") => "enumMember",
+                // enum in front of it says what the segment is. A
+                // function of its `impl` is no variant.
+                None if declared_kind(doc, &parent) == Some("enum") => {
+                    impl_function_kind(doc, &parent, segment.text(src)).unwrap_or("enumMember")
+                }
 
                 // `Ns.T`: the emit writes one flat name, `Ns_T`, so the
                 // child paints nothing on the word the source wrote for
@@ -554,6 +827,64 @@ mod tests {
             .collect();
 
         assert_eq!(drawn, [(0, 6), (1, 6), (2, 6), (2, 13)]);
+    }
+
+    /// The words of a `match` and of a guard draw as names where they
+    /// are names, the way `trait` does, and draw nothing as keywords.
+    #[test]
+    fn a_match_word_as_a_name_draws_as_a_variable() {
+        const SRC: &str = "local where = 1\nlocal case, default, with = 2, 3, 4\nmatch where with\n    case 1 then print(case)\n    case n where n > 1 then print(n)\n    default print(default, with)\nend\n";
+        let doc = Doc::new(
+            SRC.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let types = legend();
+        let variable = type_index(&types, "variable").expect("the type");
+        let drawn: Vec<(u32, u32)> = alloy_tokens(&doc, &types, &[])
+            .into_iter()
+            .filter(|t| t.3 == variable)
+            .map(|t| (t.0, t.1))
+            .collect();
+
+        assert_eq!(
+            drawn,
+            [
+                (0, 6),
+                (1, 6),
+                (1, 12),
+                (1, 21),
+                (2, 6),
+                (3, 22),
+                (5, 18),
+                (5, 27)
+            ]
+        );
+    }
+
+    /// Every attribute name draws as one: the whole dotted path, and
+    /// each name of Luau's list.
+    #[test]
+    fn every_attribute_form_draws_its_name() {
+        const SRC: &str = "@[native, deprecated {use = \"g\"}]\nlocal function f() end\n@serde.rename_all(\"camelCase\")\nstruct S\n    @T.label(\"x\")\n    x: number\nend\n";
+        let doc = Doc::new(
+            SRC.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let types = legend();
+        let decorator = type_index(&types, "decorator").expect("the type");
+        let drawn: Vec<(u32, u32, u64)> = alloy_tokens(&doc, &types, &[])
+            .into_iter()
+            .filter(|t| t.3 == decorator)
+            .map(|t| (t.0, t.1, t.2))
+            .collect();
+
+        assert_eq!(drawn, [(0, 2, 6), (0, 10, 10), (2, 1, 16), (4, 5, 7)]);
     }
 
     /// `match macro with`: the word is the value the match reads, so the
@@ -993,5 +1324,142 @@ mod tests {
         let quote_col = third.find("\"s\"").unwrap() as u64;
         assert_eq!(&out[5..10], &[1, props_col, 5, 8, 0]);
         assert_eq!(&out[10..], &[0, quote_col - props_col, 3, 18, 0]);
+    }
+
+    /// A macro argument takes the tokens of its code copy. `$assert(x)`
+    /// lowers to `assert(x, "assertion failed: x")`, all generated, so
+    /// `string.upper` and `t.k` went uncoloured. `$nameof` writes no
+    /// copy, and a word in a message string is no copy either.
+    #[test]
+    fn a_macro_argument_takes_the_tokens_of_its_code_copy() {
+        let src = "local t = { k = 'v' }\n$assert(string.upper(t.k) == 'V')\nprint($nameof(t.k))\n";
+        let doc = Doc::new(
+            src.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let shadow = doc.shadow.lines().nth(1).unwrap();
+        let code = shadow.find("string.upper").unwrap() as u64;
+        let message = shadow.rfind("string.upper").unwrap() as u64;
+        let k = shadow.find("t.k").unwrap() as u64 + 2;
+        // `string` in the copy, `k` in the copy, then `string` in the
+        // message string.
+        let data = [
+            1,
+            code,
+            6,
+            8,
+            0,
+            0,
+            k - code,
+            1,
+            9,
+            0,
+            0,
+            message - k,
+            6,
+            8,
+            0,
+        ];
+        let out = remap(&data, &doc, &[], &[]);
+        let line = src.lines().nth(1).unwrap();
+        let at = line.find("string").unwrap() as u64;
+        let at_k = line.find("t.k").unwrap() as u64 + 2;
+
+        assert_eq!(out, vec![1, at, 6, 8, 0, 0, at_k - at, 1, 9, 0]);
+    }
+
+    /// A function of an enum's `impl` draws as a method, not a variant.
+    /// `$nameof(Mode.describe)` has no code copy, so the proxy's own
+    /// token is the one the editor shows there.
+    #[test]
+    fn an_enum_method_draws_as_a_method() {
+        const SRC: &str = "enum Mode\n  Fast,\nend\n\nimpl Mode\n  function describe(self): string\n    return 'mode'\n  end\nend\n\nprint($nameof(Mode.describe), Mode.Fast)\n";
+        let doc = Doc::new(
+            SRC.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let types = legend();
+        let drawn = alloy_tokens(&doc, &types, &[]);
+        let kind = |needle: &str| {
+            let (line, column) = position_of(SRC, SRC.rfind(needle).expect(needle));
+
+            drawn
+                .iter()
+                .find(|t| t.0 == line && t.1 == column)
+                .map(|t| types[t.3 as usize].as_str())
+        };
+
+        assert_eq!(kind("describe)"), Some("method"), "{drawn:?}");
+        assert_eq!(kind("Fast)"), Some("enumMember"), "{drawn:?}");
+    }
+
+    /// A default method of a trait an enum implements drew as a variant.
+    /// The `impl` writes no line for it, and the trait lists it.
+    #[test]
+    fn a_trait_default_on_an_enum_draws_as_a_method() {
+        const SRC: &str = "trait Named\n  function name(self): string\n  function label(self): string\n    return self:name()\n  end\nend\nenum Foe\n  Grunt(number)\nend\nimpl Named for Foe\n  function name(self): string\n    return 'f'\n  end\nend\nprint(Foe.label(Foe.Grunt(1)), Foe.name(Foe.Grunt(2)))\n";
+        let doc = Doc::new(
+            SRC.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let types = legend();
+        let drawn = alloy_tokens(&doc, &types, &[]);
+        let kind = |needle: &str| {
+            let (line, column) = position_of(SRC, SRC.rfind(needle).expect(needle));
+
+            drawn
+                .iter()
+                .find(|t| t.0 == line && t.1 == column)
+                .map(|t| types[t.3 as usize].as_str())
+        };
+
+        assert_eq!(kind("label(Foe"), Some("method"), "{drawn:?}");
+        assert_eq!(kind("name(Foe"), Some("method"), "{drawn:?}");
+        assert_eq!(kind("Grunt(1"), Some("enumMember"), "{drawn:?}");
+    }
+    /// A variant draws as `enumMember` in a macro argument and outside
+    /// one. The child reads the key the emit writes, `property`, and its
+    /// token used to win outside. A key of `new S { }` draws as a
+    /// property in a macro argument too, where the child draws nothing.
+    #[test]
+    fn a_variant_and_a_field_draw_alike_in_a_macro_argument() {
+        const SRC: &str = "enum Mode\n  Fast\nend\n\nstruct Box\n  mode: Mode\nend\n\nprint(Mode.Fast)\n$dbg(new Box { mode = Mode.Fast })\n";
+        let doc = Doc::new(
+            SRC.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let types = legend();
+        let property = types.iter().position(|t| t == "property").unwrap() as u64;
+        let shadow = doc.shadow.lines().nth(8).unwrap();
+        let fast = shadow.find("Fast").unwrap() as u64;
+        let out = remap(&[8, fast, 4, property, 0], &doc, &types, &[]);
+        let kind_at = |line: u64, column: u64| {
+            let (mut l, mut c) = (0, 0);
+
+            out.chunks_exact(5).find_map(|t| {
+                l += t[0];
+                c = if t[0] > 0 { t[1] } else { c + t[1] };
+
+                (l == line && c == column).then(|| types[t[3] as usize].as_str())
+            })
+        };
+        let column =
+            |line: usize, needle: &str| SRC.lines().nth(line).unwrap().find(needle).unwrap() as u64;
+
+        assert_eq!(kind_at(8, column(8, "Fast")), Some("enumMember"), "{out:?}");
+        assert_eq!(kind_at(9, column(9, "mode =")), Some("property"), "{out:?}");
+        assert_eq!(kind_at(9, column(9, "Fast")), Some("enumMember"), "{out:?}");
     }
 }

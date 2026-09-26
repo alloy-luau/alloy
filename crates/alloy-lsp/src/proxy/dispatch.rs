@@ -4,6 +4,10 @@ use super::*;
 /// drops the answer: the editor already has its own.
 pub(crate) const CHILD_SHUTDOWN_ID: i64 = -900_001;
 
+/// The end of the name of a shadow copy one request reads, beside the
+/// shadow. The child's reports on it reach no one.
+pub(crate) const SCRATCH_SUFFIX: &str = ".__member.luau";
+
 pub struct Server {
     pub(crate) state: Mutex<State>,
     pub(crate) child_in: Mutex<Box<dyn Write + Send>>,
@@ -144,6 +148,7 @@ impl Server {
                 let _ = std::fs::remove_dir_all(mirror_base(&st.mirror));
                 purge_stale_mirrors(&st.mirror);
                 let _ = std::fs::create_dir_all(&st.mirror);
+                claim_mirror(&st.mirror);
                 st.root = root;
                 st.initialize_id = message.get("id").map(id_key);
                 st.snippets = message
@@ -500,8 +505,10 @@ impl Server {
                 }
 
                 // A file the editor shows compiled with the old config,
-                // and no edit comes to compile it again.
+                // and no edit comes to compile it again. The reports on
+                // the config files follow the disk too.
                 if config_changed {
+                    self.publish_alias_problems();
                     let open: Vec<String> = self
                         .state
                         .lock()
@@ -737,6 +744,29 @@ impl Server {
                     return true;
                 }
 
+                // `script.Parent->sys`: the name lowers to the string of
+                // a `FindFirstChild("`, where the child lists the
+                // children the sourcemap gives, and nothing else.
+                if m == "textDocument/completion"
+                    && let Some(home) = self.child_home(&uri, &message)
+                {
+                    self.forward_request_at(message, method.as_deref(), home);
+
+                    return true;
+                }
+
+                // `player->leaderstats?.`: the check artifact casts the
+                // child to `any`, so the child lists no member of it. A
+                // copy of the shadow without the cast answers instead.
+                if m == "textDocument/completion"
+                    && let Some(text) = self.child_member_scratch(&uri, &message)
+                {
+                    let home = self.member_home(&uri, &message);
+                    self.forward_request_with(message, method.as_deref(), home, Some(text));
+
+                    return true;
+                }
+
                 if m == "textDocument/completion"
                     && let Some(id) = message.get("id").cloned()
                     && self.context_completion(&uri, &message, &id)
@@ -920,7 +950,7 @@ impl Server {
     /// Maps a request about an Alloy document into its shadow and
     /// forwards it, remembering what it was about.
     pub(crate) fn forward_request(&self, message: Value, method: Option<&str>) {
-        self.forward_request_with(message, method, None);
+        self.forward_request_with(message, method, None, None);
     }
 
     /// Forwards a request whose shadow position is already known.
@@ -930,14 +960,17 @@ impl Server {
         method: Option<&str>,
         shadow: (u32, u32),
     ) {
-        self.forward_request_with(message, method, Some(shadow));
+        self.forward_request_with(message, method, Some(shadow), None);
     }
 
+    /// `scratch` is a copy of the shadow the child answers from instead,
+    /// with every byte in its place, so the answer maps the same way.
     pub(crate) fn forward_request_with(
         &self,
         mut message: Value,
         method: Option<&str>,
         shadow: Option<(u32, u32)>,
+        scratch: Option<String>,
     ) {
         let uri = text_document_uri(&message);
 
@@ -1023,7 +1056,33 @@ impl Server {
 
         map_uris_into_mirror(&mut message, &st);
         drop(st);
+
+        let Some(text) = scratch else {
+            self.to_child(&message);
+
+            return;
+        };
+        // The child reads its messages in order, so the copy is open for
+        // the request alone, and no other answer reads it.
+        let shadow_uri = message
+            .pointer("/params/textDocument/uri")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let uri = format!("{}{SCRATCH_SUFFIX}", shadow_uri.trim_end_matches(".luau"));
+        message["params"]["textDocument"]["uri"] = json!(uri);
+        self.to_child(&json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": { "uri": uri, "languageId": "luau", "version": 0, "text": text }
+            }
+        }));
         self.to_child(&message);
+        self.to_child(&json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didClose",
+            "params": { "textDocument": { "uri": uri } }
+        }));
     }
 
     /// Handles one message from the child.
@@ -1054,7 +1113,8 @@ impl Server {
                     .to_string();
                 let st = self.state.lock().expect("state");
 
-                if st.runtime_uri.as_deref() == Some(uri.as_str()) {
+                if st.runtime_uri.as_deref() == Some(uri.as_str()) || uri.ends_with(SCRATCH_SUFFIX)
+                {
                     return;
                 }
 
@@ -1328,7 +1388,15 @@ impl Server {
                             // Before any pass reads the `where` clause of
                             // a solver variable as a type of its own.
                             if let Some(named) = name_solver_local(&st, &text, doc, line, character)
-                                .or_else(|| name_solver_struct(&text, doc))
+                                .or_else(|| {
+                                    let reach: Vec<_> = st
+                                        .imported_docs(uri)
+                                        .into_iter()
+                                        .flat_map(|d| d.import_decls.iter())
+                                        .collect();
+
+                                    name_solver_struct(&text, doc, &reach)
+                                })
                             {
                                 text = named;
                             }
@@ -1374,6 +1442,12 @@ impl Server {
 
                             if let Some(named) = restore_struct_arguments(&text, doc, line) {
                                 text = named;
+                            }
+
+                            // `parts:take()` on a `Pool<Part>` binds the
+                            // `T` of the impl, as signature help does.
+                            if let Some(bound) = bind_hover_receiver(&text, doc, line, character) {
+                                text = bound;
                             }
 
                             if let Some(dropped) = drop_bound_intersections(&text, doc) {
@@ -1439,6 +1513,16 @@ impl Server {
                                 optional_index_hover(&text, doc, line, character)
                             {
                                 text = optional;
+                            }
+
+                            // A child name asked at the name that holds
+                            // the lookup: the child hover, with the type
+                            // the sourcemap gives.
+                            if let Some((child, range)) =
+                                child_lookup_hover(&value, doc, line, character)
+                            {
+                                text = child;
+                                result["range"] = range;
                             }
 
                             // A key of a table literal asked at its
@@ -1659,7 +1743,43 @@ impl Server {
                 }));
             }
 
+            // A follow-up command reads the shadow's edits, so it maps
+            // before the edits do.
+            match method.as_str() {
+                "textDocument/codeAction" => result
+                    .as_array_mut()
+                    .into_iter()
+                    .flatten()
+                    .for_each(|a| map_follow_up(a, &st)),
+
+                "codeAction/resolve" => map_follow_up(result, &st),
+
+                _ => {}
+            }
+
             map_from_shadow(result, ctx.as_deref(), &st);
+
+            if method == "codeAction/resolve" {
+                st.wrap_inlined(result);
+            }
+
+            // An extract or an inline that breaks the parse applies
+            // nothing, and an extract's rename has no name to rename.
+            if method == "codeAction/resolve"
+                && !st.extract_parses(result)
+                && let Some(action) = result.as_object_mut()
+            {
+                action.remove("edit");
+                action.remove("command");
+                self.to_client(&json!({
+                    "jsonrpc": "2.0",
+                    "method": "window/showMessage",
+                    "params": {
+                        "type": 2,
+                        "message": "Alloy: this refactor would leave code that does not parse, so it does not apply here.",
+                    },
+                }));
+            }
 
             if method == "textDocument/diagnostic"
                 && let Some(uri) = ctx.as_deref()
@@ -1835,6 +1955,11 @@ impl Server {
                         actions.extend(st.import_actions(uri, &reported));
                         st.unused_import_actions(uri, range, actions);
                         drop_child_prefix_fixes(actions);
+                        drop_child_requires(actions);
+
+                        if let Some(doc) = st.docs.get(uri) {
+                            mend_child_spelling(actions, uri, &doc.source);
+                        }
                     }
                 }
 
@@ -1848,6 +1973,10 @@ impl Server {
                             restyle_signatures(result, doc, line, character);
                         }
 
+                        let mended = position.is_some_and(|(line, character)| {
+                            st.mend_constructor_signature(uri, line, character, result)
+                        });
+
                         // The child answered nothing: a macro call is
                         // gone from the emit, and a file with an
                         // unclosed call has no compile at all, so the
@@ -1859,6 +1988,7 @@ impl Server {
                             .is_none_or(Vec::is_empty);
 
                         if empty
+                            && !mended
                             && let Some((line, character)) = position
                             && let Some(help) = st.declared_signature_help(uri, line, character)
                         {
@@ -1937,12 +2067,12 @@ impl Server {
                                 return false;
                             };
 
-                            if !seen.insert((line, s)) {
+                            if !seen.insert(s) {
                                 return false;
                             }
 
                             link["target"] = json!(target);
-                            link["range"] = range_value((line, s), (line, e));
+                            link["range"] = range_value(s, e);
 
                             true
                         });
@@ -2049,7 +2179,14 @@ impl Server {
                             .get(uri)
                             .and_then(|d| offset_of(&d.source, line, character))
                             .zip(st.docs.get(uri))
-                            .is_some_and(|(at, d)| context::in_string(&d.source, at));
+                            .is_some_and(|(at, d)| {
+                                // A child name was asked inside the string
+                                // its lookup lowers to.
+                                context::in_string(&d.source, at)
+                                    || context::child_name_start(&d.source, at)
+                                        .and_then(|start| child_call(d, start))
+                                        .is_some()
+                            });
                         // A member list names what the value has; an
                         // auto-import is a new name, which cannot follow
                         // a `.` or a `:`.
@@ -2068,7 +2205,7 @@ impl Server {
                             // A trait has no table in the emit, so the
                             // child answers nothing for `self` inside a
                             // default method.
-                            extra.extend(st.trait_self_members(uri, line, character));
+                            extra.extend(st.trait_self_members(uri, line, character, result));
                             // An `impl` of a struct another file declares
                             // writes its methods on the imported table,
                             // and the child types that table from the
@@ -2121,8 +2258,16 @@ impl Server {
                         }
 
                         if let Some(doc) = st.docs.get(uri) {
-                            clean_completion(result, doc, line, character, st.snippets);
+                            let reach: Vec<_> = st
+                                .imported_docs(uri)
+                                .into_iter()
+                                .flat_map(|d| d.import_shapes.iter())
+                                .collect();
+
+                            clean_completion(result, doc, &reach, line, character, st.snippets);
                         }
+
+                        st.child_name_details(uri, line, character, result);
 
                         st.filter_remote_members(uri, line, character, result);
                         // A static of an `impl` sits on the same table as
@@ -2182,9 +2327,11 @@ fn parameter_labels_as_text(result: &mut Value) {
     }
 }
 
-/// The parameters back as UTF-16 offsets into the final label, found
-/// in order after its `(`, so the editor marks the active one exactly.
-/// A text the label no longer holds stays text.
+/// The parameters back as UTF-16 offsets into the final label, so the
+/// editor marks the active one exactly. Each one is found in order
+/// among the entries of the label's list, not in its text: `self:
+/// Signal<number, string>` holds the words of the entries after it. A
+/// text the label no longer holds stays text.
 fn parameter_labels_as_offsets(result: &mut Value) {
     for sig in result
         .get_mut("signatures")
@@ -2193,7 +2340,8 @@ fn parameter_labels_as_offsets(result: &mut Value) {
         .flatten()
     {
         let label = sig["label"].as_str().unwrap_or("").to_string();
-        let mut from = label.find('(').map_or(0, |i| i + 1);
+        let entries = label_entries(&label);
+        let mut next = 0;
         let units = |bytes: usize| label[..bytes].encode_utf16().count();
 
         for p in sig
@@ -2205,13 +2353,73 @@ fn parameter_labels_as_offsets(result: &mut Value) {
             let Some(text) = p["label"].as_str().filter(|t| !t.is_empty()) else {
                 continue;
             };
+            let rest = entries.get(next..).unwrap_or_default();
+            // The entry that is the parameter, else the first that
+            // starts with it or holds it.
+            let found = rest
+                .iter()
+                .position(|&(s, e)| &label[s..e] == text)
+                .or_else(|| {
+                    rest.iter()
+                        .position(|&(s, e)| label[s..e].starts_with(text))
+                })
+                .or_else(|| rest.iter().position(|&(s, e)| label[s..e].contains(text)));
 
-            if let Some(at) = label[from..].find(text).map(|i| from + i) {
-                from = at + text.len();
-                p["label"] = json!([units(at), units(from)]);
+            if let Some(k) = found {
+                let (s, e) = rest[k];
+                let at = s + label[s..e].find(text).unwrap_or_default();
+                next += k + 1;
+                p["label"] = json!([units(at), units(at + text.len())]);
             }
         }
     }
+}
+
+/// The byte range of each entry of a label's parameter list, split at
+/// the commas outside every bracket. The `>` of a `->` closes nothing.
+fn label_entries(label: &str) -> Vec<(usize, usize)> {
+    let Some(open) = label.find('(') else {
+        return Vec::new();
+    };
+    let mut entries = Vec::new();
+    let mut depth = 0i32;
+    let mut start = open + 1;
+    let mut prev = '(';
+    let mut push = |from: usize, to: usize| {
+        let text = &label[from..to];
+        let from = from + (text.len() - text.trim_start().len());
+
+        entries.push((from, from + text.trim().len()));
+    };
+
+    for (i, c) in label[open + 1..].char_indices() {
+        let at = open + 1 + i;
+
+        match c {
+            '(' | '[' | '{' | '<' => depth += 1,
+
+            '>' if prev == '-' => {}
+
+            ')' if depth == 0 => {
+                push(start, at);
+
+                break;
+            }
+
+            ')' | ']' | '}' | '>' => depth -= 1,
+
+            ',' if depth == 0 => {
+                push(start, at);
+                start = at + 1;
+            }
+
+            _ => {}
+        }
+
+        prev = c;
+    }
+
+    entries
 }
 
 /// The child's "Prefix 'x' with '_'" where the `unused_variable` lint
@@ -2236,6 +2444,91 @@ fn drop_child_prefix_fixes(actions: &mut Vec<Value>) {
         let rewrite = format!("Rewrite as `_{name}`");
 
         !ours.iter().any(|o| o.starts_with(&rewrite))
+    });
+}
+
+/// The child's "Add require for 'X'" and "Add all missing requires"
+/// where Alloy offers an import for the name. The child writes a raw
+/// `require`, which the `raw_require` lint then reports.
+pub(crate) fn drop_child_requires(actions: &mut Vec<Value>) {
+    let title = |a: &Value| {
+        a.get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+
+    if !actions.iter().any(|a| title(a).starts_with("Add `import ")) {
+        return;
+    }
+
+    actions.retain(|a| {
+        let t = title(a);
+
+        !t.starts_with("Add require for '") && t != "Add all missing requires"
+    });
+}
+
+/// The child's "Change 'flyer' to 'Flyer'" on `t.flyer` edits the whole
+/// `t.flyer`, and the code then reads a global `Flyer`. The edit now
+/// takes the name alone, and an edit that does not end on the name
+/// drops the action. Where Alloy's "Rename to `Flyer`" makes the same
+/// fix, the child's goes.
+pub(crate) fn mend_child_spelling(actions: &mut Vec<Value>, uri: &str, src: &str) {
+    let ours: Vec<String> = actions
+        .iter()
+        .filter_map(|a| a.get("title").and_then(Value::as_str).map(str::to_string))
+        .collect();
+
+    actions.retain_mut(|a| {
+        let Some((old, new)) = a
+            .get("title")
+            .and_then(Value::as_str)
+            .and_then(|t| {
+                t.strip_prefix("Change '")?
+                    .strip_suffix('\'')?
+                    .split_once("' to '")
+            })
+            .map(|(o, n)| (o.to_string(), n.to_string()))
+        else {
+            return true;
+        };
+
+        if ours.contains(&format!("Rename to `{new}`")) {
+            return false;
+        }
+
+        let Some(edits) = a
+            .pointer_mut("/edit/changes")
+            .and_then(|c| c.get_mut(uri))
+            .and_then(Value::as_array_mut)
+        else {
+            return true;
+        };
+
+        edits.iter_mut().all(|e| {
+            let Some(((sl, sc), (el, ec))) = e.get("range").and_then(range_of) else {
+                return false;
+            };
+            let (Some(start), Some(end)) = (offset_of(src, sl, sc), offset_of(src, el, ec)) else {
+                return false;
+            };
+            let Some(head) = src
+                .get(start..end)
+                .and_then(|t| t.strip_suffix(old.as_str()))
+            else {
+                return false;
+            };
+
+            if !head.is_empty() && !head.ends_with(['.', ':']) {
+                return false;
+            }
+
+            let (l, c) = position_of(src, end - old.len());
+            e["range"]["start"] = json!({ "line": l, "character": c });
+
+            true
+        })
     });
 }
 
@@ -2327,6 +2620,42 @@ mod signature_tests {
         assert_eq!(
             help["signatures"][0]["parameters"][1]["label"],
             json!([24, 33])
+        );
+    }
+
+    /// The type of `self` holds the words of the parameters after it;
+    /// each parameter marks its own entry of the list.
+    #[test]
+    fn a_parameter_marks_its_own_entry_past_the_self_type() {
+        let label = "function Signal:Fire(self: Signal<number, string>, number, string): ()";
+        let mut help = json!({ "signatures": [{
+            "label": label,
+            "parameters": [{ "label": "number" }, { "label": "string" }],
+        }] });
+        super::parameter_labels_as_offsets(&mut help);
+
+        let marked = |i: usize| {
+            let span = &help["signatures"][0]["parameters"][i]["label"];
+            let (s, e) = (span[0].as_u64().unwrap(), span[1].as_u64().unwrap());
+
+            (s, &label[s as usize..e as usize])
+        };
+
+        assert_eq!(marked(0), (51, "number"));
+        assert_eq!(marked(1), (59, "string"));
+
+        // A function type in the list: its `->` closes no bracket.
+        let label = "function f(g: (number) -> Map<string, number>, n: number): ()";
+        let mut help = json!({ "signatures": [{
+            "label": label,
+            "parameters": [{ "label": "g: (number) -> Map<string, number>" }, { "label": "n: number" }],
+        }] });
+        super::parameter_labels_as_offsets(&mut help);
+
+        let n = label.find("n: number").unwrap();
+        assert_eq!(
+            help["signatures"][0]["parameters"][1]["label"],
+            json!([n, n + "n: number".len()])
         );
     }
 }

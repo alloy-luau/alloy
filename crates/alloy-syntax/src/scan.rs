@@ -1,6 +1,7 @@
-//! Finds `require("...")` call sites in a token stream.
+//! Finds `require("...")` call sites in a token stream, and the
+//! `import` statements of a source.
 
-use crate::lexer::{Tok, TokKind};
+use crate::lexer::{Lexed, Tok, TokKind};
 
 #[derive(Debug, Clone, Copy)]
 pub struct RequireSite {
@@ -271,6 +272,170 @@ fn literal_name(src: &str, tok: &Tok) -> Option<String> {
     (!text.contains('\\')).then(|| text.to_string())
 }
 
+/// One `import ... from "path"` statement, or one `export { ... } from
+/// "path"` re-export, whole. A name list can run over several lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportStatement {
+    /// The byte range from the keyword through the path string.
+    pub start: usize,
+    pub end: usize,
+    /// The zero-based line of the keyword.
+    pub line: usize,
+    /// The source of the range on one line: each line break and each
+    /// comment byte is a space. An offset into it is an offset from
+    /// `start` into the source.
+    pub text: String,
+    /// The path between the quotes.
+    pub spec: String,
+}
+
+/*
+Every import statement and re-export of a source, in order.
+
+A scan that reads one line at a time misses a list that runs over
+several lines, and it reads a comment or a string as a statement. This
+walk reads the tokens, so neither happens. The shapes are the parser's:
+`import` before `*`, `{`, `type {`, or a name, and `export` before `{`
+or `type {`, each through its `from` and the path.
+
+A source the lexer refuses still yields the statements above the fault.
+An editor holds a half-typed string most of the time, and the imports
+sit at the top.
+*/
+pub fn import_statements(src: &str) -> Vec<ImportStatement> {
+    let (src, lexed) = lex_prefix(src);
+    let toks = &lexed.toks;
+    let text = |i: usize| toks.get(i).map_or("", |t| t.text(src));
+    let mut out = Vec::new();
+    let mut line = 0;
+    let mut counted = 0;
+
+    for (i, tok) in toks.iter().enumerate() {
+        let member = i > 0 && matches!(toks[i - 1].kind, TokKind::Dot | TokKind::Colon);
+
+        if tok.kind != TokKind::Ident || member || !matches!(text(i), "import" | "export") {
+            continue;
+        }
+
+        let Some(path) = statement_path(src, toks, i) else {
+            continue;
+        };
+        let TokKind::Str {
+            inner_start,
+            inner_end,
+        } = toks[path].kind
+        else {
+            continue;
+        };
+        let (start, end) = (tok.start as usize, toks[path].end as usize);
+        line += src[counted..start].matches('\n').count();
+        counted = start;
+        let mut bytes = src.as_bytes()[start..end].to_vec();
+
+        for &(a, b) in &lexed.comments {
+            let (a, b) = ((a as usize).max(start), (b as usize).min(end));
+
+            if a < b {
+                bytes[a - start..b - start].fill(b' ');
+            }
+        }
+
+        for b in bytes.iter_mut().filter(|b| matches!(b, b'\n' | b'\r')) {
+            *b = b' ';
+        }
+
+        out.push(ImportStatement {
+            start,
+            end,
+            line,
+            text: String::from_utf8_lossy(&bytes).into_owned(),
+            spec: src[inner_start as usize..inner_end as usize].to_string(),
+        });
+    }
+
+    out
+}
+
+/// The tokens of the longest prefix of a source that lexes.
+fn lex_prefix(src: &str) -> (&str, Lexed) {
+    let mut src = src;
+
+    loop {
+        match crate::lexer::lex(src) {
+            Ok(lexed) => return (src, lexed),
+
+            Err(e) if e.offset < src.len() && src.is_char_boundary(e.offset) => {
+                src = &src[..e.offset];
+            }
+
+            Err(_) => return (src, Lexed::default()),
+        }
+    }
+}
+
+/// The index of the path string of the statement whose keyword is at
+/// `i`, or `None` when the tokens there make no import or re-export.
+fn statement_path(src: &str, toks: &[Tok], i: usize) -> Option<usize> {
+    let text = |j: usize| toks.get(j).map_or("", |t| t.text(src));
+    let name = |j: usize| toks.get(j).is_some_and(|t| t.kind == TokKind::Ident);
+    let mut j = i + 1;
+
+    match (text(i), text(j)) {
+        ("export", "type") | ("import", "type") if text(j + 1) == "{" => {
+            j = past_list(src, toks, j + 1)?;
+        }
+
+        ("export", "{") | ("import", "{") => j = past_list(src, toks, j)?,
+
+        // `import * as M` and `import * as M, { a }`.
+        ("import", "*") if text(j + 1) == "as" && name(j + 2) => {
+            j += 3;
+
+            if text(j) == "," {
+                j = past_list(src, toks, j + 1)?;
+            }
+        }
+
+        // `import M` and `import M, { a }`.
+        ("import", _) if name(j) => {
+            j += 1;
+
+            if text(j) == "," {
+                j = past_list(src, toks, j + 1)?;
+            }
+        }
+
+        _ => return None,
+    }
+
+    let is_path = toks
+        .get(j + 1)
+        .is_some_and(|t| matches!(t.kind, TokKind::Str { .. }));
+
+    (text(j) == "from" && is_path).then_some(j + 1)
+}
+
+/// The index past the `}` of the name list that opens at `open`. A list
+/// holds names, `as`, `type`, dots, commas, and `@`; any other token
+/// means the list is not closed yet.
+fn past_list(src: &str, toks: &[Tok], open: usize) -> Option<usize> {
+    if toks.get(open)?.text(src) != "{" {
+        return None;
+    }
+
+    for (j, tok) in toks.iter().enumerate().skip(open + 1) {
+        match (tok.kind, tok.text(src)) {
+            (TokKind::Symbol, "}") => return Some(j + 1),
+
+            (TokKind::Ident | TokKind::Dot, _) | (TokKind::Symbol, "," | "@") => {}
+
+            _ => return None,
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,6 +473,36 @@ mod tests {
         let toks = lex(src).unwrap().toks;
 
         assert_eq!(scan(src, &toks).dynamic.len(), 3);
+    }
+
+    /// A list over several lines is one statement. A comment or a
+    /// string that holds `import` is none, and neither is a field read.
+    #[test]
+    fn import_statements_read_whole_statements() {
+        let src = "--!strict\nimport {\n    Stats, -- the stats\n    Gear,\n} from \"./types\"\nimport * as M, { a } from '@x/m'\nimport D from \"./d\"\nimport type { T } from \"./t\"\nexport type { U } from \"./u\"\nexport { a, b }\n-- import { c } from \"./c\"\nlocal s = \"import { d } from './d'\"\nlocal import = t.import\nlocal x = import(\"./x\")\n";
+        let found = import_statements(src);
+        let specs: Vec<&str> = found.iter().map(|s| s.spec.as_str()).collect();
+
+        assert_eq!(specs, ["./types", "@x/m", "./d", "./t", "./u"]);
+        assert_eq!(found[0].line, 1);
+        assert_eq!(found[1].line, 5);
+        assert_eq!(found[4].line, 8);
+        assert_eq!(
+            found[0].text,
+            "import {     Stats,                  Gear, } from \"./types\""
+        );
+        assert_eq!(found[0].text.len(), found[0].end - found[0].start);
+        assert_eq!(&src[found[0].end - 1..found[0].end], "\"");
+    }
+
+    /// A string the author has not closed yet hides only what follows
+    /// it, and a list with no `}` is no statement yet.
+    #[test]
+    fn import_statements_survive_a_half_typed_file() {
+        let src = "import { a } from \"./a\"\nimport {\n    b,\nlocal s = \"open\nimport { c } from \"./c\"\n";
+        let specs: Vec<String> = import_statements(src).into_iter().map(|s| s.spec).collect();
+
+        assert_eq!(specs, ["./a"]);
     }
 
     #[test]

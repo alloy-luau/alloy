@@ -7,11 +7,28 @@ use super::super::*;
 impl<'a> Parser<'a> {
     // --- patterns ----------------------------------------------------------
 
-    /// Reports if `local Name(` starts a pattern local, not a call.
+    /// Reports if the name after `local` starts a pattern local: a name
+    /// or a dotted path, then `(`, or `{` on the same line.
     pub(super) fn pattern_local_follows(&self) -> bool {
-        // `local f(x)` is not valid Luau, so a name and `(` after `local`
-        // can only be a pattern.
-        true
+        // `local f(x)` and `local P { x }` are not valid Luau, so a name
+        // and `(` or `{` after `local` can only be a pattern.
+        if !self.at_name() {
+            return false;
+        }
+
+        let mut n = 0;
+
+        while self.text_at(n + 1) == "." && self.name_at(n + 2) {
+            n += 2;
+        }
+
+        match self.text_at(n + 1) {
+            "(" => true,
+
+            "{" => !self.newline_after(n),
+
+            _ => false,
+        }
     }
 
     pub(super) fn pattern(&mut self) -> Result<Pattern, ParseError> {
@@ -108,6 +125,12 @@ impl<'a> Parser<'a> {
                         }
 
                         let path = TokSpan::new(name_start, self.pos);
+
+                        // `B.Gem { n }` names a struct through a module
+                        // or a namespace.
+                        if self.at("{") {
+                            return self.struct_pattern(Some(path), start);
+                        }
 
                         if !self.at("(") {
                             return Ok(Pattern::Path(path));

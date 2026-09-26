@@ -43,7 +43,7 @@ mod types;
 use macros::MacroRef;
 use namespaces::{NamespaceInfo, NsFrame, NsHoist};
 pub(crate) use remotes::WIRE_WIDTHS;
-pub(crate) use types::{group_len, split_top_level, strip_bounds};
+pub(crate) use types::{group_len, qualify_names, split_top_level, strip_bounds};
 
 /// A message tied to a source byte range.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +67,13 @@ pub struct EmitOptions {
     /// Empty when the compile has no output path, and a relative path
     /// then stays as the source wrote it.
     pub module_rel: String,
+    /// Each relative spec that leaves the file's mount, with the
+    /// `@game/...` place its `require` writes. See
+    /// `crate::project::mount_requires`.
+    pub mount_requires: Vec<(String, String)>,
+    /// The side the file's place in the game gives it, for a name with
+    /// no `.server` or `.client`. See `crate::project::place_side`.
+    pub mount_side: Option<crate::directives::Side>,
     /// The string passed to `require` for the runtime.
     pub std_require: String,
     /// The ship artifact's runtime require when it differs: under a
@@ -85,6 +92,9 @@ pub struct EmitOptions {
     /// The structs of the whole project, for the wire layout of a
     /// remote that carries one from another file.
     pub shapes: Vec<StructShape>,
+    /// The imports of each project module. A wire layout reads a type
+    /// name through the imports of the file that writes it.
+    pub wire_scopes: Vec<WireScope>,
     /// Render the check artifact: a call to an extension method on a
     /// foreign type stays as written, and `self` in such an impl carries
     /// the target type, so the analyzer types both. The ship artifact
@@ -125,6 +135,10 @@ pub struct EmitOptions {
     /// payload counts. A `match` over an imported enum covers it.
     /// See `crate::modules::import_enums`.
     pub import_enums: Vec<(String, Vec<(String, usize)>)>,
+    /// The remotes the imported modules declare, by the name this file
+    /// binds, with whether the client and the server fire each one. See
+    /// `crate::modules::import_remotes`.
+    pub import_remotes: Vec<(String, (bool, bool))>,
     /// Per imported trait, the names of its default methods, so an
     /// `impl Trait for S` here flattens them in as a local trait's would.
     pub import_trait_defaults: Vec<(String, Vec<String>)>,
@@ -141,10 +155,20 @@ pub struct EmitOptions {
     /// so `private_access` reports a read across a module boundary. See
     /// `crate::modules::import_privates`.
     pub import_privates: Vec<(String, Vec<String>)>,
+    /// The functions the imported modules declare, with their parameter
+    /// counts and deprecation notes, so `argument_count` and
+    /// `deprecated_call` read a call across a module boundary. See
+    /// `crate::modules::import_callables`.
+    pub import_callables: Vec<(String, crate::flux::Callable)>,
     /// Per struct an imported module declares, each field with whether
     /// it carries a default, so `new Box { }` here reports the fields it
     /// leaves unset. See `crate::modules::import_struct_fields`.
     pub import_struct_fields: Vec<(String, Vec<(String, bool)>)>,
+    /// Per struct an imported module declares, the type text of each
+    /// field, with whether this file can write it the way the module
+    /// does. A field's constructor takes the arguments the type names,
+    /// as in the module. See `crate::modules::import_field_types`.
+    pub import_field_types: Vec<(String, Vec<crate::declarations::FieldText>)>,
     /// Per struct an imported module declares that writes a
     /// constructor, the name of that `new` or `New`. A report of
     /// `Box(1)` reads it, so it names the constructor. See
@@ -169,6 +193,16 @@ pub struct EmitOptions {
     /// attribute is used, so a use here needs the declaration there.
     /// See `crate::modules::import_attributes`.
     pub import_attributes: Vec<(String, AttrDecl)>,
+    /// Each star import of an Alloy module: the local, the paths of the
+    /// namespaces the module declares, and every name it exports.
+    /// `import_attributes` lists the attributes of the module and of
+    /// those namespaces in full, so `@M.tag` or `@M.Ns.tag` that names
+    /// none of them reports. See `crate::modules::import_star_modules`.
+    pub import_star_modules: Vec<(String, Vec<String>, Vec<String>)>,
+    /// The private attributes of the namespaces the imported modules
+    /// export, by the path this file writes, so a use of one reports
+    /// that it is private. See `crate::modules::import_private_attributes`.
+    pub import_private_attributes: Vec<String>,
     /// The enums the file around a macro expansion declares. A macro
     /// body compiles as a fragment of its own, and a `match` in it
     /// covers the enums of the file it lands in. See `compile_fragment`.
@@ -182,6 +216,14 @@ pub struct EmitOptions {
     pub naming: crate::naming::Naming,
     /// The markup of an `.alx` file, for the component names.
     pub markup: crate::naming::Markup,
+    /// The byte ranges of the lowered `.alx` text that hold an attribute
+    /// value or a lone `{expr}` that sets `Text`, with the type it must
+    /// have. The check artifact passes each one through `__alloy.prop`,
+    /// cast to that type.
+    pub attribute_types: Vec<(u32, u32, String)>,
+    /// The check artifact goes to Luau's new solver, `[flux] new_solver`.
+    /// A type that only one solver reads right picks its form by it.
+    pub new_solver: bool,
 }
 
 /// One field of a struct or an interface, as the prescan keeps it.
@@ -266,11 +308,41 @@ pub use structs::RENAME_STYLES;
 /// A struct another file declares, for the wire layout of a remote
 /// that carries it: each field with its type text and its width, and the
 /// derives it takes, so an importer's own derives reach through it.
+/// An enum rides the same list with its variants and no fields.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct StructShape {
     pub name: String,
     pub fields: Vec<WireField>,
     pub derives: Vec<String>,
+    /// The declaring source, relative to the project's `in` folder. It
+    /// keys the table the runtime registers for the wire.
+    pub module: String,
+    /// Each variant with the type of each payload value; empty for a
+    /// struct.
+    pub variants: Vec<(String, Vec<String>)>,
+}
+
+impl StructShape {
+    /// The key the declaring file registers the table under, and the
+    /// layout of a file that cannot name the table.
+    pub fn wire_key(&self) -> String {
+        format!("{}:{}", self.module, self.name)
+    }
+}
+
+/// The imports of one project module. A type name in the module means
+/// the type these imports bind, so a same-named type elsewhere in the
+/// project does not change the layout.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct WireScope {
+    /// The module, relative to the project's `in` folder, as in
+    /// `StructShape::module`.
+    pub module: String,
+    /// Each name an import binds, with the module and the name there:
+    /// `import { Inner as I }` binds `I` to `Inner`.
+    pub names: Vec<(String, String, String)>,
+    /// Each `import * as K`, with its module.
+    pub stars: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -344,12 +416,15 @@ impl Default for EmitOptions {
             wait_timeout: None,
             file_name: "<input>".to_string(),
             module_rel: String::new(),
+            mount_requires: Vec::new(),
+            mount_side: None,
             std_require: "@alloy".to_string(),
             ship_std_require: None,
             definitions: false,
             erase_type_imports: false,
             macros: Vec::new(),
             shapes: Vec::new(),
+            wire_scopes: Vec::new(),
             check: false,
             extensions: Vec::new(),
             std_globals: crate::std_names::Globals::All,
@@ -360,20 +435,27 @@ impl Default for EmitOptions {
             test_runner: true,
             import_types: Vec::new(),
             import_enums: Vec::new(),
+            import_remotes: Vec::new(),
             import_trait_defaults: Vec::new(),
             import_trait_methods: Vec::new(),
             import_result_asyncs: Vec::new(),
             import_privates: Vec::new(),
+            import_callables: Vec::new(),
             import_struct_fields: Vec::new(),
+            import_field_types: Vec::new(),
             import_struct_ctors: Vec::new(),
             import_private_views: Vec::new(),
             plain_modules: Vec::new(),
             ambient_names: Vec::new(),
             import_attributes: Vec::new(),
+            import_star_modules: Vec::new(),
+            import_private_attributes: Vec::new(),
             macro_enums: Vec::new(),
             macro_depth: 0,
             naming: crate::naming::Naming::default(),
             markup: crate::naming::Markup::default(),
+            attribute_types: Vec::new(),
+            new_solver: true,
         }
     }
 }
@@ -395,6 +477,10 @@ pub struct Rendered {
     pub tests: Vec<(String, bool)>,
     /// The members an attribute contract asked for and did not find.
     pub contract_gaps: Vec<ContractGap>,
+    /// The byte each member name starts at that an attribute contract
+    /// asks for. The contract fixes the name, so the naming lint leaves
+    /// that member alone, and reads another member of the same name.
+    pub contract_names: HashSet<u32>,
 }
 
 /// The words a declaration may write between `global` and the name it
@@ -495,6 +581,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         ),
     });
 
+    let (std_imports, std_namespaces, std_aliases) = std_imports(src, toks, chunk);
     let mut d = Desugar {
         src,
         toks,
@@ -507,9 +594,13 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         import_next: 0,
         expected_generic: None,
         field_expected: HashMap::new(),
+        field_casts: HashMap::new(),
+        variant_casts: HashMap::new(),
         value_sink: None,
         for_header: 0,
-        last_link: false,
+        child_cast: None,
+        require_arg: false,
+        chain_target: false,
         expected_payload: None,
         result_asyncs: options.import_result_asyncs.iter().cloned().collect(),
         // Luau reads a reserved word as a key only in brackets.
@@ -547,8 +638,12 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         uses_std: false,
         top_scope: 1,
         // `ui.client.aly` sees the client half of a remote, and
-        // `main.server.aly` the server half.
-        file_side: crate::directives::file_side(&options.file_name),
+        // `main.server.aly` the server half. A module under
+        // `ServerScriptService` runs on the server alone.
+        file_side: crate::directives::file_side(&options.file_name).or(options.mount_side),
+        remote_sides: options.import_remotes.iter().cloned().collect(),
+        remote_shadows: Vec::new(),
+        remote_aliases: HashMap::new(),
         own_names: top_level_names(src, toks, chunk),
         exports: Vec::new(),
         has_default_export: false,
@@ -560,17 +655,21 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         imported_names: HashSet::new(),
         import_renames: HashMap::new(),
         star_modules: HashSet::new(),
+        star_specs: HashMap::new(),
         private_view_names: HashSet::new(),
         ret_types: Vec::new(),
         try_targets: Vec::new(),
+        one_value: HashSet::new(),
         result_aliases: HashSet::new(),
         alias_values: HashMap::new(),
         fn_ret_types: HashMap::new(),
         plain_fns: HashSet::new(),
         binding_types: HashMap::new(),
         enum_decls: HashMap::new(),
+        enum_payloads: HashMap::new(),
         impl_methods: HashMap::new(),
         contract_gaps: Vec::new(),
+        contract_names: HashSet::new(),
         field_body: HashMap::new(),
         method_body: HashMap::new(),
         type_members: HashMap::new(),
@@ -584,10 +683,11 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         structs_with_new: HashMap::new(),
         impl_target: None,
         impl_method: None,
-        plain_tables: HashSet::new(),
+        table_selfs: HashMap::new(),
         self_inject: None,
         declared_types: HashSet::new(),
         traits: HashMap::new(),
+        self_dispatch: HashSet::new(),
         trait_required: HashMap::new(),
         struct_fields: HashMap::new(),
         generic_types: HashSet::new(),
@@ -612,9 +712,11 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         serializable: HashSet::new(),
         deserializable: HashSet::new(),
         cloneable: HashSet::new(),
+        equatable: HashSet::new(),
         defaultable: HashSet::new(),
-        std_imports: std_imports(src, toks, chunk).0,
-        std_namespaces: std_imports(src, toks, chunk).1,
+        std_imports,
+        std_namespaces,
+        std_aliases,
         std_reported: HashSet::new(),
         private_types: HashSet::new(),
         self_prologue: None,
@@ -629,6 +731,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         ns_force_local: false,
         export_listed: HashSet::new(),
         export_listed_bare: HashSet::new(),
+        reexported_types: HashSet::new(),
         export_listed_types: HashSet::new(),
         file_types: HashMap::new(),
         imported_types: HashMap::new(),
@@ -662,6 +765,18 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     // `global` left the language; each one the file wrote reports.
     d.report_globals(src, toks, chunk);
 
+    // `id<number>(5)` is valid Luau, two comparisons, and compiles as
+    // that. The author most likely meant a call; see `angle_calls`.
+    for (span, message) in &chunk.angle_calls {
+        d.lints.push(Lint {
+            name: "single_angle_call",
+            start: toks[span.start as usize].start,
+            end: toks[span.end as usize - 1].end,
+            message: message.clone(),
+            fix: None,
+        });
+    }
+
     // A namespace names its members before the prescan reads them: a
     // member renders under the namespace's prefix, and every table the
     // prescan fills is keyed by that rendered name.
@@ -676,6 +791,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     d.scan_ns_hoists(&chunk.block);
     d.scan_plain_tables(&chunk.block);
     d.scan_reduce_inserts(&chunk.block);
+    d.note_remote_sides(&chunk.block);
     d.scan_static_checks(&chunk.block);
     d.check_await_spots(&chunk.block);
 
@@ -701,6 +817,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
             d.top_scope = d.scope_depth();
             d.block(&chunk.block);
             d.check_bound_calls(&chunk.block);
+            d.check_identity_compares(&chunk.block);
             let last = toks[toks.len() - 1].end;
             d.return_at = Some(d.r.out_len());
             d.module_return(last, &chunk.block);
@@ -811,6 +928,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         ext_used: d.ext_hit,
         tests: d.test_names,
         contract_gaps: d.contract_gaps,
+        contract_names: d.contract_names,
     }
 }
 
@@ -852,7 +970,7 @@ pub fn bound_names(src: &str, toks: &[Tok], stmt: &Stmt) -> Vec<String> {
 /// Every name the top level of a file binds: a local, a function, a
 /// declaration, an import. A global by one of these names is the file's
 /// own name, so nothing is injected over it.
-fn top_level_names(src: &str, toks: &[Tok], chunk: &Chunk) -> HashSet<String> {
+pub(crate) fn top_level_names(src: &str, toks: &[Tok], chunk: &Chunk) -> HashSet<String> {
     let text = |span: TokSpan| span.text_or_empty(src, toks).to_string();
     let mut out = HashSet::new();
 
@@ -924,17 +1042,23 @@ fn top_level_names(src: &str, toks: &[Tok], chunk: &Chunk) -> HashSet<String> {
 }
 
 /// The std names a file's imports bind under their own names, then the
-/// locals its star imports of the std bind. A name under an alias binds
-/// the alias, a local the import writes.
+/// locals its star imports of the std bind, then each alias of a std
+/// name with the name. A name under an alias binds the alias, a local
+/// the import writes.
 fn std_imports(
     src: &str,
     toks: &[Tok],
     chunk: &Chunk,
-) -> (HashSet<String>, HashMap<String, String>) {
+) -> (
+    HashSet<String>,
+    HashMap<String, String>,
+    HashMap<String, String>,
+) {
     use alloy_syntax::ast::ImportKind;
 
     let mut out = HashSet::new();
     let mut stars = HashMap::new();
+    let mut aliases = HashMap::new();
 
     for i in imports_in(&chunk.block) {
         let spec = i.path.text(src, toks).trim_matches(['"', '\'']);
@@ -952,13 +1076,23 @@ fn std_imports(
         | ImportKind::Both(_, specs)
         | ImportKind::Namespace(_, specs) = &i.kind
         {
-            for s in specs.iter().filter(|s| s.alias.is_none()) {
-                out.insert(s.name.text(src, toks).to_string());
+            for s in specs {
+                let name = s.name.text(src, toks).to_string();
+
+                match s.alias {
+                    Some(a) => {
+                        aliases.insert(a.text(src, toks).to_string(), name);
+                    }
+
+                    None => {
+                        out.insert(name);
+                    }
+                }
             }
         }
     }
 
-    (out, stars)
+    (out, stars, aliases)
 }
 
 /// Every `import` of a block at any depth, in source order. An import
@@ -1081,6 +1215,14 @@ struct Desugar<'s> {
     /// with the arguments the field's declared type names: `visits =
     /// HashMap.new()` under `visits: HashMap<string, number>`.
     field_expected: HashMap<usize, (String, String)>,
+    /// The field values of a `new S { ... }` of an imported struct, by
+    /// address, with the type the check artifact casts each one to:
+    /// `index<S, "rows">` for `rows = HashMap.new()`, where the field's
+    /// type names a type this file cannot write.
+    field_casts: HashMap<usize, String>,
+    /// The items of a list literal that construct a variant, by
+    /// address, with the enum the check artifact casts each one to.
+    variant_casts: HashMap<usize, String>,
     /// The text a value-only `return` writes in front of its value: `s = `
     /// in an arm of `local s = match`, `return ` for a value block. None
     /// writes `return `.
@@ -1088,9 +1230,17 @@ struct Desugar<'s> {
     /// Above zero while the check artifact renders a for-in header; see
     /// the `return` cast in `statements`.
     for_header: u32,
-    /// Whether the link under render ends its chain; a child lookup
-    /// there keeps its `Instance` type in the check artifact.
-    last_link: bool,
+    /// The cast the check artifact puts on the child lookup under
+    /// render. None emits the plain call, so luau-lsp types the child
+    /// from the sourcemap. See `chain_parts`.
+    child_cast: Option<String>,
+    /// Set while the check artifact renders the argument of `require`.
+    /// The child lookups of that chain lose their nil guards, since
+    /// luau-lsp resolves a module from plain calls only.
+    require_arg: bool,
+    /// Set while an assignment target renders its object. A field
+    /// follows the chain's last link, so a child there casts to `any`.
+    chain_target: bool,
     /// `local f: Future<T> = async do ... end`: the payload type `T`,
     /// so the block's closure carries it. Without it the checker infers
     /// the closure's result, and an open result lands on `unknown`. An
@@ -1155,6 +1305,16 @@ struct Desugar<'s> {
     top_scope: usize,
     /// The side this file sits on, from its name or its directive.
     file_side: Option<crate::directives::Side>,
+    /// Each remote a name here reaches, declared or imported, with
+    /// whether the client and the server fire it.
+    remote_sides: HashMap<String, (bool, bool)>,
+    /// The bindings of this file that share a name with a remote or an
+    /// alias of one, with the tokens each one holds; see
+    /// `naming::scoped_bindings`.
+    remote_shadows: Vec<crate::naming::ScopedBinding>,
+    /// Each remote a local holds, `const vote = Net.Vote`, keyed by the
+    /// token that declares the local and the path through it.
+    remote_aliases: HashMap<(usize, String), (bool, bool)>,
     /// Every name the top level of this file binds.
     own_names: HashSet<String>,
     /// Names the module exports, as `name = value` pairs for the table.
@@ -1176,6 +1336,9 @@ struct Desugar<'s> {
     /// `import * as M`: the locals that stand for a whole module, so
     /// `new M.Box { }` names the struct `Box` the module declares.
     star_modules: HashSet<String>,
+    /// `import * as M from "./m"`: each such local with the spec it
+    /// names, so `export { M }` sends the module's types on.
+    star_specs: HashMap<String, String>,
     /// Imported structs whose full view this file aliases as
     /// `Name__all`. An `impl` of one types `self` as the view.
     private_view_names: HashSet<String>,
@@ -1188,6 +1351,9 @@ struct Desugar<'s> {
     /// reads the last one to pick between the block's `fail` and a
     /// `return` from the function.
     try_targets: Vec<Option<TryTarget>>,
+    /// Each `await` a `try do` block returns, by address, which the check
+    /// artifact wraps in parens to keep its first value alone.
+    one_value: HashSet<usize>,
     /// Type aliases the file declares whose value is a `Result`, so a
     /// function that returns one still takes `try`.
     result_aliases: HashSet<String>,
@@ -1211,6 +1377,9 @@ struct Desugar<'s> {
     /// the declaration still checks. `enums` also holds `Result`, which
     /// the std owns and whose table carries more than its variants.
     enum_decls: HashMap<String, Vec<(String, usize)>>,
+    /// The payload types of each enum this file declares, variant by
+    /// variant, for the wire layout that restores a payload value.
+    enum_payloads: HashMap<String, Vec<(String, Vec<String>)>>,
     /// Method and static names an `impl` block writes, by target. An enum
     /// member check reads it so a method call is not a missing variant.
     impl_methods: HashMap<String, HashSet<String>>,
@@ -1218,6 +1387,8 @@ struct Desugar<'s> {
     /// source order. The report names each one; this is what the editor
     /// writes in.
     contract_gaps: Vec<ContractGap>,
+    /// See [`Rendered::contract_names`].
+    contract_names: HashSet<u32>,
     /// Where a member of a type goes, by the type's name: the span of
     /// the `struct` or `interface` that holds its fields, and the span of
     /// an `impl` that holds its methods. A contract on an `impl` can ask
@@ -1261,10 +1432,9 @@ struct Desugar<'s> {
     /// `new Self()` in the constructor itself would call the
     /// constructor again, so the emit builds the value instead.
     impl_method: Option<String>,
-    /// Top-level `local X = { }` tables the file never rebinds and
-    /// never gives a metatable. A colon method on one of them takes
-    /// `typeof(X)` for its `self`.
-    plain_tables: HashSet<String>,
+    /// The `self` type of each top-level table a colon method is
+    /// written on, for the check artifact.
+    table_selfs: HashMap<String, crate::tables::SelfType>,
     /// The type of the `self` parameter the next function header has to
     /// write out, for a method the source spells with a colon.
     self_inject: Option<String>,
@@ -1273,6 +1443,9 @@ struct Desugar<'s> {
     declared_types: HashSet<String>,
     /// Declared trait names with their default-method names.
     traits: HashMap<String, Vec<String>>,
+    /// The `self` of each `self:m()` in the trait default under render
+    /// that calls through `__impl`, by token index; see `trait_decl`.
+    self_dispatch: HashSet<u32>,
     /// Declared trait names with the methods an impl must write: name,
     /// parameter count with `self` included, and the return type the
     /// signature declares.
@@ -1356,6 +1529,9 @@ struct Desugar<'s> {
     /// The structs of this file that derive `Clone`: a field of one
     /// clones through its own `clone`.
     cloneable: HashSet<String>,
+    /// The structs and enums of this file that derive `Eq` or
+    /// `PartialEq`, so `==` compares their content.
+    equatable: HashSet<String>,
     /// The structs of this file that derive `Default`: a field of one
     /// starts as its own `default()`.
     defaultable: HashSet<String>,
@@ -1365,6 +1541,9 @@ struct Desugar<'s> {
     /// The locals a star import of the std binds, `import * as s`, each
     /// with the module it names; the facade is `""`.
     std_namespaces: HashMap<String, String>,
+    /// Each alias an import gives a std name, `Signal as Sig`, with the
+    /// name.
+    std_aliases: HashMap<String, String>,
     /// The std names already reported as missing their import. The first
     /// use carries the report, and its fix writes the one line.
     std_reported: HashSet<String>,
@@ -1395,6 +1574,9 @@ struct Desugar<'s> {
     /// their own name. An imported namespace among them sends its type
     /// aliases out with the word `export`.
     export_listed_bare: HashSet<String>,
+    /// The names an `export { ... } from` list sends out, `default`
+    /// aside. The type of a re-exported default takes none of them.
+    reexported_types: HashSet<String>,
     /// The types a top-level `export { ... }` list names under their
     /// own names. Luau has no way to re-export an alias, so the
     /// declaration takes the `export` word instead.
@@ -2334,6 +2516,16 @@ fn expr_needs_desugar(e: &Expr) -> bool {
 }
 
 /// Backticked names joined with commas and a final `and`.
+/// `a` or `an` for the word a report puts after it. The test reads both
+/// cases, or a type named `E` takes `a`.
+pub fn article(word: &str) -> &'static str {
+    match word.starts_with(['a', 'e', 'i', 'o', 'u', 'A', 'E', 'I', 'O', 'U']) {
+        true => "an",
+
+        false => "a",
+    }
+}
+
 pub(crate) fn list_names(names: &[&str]) -> String {
     let quoted: Vec<String> = names.iter().map(|n| format!("`{n}`")).collect();
 
@@ -2388,6 +2580,37 @@ impl<'s> Desugar<'s> {
 
                 _ => None,
             })
+            .collect();
+
+        // The field types of each struct with a derive that reads them:
+        // `from_table` sets the metatable of a payload enum, and a nested
+        // struct clones and serializes through its own functions. The
+        // derived functions run after the file loads, as a body does.
+        let derived: Vec<(u32, &str)> = block
+            .stmts
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::Struct(st)
+                    if st
+                        .attributes
+                        .iter()
+                        .filter(|a| a.name.is_some_and(|n| self.text_of(n) == "derive"))
+                        .flat_map(|a| a.args.iter())
+                        .any(|arg| {
+                            matches!(
+                                self.derive_name(arg).as_str(),
+                                "Clone" | "Default" | "Serialize" | "Deserialize"
+                            )
+                        }) =>
+                {
+                    Some(st)
+                }
+
+                _ => None,
+            })
+            .flat_map(|st| st.fields.iter())
+            .flat_map(|f| f.ty.start..f.ty.end)
+            .map(|k| (k, self.toks[k as usize].text(self.src)))
             .collect();
 
         // The names declared so far.
@@ -2479,6 +2702,11 @@ impl<'s> Desugar<'s> {
                 self.diagnose(TokSpan::new(k, k + 1), &message);
                 break;
             }
+
+            deferred |= !is_fn
+                && derived
+                    .iter()
+                    .any(|(k, word)| *k < decl.start && *word == name);
 
             if deferred && is_fn {
                 self.hoisted_fns.push(name.to_string());
@@ -2915,14 +3143,19 @@ impl<'s> Desugar<'s> {
     /// both bindings write the same one. A binding with no annotation
     /// blanks it: the name then stands for a type no reader knows.
     fn record_binding_type(&mut self, name: TokSpan, ty: Option<TokSpan>) {
-        let Some(ty) = ty else {
-            let key = self.text_of(name).to_string();
+        let text = ty.map(|ty| self.text_of(ty).trim().trim_start_matches(':').trim());
+        self.record_type_text(name, text);
+    }
+
+    /// `record_binding_type` with the type as text, for a type that the
+    /// value gives and no annotation writes.
+    pub(crate) fn record_type_text(&mut self, name: TokSpan, text: Option<&str>) {
+        let key = self.text_of(name).to_string();
+        let Some(text) = text else {
             self.binding_types.insert(key, String::new());
 
             return;
         };
-        let key = self.text_of(name).to_string();
-        let text = self.text_of(ty).trim().trim_start_matches(':').trim();
 
         match self.binding_types.get(&key) {
             Some(old) if old != text => {
@@ -3156,6 +3389,8 @@ impl<'s> Desugar<'s> {
                     }
                 },
             }
+
+            self.r.end_stmt();
         }
     }
 

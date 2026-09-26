@@ -11,27 +11,7 @@ impl<'a> Parser<'a> {
             let start = self.bump();
 
             if self.at("[") {
-                let mut depth = 0usize;
-
-                loop {
-                    if self.at_end() {
-                        return Err(self.err("this attribute never closes"));
-                    }
-
-                    if self.at("[") {
-                        depth += 1;
-                    } else if self.at("]") {
-                        depth -= 1;
-
-                        if depth == 0 {
-                            self.bump();
-
-                            break;
-                        }
-                    }
-
-                    self.bump();
-                }
+                self.bracket_group(start)?;
 
                 out.push(Attr {
                     name: None,
@@ -47,13 +27,18 @@ impl<'a> Parser<'a> {
 
             // Arguments only when `(` touches the name: `@derive(Eq)`.
             if self.at("(") && self.adjacent_prev() {
-                self.bump();
+                let open = self.bump();
+                let read = match self.at(")") {
+                    true => Ok(Vec::new()),
 
-                if !self.at(")") {
-                    args = self.expr_list()?;
+                    false => self.expr_list(),
                 }
+                .and_then(|a| self.expect(")").map(|_| a));
 
-                self.expect(")")?;
+                // An argument list the author is still typing reads on
+                // into the declaration below, and the report would land
+                // there. The bracket that never closes is the mistake.
+                args = read.map_err(|e| self.unclosed_args(open, name).unwrap_or(e))?;
             }
 
             out.push(Attr {
@@ -64,6 +49,124 @@ impl<'a> Parser<'a> {
         }
 
         Ok(out)
+    }
+
+    /// Skips the group of `@[...]`, whose `[` is at the cursor. The
+    /// group of a definitions file is metadata that larvae reads past.
+    /// A group that never closes reports at its `@`, `at`, and names the
+    /// brackets left open: `@[deprecated({` above a function. The group
+    /// ends at the end of the file, or at a line that opens with a
+    /// declaration, which no attribute can hold.
+    fn bracket_group(&mut self, at: usize) -> Result<(), ParseError> {
+        let text = |i: usize| self.toks[i].text(self.src);
+        let open = self.pos;
+        let mut stack = vec![open];
+
+        for i in open + 1..self.toks.len() {
+            if self.declares_at(i) {
+                break;
+            }
+
+            match text(i) {
+                "(" | "{" | "[" => stack.push(i),
+
+                // A stray closer of another kind closes nothing.
+                close @ (")" | "}" | "]")
+                    if stack
+                        .last()
+                        .is_some_and(|&o| close.starts_with(closer_of(text(o)))) =>
+                {
+                    stack.pop();
+
+                    if stack.is_empty() {
+                        self.pos = i + 1;
+
+                        return Ok(());
+                    }
+                }
+
+                _ => {}
+            }
+        }
+
+        let head = match self.toks.get(open + 1) {
+            Some(t) if t.kind == TokKind::Ident => format!("@[{}", text(open + 1)),
+
+            _ => "@[".to_string(),
+        };
+        let last = *stack.last().unwrap_or(&open);
+        let closers: String = stack.iter().rev().map(|&i| closer_of(text(i))).collect();
+        let after = match stack.len() {
+            1 => "the attribute",
+
+            _ => "its arguments",
+        };
+
+        Err(ParseError {
+            offset: self.toks[at].start as usize,
+            message: format!(
+                "`{head}` opens `{}` and never closes it; write `{closers}` after {after}",
+                text(last)
+            ),
+        })
+    }
+
+    /// Whether token `i` opens a line with a declaration, which no
+    /// attribute argument can hold.
+    fn declares_at(&self, i: usize) -> bool {
+        let declares = match self.toks[i].text(self.src) {
+            "@" | "local" | "const" | "export" => true,
+
+            "function" | "struct" | "enum" | "trait" | "interface" | "impl" | "remote" => self
+                .toks
+                .get(i + 1)
+                .is_some_and(|t| t.kind == TokKind::Ident),
+
+            _ => false,
+        };
+
+        declares && i > 0 && crate::contextual::newline_after(self.src, self.toks, i - 1)
+    }
+
+    /// The report for an argument list that never closes, on the last
+    /// bracket left open: `@deprecated({` above a function. The list
+    /// ends at the end of the file, or at a line that opens with a
+    /// declaration, which no argument can hold.
+    fn unclosed_args(&self, open: usize, name: TokSpan) -> Option<ParseError> {
+        let text = |i: usize| self.toks[i].text(self.src);
+        let mut stack = vec![open];
+
+        for i in open + 1..self.toks.len() {
+            if self.declares_at(i) {
+                break;
+            }
+
+            match text(i) {
+                "(" | "{" | "[" => stack.push(i),
+
+                ")" | "}" | "]" => {
+                    stack.pop();
+
+                    if stack.is_empty() {
+                        return None;
+                    }
+                }
+
+                _ => {}
+            }
+        }
+
+        let last = *stack.last()?;
+        let closers: String = stack.iter().rev().map(|&i| closer_of(text(i))).collect();
+
+        Some(ParseError {
+            offset: self.toks[last].start as usize,
+            message: format!(
+                "`@{}` opens `{}` and never closes it; write `{closers}` after its arguments",
+                self.span_text(name),
+                text(last)
+            ),
+        })
     }
 
     /// The name of an attribute, as one name or a dotted path.
@@ -104,27 +207,7 @@ impl<'a> Parser<'a> {
             and balanced; its content is metadata larvae reads past.
             */
             if self.at("[") {
-                let mut depth = 0usize;
-
-                loop {
-                    if self.at_end() {
-                        return Err(self.err("this attribute never closes"));
-                    }
-
-                    if self.at("[") {
-                        depth += 1;
-                    } else if self.at("]") {
-                        depth -= 1;
-
-                        if depth == 0 {
-                            self.bump();
-
-                            break;
-                        }
-                    }
-
-                    self.bump();
-                }
+                self.bracket_group(start)?;
             } else {
                 self.attribute_name()?;
             }
@@ -331,5 +414,16 @@ impl<'a> Parser<'a> {
             "expected an attribute target, found {}",
             self.found()
         )))
+    }
+}
+
+/// The bracket that closes `open`.
+fn closer_of(open: &str) -> char {
+    match open {
+        "{" => '}',
+
+        "[" => ']',
+
+        _ => ')',
     }
 }

@@ -32,6 +32,28 @@ fn a_function_body_reads_a_table_declared_below_it() {
     }
 }
 
+/// A derived function reads the type of each field: `from_table` sets
+/// the metatable of a payload enum, and a nested struct serializes
+/// through its own `to_table`. It named the table above its `local`, so
+/// it read a nil global, and check and build said nothing.
+#[test]
+fn a_derive_reads_a_field_type_declared_below_it() {
+    let src = "@derive(Serialize, Deserialize)\nstruct Save\n    inventory: { Item } = {}\n    stats: Stats?\nend\n@derive(Eq)\nenum Item\n    Sword(number)\n    Nothing\nend\n@derive(Serialize)\nstruct Stats\n    hp: number\nend\n@derive(Eq)\nstruct Plain\n    kind: Later\nend\nenum Later\n    A\nend\n";
+    let out = compile(src);
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+    for text in [&out.ship, &out.check] {
+        let first = text.lines().next().unwrap();
+        assert!(first.contains("local Item, Stats = {}, {} "), "{text}");
+        assert!(text.contains("\nItem.__index = Item"), "{text}");
+        assert!(text.contains("\nStats.__index = Stats"), "{text}");
+        assert_eq!(text.lines().count(), src.lines().count(), "{text}");
+    }
+
+    // `Eq` compares the values and names no type.
+    assert!(out.ship.contains("local Later = {}"), "{}", out.ship);
+}
+
 #[test]
 fn a_table_declared_below_a_body_that_never_reads_it_stays_local() {
     let src = format!("function one(): number\n    return 1\nend\n\n{DECLS}print(one())\n");

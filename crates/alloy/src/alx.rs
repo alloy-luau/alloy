@@ -39,6 +39,10 @@ pub fn compile_alx(
     })?;
     let blanked = luaux::resolve::blank_luaux_regions(src, &spans);
     let bound = bound_names(&blanked);
+    // A reactive library takes a source where a property wants a value,
+    // so only a plain lowering types a Roblox tag's attributes.
+    let plain = config.interpolate == luaux::config::Interpolate::Plain;
+    let (problems, typed) = component_props_problems(src, &bound, plain, options.new_solver);
 
     let compiled = match config.backend {
         luaux::config::BackendKind::Table => {
@@ -67,6 +71,29 @@ pub fn compile_alx(
     // component, which `[lint.naming] component` styles.
     let mut options = options.clone();
     options.markup = crate::naming::Markup::of(src, &compiled.regions);
+    // A lone `{expr}` that the markup gives as `Text` is a string or a
+    // number, or a binding of one, as `Text={expr}` is. A hole that held
+    // markup of its own has no copied bytes to map, and goes unchecked.
+    let text = bindable("string | number", options.new_solver);
+    let holes = compiled.text_holes.iter().filter_map(|&(open, close)| {
+        let inner = src.get(open + 1..close.checked_sub(1)?)?;
+        let start = open + 1 + inner.len() - inner.trim_start().len();
+        let end = open + 1 + inner.trim_end().len();
+
+        (start < end).then(|| (start, end, text.clone()))
+    });
+    // An attribute value the walk typed, as bytes of the lowered text.
+    options.attribute_types = typed
+        .into_iter()
+        .chain(holes)
+        .filter_map(|(start, end, ty)| {
+            Some((
+                lowering.to_output(start as u32)?,
+                lowering.to_output(end as u32 - 1)? + 1,
+                ty,
+            ))
+        })
+        .collect();
 
     let mut output = crate::compile_with(&lowered, &options)?;
     let back = |offset: u32| lowering.to_source(offset);
@@ -103,10 +130,55 @@ pub fn compile_alx(
         }
     }
 
+    // A lint inside markup reads the calls the markup lowered to. A tag
+    // hands its component the props table, so a component with no
+    // parameters is no wrong call. A lint that still quotes code the
+    // author never wrote, `create(Menu, {})`, describes the lowering,
+    // and its rewrite would write that code into the file; the markup's
+    // own lints cover the shape.
+    let in_markup = |at: u32| {
+        compiled
+            .regions
+            .iter()
+            .any(|r| r.out_start <= at as usize && (at as usize) < r.out_end)
+    };
+    let written: String = src.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    output.lints.retain(|l| {
+        if !in_markup(l.start) {
+            return true;
+        }
+
+        l.name != "argument_count"
+            && l.message.split('`').skip(1).step_by(2).all(|quoted| {
+                written.contains(&quoted.split_whitespace().collect::<Vec<_>>().join(" "))
+            })
+    });
+
     // A rewrite carries a range of its own, and the lowering moves
     // every byte after the first tag. Without this the rewrite lands at
     // the wrong offset and writes over the author's code.
     crate::lint::to_source(&mut output.lints, src, &lowering);
+
+    // A markup error can drop the code it covers from the lowering, as
+    // `Text={pad(x)}` beside text between the tags. A name that only this
+    // code reads is not unused: the error is the fix, not the import.
+    let dropped: Vec<&str> = compiled
+        .errors
+        .iter()
+        .filter_map(|e| src.get(e.offset..e.offset + e.length))
+        .collect();
+
+    output.lints.retain(|l| {
+        !matches!(
+            l.name,
+            "unused_import" | "unused_variable" | "unused_function"
+        ) || !l.message.split('`').nth(1).is_some_and(|name| {
+            dropped
+                .iter()
+                .any(|code| whole_word_from(code, name, 0).is_some())
+        })
+    });
 
     for e in compiled.errors {
         output.diagnostics.push(Diagnostic {
@@ -116,9 +188,7 @@ pub fn compile_alx(
         });
     }
 
-    for d in component_props_problems(src, &bound) {
-        output.diagnostics.push(d);
-    }
+    output.diagnostics.extend(problems);
 
     for d in struct_props_problems(&blanked, &spans, &options) {
         output.diagnostics.push(d);
@@ -257,39 +327,57 @@ struct Prop {
 /// rewrites into properties before the tag is built.
 pub const FREE_PROPS: &[&str] = &["key", "ClassName"];
 
+/// The source bytes of an attribute value and the Luau type it must
+/// have, for the check artifact.
+type Typed = (usize, usize, String);
+
 /// The attributes of every component tag, against the props the
 /// component declares: a prop it does not take, a required prop the tag
-/// leaves out, and a literal of the wrong type.
-fn component_props_problems(src: &str, bound: &HashSet<String>) -> Vec<Diagnostic> {
+/// leaves out, and a literal of the wrong type. The second list holds
+/// each other value a declared type covers, for the check artifact. With
+/// `plain` false, a Roblox tag adds nothing to it. `new_solver` says
+/// which Luau solver reads the check artifact, see `bindable`.
+fn component_props_problems(
+    src: &str,
+    bound: &HashSet<String>,
+    plain: bool,
+    new_solver: bool,
+) -> (Vec<Diagnostic>, Vec<Typed>) {
     let Ok(spans) = luaux::compile::markup_spans(src) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
     let mut out = Vec::new();
+    let mut typed = Vec::new();
 
     for (start, _) in spans {
         let Ok((node, _)) = luaux::markup::parse_node(src, start) else {
             continue;
         };
-        check_node(&node, src, bound, &mut out);
+        check_node(&node, src, bound, plain, new_solver, &mut out, &mut typed);
     }
 
     out.sort_by_key(|d| d.start);
     out.dedup_by(|a, b| a.start == b.start && a.message == b.message);
+    typed.sort();
+    typed.dedup();
 
-    out
+    (out, typed)
 }
 
 fn check_node(
     node: &luaux::markup::Node,
     src: &str,
     bound: &HashSet<String>,
+    plain: bool,
+    new_solver: bool,
     out: &mut Vec<Diagnostic>,
+    typed: &mut Vec<Typed>,
 ) {
     use luaux::markup::{Child, Node};
 
     let children = match node {
         Node::Element(e) => {
-            check_element(e, src, bound, out);
+            check_element(e, src, bound, plain, new_solver, out, typed);
             &e.children
         }
 
@@ -298,7 +386,7 @@ fn check_node(
 
     for child in children {
         match child {
-            Child::Node(n) => check_node(n, src, bound, out),
+            Child::Node(n) => check_node(n, src, bound, plain, new_solver, out, typed),
 
             // A tag inside a hole is one expression to the markup
             // parser, so its own region is parsed from the text.
@@ -310,7 +398,7 @@ fn check_node(
 
                     match luaux::markup::parse_node(src, at) {
                         Ok((inner, next)) => {
-                            check_node(&inner, src, bound, out);
+                            check_node(&inner, src, bound, plain, new_solver, out, typed);
                             at = next.max(at + 1);
                         }
 
@@ -330,14 +418,17 @@ fn check_element(
     element: &luaux::markup::Element,
     src: &str,
     bound: &HashSet<String>,
+    plain: bool,
+    new_solver: bool,
     out: &mut Vec<Diagnostic>,
+    typed: &mut Vec<Typed>,
 ) {
-    use luaux::markup::Attribute;
+    use luaux::markup::{Attribute, AttributeValue};
 
     let name = element.name.as_written();
 
     if luaux::roblox::is_class(&name) {
-        check_intrinsic(element, &name, out);
+        check_intrinsic(element, &name, src, plain.then_some(typed), new_solver, out);
 
         return;
     }
@@ -392,12 +483,25 @@ fn check_element(
             continue;
         };
 
-        let Some(got) = value.and_then(literal_type) else {
+        let literal = value.and_then(literal_type);
+        let want = prop.ty.trim().trim_end_matches('?');
+        let primitive = matches!(want, "string" | "number" | "boolean");
+
+        // A literal against a primitive is the text check's report. The
+        // checker types every other value, `item={5}` against `Item` too.
+        if !(literal.is_some() && primitive)
+            && !matches!(value, Some(AttributeValue::Boolean))
+            && let Some(ty) = prop_type(prop)
+            && let Some(bytes) = value_bytes(src, span)
+        {
+            typed.push((bytes.0, bytes.1, ty));
+        }
+
+        let Some(got) = literal else {
             continue;
         };
-        let want = prop.ty.trim().trim_end_matches('?');
 
-        if matches!(want, "string" | "number" | "boolean") && want != got {
+        if primitive && want != got {
             out.push(Diagnostic {
                 start: span.start as u32,
                 end: (span.start + attr.len()) as u32,
@@ -432,11 +536,55 @@ fn check_element(
     }
 }
 
+/// A value of type `want`, or a React binding of one, for the check
+/// artifact. React reads a binding through `getValue`. The new solver
+/// takes an `any` parameter as a hidden error, so `(any) -> T` passed a
+/// binding of any `T`. It checks a read-only `(never) -> T` in full. The
+/// old solver rejects `read`, and checks `(any) -> T` in full.
+fn bindable(want: &str, new_solver: bool) -> String {
+    match new_solver {
+        true => format!("{want} | {{ read getValue: (never) -> ({want}) }}"),
+
+        false => format!("{want} | {{ getValue: (any) -> ({want}) }}"),
+    }
+}
+
+/// A property type as Luau code names it. The class list writes an
+/// enum as `EnumSortOrder`, and a script names it `Enum.SortOrder`. A
+/// string-backed type is a `string`. `None` for a type the Roblox
+/// definitions do not declare, so its value goes unchecked.
+fn luau_property_type(ty: &str) -> Option<String> {
+    match ty {
+        "BinaryString" | "ContentId" | "ProtectedString" => Some("string".to_string()),
+
+        "QDir" | "QFont" | "UniqueId" | "EnumLanguage" | "EnumSolidPrimitiveType" => None,
+
+        _ => Some(
+            match ty
+                .strip_prefix("Enum")
+                .filter(|r| r.starts_with(char::is_uppercase))
+            {
+                Some(rest) => format!("Enum.{rest}"),
+
+                None => ty.to_string(),
+            },
+        ),
+    }
+}
+
 /// A Roblox tag's attributes against the class: a literal where the
 /// property takes another type, and a literal on an event, which takes
 /// a function. A property the class does not have is luaux's report.
-fn check_intrinsic(element: &luaux::markup::Element, class: &str, out: &mut Vec<Diagnostic>) {
-    use luaux::markup::Attribute;
+/// Each other value of a typed property goes to `typed`, when given.
+fn check_intrinsic(
+    element: &luaux::markup::Element,
+    class: &str,
+    src: &str,
+    mut typed: Option<&mut Vec<Typed>>,
+    new_solver: bool,
+    out: &mut Vec<Diagnostic>,
+) {
+    use luaux::markup::{Attribute, AttributeValue};
 
     for attribute in &element.attributes {
         let Attribute::Named { name, span, value } = attribute else {
@@ -447,6 +595,18 @@ fn check_intrinsic(element: &luaux::markup::Element, class: &str, out: &mut Vec<
         }
 
         let Some(got) = literal_type(value) else {
+            // A nil field of the props table leaves the property unset,
+            // so the value may be nil too: `if on then red else nil`.
+            // React takes a binding where a property wants a value.
+            if let (Some(typed), AttributeValue::Expression(_)) = (typed.as_mut(), value)
+                && !luaux::roblox::is_event(class, name)
+                && let Some(want) =
+                    crate::roblox_props::property_type(class, name).and_then(luau_property_type)
+                && let Some((start, end)) = value_bytes(src, *span)
+            {
+                typed.push((start, end, format!("({})?", bindable(&want, new_solver))));
+            }
+
             continue;
         };
         let report = |out: &mut Vec<Diagnostic>, message: String| {
@@ -482,6 +642,42 @@ fn check_intrinsic(element: &luaux::markup::Element, class: &str, out: &mut Vec<
                 ),
             );
         }
+    }
+}
+
+/// The source bytes of an attribute's value: the expression between its
+/// braces, or its quoted text. `None` for a bare attribute.
+fn value_bytes(src: &str, span: luaux::markup::Span) -> Option<(usize, usize)> {
+    let text = src.get(span.start..span.end)?;
+    let after = text.find('=')? + 1;
+    let value = text[after..].trim();
+    let mut at = span.start + after + (text[after..].len() - text[after..].trim_start().len());
+    let value = match value.strip_prefix('{').and_then(|v| v.strip_suffix('}')) {
+        Some(inner) => {
+            at += 1 + inner.len() - inner.trim_start().len();
+            inner.trim()
+        }
+
+        None => value,
+    };
+
+    (!value.is_empty()).then_some((at, at + value.len()))
+}
+
+/// The type a prop's value must have, on one line, since the check
+/// artifact writes it into the line of the tag. A comment in the type
+/// would end that line, so such a type is left out.
+fn prop_type(prop: &Prop) -> Option<String> {
+    let ty = prop.ty.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    if ty.is_empty() || ty.contains("--") {
+        return None;
+    }
+
+    match prop.optional && !ty.ends_with('?') {
+        true => Some(format!("({ty})?")),
+
+        false => Some(ty),
     }
 }
 
@@ -970,8 +1166,8 @@ fn copied_spans(src: &str, node: &luaux::markup::Node, out: &mut Vec<(usize, usi
                 };
                 let open = span.start + src[span.start..span.end].find('{').unwrap_or(0);
 
-                if let Some(range) = hole_range(src, open, span.end, expression) {
-                    out.push(range);
+                if !markup_hole_spans(src, open, span.end, out) {
+                    out.extend(hole_range(src, open, span.end, expression));
                 }
             }
 
@@ -986,14 +1182,52 @@ fn copied_spans(src: &str, node: &luaux::markup::Node, out: &mut Vec<(usize, usi
             Child::Node(node) => copied_spans(src, node, out),
 
             Child::Expression { expression, span } => {
-                if let Some(range) = hole_range(src, span.start, span.end, expression) {
-                    out.push(range);
+                if !markup_hole_spans(src, span.start, span.end, out) {
+                    out.extend(hole_range(src, span.start, span.end, expression));
                 }
             }
 
             Child::Text { .. } | Child::Comment { .. } => {}
         }
     }
+}
+
+/// The copied ranges of a hole that holds markup of its own,
+/// `{xs:map(function(x) return <Row n={x} /> end)}`. The lowering copies
+/// the code around each tag, and each tag copies what any tag does.
+/// Without them the whole hole maps as generated text, and the editor
+/// loses every token on the line. `false` for a hole with no tag.
+fn markup_hole_spans(src: &str, open: usize, close: usize, out: &mut Vec<(usize, usize)>) -> bool {
+    let Some(inner) = src.get(open + 1..close.saturating_sub(1)) else {
+        return false;
+    };
+    let tags = match luaux::compile::markup_spans(inner) {
+        Ok(tags) if !tags.is_empty() => tags,
+
+        _ => return false,
+    };
+    let base = open + 1;
+    let code = |start: usize, end: usize, out: &mut Vec<(usize, usize)>| {
+        if !src[start..end].trim().is_empty() {
+            out.push((start, end));
+        }
+    };
+    let mut at = base;
+
+    for (start, end) in tags {
+        let (start, end) = (base + start, base + end);
+        code(at, start, out);
+
+        if let Ok((node, _)) = luaux::markup::parse_node(src, start) {
+            copied_spans(src, &node, out);
+        }
+
+        at = end;
+    }
+
+    code(at, base + inner.len(), out);
+
+    true
 }
 
 /// Where `expression` sits inside the hole that spans `open..close`.
@@ -1115,6 +1349,122 @@ mod tests {
             "{}",
             lint.message
         );
+    }
+
+    /// A `Text` attribute beside text between the tags is a markup
+    /// error. The lowering drops the attribute, so the import only it
+    /// reads must not also read as unused.
+    #[test]
+    fn a_text_conflict_reports_and_keeps_its_names_used() {
+        let src = "import { pad } from \"./util\"\nlocal function create(n: string): any return n end\nreturn <TextLabel Text={pad(\"x\")}>hello</TextLabel>\n";
+        let mut config = luaux::Config::bare();
+        config.create = "create".to_string();
+        let out = compile_alx(src, &EmitOptions::default(), config)
+            .expect("the markup compiles")
+            .output;
+        let errors: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+        assert_eq!(
+            errors,
+            [
+                "markup: `Text` is set twice: by this attribute and by the text between the tags (remove the attribute, or the text between the tags)"
+            ]
+        );
+        assert_eq!(
+            &src[out.diagnostics[0].start as usize..out.diagnostics[0].end as usize],
+            "Text={pad(\"x\")}"
+        );
+        assert!(
+            !out.lints.iter().any(|l| l.name == "unused_import"),
+            "{:?}",
+            out.lints.iter().map(|l| &l.message).collect::<Vec<_>>()
+        );
+    }
+
+    /// A lone `{expr}` that becomes `Text` must be a string or a number,
+    /// or a React binding of one, as `Text={expr}` may be. With no
+    /// reactivity, the check artifact passes it through `__alloy.prop`,
+    /// and the ship artifact keeps it bare. Text with holes is a string
+    /// already. A reactive library takes a source there, so its hole
+    /// stays bare in both.
+    #[test]
+    fn a_lone_text_hole_checks_its_type() {
+        let src = "local function create(n: string): any return n end\nlocal function Corner(): any return 1 end\nreturn <Frame><TextLabel>{Corner()}</TextLabel><TextBox>n: {Corner()}</TextBox></Frame>\n";
+        let mut config = luaux::Config::bare();
+        config.create = "create".to_string();
+        config.interpolate = luaux::config::Interpolate::Plain;
+        let out = compile_alx(src, &EmitOptions::default(), config.clone())
+            .expect("the markup compiles")
+            .output;
+
+        let text = "string | number | { read getValue: (never) -> (string | number) }";
+        assert!(
+            out.check.contains(&format!(
+                "Text = (__alloy.prop :: ({text}) -> ({text}))(Corner())"
+            )),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check.contains("Text = `n: {Corner()}`"),
+            "{}",
+            out.check
+        );
+        assert!(out.ship.contains("Text = Corner()"), "{}", out.ship);
+        assert!(!out.ship.contains("__alloy"), "{}", out.ship);
+
+        config.interpolate = luaux::config::Interpolate::Wrap;
+        let out = compile_alx(src, &EmitOptions::default(), config)
+            .expect("the markup compiles")
+            .output;
+
+        assert!(!out.check.contains("__alloy.prop"), "{}", out.check);
+    }
+
+    /// An attribute value that is no literal must fit its property or
+    /// its prop. The check artifact casts `__alloy.prop` to a function
+    /// of that type and passes the value through it. The ship artifact
+    /// keeps it bare. A literal against a primitive stays with the text
+    /// check, and a reactive library keeps a Roblox tag's values bare.
+    /// The class list names an enum `EnumSortOrder`, which no script can
+    /// write, so a check of an enum property read "Unknown type".
+    #[test]
+    fn a_property_type_takes_the_name_luau_code_writes() {
+        assert_eq!(
+            luau_property_type("EnumSortOrder").as_deref(),
+            Some("Enum.SortOrder")
+        );
+        assert_eq!(luau_property_type("ContentId").as_deref(), Some("string"));
+        assert_eq!(luau_property_type("UDim2").as_deref(), Some("UDim2"));
+        assert_eq!(luau_property_type("QFont"), None);
+    }
+
+    #[test]
+    fn an_attribute_value_checks_its_type() {
+        let src = "local function create(k: any, p: any): any return p end\ntype Props = { item: Item, count: number }\nlocal function Row(props: Props) return nil end\nlocal n = 1\nreturn <Frame><TextLabel Text={n} Visible /><Row item={5} count={1} /></Frame>\n";
+        let mut config = luaux::Config::bare();
+        config.create = "create".to_string();
+        config.interpolate = luaux::config::Interpolate::Plain;
+        let out = compile_alx(src, &EmitOptions::default(), config.clone())
+            .expect("the markup compiles")
+            .output;
+
+        for want in [
+            "Text = (__alloy.prop :: ((string | { read getValue: (never) -> (string) })?) -> ((string | { read getValue: (never) -> (string) })?))(n)",
+            "item = (__alloy.prop :: (Item) -> (Item))(5)",
+            "count = 1",
+        ] {
+            assert!(out.check.contains(want), "{want}\n{}", out.check);
+        }
+        assert!(!out.ship.contains("__alloy"), "{}", out.ship);
+
+        config.interpolate = luaux::config::Interpolate::Wrap;
+        let out = compile_alx(src, &EmitOptions::default(), config)
+            .expect("the markup compiles")
+            .output;
+
+        assert!(out.check.contains("Text = n"), "{}", out.check);
+        assert!(out.check.contains("(__alloy.prop :: (Item) -> (Item))(5)"));
     }
 
     /// A warn-level markup lint is a lint. As a diagnostic it was an
@@ -1430,6 +1780,24 @@ return Panel\n";
         // The call the lowering wrote is no one's text.
         let call = compiled.output.find("create(").expect("the call") as u32;
         assert!(map.is_generated(call));
+    }
+
+    /// A hole that holds a tag of its own is still the author's code
+    /// around the tag, and the tag's own hole is too. The map read the
+    /// whole hole as generated text, and the editor drew no token on
+    /// the line.
+    #[test]
+    fn a_hole_with_a_tag_keeps_the_code_around_it() {
+        let src = "local create = f\nlocal xs = {}\nlocal e = <Frame>{xs:map(function(s) return <Row n={s.id} /> end)}</Frame>\n";
+        let (compiled, map) = lower(src);
+
+        for needle in ["xs:map(function(s) return ", "s.id", " end)"] {
+            let at = src.find(needle).expect(needle) as u32;
+            let out = map.to_output(at).expect(needle) as usize;
+            assert!(compiled.output[out..].starts_with(needle), "{needle}");
+            assert_eq!(map.to_source(out as u32), at, "{needle}");
+            assert!(!map.is_generated(out as u32), "{needle}");
+        }
     }
 
     /// Every position the map answers stays on the line the author

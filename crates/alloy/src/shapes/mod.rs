@@ -49,8 +49,8 @@ pub struct Known {
     /// the source wrote. `Math_Vec2` reads as `Math.Vec2`.
     pub namespaces: Vec<(String, String)>,
     /// The plain `local X = { }` tables with their members. The
-    /// analyzer has no name for one, so a print of the whole shape
-    /// reads back as `typeof(X)`.
+    /// analyzer has no name for one, so a print of the whole shape as
+    /// `self` reads back as `typeof(X)`.
     pub tables: Vec<(String, Vec<String>)>,
 }
 
@@ -649,28 +649,27 @@ pub fn fold(text: &str, known: &Known) -> String {
 
         false => known,
     };
-    // `local Provider: typeof(Provider)` says nothing. A hover on the
-    // table itself keeps the shape; every other reader of the type
-    // gets the name.
-    let without_subject;
-    let known = match subject_of(text) {
-        Some(name) if known.tables.iter().any(|(n, _)| *n == name) => {
-            without_subject = Known {
-                tables: known
-                    .tables
-                    .iter()
-                    .filter(|(n, _)| *n != name)
-                    .cloned()
-                    .collect(),
+    // A plain table has no type name, so the fold matches its keys. Two
+    // tables with the same keys are two values: `local b = { walk = 5 }`
+    // is not `speeds` of another file. Only `self` in a method of the
+    // table is sure to be the table, so every other print keeps the
+    // shape. `local Provider: typeof(Provider)` also says nothing.
+    let without_tables;
+    let known = match subject_of(text).as_deref() {
+        Some("self") => known,
+
+        _ if known.tables.is_empty() => known,
+
+        _ => {
+            without_tables = Known {
+                tables: Vec::new(),
                 shapes: known.shapes.clone(),
                 interfaces: known.interfaces.clone(),
                 namespaces: known.namespaces.clone(),
             };
 
-            &without_subject
+            &without_tables
         }
-
-        _ => known,
     };
     // The std spells the operand of `await` `Awaitable<T>`; the source
     // writes `Future<T>`, and the two are one type.
@@ -893,8 +892,8 @@ fn fold_heads(text: &mut String, known: &Known) {
     }
 }
 
-/// An `is table` or `is function` test meets the value with a shape the
-/// checker can index or call; the reader wants the primitive's name.
+/// An `is table` test meets the value with a shape the checker can
+/// index; the reader wants the primitive's name.
 fn fold_narrowed_primitives(text: &mut String) {
     // A long union prints one member per line.
     while let Some(i) = text.find("*error-type*\n") {
@@ -921,22 +920,6 @@ fn fold_narrowed_primitives(text: &mut String) {
     }
 
     for (from, to) in [
-        (
-            "((...any) -> ()) & ((...any) -> (...any)) & function",
-            "function",
-        ),
-        (
-            "((...any) -> (...any)) & ((...any) -> ()) & function",
-            "function",
-        ),
-        (
-            "function & ((...any) -> ()) & ((...any) -> (...any))",
-            "function",
-        ),
-        (
-            "function & ((...any) -> (...any)) & ((...any) -> ())",
-            "function",
-        ),
         ("{ [any]: any } & table", "table"),
         ("table & { [any]: any }", "table"),
         // The new solver types the value a `for` reads from an `any`
@@ -1878,6 +1861,7 @@ const HIDDEN_FIELDS: &[&str] = &[
     "__ok",
     "__private",
     "__value",
+    "__values",
     // The Luau metamethods.
     "__add",
     "__call",
@@ -2100,6 +2084,28 @@ mod tests {
         assert_eq!(
             fold("local Position: {\n    __T: T\n}", &known),
             "local Position: {\n    __T: T\n}"
+        );
+    }
+
+    /// A Future of two values carries both in `__values`, and the name
+    /// the hover prints holds both.
+    #[test]
+    fn a_future_of_two_values_names_both() {
+        let known = Known::default();
+
+        assert_eq!(
+            fold(
+                "local f: { read __value: number, read __values: (number, string) -> (), read andThen: (self: any) -> any }",
+                &known
+            ),
+            "local f: Future<number, string>"
+        );
+        assert_eq!(
+            fold(
+                "local f: { read __value: number, read __values: (number) -> (), read andThen: (self: any) -> any }",
+                &known
+            ),
+            "local f: Future<number>"
         );
     }
 
@@ -3048,5 +3054,29 @@ mod tests {
                 "Expected this to be 'Container', but got 'number'"
             );
         }
+    }
+
+    /// A table shape read as `typeof(X)` by its keys named a local of
+    /// another file for any table with the same keys. Only `self` in a
+    /// method of the table is sure to be it.
+    #[test]
+    fn a_table_shape_names_a_plain_table_for_self_alone() {
+        let known = Known {
+            tables: vec![(
+                "speeds".to_string(),
+                vec!["walk".to_string(), "run".to_string()],
+            )],
+            ..Known::default()
+        };
+        let shape = "{\n    run: number,\n    walk: number\n}";
+
+        for head in ["local other", "local speeds", "local mine"] {
+            let text = format!("```luau\n{head}: {shape}\n```");
+            assert_eq!(fold(&text, &known), text);
+        }
+        assert_eq!(
+            fold(&format!("```luau\nlocal self: {shape}\n```"), &known),
+            "```luau\nlocal self: typeof(speeds)\n```"
+        );
     }
 }

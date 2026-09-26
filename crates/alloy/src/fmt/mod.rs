@@ -150,9 +150,11 @@ pub fn header_as_fixes(src: &str) -> Vec<crate::lint::Fix> {
 
         // An `impl` header runs over names, `.`, and `for`; the others end
         // at their one name, past `<...>` and an interface's `extends`.
+        // A name follows the opener or a joining word. The first word of
+        // the body is a name too: `public` in `impl Svc` then `public
+        // function`, or `area` in `interface Shape` then `area: number`.
         let mut j = i + 1;
         let mut angle = 0usize;
-        let mut names = 0usize;
 
         while j < toks.len() {
             let t = text(j);
@@ -162,15 +164,12 @@ pub fn header_as_fixes(src: &str) -> Vec<crate::lint::Fix> {
                 angle += usize::from(t == "<");
                 angle -= usize::from(t == ">");
                 j += 1;
-            } else if t == "<" {
-                angle += 1;
-                j += 1;
-            } else if opener == "impl" && (t == "." || t == "for" || name) {
-                j += 1;
-            } else if (opener == "interface" && (t == "extends" || t == "," || (name && names > 0)))
-                || (name && names == 0)
+            } else if t == "<"
+                || (opener == "impl" && (t == "." || t == "for"))
+                || (opener == "interface" && (t == "extends" || t == ","))
+                || (name && (j == i + 1 || matches!(text(j - 1), "." | "for" | "extends" | ",")))
             {
-                names += 1;
+                angle += usize::from(t == "<");
                 j += 1;
             } else {
                 break;
@@ -248,9 +247,22 @@ pub fn format_named(name: &str, src: &str, options: &FmtConfig) -> Result<String
     } else if name.ends_with(".d.aly") {
         format_file(src, options)
     } else {
-        let renamed = crate::naming::renamed(src, options);
+        // `prefer_const` goes first. A local it makes a `const` takes
+        // the const style, so a second run renames nothing.
+        let src = with_consts(src, options);
+        let renamed = crate::naming::renamed(&src, options);
 
-        format_file(renamed.as_deref().unwrap_or(src), options)
+        format_file(renamed.as_deref().unwrap_or(&src), options)
+    }
+}
+
+/// The source with the `prefer_const` rewrites: a `local` that nothing
+/// assigns again reads as `const`, unless `[fmt] prefer_const = false`.
+fn with_consts<'a>(src: &'a str, options: &FmtConfig) -> std::borrow::Cow<'a, str> {
+    match options.prefer_const {
+        true => crate::std_names::apply(src, &crate::flux::prefer_const_fixes(src)).into(),
+
+        false => src.into(),
     }
 }
 
@@ -264,17 +276,7 @@ pub fn format_file(src: &str, options: &FmtConfig) -> Result<String, String> {
         return Err(format!("{UNPARSED}: {message}"));
     }
 
-    // `local x` that nothing assigns again reads as `const x`.
-    let written;
-    let src = match options.prefer_const {
-        true => {
-            written = crate::std_names::apply(src, &crate::flux::prefer_const_fixes(src));
-            written.as_str()
-        }
-
-        false => src,
-    };
-    let text = format_with(src, options)?;
+    let text = format_with(&with_consts(src, options), options)?;
 
     // A formatter never writes a file it cannot read back: the input
     // parsed, so output that does not is a bug here, and the caller
@@ -314,6 +316,7 @@ fn format_tokens(src: &str, options: &FmtConfig) -> Result<String, String> {
     // `parse_error` has read the file already, so the tree is whole.
     let (chunk, _) = alloy_syntax::parser::parse_lenient(src, &toks, parse_options());
     let annotation = colons::annotation_colons(src, &toks, &chunk);
+    let expr_ifs = colons::expr_ifs(src, &toks, &chunk);
 
     let mut f = Formatter {
         items,
@@ -324,9 +327,12 @@ fn format_tokens(src: &str, options: &FmtConfig) -> Result<String, String> {
         depths: Vec::new(),
         generic: Vec::new(),
         annotation,
+        expr_ifs,
         signature: Vec::new(),
         forced: Vec::new(),
         at_line: Vec::new(),
+        hole: Vec::new(),
+        held: Vec::new(),
     };
     f.rewrite_tokens();
     f.sort_requires();
@@ -335,17 +341,25 @@ fn format_tokens(src: &str, options: &FmtConfig) -> Result<String, String> {
     // The rewrites are done, so the item count is final.
     f.forced = vec![false; f.items.len()];
     f.at_line = vec![0; f.items.len()];
+    f.hole = f.holes();
     f.measure_lines();
 
     // An `if` expression and a `match` are no bracket group, so the
     // width alone cannot break them. The render says which ones came out
     // past the column, the next pass breaks those, and a pass that
-    // breaks nothing is the last. Three cover one inside another.
-    for _ in 0..3 {
+    // breaks nothing is the last. Each pass breaks one level of a nest,
+    // and the last pass renders whatever the passes before it forced.
+    for pass in 1..=8 {
         let tree = f.tree();
         let hard = f.hard_breaks(&tree);
+        f.held = f.held_items(&hard);
         f.render_nodes(&tree, &hard, 0);
         f.flush();
+
+        if pass == 8 {
+            break;
+        }
+
         let broke_ifs = f.force_long_expr_ifs();
         let broke_matches = f.force_long_matches();
 
@@ -508,6 +522,9 @@ struct Formatter<'s> {
     generic: Vec<bool>,
     /// The byte offsets of the `:` items that open a type; see `colons`.
     annotation: std::collections::HashSet<usize>,
+    /// The byte offsets of the `if` items that open an expression; see
+    /// `colons`.
+    expr_ifs: std::collections::HashSet<usize>,
     /// The `function` items inside a trait that have no body.
     signature: Vec<bool>,
     /// Items the layout breaks before whatever the source wrote: the
@@ -515,6 +532,13 @@ struct Formatter<'s> {
     forced: Vec<bool>,
     /// The output line each item landed on in the last render.
     at_line: Vec<usize>,
+    /// The items inside an interpolation hole, the `}` that closes it
+    /// included. A hole keeps its line.
+    hole: Vec<bool>,
+    /// The items of an `if` expression that has not broken yet. A
+    /// bracket group among them keeps its line, so a long `if` breaks at
+    /// its keywords first.
+    held: Vec<bool>,
 }
 
 /// Openers of bracket groups, as token text.
@@ -883,6 +907,19 @@ mod tests {
         assert_eq!(format_file(src, &FmtConfig::preserving()).unwrap(), src);
     }
 
+    /// `export default struct` opened no block, so its fields lost
+    /// their indent. `default` after `export` now opens it, as `export`
+    /// alone does.
+    #[test]
+    fn a_default_export_indents_its_body() {
+        let src = "@derive(Debug)\nexport default struct Bag\nn: number\nend\n";
+
+        assert_eq!(
+            fmt(src),
+            "@derive(Debug)\nexport default struct Bag\n  n: number\nend\n"
+        );
+    }
+
     #[test]
     fn a_negation_holds_its_operand() {
         assert_eq!(
@@ -969,15 +1006,15 @@ mod tests {
         assert_eq!(fmt(want), want);
     }
 
-    /// An `if` expression past `column_width` breaks the way a
-    /// hand-broken one reads: each branch on its own line, with `else`
-    /// opening a line. The rule reaches the three places one sits in,
-    /// and a second run changes nothing.
+    /// An `if` expression past `column_width` breaks the way StyLua
+    /// breaks one: the first `then` and the `else` open a line, each with
+    /// its value. The rule reaches the three places one sits in, and a
+    /// second run changes nothing.
     #[test]
     fn a_long_if_expression_breaks_its_branches() {
         let a = "1111111111111111111111111111111111111111111111111";
         let b = "2222222222222222222222222222222222222222222222222222";
-        let branches = format!("if flag then\n    {a}\n    else\n    {b}");
+        let branches = format!("if flag\n    then {a}\n    else {b}");
 
         let cases = [
             (
@@ -1004,11 +1041,44 @@ mod tests {
         assert_eq!(fmt(short), short);
     }
 
+    /// The `)` of a call in a branch ended the `if` expression, so the
+    /// `else` of a broken `local` or `const` fell to column 0. A closer
+    /// now ends only an `if` that opened inside its group. A hand-broken
+    /// `if` keeps its shape.
+    #[test]
+    fn a_call_in_a_branch_keeps_the_else_in_the_if() {
+        let config = FmtConfig {
+            prefer_const: false,
+            indent_width: 4,
+            ..FmtConfig::default()
+        };
+        let value = "if props.unlocked then Difficulty.color(props.stage.difficulty) else Color3.fromRGB(90, 90, 90)";
+
+        for word in ["local", "const"] {
+            let src = format!(
+                "local function view(props: any)\n    {word} color = {value}\n    print(color)\nend\n"
+            );
+            let want = format!(
+                "local function view(props: any)\n    {word} color = if props.unlocked\n        then Difficulty.color(props.stage.difficulty)\n        else Color3.fromRGB(90, 90, 90)\n    print(color)\nend\n"
+            );
+            let by_hand = format!(
+                "local function view(props: any)\n    {word} color = if props.unlocked then\n        Difficulty.color(props.stage.difficulty)\n        else\n        Color3.fromRGB(90, 90, 90)\n    print(color)\nend\n"
+            );
+
+            assert_eq!(format_file(&src, &config).unwrap(), want);
+            assert_eq!(format_file(&want, &config).unwrap(), want);
+            assert_eq!(format_file(&by_hand, &config).unwrap(), by_hand);
+        }
+
+        // A closer still ends an `if` that opened inside its group.
+        let inner = "print(f(if a then g(1) else h(2)), { k = if a then g(1) else 2 })\n";
+        assert_eq!(format_file(inner, &config).unwrap(), inner);
+    }
+
     /// An `if` inside an interpolation hole is an expression, so it
     /// opens no block and the `end` of the function stays at column 0.
-    /// A long one breaks inside the hole. Luau reads that form: the
-    /// newline lands between two tokens of the hole, never inside a
-    /// segment of the string.
+    /// A long one keeps its line, since a hole never breaks, and one an
+    /// older run broke joins again.
     #[test]
     fn an_if_expression_in_an_interpolation_hole_opens_no_block() {
         let short =
@@ -1022,11 +1092,89 @@ mod tests {
         let long = format!(
             "function g(flag: boolean): string\n  return `prefix {{if flag then {t} else {f}}} suffix`\nend\n"
         );
-        let want = format!(
+        let broken = format!(
             "function g(flag: boolean): string\n  return `prefix {{if flag then\n    {t}\n    else\n    {f}}} suffix`\nend\n"
         );
         assert!(long.lines().any(|l| l.chars().count() > 100));
-        assert_eq!(fmt(&long), want);
+        assert_eq!(fmt(&long), long);
+        assert_eq!(fmt(&broken), long);
+    }
+
+    /// A call in an interpolation hole kept its line only while it fit,
+    /// so a long one broke inside the hole. A hole never breaks now, and
+    /// one an older run broke joins again.
+    #[test]
+    fn a_call_in_an_interpolation_hole_keeps_its_line() {
+        let name = "Enemy.displayNameForTheEnemyThatTheWaveSpawnedJustNow";
+        let long = format!(
+            "local s = `hit {{{name}(enemy, wave)}} for {{damage}} damage, {{hits}} left`\n"
+        );
+        assert!(long.chars().count() > 100);
+        assert_eq!(fmt(&long), long);
+
+        let broken = format!(
+            "local s = `hit {{{name}(\n  enemy,\n  wave\n)}} for {{damage}} damage, {{hits}} left`\n"
+        );
+        assert_eq!(fmt(&broken), long);
+    }
+
+    /// The tail of a macro is an expression, so an `if` there opens no
+    /// block. The `end` of the macro and every line after it kept one
+    /// level of indent too many.
+    #[test]
+    fn an_if_expression_as_a_macro_tail_opens_no_block() {
+        let src = "macro pick(ok, a, b)\n    if ok then a else b\nend\n\nmacro twice(x)\n    x * 2\nend\n\nprint($pick(true, 1, 2), $twice(3))\n";
+        let want = "macro pick(ok, a, b)\n  if ok then a else b\nend\n\nmacro twice(x)\n  x * 2\nend\n\nprint($pick(true, 1, 2), $twice(3))\n";
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want);
+    }
+
+    /// An `end` after an `if` expression on one line closes the block
+    /// of that line. It closed nothing, so every line after it moved in.
+    #[test]
+    fn an_end_after_an_if_expression_closes_its_block() {
+        let src = "local function f(c: boolean, a: boolean)\n  local y = 0\n  if c then y = if a then 1 else 2 end\n  print(y)\nend\n\nf(true, false)\n";
+        assert_eq!(fmt(src), src);
+    }
+
+    /// A long `if` expression breaks at its keywords before a bracket
+    /// group inside it breaks, the way StyLua 2.5.2 lays it out. An `if`
+    /// in an `else` breaks only when its own line is too long.
+    #[test]
+    fn a_long_if_expression_breaks_at_its_keywords_first() {
+        let src = "local function label(name: string, wave: number): string\n    return if wave > 20 then `elite {string.upper(name)} of wave {wave}` else if wave > 10 then `veteran {name}` else name\nend\n\nlocal function color(flying: boolean, boss: boolean, wave: number): Color3\n    local c = if flying then Color3.fromRGB(80, 80, 255) elseif boss and wave > 10 then Color3.fromRGB(255, 0, 0) else Color3.fromRGB(200, 200, 200)\n    return c\nend\n";
+        let want = "local function label(name: string, wave: number): string\n  return if wave > 20\n    then `elite {string.upper(name)} of wave {wave}`\n    else if wave > 10 then `veteran {name}` else name\nend\n\nlocal function color(flying: boolean, boss: boolean, wave: number): Color3\n  local c = if flying\n    then Color3.fromRGB(80, 80, 255)\n    elseif boss and wave > 10 then Color3.fromRGB(255, 0, 0)\n    else Color3.fromRGB(200, 200, 200)\n  return c\nend\n";
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want);
+
+        // The group an older run broke inside a branch joins again.
+        let old = "local c = if flying then Color3.fromRGB(80, 80, 255) elseif boss and wave > 10 then Color3.fromRGB(\n  255,\n  0,\n  0\n) else Color3.fromRGB(200, 200, 200)\n";
+        let fixed = "local c = if flying\n  then Color3.fromRGB(80, 80, 255)\n  elseif boss and wave > 10 then Color3.fromRGB(255, 0, 0)\n  else Color3.fromRGB(200, 200, 200)\n";
+        assert_eq!(fmt(old), fixed);
+    }
+
+    /// A nest of long `if` expressions breaks one level per pass, and
+    /// each level indents under the one around it. The render loop
+    /// stopped after three passes with its lines cleared, so a deeper
+    /// nest could come out empty.
+    #[test]
+    fn nested_if_expressions_break_one_level_at_a_time() {
+        let [a, b, c, d, e] = ["a", "b", "c", "d", "e"].map(|x| x.repeat(60));
+        let src = format!(
+            "local v = if {a} then 1 else if {b} then 2 else if {c} then 3 else if {d} then 4 else if {e} then 5 else 6\n"
+        );
+        let want = format!(
+            "local v = if {a}\n  then 1\n  else if {b}\n    then 2\n    else if {c}\n      then 3\n      else if {d}\n        then 4\n        else if {e} then 5 else 6\n"
+        );
+        assert_eq!(fmt(&src), want);
+        assert_eq!(fmt(&want), want);
+
+        // An `if` in a `then` gives the outer `else` back its level.
+        let (x, y) = ("1".repeat(56), "2".repeat(46));
+        let src = format!("local n = if flag then if other then {x} else {y} else 3\n");
+        let want =
+            format!("local n = if flag\n  then if other\n    then {x}\n    else {y}\n  else 3\n");
+        assert_eq!(fmt(&src), want);
         assert_eq!(fmt(&want), want);
     }
 
@@ -1148,6 +1296,17 @@ mod tests {
         );
     }
 
+    /// A struct pattern in a `local` is no call either: `Pt({ x })`
+    /// would be a variant pattern. A call in the value still takes its
+    /// parentheses.
+    #[test]
+    fn a_struct_pattern_in_a_local_is_not_a_call() {
+        let src = "if local Seg { a = Pt { x } } = s then\n  print(x)\nend\nlocal Pt { x = y } = f { 1 }\nconst N.P { x = z } = p\n";
+        let want = "if local Seg { a = Pt { x } } = s then\n  print(x)\nend\nlocal Pt { x = y } = f({ 1 })\nconst N.P { x = z } = p\n";
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want);
+    }
+
     /// `enum Opt<T>` keeps its parameter list, and the body indents
     /// the way a struct's does. A second pass changes nothing.
     #[test]
@@ -1230,6 +1389,15 @@ mod tests {
             format_with(src, &o).unwrap(),
             "import { a } from '@pkg/a'\nimport { b } from './b'\nprint(a, b)\n"
         );
+
+        // A name list over several lines moves whole.
+        let src = "import { b } from './b'\nimport {\n  a, -- the a\n  c,\n} from './a'\nprint(a, b, c)\n";
+        let once = format_with(src, &o).unwrap();
+        assert_eq!(
+            once,
+            "import {\n  a, -- the a\n  c,\n} from './a'\nimport { b } from './b'\nprint(a, b, c)\n"
+        );
+        assert_eq!(format_with(&once, &o).unwrap(), once);
     }
 
     #[test]
@@ -1474,6 +1642,23 @@ mod tests {
         );
         assert!(parse_error(&text).is_none(), "{text}");
         assert!(header_as_fixes(&text).is_empty());
+    }
+
+    /// A header on its own line takes no rewrite. The first word of the
+    /// body read as one more name of the header, and the fix wrote
+    /// `public as function` and `area as: number`.
+    #[test]
+    fn the_header_rewrite_stops_at_the_header() {
+        for src in [
+            "impl Svc\n  public function boot(self)\n  end\nend\n",
+            "impl Shape for Svc\n  private function area(self): number\n    return 1\n  end\nend\n",
+            "interface Shape extends Base, Named\n  area: number\nend\n",
+            "impl Box<T>\n  public function get(self): T\n  end\nend\n",
+        ] {
+            assert!(header_as_fixes(src).is_empty(), "{src}");
+        }
+        let fixes = header_as_fixes("interface Shape extends Base area: number end\n");
+        assert_eq!(fixes.len(), 1, "{fixes:?}");
     }
 
     /// The `as name` of a match head stays on the head line, with one

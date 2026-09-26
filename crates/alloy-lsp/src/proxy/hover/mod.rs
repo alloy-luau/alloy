@@ -9,7 +9,7 @@ mod restyle;
 
 pub(crate) use declarations::{
     binds_a_value, case_arm_of_binding, case_binding_span, case_binding_text, formatted_hover,
-    import_alias_source, let_else_binding,
+    import_alias_source, let_else_binding, split_top,
 };
 pub(crate) use fields::{
     declared_field_hover, declared_field_owner, declared_parameter_hover,
@@ -22,16 +22,16 @@ pub(crate) use modules::{import_spec, module_hover, remote_spec, service_hover};
 
 #[cfg(test)]
 #[cfg(test)]
-pub(crate) use modules::shadows_an_import;
+pub(crate) use modules::{shadows_an_import, star_module_hover, std_import_hover};
 pub(crate) use restyle::group_len;
 pub(crate) use restyle::{
-    close_empty_packs, close_item_packs, declared_annotation, declared_head, declared_signature,
-    drop_bound_intersections, empty_parameter_names, fold_std_shapes, invents_a_type,
-    is_byte_count, keep_annotation, lowers_a_block, member_doc, name_by_declaration,
-    name_method_doc, name_method_receiver, name_self_receiver, name_solver_variable,
-    name_trait_method, names_a_key, prefer_constructed_struct, restates_itself,
-    restore_struct_arguments, restyle_hover, restyle_signatures, source_type, std_generic,
-    unlocal_parameter,
+    bind_hover_receiver, close_empty_packs, close_item_packs, declared_annotation, declared_head,
+    declared_signature, drop_bound_intersections, empty_parameter_names, fold_std_shapes,
+    invents_a_type, is_byte_count, keep_annotation, lowers_a_block, member_doc,
+    name_by_declaration, name_method_doc, name_method_receiver, name_self_receiver,
+    name_solver_variable, name_trait_method, names_a_key, prefer_constructed_struct,
+    restates_itself, restore_struct_arguments, restyle_hover, restyle_signatures, source_type,
+    std_generic, unlocal_parameter,
 };
 
 use super::completion::{lands_on_member, member_position, sep_of};
@@ -106,8 +106,8 @@ impl Server {
     }
 
     /// The shadow position of a signature-help caret inside a call in
-    /// an intrinsic's argument, where the argument stands as code.
-    /// `None` when no such call is open at the caret.
+    /// an intrinsic's argument, where the argument stands as code, or
+    /// on the base of an index. `None` for any other caret.
     pub(crate) fn signature_home(&self, uri: &str, message: &Value) -> Option<(u32, u32)> {
         if !is_alloy_uri(uri) {
             return None;
@@ -116,9 +116,32 @@ impl Server {
         let (line, character) = position_of_message(message)?;
         let st = self.state.lock().expect("state");
         let doc = st.docs.get(uri)?;
-        let (shadow_line, _) = doc.to_shadow(line, character);
+        let shadow = doc.to_shadow(line, character);
 
-        intrinsic_code_home(&doc.source, &doc.shadow, line, shadow_line, character)
+        intrinsic_code_home(&doc.source, &doc.shadow, line, shadow.0, character)
+            .or_else(|| before_call_argument(&doc.shadow, shadow))
+            .or_else(|| past_index_base(&doc.shadow, shadow))
+    }
+
+    /// The shadow text a member completion after a child lookup reads,
+    /// `player->leaderstats?.`: the shadow with the lookups uncast.
+    /// `None` for any other completion.
+    pub(crate) fn child_member_scratch(&self, uri: &str, message: &Value) -> Option<String> {
+        if !is_alloy_uri(uri) {
+            return None;
+        }
+
+        let (line, character) = position_of_message(message)?;
+        let st = self.state.lock().expect("state");
+        let doc = st.docs.get(uri)?;
+        let offset = offset_of(&doc.source, line, character)?;
+        let (base, _, sep, word) = context::member_at(&doc.source, offset)?;
+        let head = doc.source[..offset - word]
+            .strip_suffix(sep)?
+            .trim_end_matches(['?', '!'])
+            .strip_suffix(base.as_str())?;
+
+        (head.ends_with("->") || head.ends_with("=>")).then(|| uncast_children(&doc.shadow))
     }
 
     /// The shadow position a member completion belongs at. `a?.b` and
@@ -178,6 +201,27 @@ impl Server {
         })?;
 
         Some((shadow_line_no, shadow_line[..column].chars().count() as u32))
+    }
+
+    /// The shadow position a completion after `->` or `=>` belongs at:
+    /// inside the `FindFirstChild("` or `WaitForChild("` string the
+    /// lookup lowers to, where the child lists the children and nothing
+    /// else. `None` when the caret names no child, or the shadow holds
+    /// no such call: a `->` of a function type is one.
+    pub(crate) fn child_home(&self, uri: &str, message: &Value) -> Option<(u32, u32)> {
+        if !is_alloy_uri(uri) {
+            return None;
+        }
+
+        let (line, character) = position_of_message(message)?;
+        let st = self.state.lock().expect("state");
+        let doc = st.docs.get(uri)?;
+        let offset = offset_of(&doc.source, line, character)?;
+        let start = context::child_name_start(&doc.source, offset)?;
+        let (shadow_line, text, name) = child_call(doc, start)?;
+        let at = (name + offset - start).min(text.len());
+
+        Some((shadow_line, text[..at].chars().count() as u32))
     }
 
     /// The shadow position a hover on a guarded index belongs at.
@@ -279,10 +323,21 @@ impl Server {
             return false;
         }
 
+        // A child name: the child types the name that holds the lookup
+        // from the sourcemap, and the answer becomes the child hover.
+        if let Some((start, _, _)) = keywords::child_hover(&doc.source, offset, |_| None)
+            && let Some(home) = child_value_home(doc, start)
+        {
+            drop(st);
+            self.forward_request_at(message.clone(), Some("textDocument/hover"), home);
+
+            return true;
+        }
+
         // A std name the file binds itself, through an import or a
         // declaration, is the file's: the child answers for that one.
         let owned = keywords::attribute_argument_hover(&doc.source, offset)
-            .or_else(|| keywords::child_hover(&doc.source, offset));
+            .or_else(|| keywords::child_hover(&doc.source, offset, |at| child_cast(doc, at)));
         let hit = keywords::hover(&doc.source, offset).filter(|(start, end, _)| {
             let word = &doc.source[*start..*end];
             let is_std = alloy::desugar::AMBIENT.contains(&word)
@@ -512,21 +567,292 @@ impl State {
         ))
     }
 
-    /// The source of the module a spec names: an open document first,
-    /// then the file on disk. A `.alx` in another folder is open only
-    /// when the author has it in a tab, so the disk answers for the
-    /// rest.
-    pub(crate) fn module_source(&self, uri: &str, spec: &str) -> Option<String> {
+    /// The source of the module a spec names, with its file: an open
+    /// document first, then the file on disk. A `.alx` in another
+    /// folder is open only when the author has it in a tab, so the disk
+    /// answers for the rest.
+    pub(crate) fn module_source(&self, uri: &str, spec: &str) -> Option<(String, PathBuf)> {
         let target = imports::module_path(&self.resolve_spec(uri, spec)?);
 
         for (u, d) in &self.docs {
-            if uri_to_path(u).is_some_and(|p| imports::module_path(&p) == target) {
-                return Some(d.source.clone());
+            if let Some(p) = uri_to_path(u)
+                && imports::module_path(&p) == target
+            {
+                return Some((d.source.clone(), p));
             }
         }
 
-        std::fs::read_to_string(imports::module_file(&target)?).ok()
+        let file = imports::module_file(&target)?;
+
+        Some((std::fs::read_to_string(&file).ok()?, file))
     }
+
+    /// The documents of the modules a file imports. Each one holds the
+    /// declarations of its own imports, and a remote or a function of
+    /// it can hand the file a struct that the file never imports.
+    pub(crate) fn imported_docs(&self, uri: &str) -> Vec<&Doc> {
+        let Some(doc) = self.docs.get(uri) else {
+            return Vec::new();
+        };
+        let targets: Vec<PathBuf> = alloy_syntax::scan::import_statements(&doc.source)
+            .into_iter()
+            .filter_map(|s| self.resolve_spec(uri, &s.spec))
+            .map(|p| imports::module_path(&p))
+            .collect();
+
+        self.docs
+            .iter()
+            .filter(|(u, _)| {
+                uri_to_path(u).is_some_and(|p| targets.contains(&imports::module_path(&p)))
+            })
+            .map(|(_, d)| d)
+            .collect()
+    }
+}
+
+/// The check artifact's call for the child lookup whose name starts at
+/// `start`, the byte after its `->` or `=>` and any blank: the shadow
+/// line, its text, and the byte of the name inside `FindFirstChild("`
+/// or `WaitForChild("`. The emit keeps the line, so the call is the one
+/// with the same method and name, counted from the left. A lookup with
+/// no name yet has the repair's placeholder there.
+pub(crate) fn child_call(doc: &Doc, start: usize) -> Option<(u32, &str, usize)> {
+    let src = &doc.source;
+    let head = src[..start].trim_end_matches([' ', '\t']);
+    let (arrow, method) = if head.ends_with("->") {
+        ("->", ":FindFirstChild(\"")
+    } else if head.ends_with("=>") {
+        ("=>", ":WaitForChild(\"")
+    } else {
+        return None;
+    };
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let name_at = |from: usize| {
+        let end = src[from..]
+            .find(|c| !word(c))
+            .map_or(src.len(), |i| from + i);
+
+        &src[from..end]
+    };
+    // `x->` at the end of a line: the parser reads the word that opens
+    // the next line as the name.
+    let name = match name_at(start) {
+        "" => name_at(src.len() - src[start..].trim_start().len()),
+
+        name => name,
+    };
+    let line_start = src[..start].rfind('\n').map_or(0, |i| i + 1);
+    // The earlier lookups of the same child on the line.
+    let earlier = src[line_start..head.len() - 2]
+        .match_indices(arrow)
+        .filter(|(i, _)| {
+            let rest = src[line_start + i + 2..].trim_start_matches([' ', '\t']);
+
+            rest.starts_with(name) && !rest[name.len()..].starts_with(word)
+        })
+        .count();
+    let written = match name.is_empty() {
+        true => crate::doc::HOLE.trim_end_matches("()"),
+
+        false => name,
+    };
+    let (line, character) = position_of(src, start);
+    let (shadow_line, _) = doc.to_shadow(line, character);
+    let text = doc.shadow.lines().nth(shadow_line as usize)?;
+    let call = text
+        .match_indices(&format!("{method}{written}\""))
+        .nth(earlier)?
+        .0;
+
+    Some((shadow_line, text, call + method.len()))
+}
+
+/// The type the check artifact casts a child lookup to: the `T` of
+/// `(x:FindFirstChild("a") :: T)`. The compiler decides it, from the
+/// operator and the place of the lookup in its chain.
+pub(crate) fn child_cast(doc: &Doc, start: usize) -> Option<String> {
+    let (_, text, name) = child_call(doc, start)?;
+    // The name is a string, so its closing quote ends it.
+    let args = name + text[name..].find('"')?;
+    let close = args + text[args..].find(')')?;
+
+    // A lookup the compiler leaves uncast is the plain call, so Luau's
+    // own signature types it: `FindFirstChild` and a `WaitForChild` with
+    // a timeout give `Instance?`. A sourcemap can narrow it further.
+    // A timed wait casts to its own type made optional, so it reads as
+    // the plain call does.
+    let Some(rest) = text[close + 1..]
+        .strip_prefix(" :: ")
+        .filter(|r| !r.starts_with("typeof("))
+    else {
+        let optional =
+            text[..name].ends_with("FindFirstChild(\"") || text[args..close].contains(',');
+
+        return Some(if optional { "Instance?" } else { "Instance" }.to_string());
+    };
+
+    Some(rest[..cast_end(rest)?].trim().to_string())
+}
+
+/// The byte of the `)` that closes the group of a cast, in the text
+/// after its ` :: `.
+fn cast_end(cast: &str) -> Option<usize> {
+    let mut depth = 0i32;
+
+    cast.find(|c: char| {
+        match c {
+            '(' | '{' | '<' | '[' => depth += 1,
+
+            ')' | '}' | '>' | ']' => depth -= 1,
+
+            _ => {}
+        }
+
+        depth < 0
+    })
+}
+
+/// The shadow position where the child types the child lookup whose
+/// name starts at `start`. A name that holds the whole value answers
+/// first. Else the `)` that closes the value of the lookup: a link in
+/// the middle of a chain has no name of its own, and a temp that the
+/// block assigns again types as the union of its values.
+pub(crate) fn child_value_home(doc: &Doc, start: usize) -> Option<(u32, u32)> {
+    bound_home(doc, start).or_else(|| value_close(doc, start))
+}
+
+/// The shadow position of the `)` that closes the value of a child
+/// lookup: the call, or the group of the cast that the compiler writes
+/// around it, `(x:WaitForChild("a", 5) :: typeof(...)?)`. The child
+/// types the expression that ends there.
+fn value_close(doc: &Doc, start: usize) -> Option<(u32, u32)> {
+    let (line, text, name) = child_call(doc, start)?;
+    let args = name + text[name..].find('"')?;
+    let close = args + text[args..].find(')')?;
+    let end = match text[close + 1..].strip_prefix(" :: ") {
+        Some(cast) => close + 1 + " :: ".len() + cast_end(cast)?,
+
+        None => close,
+    };
+
+    Some((line, text[..end].chars().count() as u32))
+}
+
+/// The shadow position of the name that holds the whole value of the
+/// child lookup whose name starts at `start`: a temp the emit hoists
+/// it into, `local _1 = x:WaitForChild("a")`, or a `local` or a `const`
+/// of the source with the lookup as its whole value. The child types
+/// that name from the sourcemap, as it types the lookup. `None` when
+/// the lookup is part of a larger value.
+fn bound_home(doc: &Doc, start: usize) -> Option<(u32, u32)> {
+    let (line, text, name) = child_call(doc, start)?;
+    let call = text[..name].rfind(':')?;
+    let args = name + text[name..].find('"')?;
+    let close = args + text[args..].find(')')?;
+    let head = &text[..call];
+    let is_temp = |w: &str| {
+        w.strip_prefix('_')
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    };
+    // The last `name = ` before the call that starts a statement: a
+    // `local` or a `const` of one name, or a temp the block assigns
+    // again. An annotation types the name as the source wrote it, and a
+    // list of names holds more than the lookup, so neither is one.
+    let (bind, eq) = head.rmatch_indices(" = ").find_map(|(eq, _)| {
+        let bind = head[..eq]
+            .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .map_or(0, |i| i + 1);
+        let before = &head[..bind];
+        let declared = before.ends_with("local ") || before.ends_with("const ");
+        let reused = is_temp(&head[bind..eq]) && (before.is_empty() || before.ends_with(' '));
+
+        (bind < eq && (declared || reused)).then_some((bind, eq))
+    })?;
+    let binding = &text[bind..eq];
+    // A name assigned twice types as the union of its values.
+    let assign = format!("{binding} = ");
+    let assigned = doc
+        .shadow
+        .lines()
+        .flat_map(|l| {
+            l.match_indices(&assign)
+                .filter(move |(i, _)| *i == 0 || l.as_bytes()[i - 1] == b' ')
+        })
+        .count();
+
+    if assigned > 1 {
+        return None;
+    }
+
+    let value = &text[eq + 3..call];
+    let rest = &text[close + 1..];
+    // The receiver alone, or behind the guard of an optional link.
+    let guarded = value
+        .strip_prefix("(if ")
+        .and_then(|v| v.split_once(" == nil then nil else "))
+        .is_some_and(|(a, b)| a == b && !a.contains(' '));
+    let rest = match guarded {
+        true => rest.strip_prefix(')')?,
+
+        false if value.contains(' ') => return None,
+
+        false => rest,
+    };
+    // A timed wait carries a cast to its own type made optional.
+    let rest = match rest.strip_prefix(" :: typeof(") {
+        Some(cast) => &cast[cast.find(")?)")? + 3..],
+
+        None => rest,
+    };
+    // A temp holds a prefix of the chain and nothing more. A name of the
+    // source holds the lookup alone when nothing follows it on its line.
+    let ends = match is_temp(binding) {
+        true => rest.is_empty() || rest.starts_with(' ') && !rest.starts_with(" ::"),
+
+        false => {
+            let after = &doc.source[start..];
+            let word = after
+                .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .unwrap_or(after.len());
+            let tail = after[word..].lines().next().unwrap_or("").trim();
+
+            tail.is_empty() || tail.starts_with("--")
+        }
+    };
+
+    ends.then(|| (line, text[..bind].chars().count() as u32))
+}
+
+/// The hover of a child name from the child's answer at the name that
+/// holds the lookup, see `child_value_home`: the child hover with the
+/// type that answer gives, and the range of the name.
+pub(crate) fn child_lookup_hover(
+    answer: &str,
+    doc: &Doc,
+    line: u32,
+    character: u32,
+) -> Option<(String, Value)> {
+    let offset = offset_of(&doc.source, line, character)?;
+    let (start, _, _) = keywords::child_hover(&doc.source, offset, |_| None)?;
+    child_value_home(doc, start)?;
+    // `local katana: Tool?` at a name, where the type follows the name,
+    // or `Tool?` alone at the `)` that closes the lookup.
+    let head = answer.lines().find(|l| !l.starts_with("```"))?;
+    let ty = head
+        .strip_prefix("local ")
+        .map_or(Some(head), |h| h.split_once(": ").map(|(_, ty)| ty))?;
+    let (start, end, text) =
+        keywords::child_hover(&doc.source, offset, |_| Some(ty.trim().to_string()))?;
+    let (sl, sc) = position_of(&doc.source, start);
+    let (el, ec) = position_of(&doc.source, end);
+
+    Some((
+        text,
+        json!({
+            "start": { "line": sl, "character": sc },
+            "end": { "line": el, "character": ec }
+        }),
+    ))
 }
 
 /// Maps positions and ranges in request params into the shadow.
@@ -546,6 +872,160 @@ pub(crate) fn shadow_home(shadow: &str, line: u32, word: &str) -> Option<(u32, u
 
         Some((i as u32, text[..byte].chars().count() as u32))
     })
+}
+
+/// A caret at the start of an argument that is itself a call,
+/// `make_path(|CFrame.new())`, sits on the callee of the inner call, and
+/// the child answers for that call. The caret moves one character back,
+/// to the `(` or the space in front of the argument. There the child
+/// answers for the call the argument belongs to, with the argument's
+/// index. An argument on a line of its own moves the same way.
+pub(crate) fn before_call_argument(
+    shadow: &str,
+    (line, character): (u32, u32),
+) -> Option<(u32, u32)> {
+    let at = offset_of(shadow, line, character)?;
+    let before = shadow[..at].chars().next_back()?;
+    let head = shadow[..at].trim_end();
+    let text = &shadow[..shadow[at..].find('\n').map_or(shadow.len(), |i| at + i)];
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+
+    if !matches!(before, '(' | ' ' | '\t' | '\n') {
+        return None;
+    }
+
+    if !head.ends_with(['(', ',']) {
+        return None;
+    }
+
+    // The bracket the argument stands in. A `(` after a name or a
+    // closing bracket opens a call. A table, an index, and a `(` that
+    // groups, as after `if` or `=`, hold no argument.
+    let mut depth = 0;
+    let (open, _) = head.char_indices().rev().find(|(_, c)| match c {
+        ')' | ']' | '}' => {
+            depth += 1;
+
+            false
+        }
+
+        '(' | '[' | '{' if depth > 0 => {
+            depth -= 1;
+
+            false
+        }
+
+        '(' | '[' | '{' => true,
+
+        _ => false,
+    })?;
+    let callee = head[..open].trim_end();
+    let word = &callee[callee.trim_end_matches(is_word).len()..];
+    let groups = [
+        "if", "elseif", "while", "until", "return", "and", "or", "not", "then", "do", "in", "else",
+        "repeat", "case", "with", "await",
+    ];
+
+    if !head[open..].starts_with('(')
+        || !callee.ends_with(|c: char| is_word(c) || c == ')' || c == ']')
+        || groups.contains(&word)
+    {
+        return None;
+    }
+
+    // The argument is a name chain, then the `(` of its own call.
+    let chain = text[at..]
+        .find(|c: char| !(is_word(c) || c == '.' || c == ':'))
+        .map_or(text.len(), |i| at + i);
+
+    if chain == at || !text[chain..].starts_with('(') {
+        return None;
+    }
+
+    Some(position_of(shadow, at - 1))
+}
+
+/// The child answers no signature help on the base of an index, `T` in
+/// `f(T.x)` or `Mode` in `Mode.speed(Mode.Walk, 2)`, and it does on the
+/// `.` after it. A caret on such a word moves to that `.` or `:`, which
+/// stands in the same argument.
+///
+/// `new Car { n = 2 }` lowers to `Car.__new({ n = 2 })`, and a caret on
+/// `new` or on `Car` maps to the `{`, inside a call the source never
+/// writes. Past the `)` that closes it, the child answers for the call
+/// the source opens.
+pub(crate) fn past_index_base(shadow: &str, (line, character): (u32, u32)) -> Option<(u32, u32)> {
+    let text = shadow.lines().nth(line as usize)?;
+    let at = offset_of(text, 0, character)?;
+    let column = |end: usize| (line, text[..end].encode_utf16().count() as u32);
+
+    if text[..at].ends_with(".__new(") {
+        return closing_paren(text, at - 1).map(|close| column(close + 1));
+    }
+
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let end = text[at..]
+        .find(|c: char| !is_word(c))
+        .map_or(text.len(), |i| at + i);
+    let rest = &text[end..];
+    let base = rest.starts_with(['.', ':']) && !rest.starts_with("..") && !rest.starts_with("::");
+
+    (base && end > at).then(|| column(end))
+}
+
+/// The `)` that closes the `(` at `open`. A quoted `)` closes nothing.
+fn closing_paren(text: &str, open: usize) -> Option<usize> {
+    let mut depth = 0;
+    let mut quote: Option<char> = None;
+
+    for (i, c) in text[open..].char_indices() {
+        match (quote, c) {
+            (Some(q), _) if c == q => quote = None,
+
+            (Some(_), _) => {}
+
+            (None, '"' | '\'' | '`') => quote = Some(c),
+
+            (None, '(') => depth += 1,
+
+            (None, ')') => {
+                depth -= 1;
+
+                if depth == 0 {
+                    return Some(open + i);
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    None
+}
+
+/// The shadow with the `any` cast of each child lookup blanked:
+/// `(p:FindFirstChild("x") :: any)` reads `(p:FindFirstChild("x")       )`.
+/// The check casts a child that a member follows, since `Instance` has
+/// no `CFrame`, and the cast leaves the child no member to list. Every
+/// byte keeps its place, so a position in one is a position in both.
+pub(crate) fn uncast_children(shadow: &str) -> String {
+    const CAST: &str = " :: any)";
+    let mut out = shadow.to_string();
+
+    for call in [":FindFirstChild(", ":WaitForChild("] {
+        for (at, _) in shadow.match_indices(call) {
+            let Some(close) = closing_paren(shadow, at + call.len() - 1) else {
+                continue;
+            };
+
+            if shadow[close + 1..].starts_with(CAST) {
+                let cast = close + 1..close + CAST.len();
+                out.replace_range(cast.clone(), &" ".repeat(cast.len()));
+            }
+        }
+    }
+
+    out
 }
 
 /// Where a caret inside a call in an intrinsic's argument stands in

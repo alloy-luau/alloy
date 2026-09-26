@@ -236,8 +236,15 @@ impl<'a> Parser<'a> {
             return self.local_function(start, attributes, is_const);
         }
 
-        // `local Ok(v) = e [else ... end]`: a pattern binding.
-        if self.at_name() && self.text_at(1) == "(" && self.pattern_local_follows() {
+        // `local mut x = 0` is Rust's binding. Luau reads a local named
+        // `mut`, then an assignment to a global `x`.
+        if self.at("mut") && self.name_at(1) && !self.newline_after(0) {
+            return Err(self.err("Alloy has no `mut`; a `local` can change, a `const` cannot"));
+        }
+
+        // `local Ok(v) = e [else ... end]` and `local P { x } = e`: a
+        // pattern binding.
+        if self.pattern_local_follows() {
             let keyword = TokSpan::new(keyword_at, keyword_at + 1);
             let pattern = self.pattern()?;
             self.expect("=")?;
@@ -292,10 +299,12 @@ impl<'a> Parser<'a> {
         attributes: Vec<TokSpan>,
         is_const: bool,
     ) -> Result<Stmt, ParseError> {
-        self.expect("function")?;
+        // A missing `end` names `function`, the word the `end` closes,
+        // not the `local` or `const` in front of it.
+        let keyword = self.expect("function")?;
 
         let name = self.expect_name()?;
-        let body = self.function_body(start)?;
+        let body = self.function_body(keyword)?;
 
         Ok(Stmt::LocalFunction(LocalFunction {
             attributes,
@@ -313,7 +322,8 @@ impl<'a> Parser<'a> {
         start: usize,
         attributes: Vec<TokSpan>,
     ) -> Result<Stmt, ParseError> {
-        self.expect("function")?;
+        // A missing `end` names `function`, not the `export` in front.
+        let keyword = self.expect("function")?;
 
         let mut path = vec![self.expect_name()?];
         let mut is_method = false;
@@ -331,7 +341,7 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let body = self.function_body(start)?;
+        let body = self.function_body(keyword)?;
         Ok(Stmt::Function(Function {
             attributes,
             attrs: Vec::new(),
@@ -664,9 +674,9 @@ impl<'a> Parser<'a> {
 
         if self.at("function") {
             // `type function f() ... end` is a user-defined type function.
-            self.bump();
+            let keyword = self.bump();
             let name = self.expect_name()?;
-            self.function_body(start)?;
+            self.function_body(keyword)?;
 
             return Ok(Stmt::TypeAlias(TypeAlias {
                 exported,
@@ -698,7 +708,7 @@ impl<'a> Parser<'a> {
         // `local n = v as number` leaves `as number` behind: the parser
         // reaches it as a statement of its own.
         if self.at("as") {
-            return Err(self.err("`as` is not a cast here; use `::`"));
+            return Err(self.err(super::super::AS_CAST));
         }
 
         if matches!(self.text(), "new" | "try" | "await") && self.prefix_word_here() {
@@ -753,6 +763,66 @@ impl<'a> Parser<'a> {
                 values,
                 span: TokSpan::new(start, self.pos),
             }));
+        }
+
+        // `let x = 5` is another language's declaration. The report sits
+        // on `let` and writes the line out the Luau way.
+        if let Expr::Name(word) = &first
+            && self.span_text(*word) == "let"
+            && self.at_name()
+        {
+            let end = self.toks[self.pos..]
+                .iter()
+                .take_while(|t| {
+                    !self.src[self.toks[start].end as usize..t.start as usize].contains('\n')
+                })
+                .last()
+                .map_or(self.toks[self.pos].end, |t| t.end);
+            // `let mut x`: a `local` can change, so the `mut` goes. Kept,
+            // `local mut x` declares `mut` and assigns a global `x`.
+            let from = self.pos + usize::from(self.at("mut") && self.name_at(1));
+            // A line can hold more than the one statement, as in `do let
+            // y = v * 2 print(y) end`. The quote ends where a `local` in
+            // the place of `let` ends, and never past the line.
+            let saved = (
+                self.pos,
+                self.diagnostics.len(),
+                self.type_edits.len(),
+                self.type_names.len(),
+                self.reserved_keys.len(),
+            );
+            self.pos = from - 1;
+            let local_end = self
+                .local_stmt(start)
+                .ok()
+                .map(|_| self.toks[self.pos - 1].end);
+            self.pos = saved.0;
+            self.diagnostics.truncate(saved.1);
+            self.type_edits.truncate(saved.2);
+            self.type_names.truncate(saved.3);
+            self.reserved_keys.truncate(saved.4);
+            let end = local_end.map_or(end, |at| at.min(end));
+            let rest = &self.src[self.toks[from].start as usize..end as usize];
+
+            return Err(ParseError {
+                offset: self.toks[start].start as usize,
+                message: format!("Alloy has no `let`; write `local {rest}` or `const {rest}`"),
+            });
+        }
+
+        // `id<number>(5)` as a statement reads as no Luau either: a
+        // comparison is no statement. The call form is the report.
+        if let Some(i) = self
+            .angle_calls
+            .iter()
+            .position(|(s, _)| s.start as usize == self.pos)
+        {
+            let (_, message) = self.angle_calls.remove(i);
+
+            return Err(ParseError {
+                offset: self.toks[self.pos].start as usize,
+                message,
+            });
         }
 
         match &first {

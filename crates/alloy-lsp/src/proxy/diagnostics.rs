@@ -67,30 +67,12 @@ impl State {
             }));
         }
 
-        // A markup config that does not load: the build skips the file
-        // and names the table, and the report here says the same on the
-        // first line. The default backend stands in meanwhile, so its
-        // own stop names a factory the project never chose.
-        if let Some(problem) = self.markup_problem(uri) {
-            let width = doc
-                .source
-                .lines()
-                .next()
-                .map(|l| l.trim_end().encode_utf16().count() as u32)
-                .unwrap_or(0);
-            diagnostics.push(json!({
-                "range": {
-                    "start": { "line": 0, "character": 0 },
-                    "end": { "line": 0, "character": width },
-                },
-                "severity": 1,
-                "source": "Alloy",
-                "message": format!("the markup config does not load: {problem}"),
-            }));
-
-            if doc.error.is_some() {
-                return diagnostics;
-            }
+        // A markup config that does not load: the build skips the file,
+        // and the report sits on the key of the table, in alloy.toml.
+        // The default backend stands in meanwhile, so its own stop
+        // names a factory the project never chose.
+        if self.markup_problem(uri).is_some() && doc.error.is_some() {
+            return diagnostics;
         }
 
         // A compile that stopped leaves no output. Its one error is all
@@ -241,8 +223,10 @@ impl State {
                     "message": format!("{}: {}", problem.kind, problem.message),
                 });
 
-                if let Some(url) = alloy::docs::book_url("3.2") {
-                    item["code"] = json!("3.2");
+                let code = alloy::docs::kind_section(problem.kind).map_or("3.2", |s| s.number);
+
+                if let Some(url) = alloy::docs::book_url(code) {
+                    item["code"] = json!(code);
                     item["codeDescription"] = json!({ "href": url });
                 }
 
@@ -335,8 +319,9 @@ impl State {
 
     Each one says what the file is missing, so the edit writes it: the
     `new` a construction wants, the arms a `match` does not cover, the
-    variant a misspelling meant, and the verb a remote's member meant.
-    The child reads the emit, where none of the four is left to see.
+    variant or the field a misspelling meant, and the verb a remote's
+    member meant. The child reads the emit, where none of them is left
+    to see.
     */
     pub(crate) fn compiler_actions(
         &self,
@@ -386,6 +371,76 @@ impl State {
                     format!("Write `{simple}`"),
                     json!([{ "range": at, "newText": simple }]),
                 ))
+            } else if d.message.starts_with("`!=` is not an operator")
+                && doc.source.get(start..start + 2) == Some("!=")
+            {
+                // The report spans the `!`; the edit takes the `=` too.
+                let (el, ec) = position_of(&doc.source, start + 2);
+
+                Some((
+                    "Write `~=`".to_string(),
+                    json!([{
+                        "range": { "start": { "line": sl, "character": sc }, "end": { "line": el, "character": ec } },
+                        "newText": "~=",
+                    }]),
+                ))
+            } else if d.message.starts_with("`as` is not a cast here")
+                && doc.source.get(start..start + 2) == Some("as")
+            {
+                // The report sits on `as`; the type after it stands.
+                let (el, ec) = position_of(&doc.source, start + 2);
+
+                Some((
+                    "Write `::`".to_string(),
+                    json!([{
+                        "range": { "start": { "line": sl, "character": sc }, "end": { "line": el, "character": ec } },
+                        "newText": "::",
+                    }]),
+                ))
+            } else if d.message.starts_with("Alloy has no `let`")
+                && doc.source.get(start..start + 3) == Some("let")
+            {
+                // The report sits on `let`; the rest of the line stands.
+                // When the report drops a `mut`, the edit takes it too.
+                let after = &doc.source[start + 3..];
+                let cut = match after.trim_start().strip_prefix("mut") {
+                    Some(tail)
+                        if tail.starts_with(char::is_whitespace)
+                            && !d.message.contains("write `local mut") =>
+                    {
+                        after.len() - tail.len()
+                    }
+
+                    _ => 0,
+                };
+                let (el, ec) = position_of(&doc.source, start + 3 + cut);
+
+                Some((
+                    "Write `local`".to_string(),
+                    json!([{
+                        "range": { "start": { "line": sl, "character": sc }, "end": { "line": el, "character": ec } },
+                        "newText": "local",
+                    }]),
+                ))
+            } else if d.message.starts_with("Alloy has no `mut`")
+                && doc.source.get(start..start + 3) == Some("mut")
+            {
+                // `local mut x`: the word and the space after it go.
+                let after = &doc.source[start + 3..];
+                let gap = after.len() - after.trim_start().len();
+                let (el, ec) = position_of(&doc.source, start + 3 + gap);
+
+                Some((
+                    "Remove `mut`".to_string(),
+                    json!([{
+                        "range": { "start": { "line": sl, "character": sc }, "end": { "line": el, "character": ec } },
+                        "newText": "",
+                    }]),
+                ))
+            } else if d.message.starts_with("type arguments at a call take")
+                && let Some(edits) = angle_call_edits(&doc.source, start)
+            {
+                Some(("Write `<<...>>`".to_string(), edits))
             } else if let Some(found) = self.missing_arm_fix(doc, &d.message, (start, end)) {
                 Some(found)
             } else if let Some(name) = alloy::std_names::missing_name(&d.message) {
@@ -464,17 +519,47 @@ impl State {
                 continue;
             }
 
-            let Some((wrote, name)) = remote_verb_fix(message) else {
-                continue;
-            };
             let Some(text) = doc.source.lines().nth(sl as usize) else {
                 continue;
             };
             let from = byte_column(doc, sl, sc) - 1;
-            let Some(i) = text[from..].find(&format!(".{wrote}")) else {
+
+            // `bag.add(3)` on a method: the `.` before the name becomes `:`.
+            if let Some(wrote) = dot_call_fix(message)
+                && let Some(i) = text.get(from..).and_then(|rest| rest.find(&wrote))
+                && let Some(dot) = wrote.rfind('.')
+            {
+                let at = utf16_column(doc, sl, from + i + dot + 1);
+
+                actions.push(json!({
+                    "title": format!("Write `{}:{}`", &wrote[..dot], &wrote[dot + 1..]),
+                    "kind": "quickfix",
+                    "isPreferred": true,
+                    "diagnostics": [d],
+                    "edit": { "changes": { uri: [{
+                        "range": {
+                            "start": { "line": sl, "character": at },
+                            "end": { "line": sl, "character": at + 1 },
+                        },
+                        "newText": ":",
+                    }] } },
+                }));
+
+                continue;
+            }
+
+            let Some((wrote, name)) = remote_verb_fix(message) else {
                 continue;
             };
-            let start = utf16_column(doc, sl, from + i + 2);
+            // A field report starts on the name, after its `.` or `:`.
+            let head = from.saturating_sub(1);
+            let Some(i) = text.get(head..).and_then(|rest| {
+                rest.find(&format!(".{wrote}"))
+                    .or_else(|| rest.find(&format!(":{wrote}")))
+            }) else {
+                continue;
+            };
+            let start = utf16_column(doc, sl, head + i + 2);
             let end = start + wrote.encode_utf16().count() as u32;
 
             actions.push(json!({
@@ -501,7 +586,8 @@ impl State {
     The report names the enum and every variant the arms leave out, and
     the range it points at is the whole statement, so its last three
     bytes are the `end` the arms go above. A variant with a payload
-    takes one, written `_`.
+    takes one, written `_`. An arm of a match that gives a value needs
+    a value, so its body there is `$todo()`, which fits any type.
     */
     fn missing_arm_fix(
         &self,
@@ -543,6 +629,17 @@ impl State {
             .map(|l| l[..l.len() - l.trim_start().len()].to_string())
             .unwrap_or_else(|| format!("{closing}    "));
         let payloads = self.variant_payloads(&owner);
+        // The report starts on `match`. After `return`, an `=`, an open
+        // bracket, or a comma, the match gives a value.
+        let before = doc.source[..start].trim_end();
+        let body = match ["return", "=", "(", "[", "{", ","]
+            .iter()
+            .any(|w| before.ends_with(w))
+        {
+            true => "$todo()",
+
+            false => "",
+        };
         let mut text = String::new();
 
         for name in &missing {
@@ -557,7 +654,7 @@ impl State {
                 n => format!("({})", vec!["_"; n].join(", ")),
             };
             text.push_str(&format!(
-                "{arm}case {owner}.{name}{holes} then\n{arm}    \n"
+                "{arm}case {owner}.{name}{holes} then\n{arm}    {body}\n"
             ));
         }
 
@@ -674,6 +771,21 @@ impl State {
 
         for f in &fixes {
             let (line, at) = position_of(&doc.source, f.start as usize);
+            // The parser's report names the header. A rewrite with no
+            // report on its line is the scan's mistake, not a fix.
+            let Some(head) = doc
+                .output
+                .as_ref()
+                .map(|o| o.diagnostics.as_slice())
+                .unwrap_or_default()
+                .iter()
+                .find(|d| {
+                    d.message.ends_with(alloy::fmt::NEEDS_AS)
+                        && position_of(&doc.source, d.start as usize).0 == line
+                })
+            else {
+                continue;
+            };
             let edit = json!({
                 "range": {
                     "start": { "line": line, "character": at },
@@ -687,37 +799,22 @@ impl State {
                 continue;
             }
 
-            let head = doc
-                .output
-                .as_ref()
-                .map(|o| o.diagnostics.as_slice())
-                .unwrap_or_default()
-                .iter()
-                .find(|d| {
-                    d.message.ends_with(alloy::fmt::NEEDS_AS)
-                        && position_of(&doc.source, d.start as usize).0 == line
-                });
-            let mut action = json!({
+            let (sl, sc) = position_of(&doc.source, head.start as usize);
+            actions.push(json!({
                 "title": "Write `as` after the header",
                 "kind": "quickfix",
                 "isPreferred": true,
-                "edit": { "changes": { uri: [edit] } },
-            });
-
-            if let Some(d) = head {
-                let (sl, sc) = position_of(&doc.source, d.start as usize);
-                action["diagnostics"] = json!([{
+                "diagnostics": [{
                     "range": {
                         "start": { "line": sl, "character": sc },
                         "end": { "line": line, "character": at },
                     },
                     "severity": 1,
                     "source": "Alloy",
-                    "message": alloy::docs::labeled(&d.message),
-                }]);
-            }
-
-            actions.push(action);
+                    "message": alloy::docs::labeled(&head.message),
+                }],
+                "edit": { "changes": { uri: [edit] } },
+            }));
         }
 
         if all.len() > 1 {
@@ -745,7 +842,7 @@ impl State {
         let lint_config = self.lint_config();
         let directives = alloy::directives::scan(&doc.source);
         let ((from_line, _), (to_line, _)) = range;
-        let mut all_fixes: Vec<&alloy::lint::Fix> = Vec::new();
+        let mut all_fixes: Vec<(&str, &alloy::lint::Fix)> = Vec::new();
         let edits_of = |fix: &alloy::lint::Fix| -> Vec<Value> {
             fix.edits()
                 .map(|e| {
@@ -761,6 +858,34 @@ impl State {
         };
 
         for l in &out.lints {
+            // The `<<...>>` form turns two comparisons into a call, so
+            // the lint carries no rewrite for `--fix`. The editor offers
+            // it here, as it does for the compiler's error.
+            if l.name == "single_angle_call"
+                && alloy::lint::level_in(&lint_config, &directives, l.name)
+                    != alloy::lint::Level::Allow
+                && let Some(edits) = angle_call_edits(&doc.source, l.start as usize)
+            {
+                let (ll, lc) = position_of(&doc.source, l.start as usize);
+                let (le, lec) = position_of(&doc.source, l.end as usize);
+
+                if le >= from_line && ll <= to_line {
+                    actions.push(json!({
+                        "title": "Write `<<...>>`",
+                        "kind": "quickfix",
+                        "isPreferred": true,
+                        "diagnostics": [{
+                            "range": { "start": { "line": ll, "character": lc }, "end": { "line": le, "character": lec } },
+                            "severity": 2,
+                            "source": "Alloy",
+                            "code": alloy::docs::LINT_CODE,
+                            "message": format!("{}: {}", l.name, l.message),
+                        }],
+                        "edit": { "changes": { uri: edits } },
+                    }));
+                }
+            }
+
             let Some(fix) = &l.fix else { continue };
 
             if alloy::lint::level_in(&lint_config, &directives, l.name) == alloy::lint::Level::Allow
@@ -774,12 +899,18 @@ impl State {
                 continue;
             }
 
-            all_fixes.push(fix);
+            all_fixes.push((l.name, fix));
 
             let (ll, lc) = position_of(&doc.source, l.start as usize);
             let (le, lec) = position_of(&doc.source, l.end.max(l.start) as usize);
 
             if le < from_line || ll > to_line {
+                continue;
+            }
+
+            // A rewrite that breaks the parse is a lint's mistake, and
+            // `--fix` refuses it too.
+            if !alloy::lint::sound(&doc.source, vec![fix]).1.is_empty() {
                 continue;
             }
 
@@ -817,9 +948,43 @@ impl State {
         }
 
         if all_fixes.len() > 1 {
+            // `prefer_const` goes first, as in `alloy fmt`: a local it
+            // makes a `const` takes the const style, so the renames come
+            // from the text with the `const`s in it.
+            let consts: Vec<alloy::lint::Fix> = all_fixes
+                .iter()
+                .filter(|(name, _)| *name == "prefer_const")
+                .map(|(_, f)| (*f).clone())
+                .collect();
+            let renames = match consts.is_empty() || uri.ends_with(".alx") {
+                true => Vec::new(),
+
+                false => {
+                    alloy::naming::lints_after_consts(&doc.source, &consts, &lint_config.naming)
+                }
+            };
+            let renamed: Vec<&alloy::lint::Fix> = renames
+                .iter()
+                .filter(|l| {
+                    let line = alloy::directives::line_of(&doc.source, l.start as usize);
+
+                    alloy::lint::level_in(&lint_config, &directives, l.name)
+                        != alloy::lint::Level::Allow
+                        && directives.allows_lint(line, l.name)
+                        && !directives.preserves(line)
+                })
+                .filter_map(|l| l.fix.as_ref())
+                .collect();
+            let keep_names = renamed.is_empty();
+            let fixes = all_fixes
+                .iter()
+                .filter(|(name, _)| keep_names || *name != alloy::naming::LINT)
+                .map(|(_, f)| *f)
+                .chain(renamed);
             // Two rewrites that overlap keep the first, as `--fix` does,
             // and a rename lands with every edit it makes.
-            let chosen = alloy::lint::compatible(&doc.source, all_fixes);
+            let chosen = alloy::lint::compatible(&doc.source, fixes);
+            let (chosen, _) = alloy::lint::sound(&doc.source, chosen);
             let kept: Vec<Value> = chosen.iter().flat_map(|f| edits_of(f)).collect();
 
             actions.push(json!({
@@ -968,6 +1133,34 @@ impl Server {
             }
         }
 
+        // A markup table that does not load stops every `.alx` file of
+        // the project. The mistake is in the table, so the report sits
+        // on the key it names.
+        let luaux = base.join("luaux.toml");
+
+        if luaux.is_file() {
+            by_file.insert(luaux, Vec::new());
+        }
+
+        if let Err(problem) = config.markup(&base) {
+            let (file, at) = config.markup_problem_at(&base, &problem);
+            let (line, col) = at.unwrap_or((0, 0));
+            let text = std::fs::read_to_string(&file).unwrap_or_default();
+            let written = text.lines().nth(line).unwrap_or_default().trim_end();
+            let utf16 = |s: &str| s.encode_utf16().count() as u32;
+            let message = format!("markup: {problem}");
+            by_file.entry(file).or_default().push(json!({
+                "range": {
+                    "start": { "line": line, "character": utf16(&written[..col.min(written.len())]) },
+                    "end": { "line": line, "character": utf16(written) },
+                },
+                "severity": 1,
+                "source": "Alloy",
+                "code": alloy::docs::code_for(&message),
+                "message": alloy::docs::labeled(&message),
+            }));
+        }
+
         for problem in alloy::modules::alias_problems(&base, &config) {
             let text = std::fs::read_to_string(&problem.file).unwrap_or_default();
             let (line, start, end) = alias_key_line(&text, &problem.alias).unwrap_or((0, 0, 0));
@@ -1050,15 +1243,28 @@ pub(crate) fn unmet_expectations(doc: &Doc, child: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-/// The columns of the first quoted string on a line, quotes included.
-pub(crate) fn quoted_span_on_line(source: &str, line: u32) -> Option<(u32, u32)> {
+/// The first quoted string on a line, quotes included, as a start and
+/// an end position. An import over several lines holds its path on its
+/// last line, and the emit writes its `require` on the line of `import`,
+/// so that line answers with the path of the statement.
+pub(crate) fn quoted_span_on_line(source: &str, line: u32) -> Option<((u32, u32), (u32, u32))> {
+    if let Some(s) = alloy_syntax::scan::import_statements(source)
+        .into_iter()
+        .find(|s| s.line == line as usize && source[s.start..s.end].contains('\n'))
+    {
+        let quote = source[..s.end].chars().next_back()?;
+        let open = source[..s.end - 1].rfind(quote)?;
+
+        return Some((position_of(source, open), position_of(source, s.end)));
+    }
+
     let text = source.lines().nth(line as usize)?;
     let open = text.find(['"', '\''])?;
     let quote = text.as_bytes()[open] as char;
     let close = text[open + 1..].find(quote)? + open + 1;
     let col = |byte: usize| text[..byte].encode_utf16().count() as u32;
 
-    Some((col(open), col(close + 1)))
+    Some(((line, col(open)), (line, col(close + 1))))
 }
 
 /// A diagnostic points at a token the reader can see. A range that
@@ -1463,6 +1669,12 @@ pub(crate) fn keep_diagnostic(
     };
     let end = offset_of(&doc.shadow, el, ec).unwrap_or(doc.shadow.len());
 
+    // A deprecated component reads by its tag, `<OldRow />`: the
+    // lowering writes the call, and the report stands for the tag.
+    if message.starts_with("DeprecatedApi") {
+        return true;
+    }
+
     !(start..end.max(start + 1)).any(|o| doc.generated_offset(o))
 }
 
@@ -1474,12 +1686,12 @@ pub(crate) fn statement_range(d: &mut Value, doc: &Doc, line: usize) {
     };
     let start = text.len() - text.trim_start().len();
     let start = text[..start].encode_utf16().count() as u32;
-    let end = quoted_span_on_line(&doc.source, line as u32)
+    let (end_line, end) = quoted_span_on_line(&doc.source, line as u32)
         .map(|(_, e)| e)
-        .unwrap_or_else(|| text.encode_utf16().count() as u32);
+        .unwrap_or_else(|| (line as u32, text.encode_utf16().count() as u32));
     d["range"] = json!({
         "start": { "line": line, "character": start },
-        "end": { "line": line, "character": end },
+        "end": { "line": end_line, "character": end },
     });
 }
 
@@ -1670,7 +1882,14 @@ pub(crate) fn alloy_wording(
     // the editor say one thing.
     // A name an import the file writes could bring in: the fix is one
     // word in that list, and the terminal says the same.
-    if let Some(path) = here.and_then(uri_to_path)
+    // `new Nope { }` names a struct, not a global. The compiler writes
+    // the sentence and moves the report onto the name.
+    let unknown_struct = here.and_then(uri_to_path).and_then(|path| {
+        alloy::typecheck::unknown_struct_report(&message, &path, &doc.source, sl as usize + 1)
+    });
+
+    if unknown_struct.is_none()
+        && let Some(path) = here.and_then(uri_to_path)
         && let Some(better) = alloy::modules::missing_import_message(&message, &path, &doc.source)
     {
         d["message"] = json!(format!("{kind}: {better}"));
@@ -1678,8 +1897,9 @@ pub(crate) fn alloy_wording(
         return;
     }
 
-    if let Some((better, at)) =
-        alloy::typecheck::rewrite_emitted_name(&message, &doc.source, sl as usize + 1)
+    if unknown_struct.is_none()
+        && let Some((better, at)) =
+            alloy::typecheck::rewrite_emitted_name(&message, &doc.source, sl as usize + 1)
     {
         d["message"] = json!(format!("{kind}: {better}"));
 
@@ -1697,13 +1917,15 @@ pub(crate) fn alloy_wording(
     // that is a value, and an enum variant built with the wrong
     // payload: the compiler writes these sentences and puts them on the
     // token the reader wrote.
-    if let Some(better) = alloy::typecheck::resite_report(
-        &body,
-        shapes,
-        &doc.source,
-        sl as usize + 1,
-        byte_column(doc, sl, sc),
-    ) {
+    if let Some(better) = unknown_struct.or_else(|| {
+        alloy::typecheck::resite_report(
+            &body,
+            shapes,
+            &doc.source,
+            sl as usize + 1,
+            byte_column(doc, sl, sc),
+        )
+    }) {
         d["message"] = json!(format!("{}: {}", better.kind, better.message));
 
         if let Some(code) = alloy::typecheck::section_of(better.kind) {
@@ -1792,6 +2014,15 @@ pub(crate) fn alloy_wording(
     }
 }
 
+/// Whether the word at `start` names a parameter of a function the
+/// source declares: `function f(a, b: T)` at `a` or `b`.
+fn names_a_parameter(src: &str, start: usize) -> bool {
+    let declared = super::completion::open_paren_word(src, start)
+        .is_some_and(|(word, _, _)| super::completion::declares_params(src, word));
+
+    declared && src[..start].trim_end().ends_with(['(', ','])
+}
+
 /// The names a message writes in backticks.
 fn quoted_names(text: &str) -> Vec<String> {
     text.split('`')
@@ -1801,12 +2032,20 @@ fn quoted_names(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// The variant a misspelling meant: the one name of the list the report
-/// prints that stands within two edits of the word the file wrote. Two
-/// names that near say nothing about which one, so neither answers.
+/// The variant or the field a misspelling meant: the one name of the
+/// list the report prints that stands within two edits of the word the
+/// file wrote. Two names that near say nothing about which one, so
+/// neither answers.
 fn nearest_variant_fix(message: &str) -> Option<String> {
-    let (head, tail) = message.split_once("; its variants are ")?;
-    let wrote = quoted_names(head.split(" has no variant ").nth(1)?).pop()?;
+    let (head, tail) = message
+        .split_once("; its variants are ")
+        .or_else(|| message.split_once("; its fields are "))?;
+    let wrote = quoted_names(
+        head.split(" has no variant ")
+            .nth(1)
+            .or_else(|| head.split(" has no field ").nth(1))?,
+    )
+    .pop()?;
     let near: Vec<String> = quoted_names(tail)
         .into_iter()
         .filter(|v| edit_distance(v, &wrote) <= 2)
@@ -1819,12 +2058,14 @@ fn nearest_variant_fix(message: &str) -> Option<String> {
     }
 }
 
-/// The member a remote typo meant, with the member the file wrote:
-/// the compiler's sentence names both.
+/// The member a remote typo or a struct field typo meant, with the
+/// member the file wrote: the compiler's sentence names both.
 fn remote_verb_fix(message: &str) -> Option<(String, String)> {
     let (head, tail) = message.split_once("; did you mean ")?;
+    let remote = head.contains("remote `") && head.contains("` has no `");
+    let member = head.contains("` has no field `") || head.contains("` has no method `");
 
-    if !head.contains("remote `") || !head.contains("` has no `") {
+    if !remote && !member {
         return None;
     }
 
@@ -1832,6 +2073,19 @@ fn remote_verb_fix(message: &str) -> Option<(String, String)> {
     let name = quoted_names(tail).pop()?;
 
     Some((wrote, name))
+}
+
+/// The call a report says needs `:`, as the source wrote it: `bag.add`
+/// from "`add` is a method; call it with `bag:add(...)`, not
+/// `bag.add(...)`".
+fn dot_call_fix(message: &str) -> Option<String> {
+    if !message.contains(alloy::typecheck::DOT_FOR_COLON) {
+        return None;
+    }
+
+    let wrote = quoted_names(message).pop()?;
+
+    wrote.strip_suffix("(...)").map(str::to_string)
 }
 
 /// The edit distance of two names, for a "did you mean".
@@ -2037,6 +2291,21 @@ struct Bound {
 /// lines, so the walk reads from the `import` to the `from` of the same
 /// statement.
 fn import_lines(src: &str) -> Vec<ImportLine> {
+    // A comment in a list holds no name, no comma and no `from`. The
+    // walk reads a copy with each comment blanked; the copy keeps every
+    // offset and every line break.
+    let mut blank = src.as_bytes().to_vec();
+
+    for (a, b) in alloy_syntax::lexer::lex(src).map_or(Vec::new(), |l| l.comments) {
+        for byte in &mut blank[a as usize..b as usize] {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+    }
+
+    let blank = String::from_utf8(blank).unwrap_or_else(|_| src.to_string());
+    let src = blank.as_str();
     let mut out = Vec::new();
     let mut at = 0;
 
@@ -2170,7 +2439,16 @@ fn list_cuts(src: &str, open: usize, close: usize) -> Vec<Bound> {
         let entry = &src[s..e];
         let word = entry.split_whitespace().next_back().unwrap_or(entry);
         let name_at = s + (entry.len() - word.len());
+        // A list over several lines: an entry on a line of its own goes
+        // with that line, so the comment of a neighbour stays.
+        let line_start = src[..s].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = src[e..].find('\n').map_or(src.len(), |i| e + i + 1);
+        let after = src[e..line_end].trim_start();
+        let alone = src[line_start..s].trim().is_empty()
+            && after.strip_prefix(',').unwrap_or(after).trim().is_empty();
         let cut = match (parts.get(k + 1), k) {
+            _ if alone => (line_start, line_end),
+
             (Some(&(next, _)), _) => (s, next),
 
             (None, 0) => (s, e),
@@ -2343,6 +2621,25 @@ impl State {
         uri: &str,
         range: Option<((u32, u32), (u32, u32))>,
     ) -> bool {
+        // The child's extracts read the lowered Luau. "Extract to
+        // function" passes a module name as an untyped parameter and
+        // drops the types. "Extract to local variable" on a statement
+        // word or a declared name takes the whole enclosing function.
+        match action.pointer("/data/type").and_then(Value::as_str) {
+            Some("extractFunction") => return false,
+
+            Some("extractVariable") if !self.extracts_at(uri, range) => return false,
+
+            // The child inlines a `local` or a `const` that holds a
+            // value. A parameter, an import, or a function has none, and
+            // its resolve carries no edit.
+            Some("inlineVariable") if !self.inlines(uri, action, range.map(|r| r.1.0)) => {
+                return false;
+            }
+
+            _ => {}
+        }
+
         if let Some(edit) = action.get("edit") {
             return edit_count(edit) > 0 && self.writes_source_only(edit);
         }
@@ -2368,6 +2665,244 @@ impl State {
         };
 
         !refactor || clean() == Some(true)
+    }
+
+    /// Whether the start of a source range sits in an expression, where
+    /// an extract has something to take. A declared name and a word
+    /// that only a statement writes are not in one. An `if` or a `then`
+    /// is a statement's on a line that `if`, `elseif` or `else` opens.
+    fn extracts_at(&self, uri: &str, range: Option<((u32, u32), (u32, u32))>) -> bool {
+        let Some(((line, character), _)) = range else {
+            return false;
+        };
+        let Some(doc) = self.docs.get(uri) else {
+            return false;
+        };
+        let Some(at) = offset_of(&doc.source, line, character) else {
+            return false;
+        };
+
+        // A `.config.aly` is one `export default` table, and the child
+        // writes the new `local` between `export default` and `const`.
+        if crate::config_aly::is_config(uri) {
+            return false;
+        }
+
+        let (start, end) = keywords::word_range(&doc.source, at);
+        let word = &doc.source[start..end];
+        let line_start = doc.source[..start].rfind('\n').map_or(0, |i| i + 1);
+        let branch = matches!(word, "if" | "then" | "elseif" | "else")
+            && matches!(
+                doc.source[line_start..].split_whitespace().next(),
+                Some("if" | "elseif" | "else")
+            );
+
+        // A type has no value to extract, and neither has a parameter.
+        // A caret on the space before a word reads the head up to it.
+        let rest = &doc.source[start..];
+        let word_at = start + rest.len() - rest.trim_start_matches([' ', '\t']).len();
+        let head = &doc.source[line_start..word_at];
+        // A key, `{ alpha = 1 }`, and a method name, `cp:advance`, name
+        // no value: the child writes `local extracted = alpha`. The
+        // braces of `new S { }` and a `?.` or `!.` chain lower to
+        // generated text, and there the child's edit comes back empty.
+        let before = doc.source[..start].trim_end();
+        let after = &doc.source[end..];
+        let key = before.ends_with(['{', ',', ';'])
+            && after.trim_start().starts_with('=')
+            && !after.trim_start().starts_with("==");
+        let method = doc.source[..start].ends_with(':') && !doc.source[..start].ends_with("::");
+        let chain = doc.source[line_start..start]
+            .rsplit(|c: char| !(c.is_alphanumeric() || "_.:?![]".contains(c)))
+            .next()
+            .unwrap_or("");
+        let nil_safe = ["?.", "!.", "?[", "!["]
+            .iter()
+            .any(|s| chain.contains(s) || after.starts_with(s));
+        // A caret on the `{` of `new S {` sits in the braces too.
+        let past = doc.source[at..]
+            .chars()
+            .next()
+            .map_or(at, |c| at + c.len_utf8());
+
+        !branch
+            && !key
+            && !method
+            && !nil_safe
+            && !super::completion::in_constructor_braces(&doc.source, past)
+            && !declares_a_name_at(&doc.source, at)
+            && !crate::context::takes_a_type(head)
+            && !names_a_parameter(&doc.source, start)
+            && !matches!(
+                word,
+                "local"
+                    | "const"
+                    | "return"
+                    | "do"
+                    | "end"
+                    | "while"
+                    | "for"
+                    | "in"
+                    | "repeat"
+                    | "until"
+                    | "break"
+                    | "continue"
+                    | "export"
+            )
+    }
+
+    /// Whether the name an "Inline variable" action names is a `local`
+    /// or a `const` of the file, which the child can inline.
+    ///
+    /// The child deletes the line that declares the name and writes its
+    /// value at each use. A line the lowering rewrote, `local cp = new S
+    /// { }`, gives an edit over generated text, and resolve drops it.
+    fn inlines(&self, uri: &str, action: &Value, line: Option<u32>) -> bool {
+        let name = action
+            .get("title")
+            .and_then(Value::as_str)
+            .and_then(|t| t.strip_prefix("Inline variable '"))
+            .and_then(|t| t.strip_suffix('\''));
+        let Some((name, doc)) = name.zip(self.docs.get(uri)) else {
+            return true;
+        };
+        let bound = doc.bindings.iter().any(|b| {
+            let words: Vec<&str> = b.prefix.split_whitespace().collect();
+
+            b.name == name
+                && words.iter().any(|w| matches!(*w, "local" | "const"))
+                && !words.contains(&"function")
+        });
+        let declares = |text: &str| {
+            let text = text.trim_start();
+            let text = text.strip_prefix("export ").unwrap_or(text);
+            let text = text.strip_prefix("global ").unwrap_or(text);
+
+            ["local ", "const "].iter().any(|k| {
+                text.strip_prefix(k).is_some_and(|rest| {
+                    rest.strip_prefix(name).is_some_and(|tail| {
+                        !tail.starts_with(|c: char| c.is_alphanumeric() || c == '_')
+                    })
+                })
+            })
+        };
+        let Some((at, text)) = doc
+            .source
+            .lines()
+            .enumerate()
+            .take(line.map_or(usize::MAX, |l| l as usize + 1))
+            .filter(|(_, text)| declares(text))
+            .last()
+        else {
+            return bound;
+        };
+        let from = doc
+            .source
+            .split_inclusive('\n')
+            .take(at)
+            .map(str::len)
+            .sum();
+        let at = at as u32;
+        let width = text.encode_utf16().count() as u32;
+
+        bound
+            && doc.copies_source(doc.to_shadow(at, 0), doc.to_shadow(at, width))
+            && inline_keeps_behaviour(&doc.source, from, name)
+    }
+
+    /// Puts parentheses around a value a resolved "Inline variable"
+    /// writes where the use goes on with `.`, `:`, `[` or `(`. The child
+    /// writes `{ stage = 2 }.stage` and `"hi":upper()`, and neither
+    /// parses. A name, a call, or an index needs none.
+    pub(crate) fn wrap_inlined(&self, action: &mut Value) {
+        if action.pointer("/data/type").and_then(Value::as_str) != Some("inlineVariable") {
+            return;
+        }
+
+        let Some(changes) = action
+            .pointer_mut("/edit/changes")
+            .and_then(Value::as_object_mut)
+        else {
+            return;
+        };
+
+        for (uri, edits) in changes.iter_mut() {
+            let Some(doc) = self.docs.get(uri) else {
+                continue;
+            };
+
+            for e in edits.as_array_mut().into_iter().flatten() {
+                let end = e
+                    .get("range")
+                    .and_then(range_of)
+                    .and_then(|(_, (l, c))| offset_of(&doc.source, l, c));
+                let text = e.get("newText").and_then(Value::as_str).unwrap_or("");
+                let goes_on = end.is_some_and(|end| {
+                    let rest = &doc.source[end..];
+
+                    rest.starts_with(['.', ':', '[', '(']) && !rest.starts_with("..")
+                });
+                // `x.y = 1` parses only where `x` is a prefix expression.
+                let prefix = alloy_syntax::parse_one(&format!("{text}.y = 1")).is_ok();
+
+                if goes_on && !text.is_empty() && !prefix {
+                    e["newText"] = json!(format!("({text})"));
+                }
+            }
+        }
+    }
+
+    /// Whether a resolved "Extract to local variable" or "Inline
+    /// variable" leaves each source it edits parsing. The child reads
+    /// the lowered Luau and can write `local extracted = local function`.
+    /// The check is the one `--fix` gives a lint's rewrite. Other
+    /// actions pass.
+    pub(crate) fn extract_parses(&self, action: &Value) -> bool {
+        if !matches!(
+            action.pointer("/data/type").and_then(Value::as_str),
+            Some("extractVariable" | "inlineVariable")
+        ) {
+            return true;
+        }
+
+        let mut changes = action
+            .pointer("/edit/changes")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten();
+
+        changes.all(|(uri, edits)| {
+            let Some(doc) = self.docs.get(uri) else {
+                return true;
+            };
+            let src = doc.source.as_str();
+            let fixes: Option<Vec<alloy::lint::Fix>> = edits
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|e| {
+                    let ((sl, sc), (el, ec)) = e.get("range").and_then(range_of)?;
+                    let start = offset_of(src, sl, sc)? as u32;
+                    let end = offset_of(src, el, ec)? as u32;
+
+                    Some(alloy::lint::Fix::new(
+                        src,
+                        start,
+                        end,
+                        e.get("newText").and_then(Value::as_str)?,
+                    ))
+                })
+                .collect();
+            let Some((first, rest)) = fixes.as_deref().and_then(<[_]>::split_first) else {
+                return false;
+            };
+            let fix = alloy::lint::Fix {
+                more: rest.to_vec(),
+                ..first.clone()
+            };
+
+            alloy::lint::sound(src, vec![&fix]).1.is_empty()
+        })
     }
 
     /// Whether a workspace edit of the child, in shadow terms, rewrites
@@ -2422,6 +2957,265 @@ fn edit_count(edit: &Value) -> usize {
         );
 
     lists.filter_map(Value::as_array).map(Vec::len).sum()
+}
+
+/*
+Whether "Inline variable" keeps what the code does, for the declaration
+of `name` on the line that starts at byte `from`.
+
+The child writes the value at each use and deletes the declaration. A
+value with a call then runs at the use: once per item inside a `for`
+body, or after a later call that it ran before. So a literal and a
+plain name inline anywhere. Other values inline only when they read
+names, fields, and operators, and when one use at most reads them,
+outside any loop or function that starts after the declaration.
+*/
+fn inline_keeps_behaviour(src: &str, from: usize, name: &str) -> bool {
+    use alloy_syntax::lexer::TokKind;
+
+    const OPERATORS: [&str; 15] = [
+        "+", "-", "*", "/", "//", "%", "^", "..", "==", "~=", "<", ">", "<=", ">=", "#",
+    ];
+    // The words a value may hold. The first three carry it to the next line.
+    const WORDS: [&str; 10] = [
+        "and", "or", "not", "nil", "true", "false", "if", "then", "else", "elseif",
+    ];
+
+    let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
+        return false;
+    };
+    let toks = &lexed.toks;
+    let text = |i: usize| toks[i].text(src);
+    let mut at = 0;
+    let mut row = 0;
+    let lines: Vec<usize> = toks
+        .iter()
+        .map(|t| {
+            row += src[at..t.start as usize].matches('\n').count();
+            at = t.start as usize;
+
+            row
+        })
+        .collect();
+    // A `(`, a string, or a `{` after one of these makes a call.
+    let ends_a_value = |i: usize| {
+        (toks[i].kind == TokKind::Ident && !WORDS.contains(&text(i)))
+            || matches!(text(i), ")" | "]")
+    };
+    let Some(bound) = (0..toks.len()).find(|&i| toks[i].start as usize >= from && text(i) == name)
+    else {
+        return false;
+    };
+    let mut depth = 0;
+    let Some(eq) = (bound + 1..toks.len()).find(|&i| {
+        match text(i) {
+            "(" | "{" | "[" => depth += 1,
+
+            ")" | "}" | "]" => depth -= 1,
+
+            _ => {}
+        }
+
+        depth == 0 && text(i) == "="
+    }) else {
+        return false;
+    };
+
+    // The value runs to the end of its line, or further while a bracket
+    // is open or an operator carries it on.
+    let carries = |i: usize| OPERATORS.contains(&text(i)) || WORDS[..3].contains(&text(i));
+    let mut end = eq + 1;
+    let mut depth = 0;
+
+    while end < toks.len() {
+        if depth == 0
+            && end > eq + 1
+            && lines[end] > lines[end - 1]
+            && !carries(end - 1)
+            && !carries(end)
+            && !matches!(text(end), "then" | "else" | "elseif")
+        {
+            break;
+        }
+
+        match text(end) {
+            "(" | "{" | "[" => depth += 1,
+
+            ")" | "}" | "]" => depth -= 1,
+
+            _ => {}
+        }
+
+        end += 1;
+    }
+
+    let value = eq + 1..end;
+
+    if value.len() == 1 {
+        return matches!(
+            toks[value.start].kind,
+            TokKind::Number | TokKind::Str { .. } | TokKind::InterpStr | TokKind::Ident
+        );
+    }
+
+    let pure = value.clone().all(|i| {
+        let call = i > value.start && ends_a_value(i - 1);
+
+        match toks[i].kind {
+            TokKind::Ident => !matches!(
+                text(i),
+                "function" | "await" | "new" | "match" | "do" | "end" | "try"
+            ),
+
+            TokKind::Number | TokKind::InterpMid | TokKind::InterpTail | TokKind::RParen => true,
+
+            TokKind::Str { .. } | TokKind::InterpStr | TokKind::InterpHead | TokKind::LParen => {
+                !call
+            }
+
+            TokKind::Dot => toks.get(i + 1).is_some_and(|t| t.kind == TokKind::Ident),
+
+            TokKind::Colon => false,
+
+            // A table constructor and its `[key]`. A `[` after a value
+            // is an index, which can run `__index`.
+            TokKind::Symbol => match text(i) {
+                "{" => !call,
+
+                "[" => i > value.start && matches!(text(i - 1), "{" | "," | ";"),
+
+                "}" | "]" | "," | ";" | "=" => true,
+
+                t => OPERATORS.contains(&t),
+            },
+        }
+    });
+
+    if !pure {
+        return false;
+    }
+
+    // The rest of the block. Each open block says whether it runs its
+    // body again: a loop and a function do. An `if` value closes with
+    // its `else`.
+    #[derive(PartialEq)]
+    enum Open {
+        Block,
+        Again,
+        IfValue,
+    }
+
+    let mut open: Vec<Open> = Vec::new();
+    let mut loop_head = false;
+    let mut uses = 0;
+
+    for i in end..toks.len() {
+        if toks[i].kind != TokKind::Ident {
+            continue;
+        }
+
+        let before = if i > 0 { text(i - 1) } else { "" };
+
+        match text(i) {
+            "function" | "repeat" => open.push(Open::Again),
+
+            "for" | "while" => {
+                open.push(Open::Again);
+                loop_head = true;
+            }
+
+            "do" if loop_head => loop_head = false,
+
+            "do" | "struct" | "enum" | "interface" | "impl" | "trait" | "macro" | "namespace" => {
+                open.push(Open::Block);
+            }
+
+            "match" if alloy_syntax::contextual::keyword_at_byte(src, toks[i].start as usize) => {
+                open.push(Open::Block);
+            }
+
+            "if" => {
+                let value = OPERATORS.contains(&before)
+                    || matches!(
+                        before,
+                        "=" | "(" | "," | "[" | "{" | "return" | "and" | "or" | "not"
+                    )
+                    || (matches!(before, "then" | "else") && open.last() == Some(&Open::IfValue));
+
+                open.push(if value { Open::IfValue } else { Open::Block });
+            }
+
+            "else" if open.last() == Some(&Open::IfValue) => {
+                open.pop();
+            }
+
+            "end" | "until" => {
+                if open.pop().is_none() {
+                    break;
+                }
+            }
+
+            // The branch or the arm that declares the name ends here.
+            "else" | "elseif" if open.is_empty() => break,
+
+            "case" | "default" if open.is_empty() && lines[i] > lines[i - 1] => break,
+
+            word if word == name && !matches!(before, "." | ":") => {
+                if open.contains(&Open::Again) {
+                    return false;
+                }
+
+                uses += 1;
+            }
+
+            _ => {}
+        }
+    }
+
+    uses <= 1
+}
+
+/// The edits that double the `<` at `at` and the `>` that closes it:
+/// `id<number>(5)` becomes `id<<number>>(5)`.
+fn angle_call_edits(source: &str, at: usize) -> Option<Value> {
+    let close = angle_close(source, at)?;
+    let (sl, sc) = position_of(source, at);
+    let (cl, cc) = position_of(source, close);
+
+    Some(json!([
+        {
+            "range": { "start": { "line": sl, "character": sc }, "end": { "line": sl, "character": sc } },
+            "newText": "<",
+        },
+        {
+            "range": { "start": { "line": cl, "character": cc }, "end": { "line": cl, "character": cc } },
+            "newText": ">",
+        },
+    ]))
+}
+
+/// The offset of the `>` that closes the `<` at `at`. The walk reads
+/// tokens, so the `>` of a `->` inside a function type does not count.
+fn angle_close(source: &str, at: usize) -> Option<usize> {
+    let toks = alloy_syntax::lexer::lex(source).ok()?.toks;
+    let first = toks.iter().position(|t| t.start as usize == at)?;
+    let mut depth = 0;
+
+    for t in &toks[first..] {
+        depth += match t.text(source) {
+            "<" => 1,
+
+            ">" => -1,
+
+            _ => 0,
+        };
+
+        if depth == 0 {
+            return Some(t.start as usize);
+        }
+    }
+
+    None
 }
 
 /// The written type and its simple form, from the report of a double

@@ -465,9 +465,14 @@ pub(crate) fn case_binding_span(
     let pattern = case_pattern(lines[case_line])?;
 
     // `case n then` binds the whole value, and no payload types it.
-    if !pattern_bindings(&pattern, known, || array_element(&lines, case_line))
-        .iter()
-        .any(|(name, _, _)| name == word)
+    if !pattern_bindings(
+        &pattern,
+        known,
+        || array_element(&lines, case_line),
+        &|_| Vec::new(),
+    )
+    .iter()
+    .any(|(name, _, _)| name == word)
         && !crate::context::pattern_names(&pattern)
             .iter()
             .any(|l| l.name == word)
@@ -651,10 +656,32 @@ pub(crate) fn case_binding_text(
     let lines: Vec<&str> = doc.source.lines().collect();
     let case_line = case_binding_line(&lines, line)?;
     let pattern = case_pattern(lines[case_line])?;
-    let bindings = pattern_bindings(&pattern, known, || {
-        array_element(&lines, case_line)
-            .or_else(|| super::fields::element_of(&scrutinee_type(doc, case_line)?))
-    });
+    // A struct's or a record's fields, from a declaration in reach or
+    // from the record text itself.
+    let fields = |ty: &str| {
+        let ty = ty.trim().trim_end_matches('?');
+
+        match ty.starts_with('{') {
+            true => crate::context::record_entries(ty),
+
+            false => doc
+                .decls
+                .iter()
+                .chain(&doc.import_decls)
+                .find(|d| d.name == ty)
+                .map(|d| crate::context::record_entries(&d.hover))
+                .unwrap_or_default(),
+        }
+    };
+    let bindings = pattern_bindings(
+        &pattern,
+        known,
+        || {
+            array_element(&lines, case_line)
+                .or_else(|| super::fields::element_of(&scrutinee_type(doc, case_line)?))
+        },
+        &fields,
+    );
 
     // `b.amount` reads a field of what `case Buff(b)` bound; the child
     // sees the payload slot and answers `any`.
@@ -674,14 +701,24 @@ pub(crate) fn case_binding_text(
         ));
     }
 
+    let head = lines[match_head_line(&lines, case_line)?].trim();
+
+    // A name deeper in the pattern whose type the text does not say. An
+    // expression match writes the path in its place, so the child would
+    // answer for the text after it. The statement form keeps a local the
+    // child types.
+    if pattern != word {
+        let bound = crate::context::pattern_names(&pattern)
+            .iter()
+            .any(|l| l.name == word);
+
+        return (bound && !head.starts_with("match "))
+            .then(|| format!("```alloy\n{word}\n```\nA binding of `case {pattern}`."));
+    }
+
     // `case k where k > 5 then`: a bare name binds the whole value. An
     // expression match lowers to one expression with no local for the
     // name, so the child answers with the type of the arm's result.
-    if pattern != word {
-        return None;
-    }
-
-    let head = lines[match_head_line(&lines, case_line)?].trim();
     let scrutinee = match_value(head)?;
     let text = match scrutinee_type(doc, case_line) {
         Some(ty) => format!("{word}: {ty}"),
@@ -881,79 +918,234 @@ pub(crate) fn case_pattern(line: &str) -> Option<String> {
 }
 
 /// The names a pattern binds, each with its type and what it comes
-/// from. A payload reads its type off the enum's declaration; an array
-/// pattern reads the element type of what the match runs over.
+/// from, at any depth. A payload reads its type off the enum's
+/// declaration, a field off what `fields` reads for a struct or a
+/// record, and an array pattern the element type of what it runs over.
 pub(crate) fn pattern_bindings(
     pattern: &str,
     known: &alloy::shapes::Known,
     element: impl Fn() -> Option<String>,
+    fields: &dyn Fn(&str) -> Vec<crate::context::Field>,
 ) -> Vec<(String, String, String)> {
+    // The top of an array pattern reads the element of what the match
+    // runs over.
+    let top = match pattern.trim_start().starts_with('[') {
+        true => element().map(|e| format!("{e}[]")),
+
+        false => None,
+    };
     let mut out = Vec::new();
+    typed_names(pattern, top.as_deref(), "", known, fields, &mut out);
 
-    if let Some(inner) = pattern.strip_prefix('[').and_then(|p| p.strip_suffix(']')) {
-        let Some(elem) = element() else {
-            return out;
-        };
+    out
+}
 
-        for item in inner.split(',') {
-            let item = item.trim();
+/// The names of one pattern that `expected` types, pushed with what
+/// each comes from. `owner` names what a bare name at this level reads.
+fn typed_names(
+    text: &str,
+    expected: Option<&str>,
+    owner: &str,
+    known: &alloy::shapes::Known,
+    fields: &dyn Fn(&str) -> Vec<crate::context::Field>,
+    out: &mut Vec<(String, String, String)>,
+) {
+    let sides = crate::context::alternatives(text.trim());
 
-            match item.strip_prefix("...") {
-                Some(rest) if is_binding(rest) => {
-                    out.push((
-                        rest.to_string(),
-                        format!("{elem}[]"),
-                        "the array pattern".into(),
-                    ));
+    // `Sword(n) or Wand(n)`: each side types the name, and the union of
+    // the sides is its type.
+    if let [first, rest @ ..] = sides.as_slice()
+        && !rest.is_empty()
+    {
+        let mut merged: Vec<(String, String, String)> = Vec::new();
+        typed_names(first, expected, owner, known, fields, &mut merged);
+
+        for side in rest {
+            let mut more = Vec::new();
+            typed_names(side, expected, owner, known, fields, &mut more);
+
+            for (name, ty, from) in more {
+                let Some((_, have, owners)) = merged.iter_mut().find(|(n, ..)| *n == name) else {
+                    continue;
+                };
+
+                if !have.split(" | ").any(|t| t == ty) {
+                    *have = format!("{have} | {ty}");
                 }
 
-                _ if is_binding(item) => {
-                    out.push((item.to_string(), elem.clone(), "the array pattern".into()));
+                if !owners.split(" or ").any(|o| o == from) {
+                    *owners = format!("{owners} or {from}");
                 }
-
-                _ => {}
             }
         }
 
-        return out;
+        out.extend(merged);
+
+        return;
     }
 
-    let Some(open) = pattern.find('(') else {
-        return out;
-    };
-    let head = pattern[..open].trim();
-    let variant = head.rsplit('.').next().unwrap_or(head);
-    let args = pattern[open + 1..].trim_end().trim_end_matches(')');
+    let t = sides[0];
 
-    let found = known.shapes.iter().find_map(|s| match s {
-        alloy::declarations::Shape::Enum { name, variants, .. } => variants
-            .iter()
-            .find(|(v, _)| v == variant)
-            .map(|(_, payload)| (name.clone(), payload.clone())),
-
-        _ => None,
-    });
-
-    let Some((enum_name, payload)) = found else {
-        return out;
-    };
-
-    for (k, item) in split_top(args).into_iter().enumerate() {
-        let item = item.trim();
-
-        if !is_binding(item) {
-            continue;
+    if is_binding(t) {
+        if let Some(ty) = expected {
+            out.push((t.to_string(), ty.trim().to_string(), owner.to_string()));
         }
 
-        let Some(ty) = payload.get(k) else {
-            continue;
-        };
-        out.push((
-            item.to_string(),
-            ty.clone(),
-            format!("`{enum_name}.{variant}`"),
-        ));
+        return;
     }
+
+    let (Some(open), Some(close)) = (t.find(['(', '[', '{']), t.rfind([')', ']', '}'])) else {
+        return;
+    };
+
+    if close <= open {
+        return;
+    }
+
+    let head = t[..open].trim();
+    let parts = split_top(&t[open + 1..close]);
+
+    match t.as_bytes()[open] {
+        b'(' => {
+            let Some((enum_name, variant, payload)) = variant_payload(head, expected, known) else {
+                return;
+            };
+            let owner = format!("`{enum_name}.{variant}`");
+
+            for (k, part) in parts.into_iter().enumerate() {
+                typed_names(
+                    part,
+                    payload.get(k).map(String::as_str),
+                    &owner,
+                    known,
+                    fields,
+                    out,
+                );
+            }
+        }
+
+        b'[' => {
+            let elem = expected.and_then(super::fields::element_of);
+            let owner = "the array pattern";
+
+            for part in parts {
+                match part.trim().strip_prefix("...") {
+                    Some(rest) if is_binding(rest) => {
+                        if let Some(elem) = &elem {
+                            out.push((rest.to_string(), format!("{elem}[]"), owner.into()));
+                        }
+                    }
+
+                    _ => typed_names(part, elem.as_deref(), owner, known, fields, out),
+                }
+            }
+        }
+
+        _ => {
+            let ty = match head.is_empty() {
+                true => expected.unwrap_or_default().trim().trim_end_matches('?'),
+
+                false => head,
+            };
+            // `B.Gem { n }` names a struct through a module or a
+            // namespace, and the declarations list it by its own name.
+            let declared = match (fields(ty), ty.rsplit_once('.')) {
+                (d, Some((_, last))) if d.is_empty() => fields(last),
+
+                (d, _) => d,
+            };
+
+            for part in parts {
+                let (field, sub) = match part.split_once('=') {
+                    Some((f, sub)) => (f.trim(), sub),
+
+                    None => (part.trim(), part),
+                };
+                let field_ty = declared
+                    .iter()
+                    .find(|f| f.name == field)
+                    .map(|f| f.ty.as_str());
+                let owner = format!("field `{field}` of `{ty}`");
+                typed_names(sub, field_ty, &owner, known, fields, out);
+            }
+        }
+    }
+}
+
+/// The enum, the variant, and the payload types a variant pattern's head
+/// names. `Item.Sword` picks the enum by its name, and a bare `Sword` or
+/// an alias the first enum with that variant. A generic payload reads
+/// the arguments of `expected`: `Some(v)` against `Opt<Item>` types `v`
+/// as `Item`.
+fn variant_payload(
+    head: &str,
+    expected: Option<&str>,
+    known: &alloy::shapes::Known,
+) -> Option<(String, String, Vec<String>)> {
+    let (path, variant) = head.rsplit_once('.').unwrap_or(("", head));
+    let lookup = |named: bool| {
+        known.shapes.iter().find_map(|s| {
+            let alloy::declarations::Shape::Enum {
+                name,
+                generics,
+                variants,
+            } = s
+            else {
+                return None;
+            };
+
+            if named && name != path && !name.ends_with(&format!(".{path}")) {
+                return None;
+            }
+
+            let (_, payload) = variants.iter().find(|(v, _)| v == variant)?;
+
+            Some((name, generics, payload))
+        })
+    };
+    let (name, generics, payload) = (!path.is_empty())
+        .then(|| lookup(true))
+        .flatten()
+        .or_else(|| lookup(false))?;
+
+    // `Opt<Item>` gives each parameter of `enum Opt<T>` its argument.
+    let args = expected
+        .and_then(|e| {
+            e.trim()
+                .strip_prefix(name.rsplit('.').next().unwrap_or(name))
+        })
+        .and_then(|rest| rest.trim().strip_prefix('<')?.strip_suffix('>'))
+        .map(alloy::shapes::top_level_parts)
+        .unwrap_or_default();
+    let payload = payload
+        .iter()
+        .map(|ty| {
+            generics.iter().zip(&args).fold(ty.clone(), |ty, (g, arg)| {
+                let g = g.split('=').next().unwrap_or(g).trim();
+
+                replace_word(&ty, g, arg.trim())
+            })
+        })
+        .collect();
+
+    Some((name.clone(), variant.to_string(), payload))
+}
+
+/// `text` with every whole word `word` replaced by `with`.
+fn replace_word(text: &str, word: &str, with: &str) -> String {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+
+    for (at, _) in text.match_indices(word) {
+        if !text[..at].ends_with(is_word) && !text[at + word.len()..].starts_with(is_word) {
+            out.push_str(&text[last..at]);
+            out.push_str(with);
+            last = at + word.len();
+        }
+    }
+
+    out.push_str(&text[last..]);
 
     out
 }
@@ -1036,14 +1228,24 @@ impl State {
     ) -> Option<Vec<alloy::declarations::Declaration>> {
         let entry = self.import_entry_at(source, offset)?;
         let target = imports::module_path(&self.resolve_spec(uri, &entry.spec)?);
-        let open = self
-            .docs
-            .iter()
-            .find(|(u, _)| uri_to_path(u).is_some_and(|p| imports::module_path(&p) == target))
-            .map(|(_, d)| d.source.clone());
-        let text = open.or_else(|| std::fs::read_to_string(imports::module_file(&target)?).ok())?;
+        let open = self.docs.iter().find_map(|(u, d)| {
+            let path = uri_to_path(u)?;
 
-        Some(alloy::declarations::summaries(&text, false))
+            (imports::module_path(&path) == target).then(|| (path, d.source.clone()))
+        });
+        let (path, text) = match open {
+            Some(pair) => pair,
+
+            None => {
+                let file = imports::module_file(&target)?;
+                let text = std::fs::read_to_string(&file).ok()?;
+
+                (file, text)
+            }
+        };
+
+        // A barrel's `export { T } from` reads as the module it names.
+        Some(alloy::modules::sent_summaries(&path, &text))
     }
 }
 
@@ -1158,6 +1360,23 @@ mod tests {
         assert_eq!(
             super::with_derives("```alloy\nstruct P\nend\n```", "struct P\nend\n", 7),
             "```alloy\nstruct P\nend\n```"
+        );
+    }
+
+    /// A namespace member's summary started at its attribute line, so the
+    /// hover wrote `@derive(...)` twice: once from the summary and once
+    /// from the source above the name.
+    #[test]
+    fn a_namespace_struct_hover_names_its_derives_once() {
+        let src = "namespace N\n  -- An entry.\n  @derive(Eq, Debug)\n  struct Entry\n    wins: number\n  end\nend\n";
+        let decl = alloy::declarations::summaries(src, false)
+            .into_iter()
+            .find(|d| d.name == "N.Entry")
+            .unwrap();
+
+        assert_eq!(
+            super::with_derives(&decl.hover, src, decl.offset),
+            "```alloy\n@derive(Eq, Debug)\nstruct N.Entry\n  wins: number\nend\n```\n\nAn entry."
         );
     }
 

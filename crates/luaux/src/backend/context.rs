@@ -88,6 +88,10 @@ pub struct EmitContext<'a> {
     /// `<Frame` with no `>` means guessing what was meant, and a wrong guess
     /// buries the one real mistake under a page of invented ones.
     errors: RefCell<Vec<EmitError>>,
+    /// Alloy patch: the source span of each lone `{expr}` that became the
+    /// `Text` property as a plain value. Alloy's check artifact wants a
+    /// string or a number there.
+    text_holes: RefCell<Vec<(usize, usize)>>,
 }
 
 impl<'a> EmitContext<'a> {
@@ -114,6 +118,7 @@ impl<'a> EmitContext<'a> {
             fragment: Cell::new(false),
             merge: Cell::new(false),
             errors: RefCell::default(),
+            text_holes: RefCell::default(),
         }
     }
 
@@ -266,6 +271,16 @@ impl<'a> EmitContext<'a> {
     /// The recovered errors, in the order they were found.
     pub fn take_errors(&self) -> Vec<EmitError> {
         std::mem::take(&mut self.errors.borrow_mut())
+    }
+
+    /// Alloy patch: records the span of a lone `{expr}` that became `Text`.
+    pub fn text_hole(&self, start: usize, end: usize) {
+        self.text_holes.borrow_mut().push((start, end));
+    }
+
+    /// Alloy patch: the spans `text_hole` recorded.
+    pub fn take_text_holes(&self) -> Vec<(usize, usize)> {
+        std::mem::take(&mut self.text_holes.borrow_mut())
     }
 
     /// Zero-based line containing `offset`.

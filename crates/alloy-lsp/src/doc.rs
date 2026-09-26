@@ -39,7 +39,8 @@ pub struct Doc {
     /// block instead of as the name it targets.
     pub impl_blocks: Vec<alloy::impl_blocks::ImplBlock>,
     /// The plain `local X = { }` tables with their members, for the
-    /// folds: a print of the whole shape reads back as `typeof(X)`.
+    /// folds: a print of the whole shape as `self` reads back as
+    /// `typeof(X)`.
     pub tables: Vec<(String, Vec<String>)>,
     /// Every namespace the file declares, with the byte range of its
     /// body and the members it holds.
@@ -73,7 +74,7 @@ pub struct Doc {
     pub error: Option<alloy::CompileError>,
     pub is_alx: bool,
     /// The repair pass's compile, when a dangling `.`, `:`, `?.`,
-    /// `!.`, `?:`, `!:`, `[`, `?[` or `![` stopped the parser.
+    /// `!.`, `?:`, `!:`, `[`, `?[`, `![`, `->` or `=>` stopped the parser.
     /// `shadow` and every position map come
     /// from it while it stands; `output` stays the author's own
     /// compile, so the diagnostics still name what they always did.
@@ -112,7 +113,7 @@ fn plain_enough(source: &str) -> String {
 /// The name the repair pass writes after a dangling member operator.
 /// The call keeps the statement a call, the one expression Luau reads
 /// as a statement, so `HashMap.new().` repairs in every position.
-const HOLE: &str = "__alloy_hole()";
+pub(crate) const HOLE: &str = "__alloy_hole()";
 
 /// The same for a bracket that never closed: `x[` becomes
 /// `x[__alloy_hole()]`, one index the parser reads through. The
@@ -179,7 +180,7 @@ fn closes_an_expression(text: &str) -> bool {
 
 /// The byte offsets where an access operator wants a name and none
 /// follows: `a.`, `a:`, `a?.`, `a!.`, `a?:`, `a!:`, `a[`, `a?[`,
-/// `a![`. Each carries the text the repair writes there. The parser
+/// `a![`, `a->`, `a=>`. Each carries the text the repair writes there. The parser
 /// wants a name after a separator and a key inside a bracket.
 ///
 /// A bracket goes by the end of the line alone: `x[]` closes itself,
@@ -203,6 +204,11 @@ fn dangling_members(source: &str) -> Vec<(usize, &'static str)> {
             }
 
             TokKind::Symbol if tok.text(source) == "[" => (BRACKET_HOLE, false),
+
+            // `script.Parent->` wants the name of a child. The hole
+            // lowers to a `FindFirstChild("` string, where the child
+            // lists the children the sourcemap gives.
+            TokKind::Symbol if matches!(tok.text(source), "->" | "=>") => (HOLE, true),
 
             _ => continue,
         };
@@ -432,11 +438,12 @@ impl Doc {
             .iter()
             .flat_map(|text| alloy::shapes::interfaces(text))
             .collect();
-        self.import_decls = self
-            .import_sources
-            .iter()
-            .flat_map(|text| alloy::declarations::summaries(text, false))
-            .collect();
+        // A name a barrel passes on reads as the module it names
+        // declares it, under the name the barrel sends it out as.
+        self.import_decls = alloy::modules::import_summaries_for_file(
+            std::path::Path::new(&options.file_name),
+            text,
+        );
         // `file_name` is the real path, which is what the ingots see.
         let compiled =
             alloy::compile_file(&options.file_name, &self.source, options, Some(jsx), ingots);

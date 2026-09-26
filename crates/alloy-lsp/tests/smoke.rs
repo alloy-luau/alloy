@@ -27,13 +27,26 @@ fn luau_lsp() -> Option<PathBuf> {
 
 /// Kills the server when the test ends, pass or fail, so a stuck child
 /// never outlives the test.
-struct KillOnDrop(std::process::Child);
+/// The server, and the folder of its mirrors. The drop kills the server
+/// and removes the folder, so a test run leaves no mirror behind.
+struct KillOnDrop(std::process::Child, PathBuf);
 
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
+        let _ = std::fs::remove_dir_all(&self.1);
     }
+}
+
+/// Starts the server with its mirrors in a folder of its own.
+fn serve(command: &mut Command) -> KillOnDrop {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mirrors = std::env::temp_dir().join(format!("alloy-lsp-test-{}-{n}", std::process::id()));
+    let child = command.env("ALLOY_LSP_MIRRORS", &mirrors).spawn().unwrap();
+
+    KillOnDrop(child, mirrors)
 }
 
 fn write(w: &mut impl Write, v: &Value) {
@@ -128,15 +141,13 @@ fn scenario(child: &std::path::Path) {
     } else {
         Stdio::null()
     };
-    let mut server = KillOnDrop(
+    let mut server = serve(
         Command::new(env!("CARGO_BIN_EXE_alloy-lsp"))
             .arg("--luau-lsp")
             .arg(child)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(stderr)
-            .spawn()
-            .unwrap(),
+            .stderr(stderr),
     );
     let mut stdin = server.0.stdin.take().unwrap();
     let rx = messages(server.0.stdout.take().unwrap());
@@ -322,15 +333,13 @@ fn a_child_that_exits_is_reported_and_stops_the_server() {
     std::fs::write(&script, "#!/bin/sh\necho 'no such build' >&2\nexit 1\n").unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    let mut server = KillOnDrop(
+    let mut server = serve(
         Command::new(env!("CARGO_BIN_EXE_alloy-lsp"))
             .arg("--luau-lsp")
             .arg(&script)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
+            .stderr(Stdio::null()),
     );
     let mut stdin = server.0.stdin.take().unwrap();
     let rx = messages(server.0.stdout.take().unwrap());

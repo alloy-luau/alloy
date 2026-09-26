@@ -7,8 +7,9 @@
 //! own, and the top level of a Roblox Script, which is a thread of its
 //! own too. A function literal handed to a spawner runs on a thread of
 //! its own as well: `task.spawn`, `task.defer`, `task.delay`, and the
-//! `Connect` and `Once` of a signal. Roblox and the std `Signal` both
-//! start each handler on a new thread.
+//! `Connect` and `Once` of a signal, and the `on` and `once` of a
+//! remote. Roblox and the std `Signal` both start each handler on a new
+//! thread, and a remote's handler runs from a Roblox signal or invoke.
 //!
 //! Anywhere else the yield lands in the caller. At a module's top level
 //! it lands in `require`. In a plain callback it lands wherever the
@@ -19,7 +20,7 @@
 //! yields and a standalone test suite passes.
 
 use alloy_syntax::ast::{
-    Block, CallArgs, ClassMember, DefaultExport, Expr, FunctionBody, Stmt, TokSpan,
+    Block, CallArgs, ClassMember, DefaultExport, Expr, FunctionBody, IndexKey, Stmt, TokSpan,
 };
 
 use super::{Child, Desugar, expr_children, stmt_children};
@@ -189,10 +190,26 @@ impl Desugar<'_> {
     /// Whether a call starts each function it is handed on a thread of
     /// its own.
     fn spawns_threads(&self, func: &Expr, method: Option<TokSpan>) -> bool {
-        match method {
-            Some(m) => matches!(self.text_of(m), "Connect" | "Once"),
+        match (method, func) {
+            // The std `Signal` writes `connect` and `once` beside the
+            // Roblox names, as the same functions.
+            (Some(m), _) => matches!(self.text_of(m), "Connect" | "Once" | "connect" | "once"),
 
-            None => matches!(
+            // `Ping.on(handler)`: the runtime calls a remote's handler
+            // from `OnServerEvent:Connect` or `OnServerInvoke`, and
+            // Roblox runs each of those on a thread of its own.
+            (
+                None,
+                Expr::Index {
+                    object,
+                    key: IndexKey::Field(verb),
+                    ..
+                },
+            ) if matches!(self.text_of(*verb), "on" | "once") => {
+                self.remote_named(object).is_some()
+            }
+
+            (None, _) => matches!(
                 self.dotted_name(func).as_deref(),
                 Some("task.spawn" | "task.defer" | "task.delay")
             ),

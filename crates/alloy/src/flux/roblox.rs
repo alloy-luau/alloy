@@ -245,9 +245,9 @@ impl<'s> Scan<'s> {
             return false;
         }
 
-        let name = self.t(a);
-
-        if let Some(ty) = self.declared_type(name) {
+        // The binding the name reads at `a` answers. An earlier `conn`
+        // in a closed block is another value.
+        if let Some(ty) = self.type_at(a) {
             return if event {
                 names_event_type(ty)
             } else {
@@ -255,7 +255,7 @@ impl<'s> Scan<'s> {
             };
         }
 
-        deep && match self.local_init(name) {
+        deep && match self.init_at(a) {
             Some((s, e)) => self.roblox_expr(s, e, event, false),
             None => false,
         }
@@ -299,9 +299,20 @@ impl<'s> Scan<'s> {
             .any(|i| {
                 let mut j = i + 1;
                 let mut binds = false;
+                // A name list may run over several lines: a line inside
+                // the braces opens no statement.
+                let mut depth = 0;
 
-                while j < self.toks.len() && !self.at(j, "from") && !self.statement_start(j) {
-                    binds |= self.t(j) == name;
+                while j < self.toks.len()
+                    && !self.at(j, "from")
+                    && (depth > 0 || !self.statement_start(j))
+                {
+                    match self.t(j) {
+                        "{" => depth += 1,
+                        "}" => depth -= 1,
+                        _ => binds |= self.t(j) == name,
+                    }
+
                     j += 1;
                 }
 
@@ -311,30 +322,36 @@ impl<'s> Scan<'s> {
             })
     }
 
-    /// The tokens of the value in `local name = value`, on one line.
-    fn local_init(&self, name: &str) -> Option<(usize, usize)> {
-        for j in 1..self.toks.len() {
-            if !self.at(j - 1, "local") || !self.is_name(j) || self.t(j) != name {
-                continue;
-            }
+    /// The tokens of the value the name at `at` holds: its `local` in
+    /// scope says, or the first `local` of the name in the file when no
+    /// local or parameter in scope binds it.
+    fn init_at(&self, at: usize) -> Option<(usize, usize)> {
+        match self.binding_at(at) {
+            Some(d) if self.at(d.wrapping_sub(1), "local") => self.local_value(d),
 
-            if !self.at(j + 1, "=") {
-                continue;
-            }
+            Some(_) => None,
 
-            let line = self.line_of(j);
-            let mut k = j + 2;
+            None => (1..self.toks.len())
+                .filter(|&j| self.at(j - 1, "local") && self.is_name(j) && self.t(j) == self.t(at))
+                .find_map(|j| self.local_value(j)),
+        }
+    }
 
-            while k < self.toks.len() && self.line_of(k) == line {
-                k += 1;
-            }
-
-            if k > j + 2 {
-                return Some((j + 2, k));
-            }
+    /// The tokens of the value in `local name = value`, on one line, for
+    /// the name at `j`.
+    fn local_value(&self, j: usize) -> Option<(usize, usize)> {
+        if !self.at(j + 1, "=") {
+            return None;
         }
 
-        None
+        let line = self.line_of(j);
+        let mut k = j + 2;
+
+        while k < self.toks.len() && self.line_of(k) == line {
+            k += 1;
+        }
+
+        (k > j + 2).then_some((j + 2, k))
     }
 
     /// Whether the file names a derive, as in `@derive(Debug, Clone)`.
@@ -429,14 +446,11 @@ impl<'s> Scan<'s> {
             return false;
         }
 
-        if self
-            .declared_type(self.t(i))
-            .is_some_and(names_instance_type)
-        {
+        if self.type_at(i).is_some_and(names_instance_type) {
             return true;
         }
 
-        match self.local_init(self.t(i)) {
+        match self.init_at(i) {
             Some((a, _)) => {
                 self.instance_new_open(a).is_some()
                     || (self.at(a, "new") && self.at(a + 1, "Instance"))
@@ -571,9 +585,17 @@ impl<'s> Scan<'s> {
 
                     None => None,
                 };
+                // `@M.tag` and `@serde.rename_all(...)` name a path.
+                let head = name_at.filter(|n| self.is_name(*n)).map(|mut n| {
+                    while n >= 2 && self.t(n - 1) == "." && self.is_name(n - 2) {
+                        n -= 2;
+                    }
 
-                match name_at {
-                    Some(n) if n > 0 && self.is_name(n) && self.t(n - 1) == "@" => top = n - 1,
+                    n
+                });
+
+                match head {
+                    Some(n) if n > 0 && self.t(n - 1) == "@" => top = n - 1,
 
                     _ => break,
                 }
@@ -695,6 +717,12 @@ mod tests {
         // an Instance as far as the file says.
         assert!(!all_names("delete self.part\n").contains(&"prefer_destroy"));
         assert!(!all_names("local bag = make()\ndelete bag\n").contains(&"prefer_destroy"));
+
+        // A statement after the name on its line is not the operand.
+        assert_eq!(
+            all_names("local part = Instance.new(\"Part\")\ndelete part part = nil\n"),
+            vec!["prefer_destroy"]
+        );
     }
 
     #[test]
@@ -791,6 +819,35 @@ mod tests {
             names("local c: SignalConnection = sig:connect(f)\nc:disconnect()\n"),
             Vec::<&str>::new()
         );
+        // A chain from an imported name reaches another module, and a
+        // name list over several lines binds it too.
+        for head in [
+            "import { Shop } from \"./shop\"\n",
+            "import {\n    Shop,\n} from \"./shop\"\n",
+        ] {
+            assert_eq!(
+                names(&format!("{head}local o = Shop.Offer:clone()\n")),
+                Vec::<&str>::new(),
+                "{head}"
+            );
+        }
+    }
+
+    /// The receiver reads the binding in scope. A `conn` of a Roblox
+    /// event in a closed block is another value than the `conn` of a
+    /// std signal after it, and a parameter holds its own function.
+    #[test]
+    fn a_receiver_reads_the_binding_in_scope() {
+        let src = "do\n    local conn = damaged:Connect(f)\n    conn:Disconnect()\nend\ndo\n    local conn = damaged:connect(f)\n    conn:disconnect()\nend\n";
+        assert_eq!(names(src), Vec::<&str>::new());
+
+        let roblox = "local conn = sig:connect(f)\ndo\n    local conn = part.Touched:Connect(f)\n    conn:disconnect()\nend\nconn:disconnect()\n";
+        let got = lints(roblox);
+        assert_eq!(names_of(&got), vec!["deprecated_method"]);
+        assert_eq!(got[0].start, roblox.find("disconnect").unwrap() as u32);
+
+        let param = "local conn = part.Touched:Connect(f)\nlocal function g(conn: SignalConnection)\n    conn:disconnect()\nend\nprint(g)\n";
+        assert_eq!(names(param), Vec::<&str>::new());
     }
 
     #[test]
@@ -829,6 +886,20 @@ mod tests {
         );
         assert_eq!(names("local v = bag:remove(\"key\")\n"), Vec::<&str>::new());
         assert_eq!(names("local c = t:clone(1)\n"), Vec::<&str>::new());
+    }
+
+    /// The doc sits above the attributes, and an attribute through a
+    /// path, `@M.tag`, is one of them. The walk stopped at the path, so a
+    /// documented export reported.
+    #[test]
+    fn a_doc_sits_above_a_dotted_attribute() {
+        for attr in ["@M.tag", "@serde.rename_all(\"camelCase\")", "@A.B.tag(1)"] {
+            let src = format!("-- Doc.\n{attr}\nexport struct E as\n    x: number\nend\n");
+            assert_eq!(all(&src), Vec::<&str>::new(), "{src}");
+
+            let bare = format!("{attr}\nexport struct E as\n    x: number\nend\n");
+            assert_eq!(all(&bare), vec!["missing_doc"], "{bare}");
+        }
     }
 
     #[test]

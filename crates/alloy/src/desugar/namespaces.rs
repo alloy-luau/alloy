@@ -163,6 +163,23 @@ impl<'s> Desugar<'s> {
                     self.export_listed_bare.insert(name.clone());
                 }
 
+                // `export { E } from "./m"` beside `import { E } from
+                // "./m"`: each writes an alias of `E`, and Luau reads the
+                // second as a redefinition. The import's alias takes the
+                // word, and the list writes none.
+                if let Some(from) = list.from
+                    && spec.alias.is_none()
+                    && self.imports_by_own_name(&block.stmts, self.text_of(from), &name)
+                {
+                    self.export_listed_types.insert(name.clone());
+                    self.export_listed_bare.insert(name.clone());
+                }
+
+                if list.from.is_some() && name != "default" {
+                    self.reexported_types
+                        .insert(self.text_of(spec.alias.unwrap_or(spec.name)).to_string());
+                }
+
                 self.export_listed.insert(name);
             }
         }
@@ -294,6 +311,31 @@ impl<'s> Desugar<'s> {
                 self.imported_types.insert(local, value);
             }
         }
+    }
+
+    /// Whether an import of the file binds `name` under its own name
+    /// from the module `quoted` names.
+    fn imports_by_own_name(&self, stmts: &[Stmt], quoted: &str, name: &str) -> bool {
+        let bare = |q: &str| q.trim_matches(['"', '\'']).to_string();
+
+        stmts.iter().any(|stmt| {
+            let Stmt::Import(i) = stmt else {
+                return false;
+            };
+            let specs = match &i.kind {
+                ImportKind::Named(v)
+                | ImportKind::Both(_, v)
+                | ImportKind::Namespace(_, v)
+                | ImportKind::TypeOnly(v) => v,
+
+                ImportKind::Default(_) => return false,
+            };
+
+            bare(self.text_of(i.path)) == bare(quoted)
+                && specs
+                    .iter()
+                    .any(|sp| sp.alias.is_none() && self.text_of(sp.name) == name)
+        })
     }
 
     /// The namespaces the file imports. A module that exports
@@ -635,6 +677,25 @@ impl<'s> Desugar<'s> {
         self.namespaces.contains_key(&path.replace('.', "_"))
     }
 
+    /// The key of the namespace the head of a path names. A nested
+    /// namespace reads by its own name inside the one that declares it,
+    /// so `Deep.Pos` inside `Combat` is `Combat.Deep.Pos`. The innermost
+    /// namespace under render answers first, then the file. A member of
+    /// that name that is no namespace shadows the file's namespace.
+    fn ns_head_key(&self, head: &str) -> Option<String> {
+        for frame in self.ns_stack.iter().rev() {
+            if let Some(m) = self
+                .namespaces
+                .get(&frame.key)
+                .and_then(|info| info.member(head))
+            {
+                return m.nested.then(|| key_of(Some(&frame.key), head));
+            }
+        }
+
+        self.namespaces.contains_key(head).then(|| head.to_string())
+    }
+
     /// The rendered name a dotted path through the file's namespaces
     /// names: `Zoo.Lion` is `Zoo_Lion`, and `A.B.S` through a nested
     /// namespace is `A_B_S`. `None` when the head names no namespace,
@@ -642,7 +703,7 @@ impl<'s> Desugar<'s> {
     pub(crate) fn ns_path_name(&self, path: &str) -> Option<String> {
         let parts: Vec<&str> = path.split('.').map(str::trim).collect();
         let (head, rest) = parts.split_first()?;
-        let mut key = (*head).to_string();
+        let mut key = self.ns_head_key(head)?;
         let mut info = self.namespaces.get(&key)?;
         let mut at = 0;
 
@@ -655,8 +716,10 @@ impl<'s> Desugar<'s> {
 
             let m = info.member(rest[at])?;
 
+            // `N.X.Z` with `X` a struct names nothing: the path runs off
+            // the member.
             if !m.nested {
-                return Some(m.rendered.clone());
+                return (at + 1 == rest.len()).then(|| m.rendered.clone());
             }
 
             key = key_of(Some(&key), rest[at]);
@@ -665,6 +728,37 @@ impl<'s> Desugar<'s> {
         }
 
         None
+    }
+
+    /// The flat name of a type this file declares in a namespace, for
+    /// `Combat.Hit`, or for `Hit` inside `namespace Combat`. An imported
+    /// namespace gives `None`: this file has no table of that name.
+    pub(crate) fn own_ns_type(&self, ty: &str) -> Option<String> {
+        self.ns_member_name(ty)
+            .or_else(|| self.ns_path_name(ty))
+            .filter(|n| {
+                self.struct_wire.contains_key(n)
+                    || self.enum_decls.contains_key(n)
+                    || self.alias_values.contains_key(n)
+            })
+    }
+
+    /// A type written inside a namespace, with each sibling type it
+    /// names as a path: `Pos[]` inside `namespace Combat` is
+    /// `Combat.Pos[]`. The wire layout reads it after the body closes.
+    pub(crate) fn qualify_members(&self, ty: &str) -> String {
+        if self.ns_stack.is_empty() {
+            return ty.to_string();
+        }
+
+        super::types::qualify_names(ty, &|w| {
+            self.ns_stack.iter().rev().find_map(|f| {
+                let info = self.namespaces.get(&f.key)?;
+                let m = info.member(w)?;
+
+                (m.ty || m.nested).then(|| format!("{}.{w}", info.path))
+            })
+        })
     }
 
     /// The target an `impl` inside a namespace writes: a member of the
@@ -731,8 +825,9 @@ impl<'s> Desugar<'s> {
         let (s, e) = (self.byte_start(span), self.byte_end(span));
 
         // `Math.Vec2`, and `Outer.Inner.Point` through a nested one.
-        if let Some(info) = self.namespaces.get(&name) {
-            let mut key = name.clone();
+        if let Some(mut key) = self.ns_head_key(&name)
+            && let Some(info) = self.namespaces.get(&key)
+        {
             let mut info = info;
 
             for (at, (member, fe)) in self.dotted_chain(span)?.iter().enumerate() {
@@ -1010,9 +1105,8 @@ impl<'s> Desugar<'s> {
     /// nested namespaces.
     pub(crate) fn namespace_path_name(&self, path: &str) -> Option<String> {
         let mut parts = path.split('.');
-        let head = parts.next()?;
-        let mut key = head.to_string();
-        let mut info = self.namespaces.get(head)?;
+        let mut key = self.ns_head_key(parts.next()?)?;
+        let mut info = self.namespaces.get(&key)?;
 
         for part in parts {
             let m = info.member(part)?;
@@ -1036,6 +1130,14 @@ impl<'s> Desugar<'s> {
         // join drops the spaces out again.
         let text: String = text.split_whitespace().collect();
         let (head, variant) = text.rsplit_once('.')?;
+
+        Some((self.enum_named(head)?, variant.to_string()))
+    }
+
+    /// The key `enums` holds for the enum a type names: `Kind`,
+    /// `Geo.Kind`, `Kind?`, or `Opt<number>`.
+    pub(crate) fn enum_named(&self, ty: &str) -> Option<String> {
+        let head = ty.trim().trim_end_matches('?').split('<').next()?.trim();
         // A namespace this file declares renders its enum under one
         // name, `Geo_Kind`. An imported namespace has no declaration
         // here, so the enum index keys it by the path the source writes,
@@ -1044,12 +1146,12 @@ impl<'s> Desugar<'s> {
         // Inside its namespace an enum reads by its own name, `Kind`,
         // which renders as `Geo_Kind`.
         let member = self.ns_member_name(head);
-        let name = [rendered.as_deref(), member.as_deref(), Some(head)]
+
+        [rendered.as_deref(), member.as_deref(), Some(head)]
             .into_iter()
             .flatten()
-            .find(|n| self.enums.contains_key(*n))?;
-
-        Some((name.to_string(), variant.to_string()))
+            .find(|n| self.enums.contains_key(*n))
+            .map(str::to_string)
     }
 
     /// The path a message names a declaration by. `Math_Vec2` is the

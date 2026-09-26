@@ -149,8 +149,41 @@ impl State {
             // a `Name(` in the file wants the value, which is the type
             // too, so one fix resolves the file.
             let as_type = message.contains("Unknown type '") && !uses_as_value(&doc.source, name);
-            let offers =
-                imports::auto_import_candidates(&doc.source, &path, &files, name, &bound, &aliases);
+            // The report names the module when it knows one: an import
+            // the file writes that reaches the name, such as a barrel,
+            // or else a module of the project. The fix names the same
+            // one, and a name through an import joins that import.
+            let named =
+                alloy::modules::import_that_exports(&path, &doc.source, name).or_else(|| {
+                    message
+                        .contains(" exports it: `import")
+                        .then(|| alloy::modules::module_that_exports(&path, name))
+                        .flatten()
+                });
+            let offers: Vec<(String, imports::Export)> = match named {
+                Some(spec) => vec![(
+                    spec,
+                    imports::Export {
+                        name: name.to_string(),
+                        is_type: as_type,
+                        is_default: false,
+                        is_attribute: false,
+                        kind: 0,
+                    },
+                )],
+
+                None => imports::auto_import_candidates(
+                    &doc.source,
+                    &path,
+                    &files,
+                    name,
+                    &bound,
+                    &aliases,
+                )
+                .into_iter()
+                .map(|(spec, export)| (spec, export.clone()))
+                .collect(),
+            };
 
             for (spec, export) in offers {
                 // The prefix walk answers every name that starts with
@@ -159,10 +192,17 @@ impl State {
                     continue;
                 }
 
+                // A value needs an import that binds a value. A type
+                // export binds none, and the file then reports the use
+                // as "imported as a type".
+                if export.is_type && !message.contains("Unknown type '") {
+                    continue;
+                }
+
                 let typed = as_type && !export.is_default && matches!(export.kind, 7 | 8 | 13);
                 let export = imports::Export {
                     is_type: export.is_type || typed,
-                    ..export.clone()
+                    ..export
                 };
                 let shape = imports::import_shape(&spec, &export, quote);
 
@@ -430,6 +470,19 @@ fn unresolved_name(message: &str) -> Option<&str> {
         return Some(name);
     }
 
+    // `new Nope { }` and `new Nope.Stack { }` in the compiler's words.
+    if let Some((_, rest)) = message.split_once("unknown struct `")
+        && let Some((name, _)) = rest.split_once('`')
+    {
+        return Some(name);
+    }
+
+    if let Some((_, rest)) = message.split_once('`')
+        && let Some((name, _)) = rest.split_once("` is not a module, namespace or import in scope")
+    {
+        return Some(name);
+    }
+
     let rest = message
         .split_once("Unknown type '")
         .or_else(|| message.split_once("Unknown global '"))
@@ -497,6 +550,16 @@ mod tests {
                 "TypeError: `ORIGIN` is not imported; \"./shapes\" exports it, so add it to that import"
             ),
             Some("ORIGIN")
+        );
+        assert_eq!(
+            unresolved_name("TypeError: unknown struct `Coins`"),
+            Some("Coins")
+        );
+        assert_eq!(
+            unresolved_name(
+                "TypeError: `Items` is not a module, namespace or import in scope; \"./items\" exports it: `import { Items } from \"./items\"`"
+            ),
+            Some("Items")
         );
         assert_eq!(unresolved_name("unused_variable: `x` is never read"), None);
     }

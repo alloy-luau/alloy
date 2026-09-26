@@ -194,9 +194,25 @@ fn settled_type(declared: &str) -> Option<String> {
 
     let t = declared.trim();
     let open = t.find('<')?;
-    let inner = t[open + 1..].strip_suffix('>')?;
+    let inner = t[open + 1..].strip_suffix('>')?.trim();
 
-    Some(inner.trim().to_string())
+    // `Future<A, B>` settles with two values, and a return type of two
+    // values takes parens.
+    match split_top_level(inner, ',').len() {
+        1 => Some(inner.to_string()),
+
+        _ => Some(format!("({inner})")),
+    }
+}
+
+/// The types inside the parens of a return pack, `(A, B)`, when the
+/// parens hold the whole text. `(A) -> B` is a function type and gives
+/// `None`.
+pub(crate) fn pack_inner(declared: &str) -> Option<&str> {
+    let t = declared.trim();
+
+    (t.starts_with('(') && super::types::group_len(t, '(', ')') == Some(t.len()))
+        .then(|| t[1..t.len() - 1].trim())
 }
 
 impl<'s> Desugar<'s> {
@@ -253,6 +269,10 @@ impl<'s> Desugar<'s> {
             }
 
             self.keep_lines(stmt.span(), before);
+            // A macro expansion may open with `(`, as `(function() ...
+            // end)()` does. After `f(x)` on the line above, Luau reads
+            // that as a call of `f(x)`.
+            self.r.end_stmt_since(before);
             cursor = self.byte_end(stmt.span());
         }
 
@@ -441,8 +461,21 @@ impl<'s> Desugar<'s> {
         // Declarations come first so a later statement sees them.
         match stmt {
             Stmt::Local(l) => {
-                for b in &l.names {
-                    self.declare_binding(b);
+                for (i, b) in l.names.iter().enumerate() {
+                    // `->` gives an `Instance?`, and so does `=>` under
+                    // a timeout, so a later `=>` on the name guards it.
+                    let child = matches!(
+                        l.values.get(i),
+                        Some(Expr::Child { wait, .. })
+                            if !wait || self.options.wait_timeout.is_some()
+                    );
+
+                    if child && b.ty.is_none() && b.destructure.is_none() {
+                        self.record_type_text(b.name, Some("Instance?"));
+                        self.declare_name(b.name);
+                    } else {
+                        self.declare_binding(b);
+                    }
                 }
             }
 
@@ -571,32 +604,60 @@ impl<'s> Desugar<'s> {
         self.r.append(side);
     }
 
-    /// Finds the plain tables of the file that a colon method can take
-    /// a `self` type from: `local X = { }` at the top level, with no
-    /// later rebind and no metatable of its own.
+    /// Finds the top-level tables of the file that a colon method can
+    /// take a `self` type from, and the type each takes.
     ///
     /// Luau gives `self` no type in `function X:m()` on such a table, so
-    /// the check artifact writes the parameter out as `typeof(X)`. A
-    /// struct, an enum, and a foreign `impl` carry their own `self`
-    /// already, and none of them reaches this scan.
+    /// the check artifact writes the parameter out. A plain table takes
+    /// `typeof(X)`, and a class of the `X.__index = X` shape takes an
+    /// instance. A table the file rebinds takes an alias written right
+    /// after the last rebind. A struct, an enum, and a foreign `impl`
+    /// carry their own `self` already, and none of them reaches this
+    /// scan.
     pub(crate) fn scan_plain_tables(&mut self, block: &Block) {
-        let colon_method = |stmt: &Stmt| matches!(stmt.under_default(), Stmt::Function(f) if f.is_method && f.path.len() == 2);
+        let colon_method = |stmt: &Stmt| match stmt.under_default() {
+            Stmt::Function(f) => f.is_method && f.path.len() == 2,
+
+            Stmt::Impl(_) => true,
+
+            _ => false,
+        };
 
         if !self.options.check || !block.stmts.iter().any(colon_method) {
             return;
         }
-        // The hover folds read the same list, so both come from one
-        // scan of the source.
-        let mut out: HashSet<String> = crate::tables::plain_tables(self.src)
-            .into_iter()
-            .map(|(name, _)| name)
-            .collect();
+        let mut out = crate::tables::self_types(self.src);
+        // A rebind or a metatable inside a function or a block leaves
+        // the value at a method unknown.
+        let mut nested: HashSet<String> = out.keys().cloned().collect();
+        let all = nested.clone();
 
         for stmt in &block.stmts {
-            self.drop_rebound_tables(stmt.under_default(), &mut out);
+            for child in stmt_children(stmt.under_default()) {
+                let stmts = match child {
+                    Child::Block(b) => &b.stmts,
+
+                    Child::Function(f) => &f.block.stmts,
+
+                    Child::Expr(_) => continue,
+                };
+
+                for inner in stmts {
+                    self.drop_rebound_tables(inner.under_default(), &mut nested);
+                }
+            }
         }
 
-        self.plain_tables = out;
+        out.retain(|name, _| nested.contains(name) || !all.contains(name));
+
+        for (name, kind) in &out {
+            if let crate::tables::SelfType::Rebound(at) = kind {
+                self.inserts
+                    .push((*at, format!(" type __self_{name} = typeof({name})")));
+            }
+        }
+
+        self.table_selfs = out;
     }
 
     /// Takes a name out of the plain tables when the file rebinds it,
@@ -671,9 +732,7 @@ impl<'s> Desugar<'s> {
             return None;
         }
 
-        self.plain_tables
-            .contains(owner)
-            .then(|| format!("typeof({owner})"))
+        self.table_selfs.get(owner).map(|kind| kind.text(owner))
     }
 
     /// `function X:m(...)` on a plain table, written out as
@@ -712,6 +771,22 @@ impl<'s> Desugar<'s> {
             return true;
         }
 
+        // The check artifact wraps each attribute value it types, and a
+        // lone `{expr}` that sets `Text`, so the walk has to reach the
+        // statement that holds one.
+        if self.options.check {
+            let (start, end) = (self.byte_start(s.span()), self.byte_end(s.span()));
+
+            if self
+                .options
+                .attribute_types
+                .iter()
+                .any(|&(a, b, _)| start <= a && b <= end)
+            {
+                return true;
+            }
+        }
+
         // An `export type { T }` list below the alias adds the word.
         if let Stmt::TypeAlias(t) = s
             && self.export_listed_types.contains(self.text_of(t.name))
@@ -733,6 +808,17 @@ impl<'s> Desugar<'s> {
         }
 
         if stmt_needs_desugar(s) {
+            return true;
+        }
+
+        // A `self:m()` of a trait default calls through the impl's table.
+        let span = s.span();
+
+        if self
+            .self_dispatch
+            .iter()
+            .any(|t| (span.start..span.end).contains(t))
+        {
             return true;
         }
 
@@ -871,7 +957,7 @@ impl<'s> Desugar<'s> {
         if self.fn_bounds.is_empty()
             && self.method_bounds.is_empty()
             && !self
-                .impl_methods
+                .enum_decls
                 .keys()
                 .any(|t| self.unit_variant(t).is_some())
         {
@@ -896,6 +982,161 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /// `x == Item.Tool("a", 1)`: a payload variant and a `new` struct are
+    /// a fresh table, and `==` on a table compares identity, so the test
+    /// never holds. `@derive(Eq)` writes the `__eq` that compares the
+    /// content. A type this file cannot see the derives of stays quiet.
+    pub(crate) fn check_identity_compares(&mut self, block: &Block) {
+        let mut hits: Vec<(TokSpan, String)> = Vec::new();
+        let stmts: Vec<&Stmt> = block.stmts.iter().collect();
+        self.identity_compares_at(&stmts, &mut hits);
+
+        for (span, message) in hits {
+            let (start, end) = (
+                self.toks[span.start as usize],
+                self.toks[span.end as usize - 1],
+            );
+            self.lints.push(Lint {
+                name: "identity_compare",
+                start: start.start,
+                end: end.end,
+                message,
+                fix: None,
+            });
+        }
+    }
+
+    /// The top-level statements, and the members of each namespace under
+    /// its scope, so a member reads by its own name: `Inner.B(1)`.
+    fn identity_compares_at(&mut self, stmts: &[&Stmt], hits: &mut Vec<(TokSpan, String)>) {
+        for stmt in stmts {
+            if let Stmt::Namespace(ns) = stmt.under_default() {
+                let key = namespaces::key_of(
+                    self.ns_stack.last().map(|f| f.key.as_str()),
+                    self.text_of(ns.name),
+                );
+                self.ns_stack.push(namespaces::NsFrame {
+                    key,
+                    scope: self.scope_depth(),
+                });
+                let members: Vec<&Stmt> = ns.members.iter().map(|m| &m.stmt).collect();
+                self.identity_compares_at(&members, hits);
+                self.ns_stack.pop();
+            }
+
+            self.identity_compares_in(stmt_children(stmt), hits);
+        }
+    }
+
+    fn identity_compares_in(&self, children: Vec<Child<'_>>, hits: &mut Vec<(TokSpan, String)>) {
+        for child in children {
+            let inner = match child {
+                Child::Block(b) => b.stmts.iter().flat_map(stmt_children).collect(),
+
+                Child::Function(f) => f.block.stmts.iter().flat_map(stmt_children).collect(),
+
+                Child::Expr(e) => {
+                    if let Expr::Binary { op, lhs, rhs, span } = e
+                        && let op = self.text_of(*op)
+                        && matches!(op, "==" | "~=")
+                        && let Some((ty, part)) = self
+                            .built_without_eq(lhs)
+                            .or_else(|| self.built_without_eq(rhs))
+                    {
+                        let never = match op {
+                            "==" => "equals no other",
+
+                            _ => "differs from every other",
+                        };
+                        hits.push((
+                            *span,
+                            format!(
+                                "this `{op}` compares identity, and a value built here {never}; `@derive(Eq)` on `{ty}` compares the {part}"
+                            ),
+                        ));
+                    }
+
+                    // `$assert_eq` compares with `==` at run time.
+                    if let Expr::Macro { name, args, span } = e
+                        && self.text_of(*name) == "assert_eq"
+                        && let Some((ty, part)) = args.iter().find_map(|a| self.built_without_eq(a))
+                    {
+                        hits.push((
+                            *span,
+                            format!(
+                                "`$assert_eq` compares with `==`, which compares identity, and a value built here equals no other; `@derive(Eq)` on `{ty}` compares the {part}"
+                            ),
+                        ));
+                    }
+
+                    super::expr_children(e)
+                }
+            };
+
+            self.identity_compares_in(inner, hits);
+        }
+    }
+
+    /// The type a payload variant call or a `new` builds, when that type
+    /// derives no `Eq`, with what a derived `Eq` would compare.
+    fn built_without_eq(&self, e: &Expr) -> Option<(String, &'static str)> {
+        let (ty, part) = match e {
+            Expr::Paren { inner, .. } => return self.built_without_eq(inner),
+
+            Expr::Call {
+                func, method: None, ..
+            } => {
+                let (ty, v) = self.enum_of_path(&self.dotted_name(func)?)?;
+                let (_, arity) = self.enums.get(&ty)?.iter().find(|(n, _)| *n == v)?;
+
+                if *arity == 0 {
+                    return None;
+                }
+
+                (ty, "payload")
+            }
+
+            // `new G.P { }` builds the struct this file declares as `G_P`.
+            Expr::New { name, .. } => {
+                let ty = self.dotted_name(name)?;
+
+                (self.own_ns_type(&ty).unwrap_or(ty), "fields")
+            }
+
+            _ => return None,
+        };
+
+        (self.derives_eq(&ty) == Some(false)).then(|| (self.display_name(&ty), part))
+    }
+
+    /// Whether `==` on a struct or an enum compares its content: a derived
+    /// `Eq` or `PartialEq`, or an `eq` an `impl` writes. `None` for a
+    /// type this file neither declares nor imports from the project.
+    fn derives_eq(&self, ty: &str) -> Option<bool> {
+        if self.structs.contains(ty) || self.enum_payloads.contains_key(ty) {
+            let written = |m: &str| {
+                self.impl_methods.get(ty).is_some_and(|ms| ms.contains(m))
+                    || self
+                        .options
+                        .foreign_impls
+                        .iter()
+                        .any(|x| x.head().0 == ty && x.name == m)
+            };
+
+            return Some(self.equatable.contains(ty) || written("eq") || written("__eq"));
+        }
+
+        let shape = self.imported_type(ty)?;
+        let written = ["eq", "__eq"].iter().any(|m| {
+            self.options
+                .import_callables
+                .iter()
+                .any(|(k, _)| *k == format!("{ty}:{m}") || *k == format!("{ty}.{m}"))
+        });
+
+        Some(written || shape.derives.iter().any(|d| d == "Eq" || d == "PartialEq"))
+    }
+
     /// The types a `local` binds, by name. An annotation names the type.
     /// Without one, `local x = new S { }` names the struct as exactly,
     /// and that is the form most calls hand a bounded parameter.
@@ -904,16 +1145,44 @@ impl<'s> Desugar<'s> {
             let ty = match b.ty {
                 Some(ty) => Some(self.annotation_text(ty)),
 
-                None => l
-                    .values
-                    .get(i)
-                    .and_then(|v| self.argument_struct(v, annotated)),
+                None => match l.values.get(i) {
+                    Some(t @ Expr::Table { .. }) => self.literal_shape(t, annotated),
+
+                    v => v.and_then(|v| self.argument_struct(v, annotated)),
+                },
             };
 
             if let Some(ty) = ty {
                 annotated.insert(self.text_of(b.name).to_string(), ty);
             }
         }
+    }
+
+    /// The type of a value as a table type text: a table literal names
+    /// the type of each named field it can read. `{ holder = new
+    /// Holder { } }` gives `{ holder: Holder }`.
+    fn literal_shape(&self, v: &Expr, annotated: &HashMap<String, String>) -> Option<String> {
+        let Expr::Table { fields, .. } = v else {
+            return match v {
+                Expr::Name(_) | Expr::Index { .. } => self.receiver_type(v, annotated),
+
+                _ => self.argument_struct(v, annotated),
+            };
+        };
+        let members: Vec<String> = fields
+            .iter()
+            .filter_map(|f| match f {
+                TableField::Named { name, value } => Some(format!(
+                    "{}: {}",
+                    self.text_of(*name),
+                    self.literal_shape(value, annotated)?
+                )),
+
+                _ => None,
+            })
+            .collect();
+
+        (!members.is_empty()).then(|| format!("{{ {} }}", members.join(", ")))
     }
 
     /// The type an annotation span names, without its `:`.
@@ -937,6 +1206,98 @@ impl<'s> Desugar<'s> {
             .map(|(v, _)| v.as_str())
     }
 
+    /// The type a receiver holds: a name's annotation, or the declared
+    /// type of a field of a struct. `p.rarity` reads `rarity: Rarity`
+    /// from the struct `p` holds, in this file or in an imported one.
+    /// A path walks each step: a field of a table type or an alias of
+    /// one, and `hs[1]` of an array `Holder[]`.
+    fn receiver_type(&self, e: &Expr, annotated: &HashMap<String, String>) -> Option<String> {
+        match e {
+            Expr::Name(n) => annotated.get(self.text_of(*n)).cloned(),
+
+            Expr::Paren { inner, .. } => self.receiver_type(inner, annotated),
+
+            Expr::Index { object, key, .. } => {
+                let owner = self.receiver_type(object, annotated)?;
+                let owner = owner.trim().trim_end_matches('?');
+                let owner = self.alias_values.get(owner).map_or(owner, |v| v.trim());
+
+                let IndexKey::Field(f) = key else {
+                    return array_element(owner).map(str::to_string);
+                };
+                let field = self.text_of(*f);
+
+                // `{ holder: Holder }` names the type of each field.
+                if let Some(body) = owner.strip_prefix('{').and_then(|o| o.strip_suffix('}')) {
+                    return split_top_level(body, ',').into_iter().find_map(|m| {
+                        let (k, ty) = m.split_once(':')?;
+
+                        (k.trim() == field).then(|| ty.trim().to_string())
+                    });
+                }
+
+                match self.type_members.get(owner) {
+                    Some(ms) => ms
+                        .iter()
+                        .find(|m| m.kind == "field" && m.name == field)
+                        .map(|m| m.shape.clone()),
+
+                    None => self
+                        .imported_type(owner)?
+                        .fields
+                        .iter()
+                        .find(|f| f.name == field)
+                        .map(|f| f.ty.clone()),
+                }
+            }
+
+            _ => None,
+        }
+    }
+
+    /// The enum a `:` call's receiver holds, when a unit variant of it
+    /// is a string at runtime, and that variant. `State.Idle:label()`
+    /// names the variant itself.
+    fn unit_receiver(
+        &self,
+        func: &Expr,
+        annotated: &HashMap<String, String>,
+    ) -> Option<(String, String)> {
+        if let Some((target, v)) = self.dotted_name(func).and_then(|p| self.enum_of_path(&p))
+            && self
+                .enum_decls
+                .get(&target)
+                .is_some_and(|vs| vs.iter().any(|(n, arity)| *n == v && *arity == 0))
+        {
+            return Some((target, v));
+        }
+
+        let ty = self.receiver_type(func, annotated)?;
+        // `Opt<number>` names the generic enum `Opt`.
+        let target = ty.trim_end_matches('?').split('<').next()?.trim();
+        let unit = self.unit_variant(target)?;
+
+        Some((target.to_string(), unit.to_string()))
+    }
+
+    /// Whether the enum has the method: an `impl` in this file, a trait
+    /// default an impl takes, or either in the module that declares an
+    /// imported enum. The index keys a method `State:m` and a default
+    /// `State.m`.
+    fn enum_has_method(&self, target: &str, method: &str) -> bool {
+        let keys = [format!("{target}:{method}"), format!("{target}.{method}")];
+
+        self.impl_methods
+            .get(target)
+            .is_some_and(|ms| ms.contains(method))
+            || self.takes_default(target, method)
+            || self
+                .options
+                .import_callables
+                .iter()
+                .any(|(k, _)| keys.contains(k))
+    }
+
     fn is_unit_enum(&self, name: &str) -> bool {
         self.enum_decls
             .get(name)
@@ -957,8 +1318,84 @@ impl<'s> Desugar<'s> {
                 self.note_annotations(l, &mut annotated);
             }
 
+            // An arm knows the names its patterns bind.
+            if let Stmt::Match(m) = stmt {
+                let scrutinees = m.scrutinees.iter().map(Child::Expr).collect();
+                self.bound_calls_in(scrutinees, &annotated, hits);
+
+                for a in &m.arms {
+                    let inner = self.arm_annotations(&a.patterns, &annotated);
+                    let guard = a.guard.iter().map(Child::Expr);
+                    let body = guard.chain([Child::Block(&a.block)]).collect();
+                    self.bound_calls_in(body, &inner, hits);
+                }
+
+                let default = m.default.iter().map(Child::Block).collect();
+                self.bound_calls_in(default, &annotated, hits);
+
+                continue;
+            }
+
+            // `self` in an impl of a struct holds the struct, so
+            // `self.rarity:weight()` reads the type of the field. In an
+            // impl of an enum with a unit variant, `self:m()` can find
+            // a string.
+            if let Stmt::Impl(i) = stmt
+                && let target = self.impl_target_name(i.target)
+                && (self.structs.contains(&target) || self.unit_variant(&target).is_some())
+            {
+                let mut inner = annotated.clone();
+                inner.insert("self".to_string(), target);
+                self.bound_calls_in(stmt_children(stmt), &inner, hits);
+
+                continue;
+            }
+
             self.bound_calls_in(stmt_children(stmt), &annotated, hits);
         }
+    }
+
+    /// The names the patterns of one arm bind, over the names outside:
+    /// a name in a payload slot takes the enum the slot declares, and
+    /// `case Missing(item, n)` types `item` as `Item`. Any other name a
+    /// pattern binds hides the outer one.
+    fn arm_annotations(
+        &self,
+        patterns: &[Pattern],
+        annotated: &HashMap<String, String>,
+    ) -> HashMap<String, String> {
+        let mut inner = annotated.clone();
+        let mut stack: Vec<(&Pattern, Option<(TokSpan, usize)>)> =
+            patterns.iter().map(|p| (p, None)).collect();
+
+        while let Some((p, slot)) = stack.pop() {
+            match p {
+                Pattern::Bind(n) => {
+                    let name = self.text_of(*n).to_string();
+
+                    match slot.and_then(|(v, i)| self.slot_enum(v, None, i)) {
+                        Some(e) => inner.insert(name, e),
+
+                        None => inner.remove(&name),
+                    };
+                }
+
+                Pattern::Variant { name, args, .. } => {
+                    for (i, a) in args.iter().enumerate() {
+                        stack.push((a, Some((*name, i))));
+                    }
+                }
+
+                Pattern::Or(a, b, _) => {
+                    stack.push((a, slot));
+                    stack.push((b, slot));
+                }
+
+                _ => {}
+            }
+        }
+
+        inner
     }
 
     fn bound_calls_in(
@@ -986,6 +1423,21 @@ impl<'s> Desugar<'s> {
                     }
 
                     self.bound_calls_in_block(&f.block, &inner, hits);
+                }
+
+                Child::Expr(Expr::Match(m)) => {
+                    let scrutinees = m.scrutinees.iter().map(Child::Expr).collect();
+                    self.bound_calls_in(scrutinees, annotated, hits);
+
+                    for a in &m.arms {
+                        let inner = self.arm_annotations(&a.patterns, annotated);
+                        let guard = a.guard.iter().map(Child::Expr);
+                        let body = guard.chain([Child::Expr(&a.value)]).collect();
+                        self.bound_calls_in(body, &inner, hits);
+                    }
+
+                    let default = m.default.iter().map(|d| Child::Expr(d)).collect();
+                    self.bound_calls_in(default, annotated, hits);
                 }
 
                 Child::Expr(e) => {
@@ -1018,18 +1470,12 @@ impl<'s> Desugar<'s> {
         // A unit enum is a string at runtime, and a string carries no
         // metatable of its own, so `s:m()` finds no method. The impl
         // writes `Status.m`, and the static form reaches it.
-        if let (Some(m), Expr::Name(n)) = (method, &**func)
-            && let Some(ty) = annotated.get(self.text_of(*n))
-            // `Opt<number>` names the generic enum `Opt`.
-            && let target = ty.trim_end_matches('?').split('<').next().unwrap_or_default().trim()
-            && let Some(unit) = self.unit_variant(target)
-            && self
-                .impl_methods
-                .get(target)
-                .is_some_and(|ms| ms.contains(self.text_of(*m)))
+        if let Some(m) = method
+            && let Some((target, unit)) = self.unit_receiver(func, annotated)
+            && self.enum_has_method(&target, self.text_of(*m))
         {
-            let (m, recv) = (self.text_of(*m), self.text_of(*n));
-            let what = match self.is_unit_enum(target) {
+            let (m, recv) = (self.text_of(*m), self.text_of(func.span()));
+            let what = match self.is_unit_enum(&target) {
                 true => format!("`{target}` is a unit enum, a string at runtime"),
 
                 false => format!("`{target}.{unit}` is a unit variant, a string at runtime"),
@@ -1071,6 +1517,7 @@ impl<'s> Desugar<'s> {
                     .is_some_and(|ts| ts.iter().any(|t| t == want));
 
                 if !met {
+                    let want = self.display_name(want);
                     hits.push((
                         arg.span(),
                         format!("`{target}` does not implement `{want}`; `{name}` asks for it"),
@@ -1231,6 +1678,30 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /*
+    A bound on the type parameter of a declaration: `struct Shelf<T: Named>`.
+
+    A Luau type alias takes no bound, and a field `items: T[]` is
+    invariant, so `T & Named` there accepts no argument. The emit dropped
+    the bound, and nothing checked it. `what` is `a struct`, `an enum`, or
+    `an interface`.
+    */
+    pub(crate) fn reject_type_bounds(&mut self, generics: Option<TokSpan>, what: &str) {
+        let Some(g) = generics else {
+            return;
+        };
+
+        for (name, bound) in generic_bounds(self.text_of(g)) {
+            let at = self.token_named(g, &name).unwrap_or(g);
+            self.diagnose(
+                at,
+                &format!(
+                    "a type parameter of {what} takes no bound; write `{name}` for `{name}: {bound}`, and put the bound on a function that needs it"
+                ),
+            );
+        }
+    }
+
     /// The token inside `span` whose text is `name`.
     fn token_named(&self, span: TokSpan, name: &str) -> Option<TokSpan> {
         (span.start..span.end)
@@ -1259,6 +1730,18 @@ impl<'s> Desugar<'s> {
     }
 
     pub(crate) fn stmt_inner(&mut self, stmt: &Stmt) {
+        // `try do await f end` gives one value, and `__try_ret` reads the
+        // type of the closure's `return`. A bare `await` there returns
+        // the open pack of every value, which a type function cannot
+        // read; the parens keep the first value alone.
+        if let Stmt::Return(r) = stmt
+            && self.options.check
+            && matches!(self.try_targets.last(), Some(Some(_)))
+            && let [e @ Expr::Await { .. }] = r.values.as_slice()
+        {
+            self.one_value.insert(std::ptr::from_ref(e) as usize);
+        }
+
         match stmt {
             Stmt::Struct(st) => self.struct_decl(st),
 
@@ -1397,6 +1880,17 @@ impl<'s> Desugar<'s> {
                     *whole,
                     anchor,
                 );
+            }
+
+            // `$matches(e, Ok(_))` alone is a value and no call. Its
+            // expansion, `( if ... )`, is no Luau statement, so the
+            // report is the one `x + 1` alone gets.
+            Stmt::Call(Expr::Macro { name, span, .. }, _)
+                if matches!(self.text_of(*name), "matches" | "nameof" | "stringify")
+                    && self.macro_of(self.text_of(*name)).is_none() =>
+            {
+                self.diagnose(*span, "this expression is not a statement");
+                self.blank_lines(self.byte_start(*span), self.byte_end(*span));
             }
 
             // A macro call that stands alone is a statement, so the
@@ -1846,6 +2340,7 @@ impl<'s> Desugar<'s> {
                         {
                             let anchor = d.byte_start(b.span);
                             d.generate(anchor, prefix);
+                            d.r.end_stmt();
                         }
 
                         d.block(b);
@@ -1857,6 +2352,7 @@ impl<'s> Desugar<'s> {
                 if let Some(text) = narrow_after {
                     let anchor = self.byte_end(span);
                     self.generate(anchor, &text);
+                    self.r.end_stmt();
                 }
             }
         }
@@ -2032,6 +2528,7 @@ impl<'s> Desugar<'s> {
             return (Vec::new(), self.render_to_string(target));
         };
 
+        self.chain_target = true;
         let parts = self.chain_parts(object);
         let mut guard = parts.guards;
         let mut obj = parts.inner;
@@ -2458,6 +2955,8 @@ impl<'s> Desugar<'s> {
                     Piece::Name(n) => self.copy_on_line(anchor, *n),
                 }
             }
+
+            self.r.end_stmt();
         }
     }
 
@@ -2886,6 +3385,15 @@ impl<'s> Desugar<'s> {
                     self.generate(rs, &format!("{std}.Future<nil>"));
                 } else if names_a_future(&declared) {
                     self.copy(rs, re);
+                } else if pack_inner(&declared).is_some() {
+                    // `(A, B)` is a type pack, and a pack is no type
+                    // argument. The Future takes the values one by one,
+                    // `Future<A, B>`, so the parens go.
+                    let open = self.toks[rt.start as usize].end;
+                    let close = self.toks[rt.end as usize - 1].start;
+                    self.generate(rs, &format!("{std}.Future<"));
+                    self.copy(open, close);
+                    self.generate(close, ">");
                 } else {
                     self.generate(rs, &format!("{std}.Future<"));
                     self.copy(rs, re);
@@ -2907,6 +3415,10 @@ impl<'s> Desugar<'s> {
         // 4. The prologue and the async wrapper, on the header line.
         let has_vararg = body.params.iter().any(|p| p.is_vararg);
         let mut lead = String::new();
+        // A prologue ends in an expression. The async wrapper ends in
+        // `function()`, and a `;` there opens the body with no statement.
+        let ends_open = body.is_async.is_none()
+            && (self.self_prologue.is_some() || prologue.iter().any(|p| !p.is_empty()));
 
         if let Some(p) = self.self_prologue.take() {
             lead.push(' ');
@@ -2972,6 +3484,10 @@ impl<'s> Desugar<'s> {
 
         if !lead.is_empty() {
             self.generate(cursor, &lead);
+        }
+
+        if ends_open {
+            self.r.end_stmt();
         }
 
         // 5. The body, its trailing trivia, and the close.
@@ -3682,6 +4198,30 @@ mod tests {
             .collect()
     }
 
+    /// A statement the desugar writes in front of source code ends in an
+    /// expression, so a next line that opens with `(` read as a call on
+    /// it: the narrowing of `is table`, a payload binding, a hoisted temp,
+    /// a parameter prologue. A `;` now ends it, and both artifacts parse.
+    #[test]
+    fn a_paren_line_after_a_written_statement_stays_a_statement() {
+        let src = "struct Pt\n    x: number\nend\nenum Job\n    Idle\n    Build(string)\nend\nlocal function get(): number?\n    return 1\nend\nlocal function a(value: unknown, i: Instance, job: Job)\n    if value is table then\n        (i :: any).Name = \"t\"\n    end\n    if local v = get() then\n        -- a note\n        (i :: any).Name = tostring(v)\n    end\n    local Build(m) = job else return end\n    (i :: any).Name = m\n    match job with\n        case Build(n) then\n            (i :: any).Name = n\n        case Idle then\n    end\n    (i :: any).Name = tostring(get() ?? 0)\n    if value is not Pt then return end\n    (i :: any).Name = \"p\"\nend\nlocal function b({ x }: Pt, i: Instance, n: number = 1)\n    (i :: any).Name = tostring(x + n)\nend\nprint(a, b)\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.check.contains("{ [any]: any }) ;(i :: any).Name"),
+            "{}",
+            out.check
+        );
+
+        let lua = mlua::Lua::new();
+
+        for text in [&out.ship, &out.check] {
+            if let Err(e) = lua.load(text.as_str()).into_function() {
+                panic!("{e}\n{text}");
+            }
+        }
+    }
+
     /// Two declarations of one name in one file. The second wins in
     /// silence, so a use of the first reads the other shape. The report
     /// sits on the second name and says what holds it.
@@ -3943,6 +4483,190 @@ mod tests {
         );
     }
 
+    /// The check knew an enum and its methods only from this file. An
+    /// imported enum, or a name a match arm binds to a payload slot,
+    /// passed `check`, and `flux` gave the checker's "Key 'label' is
+    /// missing from 'string'" alone.
+    #[test]
+    fn a_colon_call_on_an_imported_or_arm_bound_mixed_enum_names_the_static_form() {
+        let want = "`Item.Junk` is a unit variant, a string at runtime; call `Item.label(item)`";
+        let imported = crate::compile_with(
+            "import { Item } from \"./items\"\n\nlocal function f(item: Item): string\n    return item:label()\nend\nprint(f)\n",
+            &crate::EmitOptions {
+                import_enums: vec![(
+                    "Item".to_string(),
+                    vec![("Tool".to_string(), 1), ("Junk".to_string(), 0)],
+                )],
+                import_callables: vec![(
+                    "Item:label".to_string(),
+                    crate::flux::Callable {
+                        params: Some(1),
+                        deprecated: None,
+                        exported: true,
+                    },
+                )],
+                ..crate::EmitOptions::default()
+            },
+        )
+        .unwrap();
+        let got: Vec<&str> = imported
+            .diagnostics
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect();
+        assert_eq!(got, [want]);
+
+        let bound = "enum Item as\n    Tool(number)\n    Junk\nend\n\nimpl Item as\n    function label(self): string\n        return \"x\"\n    end\nend\n\nenum Why as\n    Lost(Item)\n    Full\nend\n\nlocal function g(w: Why): string\n    return match w with\n        case Lost(item) then item:label()\n        case Full then \"full\"\n    end\nend\nprint(g)\n";
+        assert_eq!(messages(bound), [want]);
+    }
+
+    /// A typed parameter got the report, and three receivers got the
+    /// checker's "Key 'name' is missing from 'string'" alone: the unit
+    /// variant written out, `self` in an impl of the enum, and a call
+    /// of a trait default the enum takes, here or through an import.
+    #[test]
+    fn a_colon_call_on_a_variant_self_or_default_names_the_static_form() {
+        let src = "trait Describe as\n    function name(self): string\n    function label(self): string\n        return self:name()\n    end\nend\nenum Mode as\n    On\n    Off(number)\nend\nimpl Describe for Mode as\n    function name(self): string\n        return \"m\"\n    end\nend\nimpl Mode as\n    function shout(self): string\n        return self:name()\n    end\nend\nlocal function f(m: Mode): string\n    return m:label()\nend\nprint(f, Mode.On:name())\n";
+        assert_eq!(
+            messages(src),
+            [
+                "`Mode.On` is a unit variant, a string at runtime; call `Mode.name(self)`",
+                "`Mode.On` is a unit variant, a string at runtime; call `Mode.label(m)`",
+                "`Mode.On` is a unit variant, a string at runtime; call `Mode.name(Mode.On)`",
+            ]
+        );
+
+        // The index keys a default the module's impl takes as `Kind.greet`.
+        let imported = crate::compile_with(
+            "import { Kind } from \"./kind\"\nlocal function f(k: Kind): string\n    return k:greet()\nend\nprint(f, Kind.Rich(1):greet())\n",
+            &crate::EmitOptions {
+                import_enums: vec![(
+                    "Kind".to_string(),
+                    vec![("Plain".to_string(), 0), ("Rich".to_string(), 1)],
+                )],
+                import_callables: vec![(
+                    "Kind.greet".to_string(),
+                    crate::flux::Callable {
+                        params: None,
+                        deprecated: None,
+                        exported: true,
+                    },
+                )],
+                ..crate::EmitOptions::default()
+            },
+        )
+        .unwrap();
+        let got: Vec<&str> = imported
+            .diagnostics
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect();
+        assert_eq!(
+            got,
+            ["`Kind.Plain` is a unit variant, a string at runtime; call `Kind.greet(k)`"]
+        );
+    }
+
+    /// `p.rarity:weight()` read a receiver that is a field, and the
+    /// check knew a type only from a name. `flux` gave the checker's
+    /// "Type 'Rarity' does not have key 'weight'" alone. The field's
+    /// declared type now answers: of a struct here, of `self` in its
+    /// impl, and of a struct another module declares.
+    #[test]
+    fn a_colon_call_through_a_struct_field_names_the_static_form() {
+        let rarity = "enum Rarity as\n    Common\n    Mythic\nend\nimpl Rarity as\n    function weight(self): number\n        return 1\n    end\nend\n";
+        let src = format!(
+            "{rarity}struct Pet as\n    rarity: Rarity\nend\nimpl Pet as\n    function odds(self): number\n        return self.rarity:weight()\n    end\nend\nlocal function w(p: Pet): number\n    return p.rarity:weight()\nend\nprint(w)\n"
+        );
+        assert_eq!(
+            messages(&src),
+            [
+                "`Rarity` is a unit enum, a string at runtime; call `Rarity.weight(self.rarity)`",
+                "`Rarity` is a unit enum, a string at runtime; call `Rarity.weight(p.rarity)`",
+            ]
+        );
+
+        let field = crate::WireField {
+            name: "rarity".to_string(),
+            ty: "Rarity".to_string(),
+            width: None,
+        };
+        let imported = crate::compile_with(
+            &format!(
+                "import {{ Pet }} from \"./pet\"\n{rarity}local function w(p: Pet): number\n    return p.rarity:weight()\nend\nprint(w)\n"
+            ),
+            &crate::EmitOptions {
+                file_name: "a.aly".into(),
+                shapes: vec![crate::StructShape {
+                    name: "Pet".into(),
+                    fields: vec![field],
+                    module: "pet.aly".into(),
+                    ..Default::default()
+                }],
+                wire_scopes: vec![crate::WireScope {
+                    module: "a.aly".into(),
+                    names: vec![("Pet".into(), "pet.aly".into(), "Pet".into())],
+                    stars: Vec::new(),
+                }],
+                ..crate::EmitOptions::default()
+            },
+        )
+        .unwrap();
+        let got: Vec<&str> = imported
+            .diagnostics
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect();
+        assert_eq!(
+            got,
+            ["`Rarity` is a unit enum, a string at runtime; call `Rarity.weight(p.rarity)`"]
+        );
+    }
+
+    /// `props.holder.d:color()` took two field steps, and the check read
+    /// one. The ship raised "attempt to call missing method 'color' of
+    /// string". The walk now reads each step: a table literal local, a
+    /// table type, an alias of one, and `hs[1]` of an array.
+    #[test]
+    fn a_colon_call_through_a_path_names_the_static_form() {
+        let src = "enum Diff as Easy, Hard end\nimpl Diff\n    function color(self): number\n        return 1\n    end\nend\nstruct Holder\n    d: Diff\nend\ntype Props = { holder: Holder }\nlocal props = { holder = new Holder { d = Diff.Easy } }\nprint(props.holder.d:color())\nlocal function f(p: Props, q: { holder: Holder }, hs: Holder[])\n    print(p.holder.d:color(), q.holder.d:color(), hs[1].d:color())\nend\nprint(f)\n";
+        let want = |recv: &str| {
+            format!("`Diff` is a unit enum, a string at runtime; call `Diff.color({recv})`")
+        };
+        assert_eq!(
+            messages(src),
+            [
+                want("props.holder.d"),
+                want("p.holder.d"),
+                want("q.holder.d"),
+                want("hs[1].d")
+            ]
+        );
+    }
+
+    /// `x == Item.Tool("a", 1)` compared a fresh table by identity and
+    /// was never true, with no word. A type that derives `Eq`, a unit
+    /// variant, and a type the file cannot see stay quiet.
+    #[test]
+    fn an_equality_with_a_new_value_of_a_type_without_eq_warns() {
+        let src = "enum Loose\n    Tool(string, number)\n    Junk\nend\n@derive(Eq)\nenum Tight\n    Tool(string, number)\nend\nstruct Point\n    x: number\nend\n@derive(PartialEq)\nstruct Same\n    x: number\nend\nlocal function f(x: Loose, t: Tight, p: Point, s: Same, o: any)\n    print(x == Loose.Tool(\"a\", 1))\n    print(new Point { x = 1 } ~= p)\n    print(x == Loose.Junk)\n    print(t == Tight.Tool(\"a\", 1))\n    print(s == new Same { x = 1 })\n    print(o == Other.Tool(1))\nend\nprint(f)\n";
+        let out = crate::compile(src).unwrap();
+        let got: Vec<&str> = out
+            .lints
+            .iter()
+            .filter(|l| l.name == "identity_compare")
+            .map(|l| l.message.as_str())
+            .collect();
+
+        assert_eq!(
+            got,
+            [
+                "this `==` compares identity, and a value built here equals no other; `@derive(Eq)` on `Loose` compares the payload",
+                "this `~=` compares identity, and a value built here differs from every other; `@derive(Eq)` on `Point` compares the fields",
+            ]
+        );
+    }
+
     /// A unit enum is a string at runtime, so `s:describe()` finds no
     /// method. The report names the static form, which the impl writes
     /// and the check artifact types. A payload enum is a table with a
@@ -4146,6 +4870,24 @@ mod tests {
             out.ship
         );
         assert_eq!(out.ship.lines().count(), src.lines().count());
+    }
+
+    /// An async function that returns two values settles a Future of
+    /// both. `(A, B)` in the header wrote `Future<(A, B)>`, and the
+    /// checker read a pack where a type argument goes.
+    #[test]
+    fn an_async_return_pack_names_each_value() {
+        let src = "async function f(): (number, string)\n    return 1, \"x\"\nend\nasync function g(): Future<number, string>\n    return 1, \"x\"\nend\nlocal h: Future<number, string> = async do\n    return 1, \"x\"\nend\nprint(f, g, h)\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+        for line in [
+            "local function f(): __alloy.Future<number, string> return __alloy.future(function(): (number, string)",
+            "local function g(): __alloy.Future<number, string> return __alloy.future(function(): (number, string)",
+            "local h: __alloy.Future<number, string> = __alloy.future(function(): (number, string)",
+        ] {
+            assert!(out.check.contains(line), "{line}\n{}", out.check);
+        }
     }
 
     /// The expression form still binds: the value is a Future.

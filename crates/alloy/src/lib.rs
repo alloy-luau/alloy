@@ -45,7 +45,7 @@ pub mod testbuild;
 pub mod typecheck;
 
 pub use alx::{AlxOutput, compile_alx};
-pub use desugar::{Diagnostic, EmitOptions, MacroSource, StructShape, WireField};
+pub use desugar::{Diagnostic, EmitOptions, MacroSource, StructShape, WireField, WireScope};
 pub use lint::{Fix, Lint};
 pub use render::SpanMap;
 
@@ -275,22 +275,49 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         options.definitions,
         &options.thresholds,
         &options.privates(),
+        &options.import_callables,
     );
     lints.extend(rendered.lints);
 
-    if !options.definitions {
-        lints.extend(naming::lints(
-            src,
-            &parsed.lexed.toks,
-            &parsed.chunk,
-            &options.naming,
-            &options.markup,
-        ));
+    // `[emit] wait_timeout` gives `=>` a limit, so the rewrite of an
+    // untimed `WaitForChild` can return nil where the call waited on.
+    // The lint stays, and the change is the author's to make.
+    if let Some(t) = options.wait_timeout {
+        for l in &mut lints {
+            if l.name == "manual_child_lookup"
+                && l.fix
+                    .as_ref()
+                    .is_some_and(|f| f.replacement.starts_with("=>"))
+            {
+                l.fix = None;
+                l.message.push_str(&format!(
+                    ", but `=>` waits at most {t} seconds under `wait_timeout` and gives nil after that"
+                ));
+            }
+        }
     }
 
     // A config names each value once, and the loader's Luau has no
     // `const`, so fmt keeps its locals and the lint says nothing there.
-    if options.file_name.ends_with(config_aly::FILE_NAME) {
+    // A local of a config therefore keeps the variable style.
+    let config_file = options.file_name.ends_with(config_aly::FILE_NAME);
+
+    if !options.definitions {
+        let naming = naming::Naming {
+            locals_as_const: options.naming.locals_as_const && !config_file,
+            ..options.naming.clone()
+        };
+        lints.extend(naming::lints(
+            src,
+            &parsed.lexed.toks,
+            &parsed.chunk,
+            &naming,
+            &options.markup,
+            &rendered.contract_names,
+        ));
+    }
+
+    if config_file {
         lints.retain(|l| l.name != "prefer_const");
     }
 
@@ -552,6 +579,113 @@ mod tests {
         );
         assert!(messages("local x = 1\nx += 1\nprint(x)\n").is_empty());
 
+        // A `let` said only that the next name was not a statement. The
+        // report sits on the word and writes the line out.
+        let let_ = "let x = 5 -- a note\nprint(x)\n";
+        assert_eq!(
+            messages(let_),
+            vec!["Alloy has no `let`; write `local x = 5` or `const x = 5`"]
+        );
+        assert_eq!(docs::kind_for(&messages(let_)[0]), "SyntaxError");
+        // The quote holds the one statement, not the rest of its line.
+        assert_eq!(
+            messages("for _, v in { 1 } do let y = v * 2 print(y) end\n")[0],
+            "Alloy has no `let`; write `local y = v * 2` or `const y = v * 2`"
+        );
+        assert_eq!(compile(let_).unwrap().diagnostics[0].start, 0);
+        // `let` stays a name.
+        assert!(messages("local let = 1\nprint(let)\n").is_empty());
+
+        // `let mut x` wrote `local mut x`, which declares `mut` and
+        // assigns a global `x`. The line drops the `mut`, and `local mut
+        // x` reports on its own.
+        assert_eq!(
+            messages("let mut x = 0\nprint(x)\n"),
+            vec!["Alloy has no `let`; write `local x = 0` or `const x = 0`"]
+        );
+        let mut_ = "local mut x = 0\nprint(x)\n";
+        assert_eq!(
+            messages(mut_),
+            vec!["Alloy has no `mut`; a `local` can change, a `const` cannot"]
+        );
+        assert_eq!(docs::kind_for(&messages(mut_)[0]), "SyntaxError");
+        assert_eq!(compile(mut_).unwrap().diagnostics[0].start, 6);
+        // `mut` stays a name.
+        assert!(messages("local mut = 1\nlocal mut2, y = mut, 2\nprint(mut2, y)\n").is_empty());
+
+        // `export *` said only that the line was not a statement. The
+        // report names the forms Alloy takes, with the path written.
+        let star = "export * from \"./kinds\"\n";
+        assert_eq!(
+            messages(star),
+            vec![
+                "Alloy has no `export *`; name each export, `export { A, B } from \"./kinds\"`, or write `import * as M from \"./kinds\"` and then `export { M }`"
+            ]
+        );
+        assert_eq!(docs::kind_for(&messages(star)[0]), "ImportError");
+        assert_eq!(compile(star).unwrap().diagnostics[0].start, 0);
+        assert_eq!(
+            messages("export * as K from './kinds'\n"),
+            vec![
+                "Alloy has no `export * as`; write `import * as K from './kinds'` and then `export { K }`"
+            ]
+        );
+
+        // A call's type arguments in one `<...>`. Where the tokens also
+        // read as Luau, `id<number>(5)` is two comparisons, and a valid
+        // Luau file compiles: the `single_angle_call` lint writes the
+        // call out on the `<...>`, with no `--fix` rewrite. The same
+        // holds for `f(a<b, c>(a))`, two values to Luau.
+        let single = "local function id<T>(x: T): T return x end\nlocal v = id<number>(5)\nlocal a, b, c = 1, 2, 3\nprint(v, id(a<b, c>(a)))\n";
+        assert!(messages(single).is_empty(), "{:?}", messages(single));
+        let out = compile(single).unwrap();
+        let hits: Vec<(&str, &str)> = out
+            .lints
+            .iter()
+            .filter(|l| l.name == "single_angle_call" && l.fix.is_none())
+            .map(|l| {
+                (
+                    &single[l.start as usize..l.end as usize],
+                    l.message.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            hits,
+            [
+                (
+                    "<number>",
+                    "type arguments at a call take `<<...>>`: write `id<<number>>(5)`"
+                ),
+                (
+                    "<b, c>",
+                    "type arguments at a call take `<<...>>`: write `a<<b, c>>(a)`"
+                ),
+            ]
+        );
+        // Where the tokens read as no Luau, the parse error stays.
+        assert_eq!(
+            docs::kind_for(&messages("local s = Signal.new<string>()\n")[0]),
+            "SyntaxError"
+        );
+        assert_eq!(
+            messages(
+                "local s = Signal.new<string>()\nlocal m = HashMap.new<string, Array<number>>()\n"
+            ),
+            vec![
+                "type arguments at a call take `<<...>>`: write `Signal.new<<string>>()`",
+                "type arguments at a call take `<<...>>`: write `HashMap.new<<string, Array<number>>>()`",
+            ]
+        );
+        // A comparison stays one: the operands are no type list, or a
+        // space parts them from the operator.
+        assert!(
+            messages(
+                "local a, b, c, d = 1, 2, 3, 4\nprint(a < b and c > (d), a < b, c > (d), a<b)\n"
+            )
+            .is_empty()
+        );
+
         // A declaration `declare` does not take, in a definitions file.
         let options = EmitOptions {
             definitions: true,
@@ -629,6 +763,24 @@ mod tests {
         assert_eq!(got.len(), 2, "{got:?}");
         assert!(got[0].contains("leaves `x` unset"), "{got:?}");
         assert!(got[1].contains("has no field `z`"), "{got:?}");
+    }
+
+    /// Alloy has no Rust field shorthand. Luau read `{ max_hp }` as an
+    /// array item and reported a table mismatch that named no field.
+    #[test]
+    fn a_field_with_no_name_names_the_full_form() {
+        let src = "struct Stats as\n    max_hp: number\n    result: number\nend\nlocal max_hp, result = 1, 2\nlocal s = new Stats { max_hp, result }\nlocal t = new Stats { max_hp = 1, 2 }\n";
+        let got = messages(src);
+
+        assert_eq!(
+            got,
+            [
+                "a struct takes each field by name: write `max_hp = max_hp`",
+                "a struct takes each field by name: write `result = result`",
+                "a struct takes each field by name: write `field = value`",
+            ]
+        );
+        assert!(got.iter().all(|m| docs::kind_for(m) == "StructError"));
     }
 
     #[test]
@@ -962,6 +1114,62 @@ mod tests {
         );
     }
 
+    /// An untimed `WaitForChild` waits on; `=>` under `wait_timeout`
+    /// gives nil after the limit. The lint says so and writes nothing.
+    /// The check artifact types a timed lookup as optional, since the
+    /// sourcemap types the call alone.
+    #[test]
+    fn a_wait_timeout_keeps_the_child_lookup_lint_from_rewriting() {
+        let src = "local a = workspace:WaitForChild(\"Arena\")\nlocal b = workspace:FindFirstChild(\"Arena\")\nprint(a, b)\n";
+        let lint = |wait_timeout| {
+            let options = EmitOptions {
+                wait_timeout,
+                ..EmitOptions::default()
+            };
+
+            compile_with(src, &options)
+                .unwrap()
+                .lints
+                .into_iter()
+                .filter(|l| l.name == "manual_child_lookup")
+                .map(|l| (l.message, l.fix.is_some()))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            lint(Some(5.0)),
+            vec![
+                (
+                    "`:WaitForChild(\"Arena\")` is `=>Arena`, but `=>` waits at most 5 seconds under `wait_timeout` and gives nil after that".to_string(),
+                    false
+                ),
+                ("`:FindFirstChild(\"Arena\")` is `->Arena`".to_string(), true),
+            ]
+        );
+        assert!(lint(None).iter().all(|(_, fix)| *fix));
+
+        let options = EmitOptions {
+            wait_timeout: Some(5.0),
+            check: true,
+            ..EmitOptions::default()
+        };
+        let out = compile_with(
+            "local a = workspace=>Arena\nlocal s = workspace=>Arena=>Spawn\n",
+            &options,
+        )
+        .unwrap();
+        assert!(
+            out.check.contains("local a = (workspace:WaitForChild(\"Arena\", 5) :: typeof(workspace:WaitForChild(\"Arena\", 5))?)\n"),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check.contains("local _1 = (workspace:WaitForChild(\"Arena\", 5) :: typeof(workspace:WaitForChild(\"Arena\", 5))?) local s = (if _1 == nil then nil else _1:WaitForChild(\"Spawn\", 5))"),
+            "{}",
+            out.check
+        );
+    }
+
     #[test]
     fn a_macro_local_never_captures_the_callers_name() {
         let src = "macro add_one(x)\n    local tmp = 1\n    x + tmp\nend\nlocal tmp = 10\nlocal r = $add_one(tmp)\nprint(r)\n";
@@ -1007,10 +1215,13 @@ mod tests {
 
         let own = "struct V as\n    x: number\nend\nimpl V as\n    function to_string(self): string\n        return `v{self.x}`\n    end\nend\n@derive(Debug)\nstruct W as\n    x: number\nend\n";
         let out = compile(own).unwrap();
-        assert!(!out.ship.contains("show_struct"), "{}", out.ship);
+        assert!(!out.ship.contains("show_struct(\"V\""), "{}", out.ship);
+        // `@derive(Debug)` prints the way the default printer does, and
+        // adds `debug`.
         assert!(
-            out.ship
-                .contains("W.__tostring = function(s) return \"W { \""),
+            out.ship.contains(
+                "W.__tostring = function(s) return __alloy.show_struct(\"W\", s, { \"x\" }) end function W.debug(self) return tostring(self) end"
+            ),
             "{}",
             out.ship
         );

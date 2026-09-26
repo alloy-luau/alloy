@@ -205,16 +205,72 @@ pub fn pattern_names(rest: &str) -> Vec<Local> {
         }];
     }
 
-    let Some(open) = text.find(['(', '[', '{']) else {
-        return Vec::new();
-    };
-    let inner = &text[open + 1..];
-    let end = inner.rfind([')', ']', '}']).unwrap_or(inner.len());
+    let mut out = Vec::new();
+    nested_names(text, &mut out);
 
-    split_top(&inner[..end])
-        .into_iter()
-        .filter_map(binding_entry)
-        .collect()
+    out
+}
+
+/// The names one pattern binds, at any depth: `Bought(Sword(d))` binds
+/// `d`, and `{ item = Full({ name = n }) }` binds `n`. The two sides of
+/// an `or` bind the same names, so the first side names them.
+fn nested_names(text: &str, out: &mut Vec<Local>) {
+    let t = alternatives(text.trim())[0];
+
+    let Some(open) = t.find(['(', '[', '{']) else {
+        let name = t.strip_prefix("...").unwrap_or(t);
+
+        if name.starts_with(|c: char| c.is_lowercase() || c == '_')
+            && name != "_"
+            && name.chars().all(is_word)
+            && !matches!(name, "nil" | "true" | "false")
+        {
+            out.extend(binding_entry(name));
+        }
+
+        return;
+    };
+    let inner = &t[open + 1..];
+    let inner = &inner[..group_end(inner)];
+
+    for part in split_top(inner) {
+        match (t.as_bytes()[open], top_assign(part)) {
+            // `{ name = n }` binds what stands after the `=`.
+            (b'{', Some(eq)) => nested_names(&part[eq + 1..], out),
+
+            // `{ x, y: number }` binds the field under its own name.
+            (b'{', None) => out.extend(binding_entry(part)),
+
+            _ => nested_names(part, out),
+        }
+    }
+}
+
+/// The sides of `a or b` at the top level; one side when the text has
+/// no `or`.
+pub fn alternatives(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+
+    for (i, c) in text.char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+
+            ')' | ']' | '}' => depth -= 1,
+
+            ' ' if depth == 0 && i >= start && text[i..].starts_with(" or ") => {
+                out.push(text[start..i].trim());
+                start = i + " or ".len();
+            }
+
+            _ => {}
+        }
+    }
+
+    out.push(text[start..].trim());
+
+    out
 }
 
 /// The byte the group opened before `text` closes at, or the length of
@@ -704,6 +760,14 @@ mod tests {
         assert!(names("Nil then 0").is_empty());
         assert!(names("_ then 0").is_empty());
         assert!(names("nil then 0").is_empty());
+
+        // A nested pattern binds at any depth, and names neither the
+        // enum of an inner variant nor the field a rename reads.
+        assert_eq!(names("Bought(Item.Sword(d)) then d"), ["d"]);
+        assert_eq!(names("B(Box.Full({ name = m }), s) then m"), ["m", "s"]);
+        assert_eq!(names("Vec2 { x = 0, y } then y"), ["y"]);
+        assert_eq!(names("It(Sword(n) or Wand(n)) then n"), ["n"]);
+        assert_eq!(names("[first, ...rest] then first"), ["first", "rest"]);
 
         let src = "match x with\n    case n where | then 1\nend\n";
         assert!(scope_at(src).contains(&"n".to_string()));

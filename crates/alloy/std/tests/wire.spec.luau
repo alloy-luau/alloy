@@ -10,6 +10,18 @@ local function roundtrip(layout, args)
 	return wire.unpack(layout, buf, rest), buf
 end
 
+-- Roblox copies a table across a remote and drops every metatable.
+local function engine_copy(v)
+	if type(v) ~= "table" then
+		return v
+	end
+	local t = {}
+	for k, x in v do
+		t[k] = engine_copy(x)
+	end
+	return t
+end
+
 describe("wire", function()
 	it("packs every width and reads it back", function()
 		local layout = { "u8", "u16", "u32", "i8", "i16", "i32", "f32", "f64", "bool", "str" }
@@ -157,6 +169,135 @@ describe("wire", function()
 			wire.restore({ node }, { n = 1, "Strength" })
 		end).toThrow("Strength is no variant of the enum")
 		expect(wire.restore({ { enum = Boost, tags = { None = 0 }, optional = true } }, { n = 1 })[1]).toBe(nil)
+	end)
+
+	it("restores a struct and an enum that a layout names by key", function()
+		local Stats = {}
+		Stats.__index = Stats
+		setmetatable(Stats, {
+			__call = function(_, f)
+				return setmetatable(f, Stats)
+			end,
+		})
+		function Stats.double(self)
+			return self.hp * 2
+		end
+		local Item = {}
+		Item.__index = Item
+		function Item.Sword(n)
+			return setmetatable({ tag = "Sword", _1 = n }, Item)
+		end
+		local Outer = {}
+		Outer.__index = Outer
+		-- The declaring module registers its tables when it loads.
+		wire.types["keys.aly:Stats"] = Stats
+		wire.types["keys.aly:Item"] = Item
+		local layout = {
+			{
+				fields = {
+					{ "s", { fields = { { "hp", "f64" } }, struct = "keys.aly:Stats" } },
+					{ "one", { enum = "keys.aly:Item", tags = { Sword = 1, Nothing = 0 } } },
+				},
+				struct = Outer,
+			},
+		}
+		local sent = { setmetatable({ s = Stats({ hp = 4 }), one = Item.Sword(2) }, Outer) }
+		-- The table road: the engine copies the whole value.
+		local out = wire.restore(layout, engine_copy({ n = 1, sent[1] }))
+		expect(getmetatable(out[1])).toBe(Outer)
+		expect(out[1].s:double()).toBe(8)
+		expect(getmetatable(out[1].one)).toBe(Item)
+		-- The buffer road: the enum crosses beside the buffer as a copy.
+		local buf, rest = wire.pack(layout, sent, "T")
+		local packed = wire.unpack(layout, buf, engine_copy(rest))
+		expect(packed[1].s:double()).toBe(8)
+		expect(getmetatable(packed[1].one)).toBe(Item)
+		-- A key that no module registered leaves the table plain.
+		local plain = wire.restore({ { fields = { { "hp", "f64" } }, struct = "keys.aly:Gone" } }, { n = 1, { hp = 1 } })
+		expect(getmetatable(plain[1])).toBe(nil)
+		expect(plain[1].hp).toBe(1)
+	end)
+
+	it("restores a struct inside a variant's payload", function()
+		local Stats = {}
+		Stats.__index = Stats
+		function Stats.double(self)
+			return self.hp * 2
+		end
+		local Purchase = {}
+		Purchase.__index = Purchase
+		function Purchase.Bought(s, n)
+			return setmetatable({ tag = "Bought", _1 = s, _2 = n }, Purchase)
+		end
+		function Purchase.Denied(why)
+			return setmetatable({ tag = "Denied", _1 = why }, Purchase)
+		end
+		wire.types["keys.aly:Stats"] = Stats
+		local node = {
+			enum = Purchase,
+			tags = { Bought = 2, Denied = 1 },
+			slots = { Bought = { { fields = { { "hp", "f64" } }, struct = "keys.aly:Stats" }, "u8" } },
+		}
+		local sent = setmetatable({ hp = 4 }, Stats)
+		-- The table road and the buffer road both copy the variant.
+		local out = wire.restore({ node }, engine_copy({ n = 1, Purchase.Bought(sent, 3) }))[1]
+		expect(getmetatable(out)).toBe(Purchase)
+		expect(out._1:double()).toBe(8)
+		expect(out._2).toBe(3)
+		local buf, rest = wire.pack({ node }, { Purchase.Bought(sent, 3) }, "T")
+		local packed = wire.unpack({ node }, buf, engine_copy(rest))[1]
+		expect(packed._1:double()).toBe(8)
+		-- A variant with no slot keeps its payload as it came.
+		expect(wire.restore({ node }, { n = 1, { tag = "Denied", _1 = "poor" } })[1]._1).toBe("poor")
+		-- A payload value its kind refuses is forged.
+		expect(function()
+			wire.restore({ node }, { n = 1, { tag = "Bought", _1 = { hp = 1 }, _2 = 300 } })
+		end).toThrow("does not fit @u8")
+		expect(function()
+			wire.restore({ node }, { n = 1, { tag = "Bought", _1 = "x", _2 = 1 } })
+		end).toThrow("is not a table")
+	end)
+
+	it("checks an imported unit enum and restores a keyed struct in an array", function()
+		-- The layout another module writes for `struct Holder` with
+		-- `rarity: Rarity?` and `list: { Inner }`. The unit enum crossed
+		-- as a plain string, and the array item as `any`.
+		local Inner = {}
+		Inner.__index = Inner
+		function Inner.double(self)
+			return self.n * 2
+		end
+		wire.types["shared/inner.aly:Inner"] = Inner
+		local layout = {
+			{
+				fields = {
+					{ "rarity", "one:Common,Rare?" },
+					{
+						"list",
+						{ item = { fields = { { "n", "f64" } }, struct = "shared/inner.aly:Inner" }, array = true },
+					},
+				},
+			},
+		}
+		local sent = { rarity = "Rare", list = { setmetatable({ n = 2 }, Inner) } }
+		-- The table road: the engine copies the value and drops the
+		-- metatable of each item.
+		local out = wire.restore(layout, engine_copy({ n = 1, sent }))[1]
+		expect(out.rarity).toBe("Rare")
+		expect(getmetatable(out.list[1])).toBe(Inner)
+		expect(out.list[1]:double()).toBe(4)
+		-- The buffer road carries the same layout.
+		local buf, rest = wire.pack(layout, { sent }, "T")
+		local packed = wire.unpack(layout, buf, engine_copy(rest))[1]
+		expect(packed.list[1]:double()).toBe(4)
+		expect(wire.restore(layout, { n = 1, { list = {} } })[1].rarity).toBe(nil)
+		-- A name that is no variant is forged, on either road.
+		expect(function()
+			wire.restore(layout, { n = 1, { rarity = "Legendary", list = {} } })
+		end).toThrow("Legendary is no variant of the enum")
+		expect(function()
+			wire.pack(layout, { { rarity = "Legendary", list = {} } }, "T")
+		end).toThrow("Legendary is no variant of the enum")
 	end)
 
 	it("writes a long string's length in more bytes", function()

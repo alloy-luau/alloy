@@ -204,6 +204,13 @@ fn a_header_without_as_reports_and_still_parses() {
             "trait Shape",
         ),
         ("impl Box<T> function f(self) end\nend\n", "impl Box<T>"),
+        // A namespace read `function` after its name as no declaration,
+        // and reported "this expression is not a statement".
+        (
+            "namespace Geo function two(): number return 2 end end\n",
+            "namespace Geo",
+        ),
+        ("namespace Geo const X = 1 end\n", "namespace Geo"),
     ] {
         let lexed = lexer::lex(src).unwrap();
         let (chunk, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
@@ -291,6 +298,35 @@ fn a_body_with_no_end_keeps_the_statements_after_it() {
                 .iter()
                 .any(|s| matches!(s, Stmt::LocalFunction(_))),
             "`later` still reads after {head:?}"
+        );
+    }
+}
+
+/// `local function f()` with no `end` said "`local` on line 1 needs an
+/// `end`", and `export function` named `export`. The `end` closes the
+/// `function`, so the report names that word and sits on it.
+#[test]
+fn a_function_with_no_end_names_function() {
+    for head in [
+        "local function f()",
+        "const function f()",
+        "export function f()",
+        "function f()",
+        "local g = @native function()",
+        "local h = async function()",
+    ] {
+        let src = format!("{head}\n    print(1)\n");
+        let lexed = lexer::lex(&src).unwrap();
+        let (_, diagnostics) = parser::parse_lenient(&src, &lexed.toks, ParseOptions::default());
+
+        assert_eq!(
+            diagnostics[0].message, "`function` on line 1 needs an `end`",
+            "{head}"
+        );
+        assert_eq!(
+            diagnostics[0].offset,
+            src.find("function").unwrap(),
+            "{head}"
         );
     }
 }
@@ -709,6 +745,151 @@ fn a_match_head_without_an_alias_name_reports_once() {
     assert_eq!((errors, diagnostics), (0, 1));
 }
 
+/// An attribute's argument list the author is still typing reports on
+/// the bracket left open, not on the declaration below it. A list that
+/// closes keeps the report of what is wrong inside it.
+#[test]
+fn an_unclosed_attribute_names_its_bracket() {
+    for (src, message, at) in [
+        (
+            "@deprecated({\nfunction old()\nend\n",
+            "`@deprecated` opens `{` and never closes it; write `})` after its arguments",
+            "{\n",
+        ),
+        (
+            "@deprecated(\nfunction old()\nend\n",
+            "`@deprecated` opens `(` and never closes it; write `)` after its arguments",
+            "(\n",
+        ),
+    ] {
+        let lexed = lexer::lex(src).unwrap();
+        let (_, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+        assert_eq!(diagnostics.len(), 1, "for {src:?}: {diagnostics:?}");
+        assert_eq!(diagnostics[0].message, message);
+        assert!(src[diagnostics[0].offset..].starts_with(at), "for {src:?}");
+    }
+
+    assert_eq!(
+        lenient("@deprecated({ use = \"f\" })\nfunction old()\nend\n"),
+        (0, 0)
+    );
+
+    let src = "@deprecated(1 +)\nfunction old()\nend\n";
+    let lexed = lexer::lex(src).unwrap();
+    let (_, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+    assert!(
+        !diagnostics[0].message.contains("never closes"),
+        "{diagnostics:?}"
+    );
+}
+
+/// Luau's `@[...]` form that never closes reports at its `@` and names
+/// the brackets left open. It read on to the end of the file and
+/// reported past the last line. A group that closes parses.
+#[test]
+fn an_unclosed_bracket_attribute_names_its_bracket() {
+    for (src, message) in [
+        (
+            "@[deprecated({\nfunction old()\nend\n",
+            "`@[deprecated` opens `{` and never closes it; write `})]` after its arguments",
+        ),
+        (
+            "@[deprecated(\nfunction old()\nend\n",
+            "`@[deprecated` opens `(` and never closes it; write `)]` after its arguments",
+        ),
+        (
+            "@[deprecated\nfunction old()\nend\n",
+            "`@[deprecated` opens `[` and never closes it; write `]` after the attribute",
+        ),
+        (
+            "@[deprecated {\nfunction old()\nend\n",
+            "`@[deprecated` opens `{` and never closes it; write `}]` after its arguments",
+        ),
+    ] {
+        let lexed = lexer::lex(src).unwrap();
+        let (_, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+        assert_eq!(diagnostics.len(), 1, "for {src:?}: {diagnostics:?}");
+        assert_eq!(diagnostics[0].message, message);
+        assert_eq!(diagnostics[0].offset, 0, "for {src:?}");
+    }
+
+    assert_eq!(
+        lenient("@[deprecated { use = \"f\" }]\nfunction old()\nend\n"),
+        (0, 0)
+    );
+}
+
+/// A `case` the author is still typing reports once, on the `case`. The
+/// arms around it, the `end` of the match, and the `end` of the function
+/// all parse, in the value form and in the statement form.
+#[test]
+fn a_bare_case_reports_once_on_the_case() {
+    for src in [
+        "local function f(x: number): string\n    local label = match x with\n        case 0 then \"zero\"\n        case\n    end\n    return label\nend\n",
+        "match x with\n    case\n    case 1 then print(1)\n    default print(2)\nend\nprint(3)\n",
+    ] {
+        let (errors, diagnostics) = lenient(src);
+        assert_eq!((errors, diagnostics), (0, 1), "for {src:?}");
+
+        let lexed = lexer::lex(src).unwrap();
+        let (_, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+        assert_eq!(diagnostics[0].message, "expected a pattern after `case`");
+        assert!(
+            src[diagnostics[0].offset..].starts_with("case\n"),
+            "for {src:?}"
+        );
+    }
+}
+
+/// A `case` head that leaves a bracket open reports once, on the last
+/// bracket it opens. The read moves to the next arm, so the arms below,
+/// the `end` of the match, and the `end` of the function all parse.
+/// The match says it recovered, so the compiler claims no coverage.
+#[test]
+fn an_unclosed_bracket_in_a_case_reports_once_on_the_bracket() {
+    for (src, closers) in [
+        (
+            "local function f(h: Hit): number\n    return match h with\n        case Hit.Block(\n        case Hit.Miss then 0\n        default 1\n    end\nend\n",
+            "`)`",
+        ),
+        (
+            "match h with\n    case (\n    default print(1)\nend\nprint(2)\n",
+            "`)`",
+        ),
+        (
+            "local function f(h: X)\n    match h with\n        case X(Strike {\n        case Y then print(0)\n    end\nend\n",
+            "`})`",
+        ),
+    ] {
+        let (errors, diagnostics) = lenient(src);
+        assert_eq!((errors, diagnostics), (0, 1), "for {src:?}");
+
+        let lexed = lexer::lex(src).unwrap();
+        let (chunk, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+        let message = &diagnostics[0].message;
+        assert!(message.contains("never closes it"), "{message}");
+        assert!(message.contains(closers), "{message}");
+        assert!(
+            src[diagnostics[0].offset..].starts_with(['(', '{']),
+            "for {src:?}"
+        );
+        assert!(
+            src[diagnostics[0].offset + 1..].starts_with('\n'),
+            "for {src:?}"
+        );
+
+        if let Stmt::Match(m) = &chunk.block.stmts[0] {
+            assert!(m.recovered);
+        }
+    }
+
+    let src = "match h with\n    case (x) then print(x)\n    default print(1)\nend\n";
+    let lexed = lexer::lex(src).unwrap();
+    let (_, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(diagnostics[0].message, "expected a pattern, found `(`");
+}
+
 /// Two values of one head under one name: the second would shadow the
 /// first. The report lands on the second name, once.
 #[test]
@@ -796,4 +977,92 @@ fn an_arm_of_the_wrong_form_reports_once() {
         "match s with\n    case \"a\" then\n        print(\"a\")\n    default\n        print(\"d\")\nend\nlocal w = match s with\n    case \"a\" then 1\n    default 2\nend\nprint(w)\n",
     );
     assert_eq!((errors, diagnostics), (0, 0));
+}
+
+/// `!=` drew its own report and then "unexpected `end`". The lenient
+/// parse reads it as `~=`, so the typo is the one report. A strict parse
+/// still refuses it.
+#[test]
+fn a_not_equal_typo_is_one_report() {
+    let src = "local a = 1\nif a != 2 then\n    print(a)\nend\n";
+    assert_eq!(lenient(src), (0, 1));
+
+    let lexed = lexer::lex(src).unwrap();
+    let (_, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+    assert_eq!(
+        diagnostics[0].message,
+        "`!=` is not an operator; write `~=`"
+    );
+    assert!(parser::parse(src, &lexed.toks).is_err());
+}
+
+/// `print(n as number)` drew "expected `)`, found `as`", and three casts
+/// in one `new` drew 13 reports. Each `x as T` in a value position now
+/// draws the `::` advice once, and the lenient parse reads it as `::`.
+/// A match head keeps `as` for its alias, and `as` stays a name.
+#[test]
+fn an_as_cast_is_one_report_at_every_value_position() {
+    let src = "print(n as number)\nlocal t = { n as number, [n as number] }\nlocal p = (n as number)\nlocal i = if c then n as number else 0\nprint(new P { a = x as number, b = x as string })\nlocal r = match f(x as number) as v with\n    case 1 then v\n    default 0\nend\nlocal as = 2\nprint(as, t, p, i, r)\n";
+    assert_eq!(lenient(src), (0, 8));
+
+    let lexed = lexer::lex(src).unwrap();
+    let (_, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| d.message == "`as` is not a cast here; use `::`"),
+        "{diagnostics:?}"
+    );
+    assert!(parser::parse(src, &lexed.toks).is_err());
+}
+
+/// `if ok then n else 0` as the value line of `try do`, `async do`, or a
+/// match arm read as an if-statement: each branch reported, the `if` took
+/// the block's `end`, and the rest cascaded. A macro body read it as the
+/// value already, and a value block now does too.
+#[test]
+fn an_if_expression_ends_a_value_block() {
+    for body in [
+        "local v = try do\n    local n = 1\n    if ok then n else 0\nend\n",
+        "local v = async do\n    local n = 2\n    if ok then n else 0\nend\n",
+        "local v = match k with\n    case 1 then\n        local n = 3\n        if ok then n else 0\n    default 0\nend\n",
+    ] {
+        let src = format!("{body}print(v)\n");
+        assert_eq!(lenient(&src), (0, 0), "{body}");
+
+        let lexed = lexer::lex(&src).unwrap();
+        assert!(parser::parse(&src, &lexed.toks).is_ok(), "{body}");
+    }
+
+    // An `if` that is a statement keeps its reports.
+    let src = "local v = try do\n    if ok then 1 end\n    2\nend\n";
+    assert_eq!(lenient(src).1, 1);
+}
+
+/// A block that takes an `end` left of its own indent took the `end` of
+/// a block further out. The report blamed the outer block, or a trait
+/// signature with no body; it now names the inner block.
+#[test]
+fn a_missing_end_names_the_block_the_indent_leaves_open() {
+    for (src, want) in [
+        (
+            "local function g(n: number): number\n    return match n with\n        case 1 then 10\n        default 0\nend\nprint(g(1))\n",
+            "`match` on line 2 needs an `end`",
+        ),
+        (
+            "trait T\n    function f(self): number\n    function g(self): number\n        return 1\nend\nprint(1)\n",
+            "`function` on line 3 needs an `end`",
+        ),
+        (
+            "local function tick(dt: number)\n    if dt > 1 then\n        print(\"slow\")\n    for i = 1, 3 do\n        print(i)\n    end\nend\n\nlocal function other()\n    print(2)\nend\n",
+            "`if` on line 2 needs an `end`",
+        ),
+    ] {
+        let (_, count) = lenient(src);
+        let lexed = lexer::lex(src).unwrap();
+        let (_, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+
+        assert_eq!(count, 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].message, want);
+    }
 }

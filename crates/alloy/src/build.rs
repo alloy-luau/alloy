@@ -84,11 +84,23 @@ pub(crate) fn relative_require(from: &Path, to: &Path) -> String {
     out
 }
 
+/// The manifest of the outputs the last build wrote, one path from the
+/// root per line.
+const OUTPUTS: &str = ".alloy/outputs.txt";
+
+/// Whether a file is the `init` of its folder: `init.luau`, and also a
+/// script like `init.server.luau`. Rojo makes the folder that module or
+/// script, and the other files of the folder its children.
+pub fn is_init(path: &Path) -> bool {
+    path.file_stem()
+        .is_some_and(|s| s == "init" || s == "init.server" || s == "init.client")
+}
+
 /// The path a module requires its siblings from: the file itself, and
 /// its folder for an `init.luau`. Luau reads `x/init.luau` as the
 /// module `x`, so its `./y` names a file beside `x`, not one inside it.
 pub(crate) fn module_base(path: &Path) -> PathBuf {
-    match path.file_stem().is_some_and(|s| s == "init") {
+    match is_init(path) {
         true => path.parent().unwrap_or(Path::new("")).to_path_buf(),
 
         false => path.to_path_buf(),
@@ -137,109 +149,288 @@ pub fn check(root: &Path, build: &Build, emit: &Emit) -> std::io::Result<Report>
 }
 
 /// The structs the sources declare, with each field's type and width,
-/// for the wire layout of a remote. A source that does not parse
-/// contributes nothing; its own compile reports the error.
-pub fn struct_shapes(sources: &[PathBuf]) -> Vec<crate::StructShape> {
+/// for the wire layout of a remote, and the enums with their variants.
+/// Each source also gives its imports, so a layout reads a type name
+/// the way the file that writes it does. `base` is the project's `in`
+/// folder, which each module is relative to. A source that does not
+/// parse contributes nothing; its own compile reports the error.
+pub fn struct_shapes(
+    sources: &[PathBuf],
+    base: &Path,
+    aliases: &[(String, PathBuf)],
+) -> (Vec<crate::StructShape>, Vec<crate::WireScope>) {
     let mut shapes = Vec::new();
+    let mut scopes = Vec::new();
+    let base = crate::modules::normalize(base);
+    let module_of = |path: &Path| {
+        let path = crate::modules::normalize(path);
+
+        path.strip_prefix(&base)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/")
+    };
 
     for path in sources {
         let Ok(src) = std::fs::read_to_string(path) else {
             continue;
         };
-        let Ok(parsed) = alloy_syntax::parse_one(&src) else {
-            continue;
-        };
-        let text =
-            |span: alloy_syntax::ast::TokSpan| span.text(&src, &parsed.lexed.toks).to_string();
-        // A field type names this file's own declarations, which an
-        // importer cannot see: a unit enum crosses as its string, and an
-        // alias as its value, so the importer's layout reads the type the
-        // declaring file meant, not a Roblox class of the same name.
-        let mut unit_enums = std::collections::HashSet::new();
-        let mut aliases = std::collections::HashMap::new();
+        // The key holds all the result reads: the text, the base, the
+        // aliases, and the file each import names now.
+        let key = {
+            use std::hash::{Hash, Hasher};
 
-        for stmt in &parsed.chunk.block.stmts {
-            match stmt.under_default() {
-                alloy_syntax::ast::Stmt::Enum(e)
-                    if e.variants.iter().all(|v| v.payload.is_empty()) =>
-                {
-                    unit_enums.insert(text(e.name));
-                }
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (&src, &base, aliases).hash(&mut h);
 
-                alloy_syntax::ast::Stmt::TypeAlias(t) => {
-                    if let Some((_, value)) = text(t.span).split_once('=') {
-                        aliases.insert(text(t.name), value.trim().to_string());
-                    }
-                }
-
-                _ => {}
+            for spec in crate::modules::import_specs(&src) {
+                crate::modules::resolve(&spec, path, aliases).hash(&mut h);
             }
-        }
 
-        let resolve = |ty: String| -> String {
-            let base = ty.trim_end_matches('?').trim();
-            let optional = &ty[base.len()..];
+            h.finish()
+        };
+        let held = shape_cache().lock().ok().and_then(|c| {
+            c.get(path)
+                .filter(|(k, _)| *k == key)
+                .map(|(_, own)| own.clone())
+        });
+        let own = match held {
+            Some(own) => own,
 
-            if unit_enums.contains(base) {
-                format!("string{optional}")
-            } else if let Some(value) = aliases.get(base) {
-                match optional.is_empty() {
-                    true => value.clone(),
+            None => {
+                let own = file_shapes(path, &src, &module_of(path), &module_of, aliases);
 
-                    false => format!("({value}){optional}"),
+                if let Ok(mut c) = shape_cache().lock() {
+                    c.insert(path.clone(), (key, own.clone()));
                 }
-            } else {
-                ty
+
+                own
             }
         };
 
-        for stmt in &parsed.chunk.block.stmts {
-            let alloy_syntax::ast::Stmt::Struct(st) = stmt.under_default() else {
-                continue;
-            };
-            // A `@skip` field stays off the wire, as it stays out of
-            // the derived table.
-            let fields = st
-                .fields
-                .iter()
-                .filter(|f| {
-                    !f.attributes
-                        .iter()
-                        .any(|a| a.name.map(&text).as_deref() == Some("skip"))
-                })
-                .map(|f| crate::WireField {
-                    name: text(f.name),
-                    ty: resolve(text(f.ty).trim().to_string()),
-                    width: f.attributes.iter().find_map(|a| {
-                        let n = text(a.name?);
-
-                        crate::desugar::WIRE_WIDTHS
-                            .contains(&n.as_str())
-                            .then_some(n)
-                    }),
-                })
-                .collect();
-            let derives = st
-                .attributes
-                .iter()
-                .filter(|a| a.name.map(&text).as_deref() == Some("derive"))
-                .flat_map(|a| a.args.iter().map(|x| text(x.span())))
-                // `serde.Serialize` through a star import of the std.
-                .map(|d: String| match d.rsplit_once('.') {
-                    Some((_, n)) if crate::std_names::is_std_name(n) => n.to_string(),
-
-                    _ => d,
-                })
-                .collect();
-            shapes.push(crate::StructShape {
-                name: text(st.name),
-                fields,
-                derives,
-            });
+        if let Some((own, scope)) = own {
+            shapes.extend(own);
+            scopes.push(scope);
         }
     }
 
-    shapes
+    (shapes, scopes)
+}
+
+/// The shapes one source declares and its scope, `None` for a source
+/// that does not parse.
+type FileShapes = Option<(Vec<crate::StructShape>, crate::WireScope)>;
+
+/*
+The shapes of each source, by path, with the key they came from. The
+editor reads the chain of a file's imports on each edit, and most of
+those modules did not change: 31 modules took about 4 ms a read, and a
+held one costs the read of its text and the lookup of its imports.
+*/
+fn shape_cache() -> &'static std::sync::Mutex<HashMap<PathBuf, (u64, FileShapes)>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, (u64, FileShapes)>>> =
+        std::sync::OnceLock::new();
+
+    CACHE.get_or_init(Default::default)
+}
+
+/// The shapes one source declares, and the imports that say what a
+/// name in it means. `module` is the source's own module.
+fn file_shapes(
+    path: &Path,
+    src: &str,
+    module: &str,
+    module_of: &dyn Fn(&Path) -> String,
+    aliases: &[(String, PathBuf)],
+) -> FileShapes {
+    let mut shapes = Vec::new();
+    let parsed = alloy_syntax::parse_one(src).ok()?;
+    // A barrel's `export { Inner } from "./inner"` binds the name
+    // for an importer the way an import does.
+    let passed = crate::modules::reexports(src)
+        .into_iter()
+        .filter_map(|(name, exported, spec)| {
+            let target = crate::modules::resolve(&spec, path, aliases)?;
+
+            Some((exported, module_of(&target), name))
+        });
+    let scope = crate::WireScope {
+        module: module.to_string(),
+        names: crate::modules::named_specs(src, path, aliases)
+            .into_iter()
+            .map(|(target, name, local)| (local, module_of(&target), name))
+            .chain(passed)
+            .collect(),
+        stars: crate::modules::star_locals(src, path, aliases)
+            .into_iter()
+            .map(|(target, local)| (local, module_of(&target)))
+            .collect(),
+    };
+    let text = |span: alloy_syntax::ast::TokSpan| span.text(src, &parsed.lexed.toks).to_string();
+    // A field type may name an alias of this file, which an
+    // importer cannot see, so it reads as its value.
+    let mut type_aliases = std::collections::HashMap::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        if let alloy_syntax::ast::Stmt::TypeAlias(t) = stmt.under_default()
+            && let Some((_, value)) = text(t.span).split_once('=')
+        {
+            type_aliases.insert(text(t.name), value.trim().to_string());
+        }
+    }
+
+    let resolve = |ty: String| -> String {
+        let base = ty.trim_end_matches('?').trim();
+        let optional = &ty[base.len()..];
+
+        if let Some(value) = type_aliases.get(base) {
+            match optional.is_empty() {
+                true => value.clone(),
+
+                false => format!("({value}){optional}"),
+            }
+        } else {
+            ty
+        }
+    };
+
+    let derives_of = |attributes: &[alloy_syntax::ast::Attr]| -> Vec<String> {
+        attributes
+            .iter()
+            .filter(|a| a.name.map(&text).as_deref() == Some("derive"))
+            .flat_map(|a| a.args.iter().map(|x| text(x.span())))
+            // `serde.Serialize` through a star import of the std.
+            .map(|d: String| match d.rsplit_once('.') {
+                Some((_, n)) if crate::std_names::is_std_name(n) => n.to_string(),
+
+                _ => d,
+            })
+            .collect()
+    };
+
+    let mut scoped = Vec::new();
+    let top: Vec<&alloy_syntax::ast::Stmt> = parsed.chunk.block.stmts.iter().collect();
+    scoped_stmts(&top, &text, &[], &mut scoped);
+
+    for (stmt, around) in scoped {
+        // A member names a sibling by its own name, and the shape keeps
+        // the path, `Combat.Pos`, that the layout reads in this module.
+        let field_type = |ty: String| {
+            resolve(crate::desugar::qualify_names(&ty, &|w| {
+                let (path, _) = around
+                    .iter()
+                    .rev()
+                    .find(|(_, names)| names.iter().any(|n| n == w))?;
+
+                Some(format!("{path}.{w}"))
+            }))
+        };
+        // A namespace member renders under one flat name, `Combat_Hit`.
+        let prefix: String = around
+            .last()
+            .map_or(String::new(), |(p, _)| format!("{}_", p.replace('.', "_")));
+
+        if let alloy_syntax::ast::Stmt::Enum(e) = stmt {
+            let variants = e.variants.iter().map(|v| {
+                let types = v
+                    .payload
+                    .iter()
+                    .map(|t| field_type(text(*t).trim().to_string()))
+                    .collect();
+
+                (text(v.name), types)
+            });
+            shapes.push(crate::StructShape {
+                name: format!("{prefix}{}", text(e.name)),
+                module: module.to_string(),
+                variants: variants.collect(),
+                derives: derives_of(&e.attributes),
+                ..Default::default()
+            });
+        }
+
+        let alloy_syntax::ast::Stmt::Struct(st) = stmt else {
+            continue;
+        };
+        // A `@skip` field stays off the wire, as it stays out of
+        // the derived table.
+        let fields = st
+            .fields
+            .iter()
+            .filter(|f| {
+                !f.attributes
+                    .iter()
+                    .any(|a| a.name.map(&text).as_deref() == Some("skip"))
+            })
+            .map(|f| crate::WireField {
+                name: text(f.name),
+                ty: field_type(text(f.ty).trim().to_string()),
+                width: f.attributes.iter().find_map(|a| {
+                    let n = text(a.name?);
+
+                    crate::desugar::WIRE_WIDTHS
+                        .contains(&n.as_str())
+                        .then_some(n)
+                }),
+            })
+            .collect();
+        let derives = derives_of(&st.attributes);
+        shapes.push(crate::StructShape {
+            name: format!("{prefix}{}", text(st.name)),
+            fields,
+            derives,
+            module: module.to_string(),
+            variants: Vec::new(),
+        });
+    }
+
+    Some((shapes, scope))
+}
+
+/// A namespace around a statement: its path, `Combat.Deep`, and the
+/// types it declares.
+type Around = (String, Vec<String>);
+
+/// Each statement of a block, and of every namespace in it, with the
+/// namespaces around it, innermost last.
+fn scoped_stmts<'a>(
+    stmts: &[&'a alloy_syntax::ast::Stmt],
+    text: &dyn Fn(alloy_syntax::ast::TokSpan) -> String,
+    around: &[Around],
+    out: &mut Vec<(&'a alloy_syntax::ast::Stmt, Vec<Around>)>,
+) {
+    use alloy_syntax::ast::Stmt;
+
+    for stmt in stmts {
+        let stmt = stmt.under_default();
+
+        if let Stmt::Namespace(ns) = stmt {
+            let name = text(ns.name);
+            let path = match around.last() {
+                Some((p, _)) => format!("{p}.{name}"),
+
+                None => name,
+            };
+            let members: Vec<&Stmt> = ns.members.iter().map(|m| m.stmt.under_default()).collect();
+            let types = members
+                .iter()
+                .filter_map(|m| match m {
+                    Stmt::Struct(s) => Some(text(s.name)),
+
+                    Stmt::Enum(e) => Some(text(e.name)),
+
+                    Stmt::Namespace(n) => Some(text(n.name)),
+
+                    _ => None,
+                })
+                .collect();
+            let mut inner = around.to_vec();
+            inner.push((path, types));
+            scoped_stmts(&members, text, &inner, out);
+        }
+
+        out.push((stmt, around.to_vec()));
+    }
 }
 
 /// The Alloy sources under `input`, sorted.
@@ -287,6 +478,7 @@ fn run_inner(
         naming: config.lint.naming.clone(),
         test_runner: config.test.lest,
         std_globals: config.std.globals.clone(),
+        new_solver: config.flux.new_solver,
         ..EmitOptions::default()
     };
     let input = root.join(&build.input);
@@ -297,6 +489,9 @@ fn run_inner(
     let tree = crate::project::Tree::load(root, config);
     let mut report = Report::default();
     let mut expected: HashSet<PathBuf> = HashSet::new();
+    // The outputs of the sources that failed this run. Each keeps the
+    // output a run before wrote, so the game runs the last good build.
+    let mut held: HashSet<PathBuf> = HashSet::new();
     let mut imports: Vec<(PathBuf, Vec<crate::ImportRef>)> = Vec::new();
 
     // A project whose `out` (or spec folder) sits under `in` would read
@@ -317,8 +512,11 @@ fn run_inner(
 
     // The structs of every source, so a remote in one file packs a
     // struct another file declares.
+    let module_aliases = crate::modules::aliases(root, &tree);
+    let (shapes, wire_scopes) = struct_shapes(&sources, &input, &module_aliases);
     let base_options = EmitOptions {
-        shapes: struct_shapes(&sources),
+        shapes,
+        wire_scopes,
         ..base_options
     };
 
@@ -480,7 +678,9 @@ fn run_inner(
     // `[alx]` in alloy.toml, or a `luaux.toml` beside it, picks the UI
     // library for `.alx`.
     let jsx_config = config.markup(root);
-    let module_aliases = crate::modules::aliases(root, &tree);
+    // A table that does not load is one mistake, in the file that holds
+    // it, however many `.alx` files it stops.
+    let mut markup_reported = false;
 
     // An alias the project declares wrongly is a failure of the
     // project, not of one file. The path is absolute, so the report
@@ -528,14 +728,34 @@ fn run_inner(
             &module_base(&build.out.join(&rel_out)),
             &build.out.join("alloy"),
         );
+        let ship_by_tree = crate::project::std_require_for(&tree, &source_rel);
         let (std_require, ship_std_require) = match &emit.std_require {
             Some(s) => (s.clone(), None),
 
-            None => (by_file, crate::project::std_require_for(&tree, &source_rel)),
+            // `flux` gives luau-lsp the sourcemap, and luau-lsp reads a
+            // relative path in a file the sourcemap holds as a place in
+            // the tree. The check artifact then names the runtime by the
+            // alias the flux mirror declares, as the language server
+            // does. A project an import leads into sits outside the
+            // mirror's configuration and keeps the file path.
+            None if keep && deps.stack.len() == 1 => {
+                ("@alloy".to_string(), Some(ship_by_tree.unwrap_or(by_file)))
+            }
+
+            None => (by_file, ship_by_tree),
+        };
+        // A project an import leads into sits outside the sourcemap, so
+        // its check artifact keeps the file path, as for the runtime.
+        let mount_requires = match deps.stack.len() {
+            1 => crate::project::mount_requires(&tree, &source_rel, &source),
+
+            _ => Vec::new(),
         };
         let options = EmitOptions {
             file_name: rel.to_string_lossy().into_owned(),
             module_rel: build.out.join(&rel_out).to_string_lossy().into_owned(),
+            mount_requires,
+            mount_side: crate::project::place_side(&tree, &source_rel),
             definitions: rel.to_string_lossy().ends_with(".d.aly"),
             std_require,
             ship_std_require,
@@ -573,8 +793,20 @@ fn run_inner(
             (Err(_), false) => None,
 
             (Err(e), true) => {
-                report.skipped.push(rel.clone());
-                report.failures.push((rel, e.clone()));
+                held.insert(target.clone());
+                report.skipped.push(rel);
+
+                if !markup_reported {
+                    markup_reported = true;
+                    let (file, at) = config.markup_problem_at(root, e);
+                    // `markup:` gives the report the MarkupError kind.
+                    let message = match at {
+                        Some((line, col)) => format!("{}:{}: markup: {e}", line + 1, col + 1),
+
+                        None => format!("markup: {e}"),
+                    };
+                    report.failures.push((file, message));
+                }
 
                 continue;
             }
@@ -591,6 +823,7 @@ fn run_inner(
             Ok(c) => c,
 
             Err(e) => {
+                held.insert(target.clone());
                 report.skipped.push(rel.clone());
                 report.failures.push((rel, e.located(&source)));
 
@@ -652,10 +885,11 @@ fn run_inner(
 
         // An import into another project reports once: the report that
         // names the project and its first error, over the module scan's.
+        // The data files below report a data import.
         let taken: Vec<u32> = outside.problems.iter().map(|p| p.start).collect();
         let scanned = crate::modules::import_problems(&source, &source_rel, &path, &module_aliases)
             .into_iter()
-            .filter(|p| !taken.contains(&p.start));
+            .filter(|p| !taken.contains(&p.start) && p.kind != "DataError");
 
         for problem in outside.problems.into_iter().chain(scanned) {
             let at = crate::directives::line_of(&source, problem.start as usize);
@@ -712,12 +946,23 @@ fn run_inner(
                 .iter()
                 .map(|l| (source[..l.start as usize].matches('\n').count() + 1, l.name))
                 .collect();
+            let line = |at: u32| source[..at as usize].matches('\n').count() + 1;
             let error_lines = compiled
                 .diagnostics
                 .iter()
                 .chain(&data_diagnostics)
                 .filter(|d| !crate::alx::is_attribute_check(&d.message))
-                .map(|d| source[..d.start as usize].matches('\n').count() + 1)
+                // A match with no arm for a variant ends in a nil
+                // fallthrough, and the checker reports that nil at the
+                // last arm. The report on the match already says it, so
+                // it covers every line of the match, as in the editor.
+                .flat_map(
+                    |d| match d.message.starts_with("this match is not exhaustive") {
+                        true => line(d.start)..=line(d.end),
+
+                        false => line(d.start)..=line(d.start),
+                    },
+                )
                 .chain(import_lines)
                 .collect();
             report.checks.push(crate::typecheck::CheckSource {
@@ -768,6 +1013,7 @@ fn run_inner(
         // The file produces nothing: `clean` then takes the stale output
         // a run before this one left.
         if !compiled.parsed_clean || report.diagnostics.len() > errors_before {
+            held.insert(target.clone());
             report.skipped.push(rel);
 
             continue;
@@ -879,6 +1125,65 @@ fn run_inner(
                     .push(file.strip_prefix(&out).unwrap_or(&file).to_path_buf());
             }
         }
+    }
+
+    // `clean` off keeps what no source makes, so a renamed script left
+    // its old output, and Rojo ran both. The manifest lists what the
+    // build wrote, and an entry no source makes now goes. A file the
+    // build never wrote stays.
+    let manifest = root.join(OUTPUTS);
+    let before = std::fs::read_to_string(&manifest).unwrap_or_default();
+
+    for line in before.lines() {
+        let path = root.join(line);
+
+        if expected.contains(&path) || held.contains(&path) || !path.starts_with(&out) {
+            continue;
+        }
+
+        if path.is_file() {
+            std::fs::remove_file(&path)?;
+            report
+                .removed
+                .push(path.strip_prefix(&out).unwrap_or(&path).to_path_buf());
+        }
+
+        // A folder the file leaves empty goes too, else Rojo keeps an
+        // empty instance of it.
+        let mut dir = path.parent();
+
+        while let Some(d) = dir
+            && d != out
+            && d.starts_with(&out)
+            && std::fs::remove_dir(d).is_ok()
+        {
+            dir = d.parent();
+        }
+    }
+
+    // A held output enters the manifest only when the build wrote it.
+    let mut now: Vec<String> = expected
+        .iter()
+        .chain(
+            held.iter()
+                .filter(|p| before.lines().any(|l| root.join(l) == **p)),
+        )
+        .filter(|p| p.is_file())
+        .filter_map(|p| p.strip_prefix(root).ok())
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .collect();
+    now.sort();
+    let text: String = now.iter().map(|l| format!("{l}\n")).collect();
+
+    if text != before {
+        std::fs::create_dir_all(root.join(".alloy"))?;
+        std::fs::write(&manifest, text)?;
+    }
+
+    // A mount with no source yet, `src/client` before the first client
+    // file, still has a place in the build project.
+    for dir in tree.out_dirs(root) {
+        std::fs::create_dir_all(root.join(dir))?;
     }
 
     Ok(report)
@@ -1445,6 +1750,13 @@ fn resolve_import(from: &Path, path: &str, sources: &[PathBuf]) -> Option<PathBu
         return None;
     }
 
+    // A data or Luau file is no source. `with_extension` below would
+    // read `./data.json` as `./data.aly`, the module beside it.
+    if crate::data::Format::of(path).is_some() || path.ends_with(".luau") || path.ends_with(".lua")
+    {
+        return None;
+    }
+
     let base = from.parent().unwrap_or(Path::new(""));
     let mut joined = PathBuf::new();
 
@@ -1734,6 +2046,14 @@ mod tests {
         let files: Vec<String> = lints.iter().map(|(p, _)| p.display().to_string()).collect();
         assert_eq!(files, vec!["a.aly", "b.aly", "c.aly"]);
         assert!(lints[0].1.message.contains("`a.aly` imports `b.aly`"));
+
+        // `data.aly` beside `data.json`: an import of the data file is
+        // no import of the module, so there is no cycle to report.
+        let data = vec![(
+            PathBuf::from("data.aly"),
+            vec![im("./data.json"), im("./data.luau")],
+        )];
+        assert!(circular_imports(&data).is_empty());
     }
 
     #[test]

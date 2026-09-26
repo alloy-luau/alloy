@@ -707,18 +707,14 @@ impl Server {
             // The tree writes the mirror's sourcemap, as `alloy build`
             // writes the project's. A file added since the last build is
             // in this one, so `@game/` completes and types without one.
-            if let Some(config) = &config {
-                let tree = alloy::project::Tree::load(&root, config);
-
-                if !tree.mounts.is_empty()
-                    && let Ok(map) = alloy::project::sourcemap(&tree, &root)
-                {
-                    let text = serde_json::to_string_pretty(&map).unwrap_or_default() + "\n";
-                    st.write_mirror(
-                        &root.join("sourcemap.json"),
-                        &mirrored_sourcemap(&text, &input, out.as_deref(), &root),
-                    );
-                }
+            if let Some(config) = &config
+                && tree_sourcemap(&root, Some(config))
+                && let Some(text) = alloy::project::luau_sourcemap(&root, config)
+            {
+                st.write_mirror(
+                    &root.join("sourcemap.json"),
+                    &mirrored_sourcemap(&text, &input, out.as_deref(), &root),
+                );
             }
         }
 
@@ -1472,8 +1468,16 @@ pub(crate) fn mirror_above(root: Option<&Path>) -> usize {
     deepest.clamp(ABOVE, ABOVE_MAX)
 }
 
+/// The folder that holds the mirror of every root. `ALLOY_LSP_MIRRORS`
+/// moves it, so a test run keeps its mirrors in a folder it removes.
+fn mirror_parent() -> PathBuf {
+    std::env::var_os("ALLOY_LSP_MIRRORS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("alloy-lsp"))
+}
+
 pub(crate) fn mirror_dir(root: Option<&Path>, above: usize) -> PathBuf {
-    let mut dir = std::env::temp_dir().join("alloy-lsp").join(root_key(root));
+    let mut dir = mirror_parent().join(root_key(root));
 
     for _ in 0..above {
         dir.push("up");
@@ -1482,11 +1486,25 @@ pub(crate) fn mirror_dir(root: Option<&Path>, above: usize) -> PathBuf {
     dir.join("root")
 }
 
-/// Removes the mirrors of other roots that no server touched for a
-/// week. A server that was killed leaves its mirror behind, and a
-/// probe that opens thousands of roots leaves one each.
+/// The file in the base of a mirror that names the server that uses it.
+const OWNER: &str = "server.pid";
+
+/// Writes the pid of this server into its mirror. The purge of another
+/// server then keeps the mirror while this server runs.
+pub(crate) fn claim_mirror(mirror: &Path) {
+    let _ = std::fs::write(
+        mirror_base(mirror).join(OWNER),
+        std::process::id().to_string(),
+    );
+}
+
+/// Removes the mirrors of other roots that no server touched for a day
+/// and no live server owns. A server that was killed leaves its mirror
+/// behind, and a test or a probe that opens many roots leaves one each.
+/// Only a folder named like a root key goes, so a parent set by hand
+/// loses nothing else.
 pub(crate) fn purge_stale_mirrors(mirror: &Path) {
-    const WEEK: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+    const DAY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
     let own = mirror_base(mirror).to_path_buf();
     let Some(parent) = own.parent() else {
         return;
@@ -1494,26 +1512,46 @@ pub(crate) fn purge_stale_mirrors(mirror: &Path) {
     let Ok(entries) = std::fs::read_dir(parent) else {
         return;
     };
-    let now = std::time::SystemTime::now();
 
     for entry in entries.flatten() {
         let path = entry.path();
+        let keyed = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| n.len() == 16 && n.chars().all(|c| c.is_ascii_hexdigit()));
 
-        if path == own {
+        if path == own || !keyed {
             continue;
         }
 
-        let stale = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| now.duration_since(t).ok())
-            .is_some_and(|age| age > WEEK);
-
-        if stale {
+        if age(&path).is_some_and(|a| a > DAY) && !owner_alive(&path) {
             let _ = std::fs::remove_dir_all(&path);
         }
     }
+}
+
+/// How long ago a file or a folder last changed.
+fn age(path: &Path) -> Option<std::time::Duration> {
+    let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+
+    std::time::SystemTime::now().duration_since(modified).ok()
+}
+
+/// Whether the server in the pid file of a mirror still runs. Linux
+/// lists each live process under `/proc`. Other systems give std no
+/// such check, so there a pid file younger than a week counts as live.
+fn owner_alive(base: &Path) -> bool {
+    const WEEK: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+    let file = base.join(OWNER);
+
+    if cfg!(target_os = "linux") {
+        return std::fs::read_to_string(&file)
+            .ok()
+            .and_then(|t| t.trim().parse::<u32>().ok())
+            .is_some_and(|pid| Path::new("/proc").join(pid.to_string()).exists());
+    }
+
+    age(&file).is_some_and(|a| a < WEEK)
 }
 
 /// How many folders above its root a mirror keeps: the `up` folders
@@ -1726,6 +1764,132 @@ pub(crate) fn map_from_shadow(value: &mut Value, ctx: Option<&str>, st: &State) 
     }
 }
 
+/*
+A child refactor can send a command that follows its edit: "Extract to
+local variable" asks for `luau-lsp.rename` on the new name. The
+arguments name the shadow, at a place in the text after the edit. The
+place sits in text an edit inserts, and that text lands in the source
+as it is, so the place moves with the edit. A command with a place in
+older text goes: its arguments would name a file of the mirror.
+*/
+pub(crate) fn map_follow_up(action: &mut Value, st: &State) {
+    let Some(args) = action
+        .pointer("/command/arguments")
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    let Some((i, shadow)) = args.iter().enumerate().find_map(|(i, a)| {
+        a.as_str()
+            .filter(|u| st.shadows.contains_key(*u))
+            .map(|u| (i, u.to_string()))
+    }) else {
+        return;
+    };
+    let moved = st.shadows.get(&shadow).and_then(|source| {
+        let doc = st.docs.get(source)?;
+        let (line, character) = args.get(i + 1).and_then(position_of_value)?;
+        let edit = action.get("edit")?;
+        let mut edits: Vec<&Value> = edit
+            .get("changes")
+            .and_then(|c| c.get(&shadow))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .collect();
+
+        for change in edit
+            .get("documentChanges")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if change.pointer("/textDocument/uri").and_then(Value::as_str) == Some(&shadow) {
+                edits.extend(
+                    change
+                        .get("edits")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten(),
+                );
+            }
+        }
+
+        let at = inserted_place(&edits, doc, (line, character))?;
+
+        Some((source.clone(), at))
+    });
+
+    match (moved, action.pointer_mut("/command/arguments")) {
+        (Some((source, (l, c))), Some(Value::Array(args))) => {
+            args[i] = json!(source);
+            args[i + 1] = json!({ "line": l, "character": c });
+
+            // luau-lsp's extension owns `luau-lsp.rename`, and it
+            // registers the command only once it starts on a Luau file.
+            // The Alloy extension registers its own copy.
+            if let Some(command) = action.pointer_mut("/command/command")
+                && command == "luau-lsp.rename"
+            {
+                *command = json!("alloy-luau.rename");
+            }
+        }
+
+        _ => {
+            if let Some(action) = action.as_object_mut() {
+                action.remove("command");
+            }
+        }
+    }
+}
+
+/// Where a place after the edits lands in the source, when it sits in
+/// text an edit inserts. The edits go in order, and each one moves the
+/// lines below it by the lines it adds, on each side. `None` when the
+/// place is in text that was there before.
+fn inserted_place(
+    edits: &[&Value],
+    doc: &Doc,
+    (line, character): (u32, u32),
+) -> Option<(u32, u32)> {
+    let mut edits: Vec<_> = edits
+        .iter()
+        .filter_map(|e| Some((range_of(e.get("range")?)?, e.get("newText")?.as_str()?)))
+        .collect();
+    edits.sort_by_key(|((start, _), _)| *start);
+    let (mut shadow_shift, mut source_shift) = (0i64, 0i64);
+
+    for ((start, end), text) in edits {
+        let mut mapped = range_value(start, end);
+        map_range_value(&mut mapped, doc);
+        let (to, to_end) = range_of(&mapped)?;
+        let lines: Vec<&str> = text.split('\n').collect();
+        let k = i64::from(line) - (i64::from(start.0) + shadow_shift);
+
+        if let Some(piece) = usize::try_from(k).ok().and_then(|k| lines.get(k)) {
+            let from = if k == 0 { start.1 } else { 0 };
+            let width = piece.encode_utf16().count() as u32;
+
+            if (from..=from + width).contains(&character) {
+                let l = i64::from(to.0) + source_shift + k;
+                let c = if k == 0 {
+                    to.1 + character - start.1
+                } else {
+                    character
+                };
+
+                return Some((u32::try_from(l).ok()?, c));
+            }
+        }
+
+        let added = lines.len() as i64 - 1;
+        shadow_shift += added - i64::from(end.0 - start.0);
+        source_shift += added - i64::from(to_end.0 - to.0);
+    }
+
+    None
+}
+
 /// Moves both ends of a range up by `by` lines.
 pub(crate) fn shift_lines(range: &mut Value, by: usize) {
     for end in ["start", "end"] {
@@ -1746,9 +1910,6 @@ pub(crate) fn mirrored_sourcemap(
     out: Option<&Path>,
     root: &Path,
 ) -> String {
-    let Ok(mut json) = serde_json::from_str::<Value>(text) else {
-        return text.to_string();
-    };
     let rel = |p: &Path| {
         p.strip_prefix(root)
             .unwrap_or(p)
@@ -1758,51 +1919,13 @@ pub(crate) fn mirrored_sourcemap(
     let runtime_out = out.map(|o| rel(&o.join("alloy.luau")));
     let runtime_in = rel(&input.join("alloy.luau"));
 
-    pub(crate) fn walk(v: &mut Value, f: &dyn Fn(&str) -> String) {
-        match v {
-            Value::Array(items) => items.iter_mut().for_each(|i| walk(i, f)),
-
-            Value::Object(map) => {
-                for (k, v) in map.iter_mut() {
-                    if k == "filePaths" {
-                        if let Value::Array(paths) = v {
-                            for p in paths.iter_mut() {
-                                if let Value::String(s) = p {
-                                    *s = f(s);
-                                }
-                            }
-                        }
-                    } else {
-                        walk(v, f);
-                    }
-                }
-            }
-
-            _ => {}
-        }
-    }
-
-    walk(&mut json, &|s: &str| {
+    alloy::project::map_sourcemap(text, &|s| {
         if runtime_out.as_deref() == Some(s) {
             return runtime_in.clone();
         }
 
-        if let Some(b) = s.strip_suffix(".d.aly") {
-            format!("{b}.d.luau")
-        } else if let Some(b) = s
-            .strip_suffix(".aly")
-            .or_else(|| s.strip_suffix(".alx"))
-            .or_else(|| s.strip_suffix(".json"))
-            .or_else(|| s.strip_suffix(".toml"))
-        {
-            // A data file is a module in the mirror, as in the build.
-            format!("{b}.luau")
-        } else {
-            s.to_string()
-        }
-    });
-
-    serde_json::to_string(&json).unwrap_or_else(|_| text.to_string())
+        alloy::project::luau_script_path(s)
+    })
 }
 
 /// The text the workspace pass writes into the mirror for a plain

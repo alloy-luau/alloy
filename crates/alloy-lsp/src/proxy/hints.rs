@@ -242,6 +242,14 @@ pub(crate) fn clean_hints(hints: &mut Vec<Value>, doc: &Doc) {
             // gutter stays empty.
             (false, None) if undeclared_variable(annotation, &parameters) => return false,
 
+            // The print spells out how the runtime lays out an enum or a
+            // struct: `{ _1: "Junk" | { @metatable Item, ... } }`. The
+            // hover names the type, and the layout names nothing the
+            // source wrote, so the gutter stays empty.
+            (false, None) if annotation.contains("@metatable") || annotation.contains("_1:") => {
+                return false;
+            }
+
             (false, None) => {
                 h.as_object_mut().map(|o| o.remove("textEdits"));
                 truncate_hint(h, &label);

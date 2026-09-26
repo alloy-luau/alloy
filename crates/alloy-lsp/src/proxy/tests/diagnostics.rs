@@ -4,8 +4,13 @@ use super::support::one_file;
 #[test]
 pub(crate) fn the_quoted_path_of_an_import_line() {
     let src = "import * as M from \"./inventory\"\nlocal x = 1\n";
-    assert_eq!(quoted_span_on_line(src, 0), Some((19, 32)));
+    assert_eq!(quoted_span_on_line(src, 0), Some(((0, 19), (0, 32))));
     assert_eq!(quoted_span_on_line(src, 1), None);
+
+    // The emit writes the `require` of a list over several lines on the
+    // line of `import`; the path sits on the last line.
+    let src = "import {\n    a, -- \"x\"\n} from \"./inventory\"\n";
+    assert_eq!(quoted_span_on_line(src, 0), Some(((2, 7), (2, 20))));
 }
 #[test]
 pub(crate) fn a_private_view_in_a_message_reads_as_the_struct() {
@@ -348,6 +353,55 @@ pub(crate) fn a_fix_that_deletes_names_what_it_removes() {
         "  match p with"
     );
 }
+/// The fix-all takes `prefer_const` first, as `alloy fmt` does: a local
+/// it makes a `const` takes the const style, not the variable style.
+#[test]
+pub(crate) fn the_fix_all_names_a_new_const_in_the_const_style() {
+    let config = alloy::config::Config::parse(
+        "[lint.naming]\nvariable = \"camelCase\"\nconst = \"SCREAMING_SNAKE_CASE\"\n",
+        std::path::Path::new("alloy.toml"),
+    )
+    .unwrap();
+    let source = "local max_hp = 100\nprint(max_hp)\n";
+    let uri = "file:///t.aly";
+    let options = EmitOptions {
+        naming: config.lint.naming.clone(),
+        ..EmitOptions::default()
+    };
+    let mut st = State {
+        root: Some(PathBuf::from("/")),
+        mirror: PathBuf::from("/m"),
+        ..State::default()
+    };
+    st.docs.insert(
+        uri.to_string(),
+        Doc::new(
+            source.to_string(),
+            1,
+            &options,
+            &alloy::luaux::Config::default(),
+            None,
+        ),
+    );
+    st.configs.borrow_mut().insert(
+        PathBuf::from("/"),
+        Some(std::sync::Arc::new((PathBuf::from("/alloy.toml"), config))),
+    );
+    let actions = st.lint_actions(uri, ((0, 0), (2, 0)));
+    let all = actions
+        .iter()
+        .find(|a| a["kind"] == "source.fixAll")
+        .expect("the fix-all");
+    let texts: Vec<&str> = all["edit"]["changes"][uri]
+        .as_array()
+        .expect("the edits")
+        .iter()
+        .map(|e| e["newText"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(texts, vec!["const", "MAX_HP", "MAX_HP"]);
+}
+
 /// A rename writes the new name at each read in one quick fix, and the
 /// fix-all takes every edit of it beside the other rewrites.
 #[test]
@@ -854,6 +908,25 @@ pub(crate) fn an_unused_type_import_loses_its_whole_line() {
         }])
     );
 }
+/// A name list over several lines: a dead entry on a line of its own
+/// goes with that line, and the comment of the entry above it stays. A
+/// comma in that comment is no entry.
+#[test]
+pub(crate) fn a_dead_entry_on_its_own_line_goes_with_the_line() {
+    let src = "import {\n    a, -- the a, not b\n    b,\n} from \"./mod\"\n\nprint(a)\n";
+    let (st, uri) = one_file(src);
+    let mut actions = Vec::new();
+    st.unused_import_actions(uri, ((0, 0), (0, 0)), &mut actions);
+
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    assert_eq!(
+        actions[0]["edit"]["changes"][uri],
+        json!([{
+            "range": { "start": { "line": 2, "character": 0 }, "end": { "line": 3, "character": 0 } },
+            "newText": "",
+        }])
+    );
+}
 /// An `import` whose keyword stands alone on its line: the statement
 /// runs over three lines, and the child's cut of it takes the `import`
 /// with one name and leaves the rest without a keyword.
@@ -1012,6 +1085,25 @@ pub(crate) fn the_compiler_errors_carry_their_quick_fixes() {
         }])
     );
 
+    // A match that gives a value: an empty arm reads "this arm gives
+    // no value", so each new arm holds `$todo()`.
+    for head in ["return match m with", "local n = match m with"] {
+        let src = format!(
+            "enum M as\n    Walk\n    Run\nend\n\nlocal function speed(m: M): number\n    {head}\n        case Walk then 16\n    end\nend\n\nprint(speed(M.Run))\n"
+        );
+        let (st, uri) = one_file(&src);
+        let actions = st.compiler_actions(uri, whole);
+        assert_eq!(title(&actions), "Add the missing arm", "{head}");
+        assert_eq!(
+            edit(&actions, uri),
+            json!([{
+                "range": { "start": { "line": 8, "character": 0 }, "end": { "line": 8, "character": 0 } },
+                "newText": "        case M.Run then\n            $todo()\n",
+            }]),
+            "{head}"
+        );
+    }
+
     // A variant one edit away from a name the enum has.
     let (st, uri) = one_file(
         "enum Color as\n    Red\n    Green\n    Blue\nend\n\nlocal c = Color.Gren\nprint(c)\n",
@@ -1024,6 +1116,147 @@ pub(crate) fn the_compiler_errors_carry_their_quick_fixes() {
         "enum Color as\n    Red\n    Green\n    Blue\nend\n\nlocal c = Color.Purple\nprint(c)\n",
     );
     assert!(st.compiler_actions(uri, whole).is_empty());
+
+    // `!=` is `~=`: the edit takes both characters.
+    let (st, uri) = one_file("local a = 1\nif a != 2 then\n    print(a)\nend\n");
+    let actions = st.compiler_actions(uri, whole);
+    assert_eq!(title(&actions), "Write `~=`");
+    assert_eq!(
+        edit(&actions, uri),
+        json!([{
+            "range": { "start": { "line": 1, "character": 5 }, "end": { "line": 1, "character": 7 } },
+            "newText": "~=",
+        }])
+    );
+
+    // `x as T` is `x :: T`: the edit takes `as` alone, in a call and in
+    // a whole `local`.
+    for (source, line, at) in [
+        ("local n: unknown = 1\nprint(n as number)\n", 1, 8),
+        (
+            "local n: unknown = 1\nlocal x = n as number\nprint(x)\n",
+            1,
+            12,
+        ),
+    ] {
+        let (st, uri) = one_file(source);
+        let actions = st.compiler_actions(uri, whole);
+        assert_eq!(title(&actions), "Write `::`", "{source}");
+        assert_eq!(
+            edit(&actions, uri),
+            json!([{
+                "range": { "start": { "line": line, "character": at }, "end": { "line": line, "character": at + 2 } },
+                "newText": "::",
+            }])
+        );
+    }
+
+    // `let` is `local`: the edit takes the word alone.
+    let (st, uri) = one_file("local a = 1\nlet b = a\nprint(b)\n");
+    let actions = st.compiler_actions(uri, whole);
+    assert_eq!(title(&actions), "Write `local`");
+    assert_eq!(
+        edit(&actions, uri),
+        json!([{
+            "range": { "start": { "line": 1, "character": 0 }, "end": { "line": 1, "character": 3 } },
+            "newText": "local",
+        }])
+    );
+
+    // `let mut x` gives `local x`: `local mut x` declares `mut` and
+    // assigns a global `x`.
+    let (st, uri) = one_file("let mut x = 0\nprint(x)\n");
+    let actions = st.compiler_actions(uri, whole);
+    assert_eq!(title(&actions), "Write `local`");
+    assert_eq!(
+        edit(&actions, uri),
+        json!([{
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 7 } },
+            "newText": "local",
+        }])
+    );
+
+    // `local mut x` loses the word.
+    let (st, uri) = one_file("local mut x = 0\nprint(x)\n");
+    let actions = st.compiler_actions(uri, whole);
+    assert_eq!(title(&actions), "Remove `mut`");
+    assert_eq!(
+        edit(&actions, uri),
+        json!([{
+            "range": { "start": { "line": 0, "character": 6 }, "end": { "line": 0, "character": 10 } },
+            "newText": "",
+        }])
+    );
+
+    // A call's `<...>` doubles each bracket; the `>` of a function
+    // type inside the list is not the close.
+    let (st, uri) = one_file("local s = Signal.new<(number) -> ()>()\nprint(s)\n");
+    let actions = st.compiler_actions(uri, whole);
+    assert_eq!(title(&actions), "Write `<<...>>`");
+    assert_eq!(
+        edit(&actions, uri),
+        json!([
+            {
+                "range": { "start": { "line": 0, "character": 20 }, "end": { "line": 0, "character": 20 } },
+                "newText": "<",
+            },
+            {
+                "range": { "start": { "line": 0, "character": 35 }, "end": { "line": 0, "character": 35 } },
+                "newText": ">",
+            },
+        ])
+    );
+}
+
+/// `id<number>(5)` is valid Luau, so it is a `single_angle_call` warning
+/// and no error. The lint has no `--fix` rewrite, because the call form
+/// changes what the program does, and the editor still offers it.
+#[test]
+fn a_single_angle_call_lint_offers_the_double_brackets() {
+    let (st, uri) = one_file("local number = 1\nlocal id = print\nlocal v = id<number>(5)\n");
+    let actions = st.lint_actions(uri, ((2, 0), (2, 22)));
+    let fix = actions
+        .iter()
+        .find(|a| a["title"] == "Write `<<...>>`")
+        .expect("the lint offers the call form");
+
+    assert_eq!(
+        fix["edit"]["changes"][uri],
+        json!([
+            {
+                "range": { "start": { "line": 2, "character": 12 }, "end": { "line": 2, "character": 12 } },
+                "newText": "<",
+            },
+            {
+                "range": { "start": { "line": 2, "character": 19 }, "end": { "line": 2, "character": 19 } },
+                "newText": ">",
+            },
+        ])
+    );
+    assert!(st.compiler_actions(uri, ((2, 0), (2, 22))).is_empty());
+}
+
+/// The checker's report on a `.` call of a method, in the compiler's
+/// words, carries the edit that writes the `:`.
+#[test]
+fn a_dot_call_of_a_method_takes_the_colon() {
+    let (mut st, uri) = one_file("local bag = { n = 0 }\n    bag.add(3)\n");
+    let d = json!({
+        "range": { "start": { "line": 1, "character": 4 }, "end": { "line": 1, "character": 11 } },
+        "severity": 1,
+        "message": "TypeError: `add` is a method; call it with `bag:add(...)`, not `bag.add(...)`",
+    });
+    st.child_diagnostics.insert(uri.to_string(), vec![d]);
+    let actions = st.compiler_actions(uri, ((0, 0), (99, 0)));
+
+    assert_eq!(actions[0]["title"], "Write `bag:add`");
+    assert_eq!(
+        actions[0]["edit"]["changes"][uri],
+        json!([{
+            "range": { "start": { "line": 1, "character": 7 }, "end": { "line": 1, "character": 8 } },
+            "newText": ":",
+        }])
+    );
 }
 
 /// A missing member of a remote names the remote the source declared.
@@ -1304,6 +1537,34 @@ fn a_config_file_names_a_wrong_lint_and_the_line_that_failed() {
             "the config does not load: attempt to index nil with 'x'".to_string()
         )]
     );
+
+    // Code builds these values, so only the load sees their types. It
+    // reports each one on the line of its key.
+    assert_eq!(
+        reports("local w = \"two\"\nexport default {\n    lint = { strict = w },\n    fmt = { indent_width = w },\n}\n"),
+        [
+            (
+                2,
+                "the config does not load: `lint.strict` takes a boolean; this is a string"
+                    .to_string()
+            ),
+            (
+                3,
+                "the config does not load: `fmt.indent_width` takes a whole number; this is a string"
+                    .to_string()
+            ),
+        ]
+    );
+
+    // A word the key does not take reports the same way.
+    assert_eq!(
+        reports("local t = \"tabz\"\nexport default {\n    fmt = { indent_type = t },\n}\n"),
+        [(
+            2,
+            "the config does not load: `fmt.indent_type` takes one of \"spaces\", \"tabs\"; `\"tabz\"` is none of them"
+                .to_string()
+        )]
+    );
 }
 
 /// A std name the load refuses sits on its string. The message names no
@@ -1334,7 +1595,8 @@ fn a_config_std_name_typo_sits_on_its_string() {
 /// An `[alx.factory]` the markup compiler refuses: the build skips the
 /// file and names the table, and the editor compiled it with the default
 /// backend and named `React`. A fix on disk left that report in place
-/// until the next keystroke.
+/// until the next keystroke. The report sits on the key in alloy.toml,
+/// not on the first line of each `.alx` file.
 #[test]
 fn a_broken_markup_config_is_named_and_a_fix_on_disk_clears_it() {
     use super::documents::{Recorder, alias_root};
@@ -1372,8 +1634,27 @@ fn a_broken_markup_config_is_named_and_a_fix_on_disk_clears_it() {
     server.publish(&uri);
 
     let sent = String::from_utf8_lossy(&log.lock().expect("the log").clone()).into_owned();
-    assert!(sent.contains("needs a backend"), "{sent}");
+    assert!(!sent.contains("needs a backend"), "{sent}");
     assert!(!sent.contains("`React` is not in scope"), "{sent}");
+
+    log.lock().expect("the log").clear();
+    server.publish_alias_problems();
+
+    let sent = String::from_utf8_lossy(&log.lock().expect("the log").clone()).into_owned();
+    let toml = sent
+        .split("Content-Length")
+        .find(|m| m.contains("alloy.toml"))
+        .expect("a report on alloy.toml");
+    assert!(
+        toml.contains("MarkupError: [alx.factory] needs a backend"),
+        "{toml}"
+    );
+    // The report names no key the table writes, so it sits on the
+    // table's header.
+    assert!(
+        toml.contains(r#""start":{"line":4,"character":0}"#),
+        "{toml}"
+    );
 
     log.lock().expect("the log").clear();
     std::fs::write(
@@ -1392,4 +1673,284 @@ fn a_broken_markup_config_is_named_and_a_fix_on_disk_clears_it() {
 
     assert!(sent.contains("publishDiagnostics"), "{sent}");
     assert!(!sent.contains("needs a backend"), "{sent}");
+}
+
+/// The `as` fix stands only at a header the parser reports. A method
+/// line under `impl Svc` took it and became `public as function`.
+#[test]
+fn the_header_as_fix_stands_only_at_its_report() {
+    let src = "struct Svc\n  n: number\nend\n\nimpl Svc\n  public function boot(self)\n  end\nend\n\nimpl Svc function stop(self)\n  end\nend\n";
+    let (st, uri) = one_file(src);
+
+    assert!(st.header_as_actions(uri, ((5, 4), (5, 4))).is_empty());
+
+    let actions = st.header_as_actions(uri, ((9, 2), (9, 2)));
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    let edit = &actions[0]["edit"]["changes"][uri][0];
+    assert_eq!(edit["range"]["start"], json!({ "line": 9, "character": 8 }));
+    assert!(actions[0]["diagnostics"][0]["message"].is_string());
+}
+
+/// The child's extracts read the lowered Luau. "Extract to function"
+/// goes. "Extract to local variable" stays in an expression, and its
+/// edit lands only when the file still parses.
+#[test]
+fn an_extract_stays_only_where_the_file_keeps_parsing() {
+    let src = "local function count(bonus: number): number\n  local n = 1 + bonus\n  if n > 1 then\n    return n * 2\n  end\n  return n\nend\n";
+    let (st, uri) = one_file(src);
+    let action =
+        |kind: &str| json!({ "title": "x", "kind": "refactor.extract", "data": { "type": kind } });
+    let at = |l: u32, c: u32| Some(((l, c), (l, c)));
+
+    assert!(!st.keeps_child_action(&action("extractFunction"), uri, at(1, 12)));
+    assert!(st.keeps_child_action(&action("extractVariable"), uri, at(1, 12)));
+    assert!(st.keeps_child_action(&action("extractVariable"), uri, at(3, 11)));
+
+    // `local`, the name `n`, the `if` and `then` of a statement, `return`.
+    for (l, c) in [(1, 2), (1, 8), (2, 2), (2, 11), (3, 4)] {
+        assert!(
+            !st.keeps_child_action(&action("extractVariable"), uri, at(l, c)),
+            "{l}:{c}"
+        );
+    }
+
+    let resolved = |edits: Value| json!({ "data": { "type": "extractVariable" }, "edit": { "changes": { uri: edits } } });
+    let edit = |(sl, sc): (u32, u32), (el, ec): (u32, u32), text: &str| {
+        json!({
+            "range": {
+                "start": { "line": sl, "character": sc },
+                "end": { "line": el, "character": ec },
+            },
+            "newText": text,
+        })
+    };
+
+    assert!(st.extract_parses(&resolved(json!([
+        edit((1, 0), (1, 0), "  local extracted = 1 + bonus\n"),
+        edit((1, 12), (1, 21), "extracted"),
+    ]))));
+    // The whole function taken as the value: `local extracted = local
+    // function count(...)` once reached the file.
+    assert!(!st.extract_parses(&resolved(json!([
+        edit(
+            (0, 0),
+            (0, 0),
+            "local extracted = local function count() end\n"
+        ),
+        edit((0, 0), (6, 3), "extracted"),
+    ]))));
+}
+
+/// An action whose resolve carries no edit goes from the list. The
+/// child inlines a `local` or a `const` that holds a value, and a
+/// parameter, an import, or a function has none. A type and a
+/// parameter name hold no value to extract.
+#[test]
+fn an_action_with_no_edit_leaves_the_list() {
+    let src = "import { Pet } from './pet'\n\nlocal function feed(pet: Pet, amount: number): number\n  const bonus = 1\n  return pet.level + amount + bonus\nend\n\nprint(feed, Pet)\n";
+    let (st, uri) = one_file(src);
+    let at = |l: u32, c: u32| Some(((l, c), (l, c)));
+    let inline = |name: &str| json!({ "title": format!("Inline variable '{name}'"), "kind": "refactor.inline", "data": { "type": "inlineVariable" } });
+    let extract =
+        json!({ "title": "x", "kind": "refactor.extract", "data": { "type": "extractVariable" } });
+
+    assert!(st.keeps_child_action(&inline("bonus"), uri, at(4, 30)));
+
+    for name in ["pet", "Pet", "feed"] {
+        assert!(
+            !st.keeps_child_action(&inline(name), uri, at(4, 9)),
+            "{name}"
+        );
+    }
+
+    // `pet`, `Pet`, the space before `number`, and the return type.
+    for c in [20, 25, 38, 39, 48] {
+        assert!(!st.keeps_child_action(&extract, uri, at(2, c)), "2:{c}");
+    }
+    assert!(st.keeps_child_action(&extract, uri, at(4, 20)));
+}
+
+/// A key and a method name hold no value, and the child extracted
+/// `local extracted = alpha`. The braces of `new S { }`, a `?.` or `!.`
+/// chain, and the `local` a `new` fills lower to generated text, and
+/// there the resolve came back with no edit. Each one leaves the list.
+#[test]
+fn a_refactor_over_a_key_or_lowered_text_leaves_the_list() {
+    let src = concat!(
+        "struct S\n",
+        "  n: number\n",
+        "end\n",
+        "impl S\n",
+        "  function m(self): number return self.n end\n",
+        "end\n",
+        "local cp = new S { n = 1 }\n",
+        "local t = { alpha = 1 }\n",
+        "local s: S? = cp\n",
+        "print(cp:m(), s?.n, s!.n, t)\n",
+    );
+    let (st, uri) = one_file(src);
+    let at = |l: u32, c: u32| Some(((l, c), (l, c)));
+    let inline = |name: &str| json!({ "title": format!("Inline variable '{name}'"), "kind": "refactor.inline", "data": { "type": "inlineVariable" } });
+    let extract =
+        json!({ "title": "x", "kind": "refactor.extract", "data": { "type": "extractVariable" } });
+
+    // `{`, the key and the value of `new S { n = 1 }`, the key `alpha`,
+    // the method `m`, and the field of `s?.n` and of `s!.n`.
+    for (l, c) in [(6, 17), (6, 19), (6, 23), (7, 12), (9, 9), (9, 17), (9, 23)] {
+        assert!(!st.keeps_child_action(&extract, uri, at(l, c)), "{l}:{c}");
+    }
+    assert!(st.keeps_child_action(&extract, uri, at(9, 26)));
+
+    assert!(!st.keeps_child_action(&inline("cp"), uri, at(9, 6)));
+    assert!(st.keeps_child_action(&inline("t"), uri, at(9, 26)));
+}
+
+/// "Inline variable" moved `task.wait(0.1)` into a `for` body, where it
+/// ran once per item, and moved `bump()` past a second `bump()`. A value
+/// with a call leaves the list. A value of names and operators stays
+/// when one use outside a later loop reads it. A literal stays always.
+#[test]
+fn an_inline_that_moves_a_call_leaves_the_list() {
+    let src = concat!(
+        "local function tick(items: { number }, p: { x: number })\n",
+        "    local dt = task.wait(0.1)\n",
+        "    local first = bump()\n",
+        "    bump()\n",
+        "    local scale = 2\n",
+        "    local sum = p.x + scale\n",
+        "    local loopy = p.x * 2\n",
+        "    local twice = p.x + 1\n",
+        "    for _, x in items do\n",
+        "        print(x * dt * scale * loopy)\n",
+        "    end\n",
+        "    print(first, sum, twice, twice)\n",
+        "end\n",
+    );
+    let (st, uri) = one_file(src);
+    let inline = |name: &str| json!({ "title": format!("Inline variable '{name}'"), "kind": "refactor.inline", "data": { "type": "inlineVariable" } });
+    let keeps = |name: &str, line: u32| {
+        st.keeps_child_action(&inline(name), uri, Some(((line, 10), (line, 10))))
+    };
+
+    assert!(!keeps("dt", 1));
+    assert!(!keeps("first", 2));
+    assert!(keeps("scale", 4));
+    assert!(keeps("sum", 5));
+    assert!(!keeps("loopy", 6));
+    assert!(!keeps("twice", 7));
+}
+
+/// The child's "Change 'flyer' to 'Flyer'" replaced all of `t.flyer`
+/// with `Flyer`, a global the file does not have. The edit now takes
+/// the name alone. On an enum, Alloy's "Rename to `Flyer`" stays and
+/// the child's fix goes.
+#[test]
+fn a_spelling_fix_of_the_child_edits_the_name_alone() {
+    let src = "local t = { Flyer = 1 }\nprint(t.flyer)\n";
+    let uri = "file:///s.aly";
+    let change = |sc: u32| {
+        json!({
+            "title": "Change 'flyer' to 'Flyer'",
+            "kind": "quickfix",
+            "isPreferred": true,
+            "edit": { "changes": { uri: [{
+                "range": { "start": { "line": 1, "character": sc }, "end": { "line": 1, "character": 13 } },
+                "newText": "Flyer",
+            }] } },
+        })
+    };
+    let mut actions = vec![change(6)];
+    super::super::dispatch::mend_child_spelling(&mut actions, uri, src);
+
+    assert_eq!(
+        actions[0]["edit"]["changes"][uri][0]["range"]["start"],
+        json!({ "line": 1, "character": 8 })
+    );
+
+    // An edit that does not end on the name leaves the list.
+    let mut actions = vec![change(6)];
+    actions[0]["edit"]["changes"][uri][0]["range"]["end"]["character"] = json!(12);
+    super::super::dispatch::mend_child_spelling(&mut actions, uri, src);
+    assert!(actions.is_empty());
+
+    let mut actions = vec![change(6), json!({ "title": "Rename to `Flyer`" })];
+    super::super::dispatch::mend_child_spelling(&mut actions, uri, src);
+    assert_eq!(actions, [json!({ "title": "Rename to `Flyer`" })]);
+}
+
+/// "Inline variable" wrote `{ stage = 2 }.stage`, which does not parse.
+/// A value that is no prefix expression takes parentheses where the use
+/// goes on with `.`, `:`, `[` or `(`; a name needs none.
+#[test]
+fn an_inlined_table_takes_parentheses_before_a_member() {
+    let src = "local tb = { stage = 2 }\nlocal n = tb\nprint(tb.stage, n.stage, tb)\n";
+    let (st, uri) = one_file(src);
+    let edit = |(l, c): (u32, u32), width: u32, text: &str| {
+        json!({
+            "range": {
+                "start": { "line": l, "character": c },
+                "end": { "line": l, "character": c + width },
+            },
+            "newText": text,
+        })
+    };
+    let mut action = json!({
+        "data": { "type": "inlineVariable" },
+        "edit": { "changes": { uri: [
+            edit((2, 6), 2, "{ stage = 2 }"),
+            edit((2, 16), 1, "tb"),
+            edit((2, 25), 2, "{ stage = 2 }"),
+        ] } },
+    });
+
+    st.wrap_inlined(&mut action);
+
+    let texts: Vec<&str> = action["edit"]["changes"][uri]
+        .as_array()
+        .expect("edits")
+        .iter()
+        .filter_map(|e| e["newText"].as_str())
+        .collect();
+    assert_eq!(texts, ["({ stage = 2 })", "tb", "{ stage = 2 }"]);
+    assert!(st.extract_parses(&action));
+}
+
+/// A field one edit away from a field the struct has: the report
+/// names it, and the quick fix renames the word the file wrote. The
+/// constructor lists the fields, and the nearest one answers.
+#[test]
+fn a_field_typo_has_a_quick_fix() {
+    let src = "struct Pet\n  level: number\n  xp: number\nend\n\nconst p = new Pet { levl = 1, xp = 0 }\nprint(p.levl)\n";
+    let (mut st, uri) = one_file(src);
+    let whole = ((0, 0), (99, 0));
+    let actions = st.compiler_actions(uri, whole);
+
+    assert_eq!(actions[0]["title"], "Rename to `level`", "{actions:?}");
+    assert_eq!(
+        actions[0]["edit"]["changes"][uri][0]["range"]["start"],
+        json!({ "line": 5, "character": 20 })
+    );
+
+    st.child_diagnostics.insert(
+        uri.to_string(),
+        vec![json!({
+            "range": { "start": { "line": 6, "character": 8 }, "end": { "line": 6, "character": 12 } },
+            "severity": 1,
+            "message": "StructError: `Pet` has no field `levl`; did you mean `level`?",
+        })],
+    );
+    let actions = st.compiler_actions(uri, whole);
+    let fix = actions
+        .iter()
+        .find(|a| a["edit"]["changes"][uri][0]["range"]["start"]["line"] == 6)
+        .expect("the access has a fix");
+
+    assert_eq!(fix["title"], "Rename to `level`");
+    assert_eq!(
+        fix["edit"]["changes"][uri],
+        json!([{
+            "range": { "start": { "line": 6, "character": 8 }, "end": { "line": 6, "character": 12 } },
+            "newText": "level",
+        }])
+    );
 }

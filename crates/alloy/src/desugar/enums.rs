@@ -33,6 +33,27 @@ pub(crate) fn join_tests(tests: &[String]) -> String {
     }
 }
 
+/// The sides of `a or b or c`, in order; any other pattern is its own
+/// one side.
+fn or_sides(p: &Pattern) -> Vec<&Pattern> {
+    match p {
+        Pattern::Or(a, b, _) => {
+            let mut sides = or_sides(a);
+            sides.extend(or_sides(b));
+
+            sides
+        }
+
+        other => vec![other],
+    }
+}
+
+/// The test that a value is one variant: `type(v) == "table" and
+/// v.tag == "Sword"`.
+fn variant_test(at: &str, variant: &str) -> String {
+    format!("type({at}) == \"table\" and {at}.tag == \"{variant}\"")
+}
+
 /// Two type spellings that name one type. The comparison drops the
 /// spacing, which the author is free to write either way.
 pub(crate) fn same_type_text(a: &str, b: &str) -> bool {
@@ -128,6 +149,7 @@ impl<'s> Desugar<'s> {
     on the lines the declaration used.
     */
     pub(crate) fn enum_decl(&mut self, e: &EnumDecl) {
+        self.reject_type_bounds(e.generics, "an enum");
         let name = self.decl_name(e.name);
         // The `as` token follows the name, or the parameter list,
         // whether or not `export` leads.
@@ -160,14 +182,21 @@ impl<'s> Desugar<'s> {
         // method call on a union with a string in it fails.
         let plain = self.options.check && !alias_generics.is_empty();
         let methods = if plain {
-            let derives_clone = e
+            let derived: Vec<String> = e
                 .attributes
                 .iter()
                 .filter(|a| a.name.is_some_and(|n| self.text_of(n) == "derive"))
                 .flat_map(|a| a.args.iter())
-                .any(|arg| self.derive_name(arg) == "Clone");
+                .filter_map(|arg| match self.derive_name(arg).as_str() {
+                    "Clone" => Some("clone".to_string()),
 
-            self.enum_alias_methods(&name, derives_clone)
+                    "Debug" => Some("debug".to_string()),
+
+                    _ => None,
+                })
+                .collect();
+
+            self.enum_alias_methods(&name, derived)
         } else {
             String::new()
         };
@@ -291,21 +320,47 @@ impl<'s> Desugar<'s> {
             ""
         };
         // A variant with a payload prints as `Msg.Move(1, 2)`; a unit
-        // variant is a string and prints as its name already.
+        // variant is a string and prints as its name already. A slot
+        // whose type is an enum with a unit variant names that enum, so
+        // the payload prints `Tool(Kind.Axe)` and not `Tool("Axe")`.
         let mut printer = if self.options.definitions {
             String::new()
         } else {
             let std = self.std();
+            let slots: Vec<String> = e
+                .variants
+                .iter()
+                .filter_map(|v| {
+                    let named: Vec<String> = v
+                        .payload
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, t)| {
+                            let e = self.unit_enum_named(self.text_of(*t))?;
+
+                            Some(format!("[{}] = {}", i + 1, luau_string(&e)))
+                        })
+                        .collect();
+
+                    (!named.is_empty())
+                        .then(|| format!("{} = {{ {} }}", self.text_of(v.name), named.join(", ")))
+                })
+                .collect();
+            let slots = match slots.is_empty() {
+                true => String::new(),
+
+                false => format!(", {{ {} }}", slots.join(", ")),
+            };
 
             format!(
-                " {name}.__tostring = function(v) return {std}.show_variant({}, v) end",
+                " {name}.__tostring = function(v) return {std}.show_variant({}, v{slots}) end",
                 luau_string(&self.display_name(&name))
             )
         };
 
         // `@derive(Eq)` compares the tag and the payload slots; a unit
         // variant is a string and compares on its own. `Clone` copies a
-        // payload variant with its metatable; `Debug` is the printer above.
+        // payload variant with its metatable; `Debug` writes `debug`.
         let max_arity = e
             .variants
             .iter()
@@ -353,8 +408,17 @@ impl<'s> Desugar<'s> {
                         ));
                     }
 
-                    // `Debug` is every enum's printer already.
-                    "Debug" => {}
+                    // The printer above is every enum's `__tostring`;
+                    // `Debug` adds the `debug` a derived struct has. A
+                    // unit variant is a string, which has no metatable,
+                    // so `debug` adds the enum's name to it: `Event.Quit`
+                    // reads the way `Event.Scored(3)` does.
+                    "Debug" => {
+                        let head = luau_string(&format!("{}.", self.display_name(&name)));
+                        printer.push_str(&format!(
+                            " function {name}.debug(v: any): string return if type(v) == \"string\" then {head} .. v else tostring(v) end"
+                        ));
+                    }
 
                     // A derive that writes nothing must not pass in silence:
                     // a unit variant is a string, and a payload variant a
@@ -397,6 +461,9 @@ impl<'s> Desugar<'s> {
                 variant_attrs.join(", ")
             ));
         }
+
+        printer.push_str(&self.wire_registration(&name));
+
         // An enum with no variant has no type to write: `type E = `
         // is not Luau, so the artifact says `never` and the report
         // names what the body wants.
@@ -484,11 +551,11 @@ impl<'s> Desugar<'s> {
     }
 
     /// The methods a generic enum's alias lists, `read m: typeof(Opt.m)`
-    /// each: the impls of this file, the impls of other files, and a
-    /// derived `clone`. `typeof` keeps the method's own generic list;
+    /// each: the impls of this file, the impls of other files, and the
+    /// derived methods. `typeof` keeps the method's own generic list;
     /// a spelled `self: Opt<T>` names the alias inside itself, and the
     /// solver then finds no `T` for a call that takes an `Opt<T>`.
-    fn enum_alias_methods(&self, name: &str, derives_clone: bool) -> String {
+    fn enum_alias_methods(&self, name: &str, derived: Vec<String>) -> String {
         let mut names: Vec<String> = self
             .type_members
             .get(name)
@@ -504,10 +571,7 @@ impl<'s> Desugar<'s> {
             }
         }
 
-        if derives_clone {
-            names.push("clone".to_string());
-        }
-
+        names.extend(derived);
         names.sort();
         names.dedup();
 
@@ -523,6 +587,18 @@ impl<'s> Desugar<'s> {
             .rev()
             .find_map(|m| m.get(name).cloned())
             .or_else(|| self.ns_member_name(name))
+    }
+
+    /// The name a printer puts before a unit variant of type `ty`: the
+    /// enum the type names, when that enum has a unit variant.
+    pub(crate) fn unit_enum_named(&self, ty: &str) -> Option<String> {
+        let e = self.enum_named(ty)?;
+
+        self.enums
+            .get(&e)?
+            .iter()
+            .any(|(_, n)| *n == 0)
+            .then(|| self.display_name(&e))
     }
 
     /// Reports if a bare name is a unit variant of a known enum.
@@ -604,9 +680,12 @@ impl<'s> Desugar<'s> {
     /// The type name a scrutinee casts to. A generic enum's alias asks
     /// for arguments the arms do not spell, so the scrutinee keeps the
     /// type it has.
-    fn castable_enum(&self, e: &str) -> Option<String> {
+    pub(crate) fn castable_enum(&self, e: &str) -> Option<String> {
         let name = self.enum_type_name(e);
-        let generic = self.generic_types.contains(e) || self.generic_types.contains(&name);
+        // `Result` is the runtime's generic enum. The file binds no
+        // table of that name, so it has no constructor to read.
+        let generic =
+            e == "Result" || self.generic_types.contains(e) || self.generic_types.contains(&name);
 
         (!generic).then_some(name)
     }
@@ -795,6 +874,7 @@ impl<'s> Desugar<'s> {
 
         let values: Vec<&str> = binds.iter().map(|(_, v, _)| v.as_str()).collect();
         self.generate(anchor, &format!(" = {}", values.join(", ")));
+        self.r.end_stmt();
     }
 
     /// Copies a span when it sits on the anchor's line, and generates
@@ -810,6 +890,36 @@ impl<'s> Desugar<'s> {
 
     /// Compiles a pattern against an access path.
     pub(crate) fn compile_pattern(&mut self, p: &Pattern, path: &str, out: &mut Compiled) {
+        self.compile_at(p, path, None, out);
+    }
+
+    /*
+    A pattern under another one, in the check artifact.
+
+    The checker reads a test on a nested path wrong. `v._1.tag == "Sword"`
+    or `type(v._1) == "table"`, where the slot holds an enum, narrows `v`
+    itself to `never`, and with it every name the arm binds. A cast of
+    the path, `(v :: any)._1`, still narrows `v`. So a test below the top
+    stands inside `(test :: boolean)`, which narrows nothing. It reads its
+    path through `(v :: any)`, since nothing narrowed the levels above
+    it. The test of the top narrows `v`, and a name one level down reads
+    its path under that.
+
+    A name further down takes `ty`, the type of the value at its path.
+    Each level works it out from the level above: the constructor of an
+    enum that is not generic gives it, and for anything else a function
+    narrows a parameter of the parent's type. The checker narrows a
+    parameter right, since it is a local.
+    */
+    fn compile_at(&mut self, p: &Pattern, path: &str, ty: Option<&str>, out: &mut Compiled) {
+        let nested = self.options.check && path.contains(['.', '[']);
+        let mute = |test: String| match nested {
+            true => format!("(({test}) :: boolean)"),
+
+            false => test,
+        };
+        let at = self.cast_root(path);
+
         match p {
             Pattern::Wildcard(_) => {}
 
@@ -821,20 +931,25 @@ impl<'s> Desugar<'s> {
                     // variant as a tagged table; the tag test narrows
                     // the union the way a payload test does.
                     Some(e) if self.options.check && self.castable_enum(&e).is_none() => {
-                        out.tests.push(format!(
-                            "type({path}) == \"table\" and {path}.tag == \"{n}\""
-                        ));
+                        out.tests.push(mute(variant_test(&at, &n)));
                     }
 
-                    Some(_) => out.tests.push(format!("{path} == \"{n}\"")),
+                    Some(_) => out.tests.push(mute(format!("{at} == \"{n}\""))),
 
-                    None => out.binds.push((*name, path.to_string(), None)),
+                    None => {
+                        let value = match ty {
+                            Some(t) => format!("({at} :: {t})"),
+
+                            None => path.to_string(),
+                        };
+                        out.binds.push((*name, value, None));
+                    }
                 }
             }
 
             Pattern::Literal(e) => {
                 let lit = self.render_to_string(e);
-                out.tests.push(format!("{path} == {lit}"));
+                out.tests.push(mute(format!("{at} == {lit}")));
             }
 
             Pattern::Path(span) => {
@@ -849,71 +964,85 @@ impl<'s> Desugar<'s> {
 
                     None => written.clone(),
                 };
-                out.tests.push(format!("{path} == {text}"));
+                out.tests.push(mute(format!("{at} == {text}")));
             }
 
             Pattern::Variant { name, args, .. } => {
                 let (vname, _) = self.pattern_variant(*name);
-                out.tests.push(format!(
-                    "type({path}) == \"table\" and {path}.tag == \"{vname}\""
-                ));
+                out.tests.push(mute(variant_test(&at, &vname)));
+                let own = variant_test("_x", &vname);
 
                 for (i, a) in args.iter().enumerate() {
-                    let sub = format!("{path}._{}", i + 1);
-                    self.compile_pattern(a, &sub, out);
+                    let seg = format!("._{}", i + 1);
+                    let known = self.payload_type(*name, args.len(), i + 1);
+                    let sub_ty = self.child_type(path, ty, &own, &seg, known);
+                    self.compile_at(a, &format!("{path}{seg}"), sub_ty.as_deref(), out);
                 }
             }
 
             Pattern::Struct { name, fields, .. } => {
-                match name {
-                    Some(n) => {
-                        let sname = self.text_of(*n).to_string();
-                        out.tests
-                            .push(format!("getmetatable({}) == {sname}", self.any_cast(path)));
-                    }
+                let test = |d: &Self, at: &str| match name {
+                    Some(n) => format!(
+                        "getmetatable({}) == {}",
+                        d.any_cast(at),
+                        d.struct_pattern_name(*n)
+                    ),
 
-                    None => out.tests.push(format!("type({path}) == \"table\"")),
-                }
+                    None => format!("type({at}) == \"table\""),
+                };
+                out.tests.push(mute(test(self, &at)));
+                let own = test(self, "_x");
 
                 for FieldPattern { field, pattern } in fields {
-                    let fname = self.text_of(*field).to_string();
-                    let sub = format!("{path}.{fname}");
+                    let seg = format!(".{}", self.text_of(*field));
+                    let sub = format!("{path}{seg}");
+                    let sub_ty = self.child_type(path, ty, &own, &seg, None);
 
                     match pattern {
-                        Some(sub_pat) => self.compile_pattern(sub_pat, &sub, out),
+                        Some(sub_pat) => self.compile_at(sub_pat, &sub, sub_ty.as_deref(), out),
 
-                        None => out.binds.push((*field, sub, None)),
+                        None => {
+                            let value = match &sub_ty {
+                                Some(t) => format!("({} :: {t})", self.cast_root(&sub)),
+
+                                None => sub,
+                            };
+                            out.binds.push((*field, value, None));
+                        }
                     }
                 }
             }
 
             Pattern::Array { items, rest, .. } => {
                 let op = if rest.is_some() { ">=" } else { "==" };
-                out.tests.push(format!(
-                    "type({path}) == \"table\" and #{path} {op} {}",
-                    items.len()
-                ));
+                let n = items.len();
+                let test = |at: &str| format!("type({at}) == \"table\" and #{at} {op} {n}");
+                out.tests.push(mute(test(&at)));
+                let own = test("_x");
 
                 for (i, item) in items.iter().enumerate() {
-                    let sub = format!("{path}[{}]", i + 1);
-                    self.compile_pattern(item, &sub, out);
+                    let seg = format!("[{}]", i + 1);
+                    let sub_ty = self.child_type(path, ty, &own, &seg, None);
+                    self.compile_at(item, &format!("{path}{seg}"), sub_ty.as_deref(), out);
                 }
 
                 if let Some(r) = rest {
                     let std = self.std();
-                    out.binds.push((
-                        *r,
-                        format!("{std}.Array.slice({path}, {})", items.len() + 1),
-                        None,
-                    ));
+                    let list = match self.child_type(path, ty, &own, "", None) {
+                        Some(t) => format!("({at} :: {t})"),
+
+                        None => path.to_string(),
+                    };
+                    out.binds
+                        .push((*r, format!("{std}.Array.slice({list}, {})", n + 1), None));
                 }
             }
 
             Pattern::Or(a, b, span) => {
                 let mut ca = Compiled::default();
                 let mut cb = Compiled::default();
-                self.compile_pattern(a, path, &mut ca);
-                self.compile_pattern(b, path, &mut cb);
+                self.compile_at(a, path, ty, &mut ca);
+                self.compile_at(b, path, ty, &mut cb);
                 let ta = self.cast_tests(&join_tests(&ca.tests), path);
                 let tb = self.cast_tests(&join_tests(&cb.tests), path);
                 out.tests.push(format!("(({ta}) or ({tb}))"));
@@ -934,13 +1063,138 @@ impl<'s> Desugar<'s> {
                         .unwrap_or_else(|| pa.clone());
                     // The checker refines each side by its own tag and
                     // cannot pick one across the `or`; the check artifact
-                    // reads the payload untyped.
-                    let (pa, pb) = (self.cast_root(pa), self.cast_root(&pb));
+                    // reads the payload untyped. A value that carries a
+                    // cast of its own keeps it.
+                    let cast = |v: &str| match v.starts_with('(') {
+                        true => v.to_string(),
+
+                        false => self.cast_root(v),
+                    };
+                    let (pa, pb) = (cast(pa), cast(&pb));
                     out.binds
                         .push((*n, format!("(if {ta} then {pa} else {pb})"), None));
                 }
             }
         }
+    }
+
+    /// The type of the value at `path{seg}` in the check artifact, for a
+    /// pattern under the one at `path`. `None` when `path` is the top:
+    /// its own test narrows it, so a child reads its path as it is.
+    /// `known` is the type a constructor gives. Without one, a function
+    /// narrows a parameter `_x` of the parent's type by `test`.
+    fn child_type(
+        &self,
+        path: &str,
+        ty: Option<&str>,
+        test: &str,
+        seg: &str,
+        known: Option<String>,
+    ) -> Option<String> {
+        if !self.options.check || !path.contains(['.', '[']) {
+            return None;
+        }
+
+        Some(known.unwrap_or_else(|| {
+            let parent = ty.map_or_else(|| format!("typeof({path})"), str::to_string);
+
+            format!(
+                "typeof((function(_x: {parent}) if {test} then return _x{seg} end return error(\"\") end)(nil :: any))"
+            )
+        }))
+    }
+
+    /// Whether a name stands for something here: a local, an import, a
+    /// namespace, or an enum.
+    fn names_a_value(&self, name: &str) -> bool {
+        self.is_local(name)
+            || self.imported_names.contains(name)
+            || self.star_modules.contains(name)
+            || self.std_namespaces.contains_key(name)
+            || self.namespaces.contains_key(name)
+            || self.enums.contains_key(name)
+    }
+
+    /// The enum that payload slot `slot` of a variant pattern holds, by
+    /// the type the declaration writes there: `Tool(Kind, number)` holds
+    /// `Kind` at slot 0. `within` is the enum of the pattern's own place,
+    /// when that is known. `None` when no one enum owns the variant, or
+    /// the slot's type is no enum here.
+    pub(crate) fn slot_enum(
+        &self,
+        name: TokSpan,
+        within: Option<&str>,
+        slot: usize,
+    ) -> Option<String> {
+        let (vname, path_enum) = self.pattern_variant(name);
+        let owner = match path_enum {
+            Some(e) => e,
+
+            None => {
+                let mut owners = self.enums.iter().filter(|(e, vs)| {
+                    within.is_none_or(|w| w == e.as_str()) && vs.iter().any(|(v, _)| *v == vname)
+                });
+                let (e, _) = owners.next()?;
+
+                if owners.next().is_some() {
+                    return None;
+                }
+
+                e.clone()
+            }
+        };
+        let payloads = match self.enum_payloads.get(&owner) {
+            Some(vs) => vs,
+
+            None => &self.imported_type(&owner)?.variants,
+        };
+        let (_, types) = payloads.iter().find(|(v, _)| *v == vname)?;
+
+        self.enum_named(types.get(slot)?)
+    }
+
+    /// The enum a match head's type names, when the file says: a name
+    /// with an annotation, or `self` in an enum's impl.
+    fn scrutinee_enum(&self, head: &Expr) -> Option<String> {
+        match head {
+            Expr::Paren { inner, .. } => self.scrutinee_enum(inner),
+
+            Expr::Name(n) if self.text_of(*n) == "self" => {
+                self.enum_named(self.impl_target.as_deref()?)
+            }
+
+            Expr::Name(n) => self.enum_named(self.binding_types.get(self.text_of(*n))?),
+
+            _ => None,
+        }
+    }
+
+    /// The type of one payload slot of a variant pattern, read off the
+    /// constructor: `typeof(Item.Sword(nil :: any)._1)`. `None` when no
+    /// one enum owns the variant, or the enum is generic.
+    fn payload_type(&self, name: TokSpan, arity: usize, slot: usize) -> Option<String> {
+        let (vname, path_enum) = self.pattern_variant(name);
+        let mut owners = self.enums.iter().filter(|(e, vs)| {
+            path_enum.as_ref().is_none_or(|p| p == *e)
+                && vs.iter().any(|(v, n)| *v == vname && *n == arity)
+        });
+        let (e, _) = owners.next()?;
+
+        if owners.next().is_some() {
+            return None;
+        }
+
+        let ty = self.castable_enum(e)?;
+        // An `import type` binds no table to call the constructor on.
+        let head = ty.split('.').next().unwrap_or(&ty);
+
+        if self.imported_types.get(head) == Some(&false) {
+            return None;
+        }
+
+        let args = vec!["nil :: any"; arity].join(", ");
+
+        Some(format!("typeof({ty}.{vname}({args})._{slot})"))
     }
 
     /// The test text for several patterns against several paths, plus a
@@ -979,28 +1233,44 @@ impl<'s> Desugar<'s> {
     ///
     /// A pattern whose variant belongs to a known enum must bind the
     /// payload the variant carries. A name no enum owns is a missing
-    /// variant of the enum the other arms name.
-    pub(crate) fn check_variant_patterns(&mut self, arms: &[&[Pattern]]) -> bool {
+    /// variant of the enum its place holds: the payload type of a slot,
+    /// or at the top the enum the other arms name or the head's type.
+    ///
+    /// `if local`, `while local`, and `local P = e` check one pattern the
+    /// same way, with `in_match` false. Their advice names no `case`.
+    pub(crate) fn check_variant_patterns(
+        &mut self,
+        arms: &[&[Pattern]],
+        scrutinees: &[Expr],
+        in_match: bool,
+    ) -> bool {
         let mut reported = false;
-        let mut flat: Vec<(TokSpan, usize)> = Vec::new();
+        // Each variant name, with the payload count the pattern binds,
+        // the column of a name at the top, and the enum of a payload slot.
+        let mut flat: Vec<(TokSpan, usize, Option<usize>, Option<String>)> = Vec::new();
         let mut paths: Vec<TokSpan> = Vec::new();
 
         for pats in arms {
-            let mut stack: Vec<&Pattern> = pats.iter().collect();
+            let mut stack: Vec<(&Pattern, Option<usize>, Option<String>)> = pats
+                .iter()
+                .enumerate()
+                .map(|(col, p)| (p, Some(col), None))
+                .collect();
 
-            while let Some(p) = stack.pop() {
+            while let Some((p, col, slot)) = stack.pop() {
                 match p {
                     Pattern::Or(a, b, _) => {
-                        stack.push(a);
-                        stack.push(b);
+                        stack.push((a, col, slot.clone()));
+                        stack.push((b, col, slot));
                     }
 
                     Pattern::Variant { name, args, .. } => {
-                        flat.push((*name, args.len()));
-
-                        for a in args {
-                            stack.push(a);
+                        for (i, a) in args.iter().enumerate() {
+                            let inner = self.slot_enum(*name, slot.as_deref(), i);
+                            stack.push((a, None, inner));
                         }
+
+                        flat.push((*name, args.len(), col, slot));
                     }
 
                     Pattern::Path(span) => paths.push(*span),
@@ -1010,12 +1280,13 @@ impl<'s> Desugar<'s> {
                     // capital says the author meant a variant, so a name
                     // no enum owns is a typo, not a catch-all.
                     Pattern::Bind(name) if is_variant_name(self.text_of(*name)) => {
-                        flat.push((*name, 0));
+                        flat.push((*name, 0, col, slot));
                     }
 
                     // `case target then` with `target` in scope binds a
                     // new name over it, and the arm takes every value.
-                    Pattern::Bind(name) if self.is_local(self.text_of(*name)) => {
+                    // `if local Some(v) = v` rebinds on purpose.
+                    Pattern::Bind(name) if in_match && self.is_local(self.text_of(*name)) => {
                         let text = self.text_of(*name).to_string();
                         let tok = self.toks[name.start as usize];
                         self.lints.push(Lint {
@@ -1054,21 +1325,62 @@ impl<'s> Desugar<'s> {
             }
         }
 
-        // The enum of the match: the first variant name a declared enum
-        // owns. A name none owns is then a variant that enum lacks.
-        let owner = flat.iter().find_map(|(name, _)| {
-            let (vname, path_enum) = self.pattern_variant(*name);
+        // The enum of each column: the first variant name at the top that
+        // a declared enum owns, or else the enum the head's type names. A
+        // name none owns is then a variant that enum lacks. A name in a
+        // payload slot answers to the slot's type instead.
+        let owners: Vec<Option<String>> = (0..scrutinees.len().max(1))
+            .map(|c| {
+                flat.iter()
+                    .filter(|(_, _, col, _)| *col == Some(c))
+                    .find_map(|(name, ..)| {
+                        let (vname, path_enum) = self.pattern_variant(*name);
 
-            path_enum.or_else(|| {
-                self.enums
-                    .iter()
-                    .find(|(_, vs)| vs.iter().any(|(v, _)| *v == vname))
-                    .map(|(e, _)| e.clone())
+                        path_enum.or_else(|| {
+                            self.enums
+                                .iter()
+                                .find(|(_, vs)| vs.iter().any(|(v, _)| *v == vname))
+                                .map(|(e, _)| e.clone())
+                        })
+                    })
+                    .or_else(|| scrutinees.get(c).and_then(|s| self.scrutinee_enum(s)))
             })
-        });
+            .collect();
 
-        for (name, binds) in flat {
+        for (name, binds, col, slot) in flat {
+            let owner = match col {
+                Some(c) => owners.get(c).cloned().flatten(),
+
+                None => slot,
+            };
             let (vname, path_enum) = self.pattern_variant(name);
+
+            // `Itme.Sword(d)`: the head of the path names nothing in
+            // scope. The report names the head, not the enum of the match.
+            let text: String = self.text_of(name).split_whitespace().collect();
+
+            if path_enum.is_none()
+                && let Some((head, _)) = text.rsplit_once('.')
+                && !self.names_a_value(head.split('.').next().unwrap_or(head))
+            {
+                let owners: Vec<&String> = self
+                    .enums
+                    .iter()
+                    .filter(|(_, vs)| vs.iter().any(|(v, _)| *v == vname))
+                    .map(|(e, _)| e)
+                    .collect();
+                let owner = match owners.as_slice() {
+                    [e] => format!("; `{}` has the variant `{vname}`", self.display_name(e)),
+
+                    _ => String::new(),
+                };
+                let message = format!("`{head}` is not an enum in scope{owner}");
+                self.diagnose(name, &message);
+                reported = true;
+
+                continue;
+            }
+
             let found = self
                 .enums
                 .iter()
@@ -1106,23 +1418,39 @@ impl<'s> Desugar<'s> {
                     {
                         let names: Vec<&str> = vs.iter().map(|(v, _)| v.as_str()).collect();
                         let message = format!(
-                            "`{e}` has no variant `{vname}`; its variants are {}",
+                            "`{}` has no variant `{vname}`; its variants are {}",
+                            self.display_name(e),
                             list_names(&names)
                         );
                         self.diagnose(name, &message);
                         reported = true;
-                    } else if binds == 0 && (self.is_local(&vname) || is_screaming(&vname)) {
+                    } else if binds == 0 {
                         // `case MAX then` reads as a comparison and binds a
                         // new `MAX` that takes every value, so a `default`
-                        // below it never runs and nothing says so.
-                        let message = match self.is_local(&vname) {
-                            true => format!(
-                                "`{vname}` names a value, and a bare name in a pattern binds a new one, so this arm takes every value; compare in a guard: `case n where n == {vname}`"
-                            ),
+                        // below it never runs and nothing says so. A
+                        // binding starts lowercase or with `_`, so any
+                        // other capital is a variant this file cannot see.
+                        let guard = match in_match {
+                            true => format!(", or compare in a guard: `case n where n == {vname}`"),
 
-                            false => format!(
-                                "`{vname}` is written as a constant's name, and a bare name in a pattern binds a new one that takes every value; bind a lowercase name, or compare in a guard: `case n where n == {vname}`"
-                            ),
+                            false => String::new(),
+                        };
+                        let message = if self.is_local(&vname) && in_match {
+                            format!(
+                                "`{vname}` names a value, and a bare name in a pattern binds a new one, so this arm takes every value; compare in a guard: `case n where n == {vname}`"
+                            )
+                        } else if self.is_local(&vname) {
+                            format!(
+                                "`{vname}` names a value, and a bare name in a pattern binds a new one that takes every value; bind a lowercase name"
+                            )
+                        } else if is_screaming(&vname) {
+                            format!(
+                                "`{vname}` is written as a constant's name, and a bare name in a pattern binds a new one that takes every value; bind a lowercase name{guard}"
+                            )
+                        } else {
+                            format!(
+                                "`{vname}` is no variant of an enum in scope, and a bare name in a pattern binds a new one that takes every value; import the enum that declares it, or bind a name that starts lowercase"
+                            )
                         };
                         self.diagnose(name, &message);
                         reported = true;
@@ -1616,8 +1944,21 @@ impl<'s> Desugar<'s> {
         })
     }
 
+    /// The name a struct pattern's test compares the metatable with. A
+    /// namespace member renders under one flat name, `N_P`, both by its
+    /// path and by its own name inside the namespace.
+    fn struct_pattern_name(&self, n: TokSpan) -> String {
+        // A macro body joins its tokens with spaces; see `enum_of_path`.
+        let text: String = self.text_of(n).split_whitespace().collect();
+
+        self.namespace_path_name(&text)
+            .or_else(|| self.ns_member_name(&text))
+            .unwrap_or(text)
+    }
+
     /// Whether a struct pattern covers the shape it names: the name is
-    /// a struct this file declares, and every field it names binds.
+    /// a struct this file declares or imports, and every field it names
+    /// binds.
     fn struct_pattern_covers(&self, p: &Pattern) -> bool {
         let Pattern::Struct { name, fields, .. } = p else {
             return self.irrefutable(p);
@@ -1625,8 +1966,13 @@ impl<'s> Desugar<'s> {
         let Some(n) = name else {
             return false;
         };
+        // The import index keys a struct by the name the source writes,
+        // `Gem`, `B.Gem` or `Zoo.Box`.
+        let written: String = self.text_of(*n).split_whitespace().collect();
+        let known = self.structs.contains(&self.struct_pattern_name(*n))
+            || self.declared_fields(&written).is_some();
 
-        self.structs.contains(self.text_of(*n))
+        known
             && fields.iter().all(|f| match &f.pattern {
                 None => true,
 
@@ -1648,30 +1994,122 @@ impl<'s> Desugar<'s> {
     }
 
     /// Reports if the payload rows of one variant cover every payload.
-    ///
-    /// A row of irrefutable patterns covers. Otherwise one field must be
-    /// the only refutable field in every row, and that field's column must
-    /// cover on its own.
+    /// The arity check reports a row with the wrong count of payloads.
+    /// Here a missing payload reads as `_`, and an extra one drops.
     pub(crate) fn payloads_cover(&self, rows: &[&Vec<&Pattern>], arity: usize) -> bool {
-        if rows.iter().any(|r| r.iter().all(|p| self.irrefutable(p))) {
+        let rows = rows
+            .iter()
+            .map(|r| (0..arity).map(|i| r.get(i).copied()).collect())
+            .collect();
+
+        self.matrix_covers(rows, arity)
+    }
+
+    /*
+    The payload slots of a variant form a product, so the rows are a
+    pattern matrix with one column per slot. `None` in a row is `_`.
+
+    A row that covers in every slot covers the matrix. Otherwise the
+    first column that names an enum splits the rows by variant: a row
+    that names the variant gives its payloads in place of the slot, and
+    a row that covers the slot gives one `_` per payload. Each variant's
+    rows must then cover what is left. `Pair(Landed(n), Landed(l))`,
+    `Pair(Landed(n), Missed)` and `Pair(Missed, _)` cover `Pair` that
+    way, and no slot covers on its own.
+
+    With no enum column, one slot must be the only refutable slot in
+    every row, and its column must cover on its own: array lengths, a
+    struct pattern.
+    */
+    fn matrix_covers<'p>(&self, rows: Vec<Vec<Option<&'p Pattern>>>, width: usize) -> bool {
+        let covers = |p: &Option<&Pattern>| p.is_none_or(|p| self.struct_pattern_covers(p));
+
+        if rows.iter().any(|r| r.iter().all(covers)) {
             return true;
         }
 
-        (0..arity).any(|j| {
-            let others_bind = rows.iter().all(|r| {
-                r.iter()
-                    .enumerate()
-                    .all(|(i, p)| i == j || self.irrefutable(p))
-            });
+        let split = (0..width).find_map(|j| {
+            rows.iter()
+                .filter_map(|r| r[j])
+                .flat_map(or_sides)
+                .find_map(|p| self.variant_of_pattern(p))
+                .map(|(e, ..)| (j, e))
+        });
 
-            if !others_bind {
-                return false;
+        let Some((j, e)) = split else {
+            return (0..width).any(|j| {
+                let others_cover = rows
+                    .iter()
+                    .all(|r| r.iter().enumerate().all(|(i, p)| i == j || covers(p)));
+                let column: Vec<&Pattern> = rows.iter().filter_map(|r| r[j]).collect();
+
+                others_cover && self.column_covers(&column)
+            });
+        };
+
+        self.enums[&e].iter().all(|(v, arity)| {
+            let mut split_rows = Vec::new();
+
+            for r in &rows {
+                let sides =
+                    r[j].map_or(vec![None], |p| or_sides(p).into_iter().map(Some).collect());
+
+                for side in sides {
+                    let mut head: Vec<Option<&'p Pattern>> = match side {
+                        Some(p) if !self.struct_pattern_covers(p) => {
+                            match self.variant_of_pattern(p) {
+                                Some((pe, pv, args)) if pe == e && pv == *v => {
+                                    (0..*arity).map(|i| args.get(i)).collect()
+                                }
+
+                                _ => continue,
+                            }
+                        }
+
+                        _ => vec![None; *arity],
+                    };
+                    head.extend(r[..j].iter().chain(&r[j + 1..]).copied());
+                    split_rows.push(head);
+                }
             }
 
-            let column: Vec<&Pattern> = rows.iter().filter_map(|r| r.get(j).copied()).collect();
-
-            self.column_covers(&column)
+            self.matrix_covers(split_rows, width - 1 + arity)
         })
+    }
+
+    /// The enum and the variant a pattern names, with its payload
+    /// patterns: `Missed`, `Outcome.Missed`, or `Landed(n)`. `None` for
+    /// any other pattern.
+    fn variant_of_pattern<'p>(&self, p: &'p Pattern) -> Option<(String, String, &'p [Pattern])> {
+        match p {
+            Pattern::Bind(n) => {
+                let name = self.text_of(*n).to_string();
+
+                Some((self.unit_variant_of(&name)?, name, &[]))
+            }
+
+            // A path compares by value, so it matches a unit variant only.
+            Pattern::Path(span) => {
+                let (e, v) = self.enum_of_path(self.text_of(*span))?;
+                let unit = self.enums.get(&e)?.iter().any(|(n, c)| *n == v && *c == 0);
+
+                unit.then_some((e, v, &[]))
+            }
+
+            Pattern::Variant { name, args, .. } => {
+                let (vname, path_enum) = self.pattern_variant(*name);
+                let owner = path_enum.or_else(|| {
+                    self.enums
+                        .iter()
+                        .find(|(_, vs)| vs.iter().any(|(v, _)| *v == vname))
+                        .map(|(e, _)| e.clone())
+                })?;
+
+                Some((owner, vname, args))
+            }
+
+            _ => None,
+        }
     }
 
     /// `match` as a statement: an if-chain on temps, one arm per line.
@@ -1688,7 +2126,16 @@ impl<'s> Desugar<'s> {
             .collect();
         let default = m.default.as_ref().map(ArmBody::Block);
 
-        self.match_chain(m.span, &m.scrutinees, &m.aliases, &arms, default, None, "");
+        self.match_chain(
+            m.span,
+            &m.scrutinees,
+            &m.aliases,
+            &arms,
+            default,
+            None,
+            "",
+            m.recovered,
+        );
     }
 
     /// `local s = match ...` whose arms run statements: the statement
@@ -1715,6 +2162,7 @@ impl<'s> Desugar<'s> {
             default,
             Some(sink),
             lead,
+            m.recovered,
         );
     }
 
@@ -1766,6 +2214,7 @@ impl<'s> Desugar<'s> {
         default: Option<ArmBody<'_>>,
         sink: Option<&str>,
         lead: &str,
+        recovered: bool,
     ) {
         let start = self.byte_start(span);
         let with_end =
@@ -1786,9 +2235,11 @@ impl<'s> Desugar<'s> {
         let exhaustive = self.match_is_exhaustive(&pats, &guards);
         // A rejected pattern makes the arm list unreliable, so the
         // exhaustiveness message would name the wrong variant.
-        let bad_arm = self.check_variant_patterns(&pats);
+        let bad_arm = self.check_variant_patterns(&pats, scrutinees, true);
 
-        if default.is_none() && !exhaustive && !bad_arm {
+        // A match the parse recovered in lost the arm it could not
+        // read, so what is left proves nothing about coverage.
+        if default.is_none() && !exhaustive && !bad_arm && !recovered {
             let msg = self.not_exhaustive_message(&pats);
             self.diagnose(span, &msg);
         }
@@ -1896,9 +2347,9 @@ impl<'s> Desugar<'s> {
         let exhaustive = self.match_is_exhaustive(&pats, &guards);
         // A rejected pattern makes the arm list unreliable, so the
         // exhaustiveness message would name the wrong variant.
-        let bad_arm = self.check_variant_patterns(&pats);
+        let bad_arm = self.check_variant_patterns(&pats, &m.scrutinees, true);
 
-        if m.default.is_none() && !exhaustive && !bad_arm {
+        if m.default.is_none() && !exhaustive && !bad_arm && !m.recovered {
             let msg = self.not_exhaustive_message(&pats);
             self.diagnose(m.span, &msg);
         }
@@ -1946,12 +2397,26 @@ impl<'s> Desugar<'s> {
 
         let mut cursor = with_end;
         let last_index = m.arms.len().saturating_sub(1);
+        let mut raise = false;
 
         for (i, arm) in m.arms.iter().enumerate() {
             let arm_start = self.byte_start(arm.span);
             self.copy(cursor, arm_start);
             let (test, c) = self.arm_test(&arm.patterns, &paths, arm.guard.as_ref());
-            let is_last_without_default = m.default.is_none() && i == last_index && exhaustive;
+            let mut is_last_without_default = m.default.is_none() && i == last_index && exhaustive;
+
+            // The ship tests the last arm of an exhaustive match too, and
+            // a value no arm names raises. An `else` there gave an old
+            // save's "Uncommon" the value of the last variant. The check
+            // artifact keeps the `else`, which the checker reads as total.
+            if is_last_without_default
+                && !self.options.check
+                && !(arm.guard.is_none() && matches!(&arm.patterns[..], [p] if self.irrefutable(p)))
+            {
+                is_last_without_default = false;
+                raise = true;
+            }
+
             // One arm that covers every value has nothing to branch on.
             // `(else v)` is not Luau, so the value stands alone.
             let keyword = if is_last_without_default && i == 0 {
@@ -1994,6 +2459,11 @@ impl<'s> Desugar<'s> {
             self.copy(cursor, vs);
             self.expr_lazy(true, d);
             cursor = self.byte_end(d.span());
+        } else if raise {
+            self.generate(
+                cursor,
+                " else error(\"match: no arm covers this value\", 2)",
+            );
         } else if !exhaustive {
             self.generate(cursor, " else nil");
         }
@@ -2012,9 +2482,31 @@ impl<'s> Desugar<'s> {
 
     /// `local Ok(v) = e` and let-else.
     pub(crate) fn pattern_local(&mut self, p: &PatternLocal) {
+        self.check_variant_patterns(
+            &[std::slice::from_ref(&p.pattern)],
+            std::slice::from_ref(&p.value),
+            false,
+        );
         let anchor = self.byte_start(p.span);
         let value = self.render_to_string(&p.value);
-        let temp = self.hoist_text(value, anchor);
+        // The check artifact gives each pattern a local of its own. Two
+        // patterns that share a temp give it the union of both values,
+        // and a struct test does not narrow a union.
+        let temp = match self.options.check {
+            true => {
+                self.bump_temp();
+                let name = format!("_v{}", self.temp_next);
+                self.hoists.push(Hoist::Fresh {
+                    name: name.clone(),
+                    value: HoistValue::Text(value),
+                    anchor,
+                });
+
+                name
+            }
+
+            false => self.hoist_text(value, anchor),
+        };
         let mut c = Compiled::default();
         self.compile_pattern(&p.pattern, &temp, &mut c);
         let test = join_tests(&c.tests);
@@ -2107,6 +2599,24 @@ impl<'s> Desugar<'s> {
                 Pattern::Bind(n) if self.unit_variant_of(self.text_of(*n)).is_none() => {
                     let name = self.text_of(*n).to_string();
 
+                    // `if local Idel = job` with `job: Job`: the value is
+                    // never nil, so a capital name there is a misspelt
+                    // variant. `job: Job?` keeps the plain binding.
+                    if is_variant_name(&name)
+                        && let Expr::Name(v) = &b.value
+                        && self
+                            .binding_types
+                            .get(self.text_of(*v))
+                            .is_some_and(|t| !t.contains('?') && !names_word(t, "nil"))
+                        && self.scrutinee_enum(&b.value).is_some()
+                    {
+                        self.check_variant_patterns(
+                            &[std::slice::from_ref(&b.pattern)],
+                            std::slice::from_ref(&b.value),
+                            false,
+                        );
+                    }
+
                     if *negated {
                         tests.push(name.clone());
                         prior.push(name.clone());
@@ -2132,6 +2642,11 @@ impl<'s> Desugar<'s> {
                 }
 
                 pat => {
+                    self.check_variant_patterns(
+                        &[std::slice::from_ref(pat)],
+                        std::slice::from_ref(&b.value),
+                        false,
+                    );
                     self.bump_temp();
                     let temp = format!("_c{}", self.temp_next);
                     let mut c = Compiled::default();
@@ -2913,8 +3428,8 @@ mod tests {
 
         let star = "import * as M from \"./lib\"\nlocal function f(o: M.Opt<number>): number\n    return match o with\n        case M.Opt.Some(v) then v\n        case M.Opt.Nil then 0\n    end\nend\nprint(f)\n";
         let options = EmitOptions {
-            import_enums: vec![("M.Opt".to_string(), variants)],
-            import_types: types,
+            import_enums: vec![("M.Opt".to_string(), variants.clone())],
+            import_types: types.clone(),
             ..EmitOptions::default()
         };
         let out = crate::compile_with(star, &options).expect("compiles");
@@ -2922,6 +3437,20 @@ mod tests {
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         assert!(!out.check.contains(":: M_Opt"), "{}", out.check);
         assert!(!out.check.contains(":: M.Opt"), "{}", out.check);
+
+        // `import { Opt as O }` keys the enum by `O`; the export list
+        // still names it `Opt<T>`.
+        let renamed = "import { Opt as O } from \"./lib\"\nlocal function f(o: O<number>): number\n    return match o with\n        case O.Some(v) then v\n        case O.Nil then 0\n    end\nend\nprint(f)\n";
+        let options = EmitOptions {
+            import_enums: vec![("O".to_string(), variants)],
+            import_types: types,
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(renamed, &options).expect("compiles");
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(!out.check.contains(":: O\n"), "{}", out.check);
+        assert!(!out.check.contains(":: O "), "{}", out.check);
     }
 
     /// `import * as Sh` binds the module, so the cast of a match over
@@ -2947,14 +3476,22 @@ mod tests {
 
     /// A static call of a method an imported enum's impl writes,
     /// `Opt.or_else(o, 5)`, is no missing variant: the impl sits in the
-    /// module that declares the enum, and the checker types the call
-    /// off the import. An enum of this file still reports.
+    /// module that declares the enum, and the import index keys it as
+    /// `Opt.or_else`. An enum of this file still reports.
     #[test]
     fn a_method_of_an_imported_enum_is_no_missing_variant() {
         let variants = vec![("Some".to_string(), 1), ("Nil".to_string(), 0)];
         let options = EmitOptions {
             import_enums: vec![("Opt".to_string(), variants)],
             import_types: vec![("./lib".to_string(), vec!["Opt<T>".to_string()])],
+            import_callables: vec![(
+                "Opt.or_else".to_string(),
+                crate::flux::Callable {
+                    params: Some(2),
+                    deprecated: None,
+                    exported: true,
+                },
+            )],
             ..EmitOptions::default()
         };
         let src = "import { Opt } from \"./lib\"\nlocal o: Opt<number> = Opt.Some(1)\nprint(Opt.or_else(o, 5))\n";
@@ -2968,6 +3505,54 @@ mod tests {
         assert_eq!(
             got[0],
             "`Opt` has no variant `or_else`; its variants are `Some` and `Nil`"
+        );
+    }
+
+    /// `Reached.Walkd` on an imported enum gave the checker's "Key
+    /// 'Walkd' not found in table 'Reached'" alone, with no variant list
+    /// and no quick fix. The import index names the variants under each
+    /// spelling a file binds: a named, a renamed, and a star import.
+    #[test]
+    fn a_misspelt_variant_of_an_imported_enum_is_an_error() {
+        let variants = vec![("Walked".to_string(), 0), ("Skipped".to_string(), 0)];
+        let options = EmitOptions {
+            import_enums: ["Reached", "R", "E.Reached"]
+                .map(|n| (n.to_string(), variants.clone()))
+                .to_vec(),
+            ..EmitOptions::default()
+        };
+        let src = "import { Reached } from \"./en\"\nimport { Reached as R } from \"./en\"\nimport * as E from \"./en\"\nprint(Reached.Walkd, R.Walkd, E.Reached.Walkd, R.Walked)\n";
+        let out = crate::compile_with(src, &options).expect("compiles");
+        let got: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+        let want = |e: &str| {
+            format!("`{e}` has no variant `Walkd`; its variants are `Walked` and `Skipped`")
+        };
+
+        assert_eq!(got, [want("Reached"), want("R"), want("E.Reached")]);
+    }
+
+    /// `impl Named for Mode` gives the enum the trait's default `hi`,
+    /// and `Mode.hi(m)` said "`Mode` has no variant `hi`". An impl in
+    /// another file gives it `extra` the same way. A typo still reports.
+    #[test]
+    fn a_trait_default_and_a_foreign_impl_are_no_missing_variant() {
+        let src = "trait Named as\n    function hi(self): string\n        return \"hi\"\n    end\nend\nenum Mode as On, Off end\nimpl Named for Mode as\nend\nprint(Mode.hi(Mode.On), Mode.extra(Mode.Off), Mode.hii)\n";
+        let options = EmitOptions {
+            foreign_impls: vec![crate::extensions::Extension {
+                target: "Mode".to_string(),
+                name: "extra".to_string(),
+                is_static: false,
+                params: String::new(),
+                ret: None,
+            }],
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(src, &options).expect("compiles");
+        let got: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+        assert_eq!(
+            got,
+            ["`Mode` has no variant `hii`; its variants are `On` and `Off`"]
         );
     }
 
@@ -3065,11 +3650,17 @@ mod tests {
 
     #[test]
     fn one_arm_that_covers_every_value_needs_no_branch() {
-        // `(else v)` is not Luau, so a match expression with one arm and
-        // no default writes the value alone.
+        // `(else v)` is not Luau, so the check artifact writes the value
+        // alone. The ship tests the one arm and raises for another value.
         let src = "enum Msg as\n    Join(number)\nend\nlocal function h(m: Msg): number\n    return match m with\n        case Join(n) then n\n    end\nend\nprint(h)\n";
         let out = crate::compile(src).unwrap();
-        assert!(!out.ship.contains("else"), "{}", out.ship);
+        assert!(
+            out.ship.contains(
+                "if type(m) == \"table\" and m.tag == \"Join\" then m._1 else error(\"match: no arm covers this value\", 2)"
+            ),
+            "{}",
+            out.ship
+        );
         assert!(!out.check.contains("else"), "{}", out.check);
     }
 
@@ -3079,9 +3670,14 @@ mod tests {
         let out = crate::compile(src).unwrap();
         assert!(!out.diagnostics.is_empty());
         assert!(
-            out.ship.contains("return (\n         0\n    )"),
+            out.ship.contains("return (\n        if type(m) == \"table\" and m.tag == \"Join\" then 0 else error(\"match: no arm covers this value\", 2)\n    )"),
             "{}",
             out.ship
+        );
+        assert!(
+            out.check.contains("return (\n         0\n    )"),
+            "{}",
+            out.check
         );
     }
 
@@ -3102,6 +3698,34 @@ mod tests {
         // The ship artifact keeps the untyped constructor.
         assert!(
             out.ship.contains("function Shape.Rect(_1, _2) return"),
+            "{}",
+            out.ship
+        );
+    }
+
+    /// `local one: Kind[] = [Kind.Slide(1)]` gave "the type arguments of
+    /// `Kind` differ": the list took the variant's own type, and a list
+    /// is invariant. The check artifact casts each item that constructs
+    /// a variant to its enum. The ship artifact stays as it was.
+    #[test]
+    fn a_variant_in_a_list_literal_is_cast_to_its_enum() {
+        let src = "enum Kind as\n    Slide(number)\n    Spin(number)\n    Idle\nend\nlocal one: Kind[] = [Kind.Slide(1), Kind.Idle]\nlocal t: { Kind } = { Kind.Spin(2), n = Kind.Spin(3) }\nprint(one, t)\n";
+        let out = crate::compile(src).unwrap();
+
+        assert!(
+            out.check
+                .contains("Array.from({(Kind.Slide(1) :: Kind), Kind.Idle})"),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check
+                .contains("{ (Kind.Spin(2) :: Kind), n = Kind.Spin(3) }"),
+            "{}",
+            out.check
+        );
+        assert!(
+            out.ship.contains("{Kind.Slide(1), Kind.Idle}"),
             "{}",
             out.ship
         );
@@ -3208,6 +3832,213 @@ mod tests {
         );
     }
 
+    /// A misspelt unit variant beside `default` read as a binding that
+    /// takes every value: no other arm named the enum, so nothing
+    /// reported it, and the emit wrote `if true`. The head's type names
+    /// the enum, and a capital that no enum owns never binds.
+    #[test]
+    fn a_misspelt_unit_variant_beside_default_is_an_error() {
+        let decl = "enum Kind\n    Pickaxe\n    Axe\nend\n";
+        let expr = format!(
+            "{decl}local function h(k: Kind): string\n    return match k with\n        case Pickax then \"p\"\n        default \"x\"\n    end\nend\nprint(h)\n"
+        );
+        let stmt = format!(
+            "{decl}local function s(k: Kind)\n    match k with\n        case Pickax then print(1)\n        default print(2)\n    end\nend\nprint(s)\n"
+        );
+        let want = "`Kind` has no variant `Pickax`; its variants are `Pickaxe` and `Axe`";
+
+        assert_eq!(messages(&expr), [want]);
+        assert_eq!(messages(&stmt), [want]);
+
+        // No enum in scope to name: the capital still does not bind.
+        let untyped = "local function u(x: number): string\n    return match x with\n        case Big then \"b\"\n        default \"x\"\n    end\nend\nprint(u)\n";
+        let got = messages(untyped);
+        assert!(
+            got.len() == 1 && got[0].starts_with("`Big` is no variant of an enum in scope"),
+            "{got:?}"
+        );
+
+        // A lowercase name binds, as before.
+        let bind = format!(
+            "{decl}local function b(k: Kind): string\n    return match k with\n        case Axe then \"a\"\n        case other then \"o\"\n    end\nend\nprint(b)\n"
+        );
+        assert!(messages(&bind).is_empty(), "{:?}", messages(&bind));
+    }
+
+    /// A misspelt bare variant in a payload slot named the enum of the
+    /// match. The slot's declared type is the enum it lacks.
+    #[test]
+    fn a_misspelt_variant_in_a_payload_slot_names_the_slot_enum() {
+        let src = "enum Kind\n    Pickaxe\n    Axe\nend\nenum Item\n    Tool(Kind, number)\n    Junk\nend\nlocal function h(i: Item): string\n    return match i with\n        case Tool(Pickax, _) then \"p\"\n        default \"x\"\n    end\nend\nprint(h)\n";
+        assert_eq!(
+            messages(src),
+            ["`Kind` has no variant `Pickax`; its variants are `Pickaxe` and `Axe`"]
+        );
+    }
+
+    /// A misspelt variant in `if local`, `while local`, or `local P = e`
+    /// went unchecked, and the emit tested a tag that never matches. Each
+    /// site now checks its pattern the way a match arm does.
+    #[test]
+    fn a_misspelt_variant_outside_a_match_is_an_error() {
+        let decl = "enum Job\n    Idle\n    Build(string)\nend\nenum Phase\n    Wait\n    Running(Job)\nend\n";
+        let src = format!(
+            "{decl}local function f(job: Job, p: Phase): string\n    if local Biuld(model) = job then return model end\n    local Biuld(m2) = job else return \"idle\" end\n    if local Running(Idel) = p then return \"r\" end\n    while local Runing(j) = p do print(j) end\n    if local Idel = job then print(Idel) end\n    if local Build(Model) = job then print(Model) end\n    return m2\nend\nprint(f)\n"
+        );
+        let job = "`Job` has no variant `Idel`; its variants are `Idle` and `Build`";
+
+        assert_eq!(
+            messages(&src),
+            [
+                "`Job` has no variant `Biuld`; its variants are `Idle` and `Build`",
+                "`Job` has no variant `Biuld`; its variants are `Idle` and `Build`",
+                job,
+                "`Phase` has no variant `Runing`; its variants are `Wait` and `Running`",
+                job,
+                "`Model` is no variant of an enum in scope, and a bare name in a pattern binds a new one that takes every value; import the enum that declares it, or bind a name that starts lowercase",
+            ]
+        );
+
+        // A capital name on a value that may be nil, or is no enum, is a
+        // plain binding. A payload name may reuse a local's name.
+        let plain = format!(
+            "{decl}local function g(maybe: Job?, part: Instance?, job: Job)\n    if local Current = maybe then print(Current) end\n    if local Humanoid = part then print(Humanoid) end\n    const model = \"m\"\n    if local Build(model) = job then print(model) end\nend\nprint(g)\n"
+        );
+        assert!(messages(&plain).is_empty(), "{:?}", messages(&plain));
+        assert!(!lint_names(&plain).contains(&"pattern_shadows_local"));
+    }
+
+    /// A typo in the enum of an inner pattern named the variant as
+    /// missing from the outer enum. The report names the typo.
+    #[test]
+    fn a_misspelt_enum_in_an_inner_pattern_names_the_head() {
+        let src = "enum Item as\n    Sword(number)\n    Nothing\nend\nenum Purchase as\n    Bought(Item)\n    Denied(string)\nend\nlocal function show(r: Purchase): string\n    return match r with\n        case Purchase.Bought(Itme.Sword(d)) then tostring(d)\n        default \"x\"\n    end\nend\nprint(show)\n";
+        assert_eq!(
+            messages(src),
+            ["`Itme` is not an enum in scope; `Item` has the variant `Sword`"]
+        );
+    }
+
+    /// `Result` is the runtime's generic enum, and the file binds no
+    /// `Result` table. A name under `Ok` reads its type through the
+    /// parent, as under any generic enum.
+    #[test]
+    fn a_name_under_a_nested_result_reads_no_result_table() {
+        let src = "enum Loaded as\n    Some(Result<number, string>)\n    None\nend\nlocal l = Loaded.None\nmatch l with\n    case Loaded.Some(Ok(n)) then print(n)\n    default print(0)\nend\n";
+        let options = EmitOptions {
+            check: true,
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(src, &options).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(!out.check.contains("Result.Ok("), "{}", out.check);
+        assert!(out.check.contains("_x.tag == \"Ok\""), "{}", out.check);
+    }
+
+    /// A name that a nested variant binds takes the payload type in the
+    /// check artifact; the checker reads the refined path as `never`.
+    #[test]
+    fn a_nested_variant_types_its_binding() {
+        let src = "enum Item as\n    Sword(number)\n    Nothing\nend\nenum Purchase as\n    Bought(Item)\n    Denied(string)\nend\nlocal r = Purchase.Denied(\"no\")\nmatch r with\n    case Purchase.Bought(Item.Sword(d)) then print(d)\n    default print(0)\nend\n";
+        let options = EmitOptions {
+            check: true,
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(src, &options).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.check
+                .contains("local d = ((_m1 :: any)._1._1 :: typeof(Item.Sword(nil :: any)._1))"),
+            "{}",
+            out.check
+        );
+        // The test below the top narrows nothing.
+        assert!(
+            out.check.contains(
+                "((type((_m1 :: any)._1) == \"table\" and (_m1 :: any)._1.tag == \"Sword\") :: boolean)"
+            ),
+            "{}",
+            out.check
+        );
+        // The ship artifact reads the path as it is.
+        let ship = crate::compile(src).unwrap().ship;
+        assert!(ship.contains("local d = _m1._1._1"), "{ship}");
+        assert!(
+            ship.contains("type(_m1._1) == \"table\" and _m1._1.tag == \"Sword\" then"),
+            "{ship}"
+        );
+
+        // An `import type` binds no table to call the constructor on, so
+        // a function narrows a parameter of the slot's type.
+        let typed = "import type { Item } from \"./lib\"\nimport { Purchase } from \"./lib\"\nlocal function f(r: Purchase)\n    match r with\n        case Purchase.Bought(Item.Sword(d)) then print(d)\n        default print(0)\n    end\nend\nprint(f)\n";
+        let options = EmitOptions {
+            check: true,
+            import_enums: vec![
+                (
+                    "Item".to_string(),
+                    vec![("Sword".to_string(), 1), ("Nothing".to_string(), 0)],
+                ),
+                (
+                    "Purchase".to_string(),
+                    vec![("Bought".to_string(), 1), ("Denied".to_string(), 1)],
+                ),
+            ],
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(typed, &options).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.check.contains(
+                "local d = ((_m1 :: any)._1._1 :: typeof((function(_x: typeof(_m1._1)) if type(_x) == \"table\" and _x.tag == \"Sword\" then return _x._1 end return error(\"\") end)(nil :: any)))"
+            ),
+            "{}",
+            out.check
+        );
+    }
+
+    /// A generic variant under an enum that is not generic has no
+    /// constructor to type its payload. A function narrows a parameter of
+    /// the slot's type, which the outer constructor gives. A name one
+    /// level down reads its path, since only the top narrows the root.
+    #[test]
+    fn a_nested_generic_variant_types_its_binding() {
+        let src = "enum Opt<T> as\n    Some(T)\n    Nil\nend\nenum Wrap as\n    W(Opt<string>)\n    Empty\nend\nenum Pair as\n    Both(Wrap, number)\n    Neither\nend\nlocal p = Pair.Neither\nmatch p with\n    case Pair.Both(Wrap.W(Opt.Some(s)), n) then print(s, n)\n    default print(0)\nend\n";
+        let options = EmitOptions {
+            check: true,
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(src, &options).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.check.contains(
+                "local s, n = ((_m1 :: any)._1._1._1 :: typeof((function(_x: typeof(Wrap.W(nil :: any)._1)) if type(_x) == \"table\" and _x.tag == \"Some\" then return _x._1 end return error(\"\") end)(nil :: any))), _m1._2"
+            ),
+            "{}",
+            out.check
+        );
+    }
+
+    /// A struct and an array pattern under a variant bind through the
+    /// same function, with the test of their own level.
+    #[test]
+    fn a_struct_and_an_array_under_a_variant_type_their_bindings() {
+        let src = "type Rec = { name: string }\nenum Box as\n    Full(Rec)\n    List({ number })\nend\nenum Order as\n    B(Box)\n    Nothing\nend\nlocal o = Order.Nothing\nmatch o with\n    case Order.B(Box.Full({ name = m })) then print(m)\n    case Order.B(Box.List([f, ...rest])) then print(f, rest)\n    default print(0)\nend\n";
+        let options = EmitOptions {
+            check: true,
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(src, &options).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+        for want in [
+            "local m = ((_m1 :: any)._1._1.name :: typeof((function(_x: typeof(Box.Full(nil :: any)._1)) if type(_x) == \"table\" then return _x.name end return error(\"\") end)(nil :: any)))",
+            "local f, rest = ((_m1 :: any)._1._1[1] :: typeof((function(_x: typeof(Box.List(nil :: any)._1)) if type(_x) == \"table\" and #_x >= 1 then return _x[1] end return error(\"\") end)(nil :: any)))",
+            "Array.slice(((_m1 :: any)._1._1 :: typeof((function(_x: typeof(Box.List(nil :: any)._1)) if type(_x) == \"table\" and #_x >= 1 then return _x end return error(\"\") end)(nil :: any))), 2)",
+        ] {
+            assert!(out.check.contains(want), "{want}\n{}", out.check);
+        }
+    }
+
     #[test]
     fn an_exhaustive_match_statement_closes_its_chain() {
         let src = "enum Shape as\n    Circle(number)\n    Rect(number, number)\nend\nlocal function area(s: Shape): number\n    match s with\n        case Circle(r) then\n            return r\n        case Rect(w, h) then\n            return w * h\n    end\nend\nprint(area)\n";
@@ -3219,6 +4050,39 @@ mod tests {
             "{}",
             out.ship
         );
+    }
+
+    /// A save loaded "Uncommon" as a `Rarity`, and the `else` of the
+    /// last arm gave it Mythic's weight. The ship now tests the last arm
+    /// and raises; the check artifact keeps the `else` for the checker.
+    /// A last arm that takes every value stays an `else`.
+    #[test]
+    fn an_exhaustive_match_expression_tests_its_last_arm() {
+        let src = "enum Tier as\n    Low\n    High\nend\nlocal function w(t: Tier): number\n    return match t with\n        case Tier.Low then 1\n        case Tier.High then 99\n    end\nend\nprint(w)\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.ship.contains(
+                "elseif t == Tier.High then 99 else error(\"match: no arm covers this value\", 2)"
+            ),
+            "{}",
+            out.ship
+        );
+        assert!(out.check.contains("else 99"), "{}", out.check);
+
+        let one = "enum One as\n    Only\nend\nlocal function w(o: One): number\n    return match o with\n        case One.Only then 1\n    end\nend\nprint(w)\n";
+        let out = crate::compile(one).unwrap();
+        assert!(
+            out.ship.contains(
+                "if o == One.Only then 1 else error(\"match: no arm covers this value\", 2)"
+            ),
+            "{}",
+            out.ship
+        );
+
+        let bound = "local function w(n: number): number\n    return match n with\n        case 1 then 1\n        case m then m\n    end\nend\nprint(w)\n";
+        let out = crate::compile(bound).unwrap();
+        assert!(!out.ship.contains("error("), "{}", out.ship);
     }
 
     /// A literal arm covers part of the value, so a `case _` or a
@@ -3398,5 +4262,129 @@ mod tests {
             assert_eq!(out.map.to_source(name_at), want, "{generated}");
             assert!(!out.map.is_generated(name_at), "{generated}");
         }
+    }
+
+    /// A struct pattern of an imported struct covers it, as one of this
+    /// file's own does. A dotted path names a struct through a module
+    /// or a namespace, and a namespace member tests its flat name.
+    #[test]
+    fn a_struct_pattern_covers_an_imported_or_qualified_struct() {
+        let gem = || vec![("n".to_string(), false)];
+        let options = EmitOptions {
+            import_struct_fields: vec![("Gem".to_string(), gem()), ("B.Gem".to_string(), gem())],
+            ..EmitOptions::default()
+        };
+        let compile = |src: &str| crate::compile_with(src, &options).unwrap();
+
+        let out = compile(
+            "import { Gem } from \"./gem\"\nlocal function f(g: Gem): number\n    return match g with\n        case Gem { n } then n\n    end\nend\nprint(f)\n",
+        );
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+        let out = compile(
+            "import * as B from \"./gem\"\nlocal function f(g: B.Gem | number): number\n    return match g with\n        case B.Gem { n } then n\n        case _ then 0\n    end\nend\nprint(f)\n",
+        );
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.ship.contains("getmetatable(g) == B.Gem then g.n"),
+            "{}",
+            out.ship
+        );
+
+        let out = compile(
+            "namespace N\n    struct P\n        x: number\n    end\n    function g(p: P | number): number\n        return match p with\n            case P { x } then x\n            case _ then 0\n        end\n    end\nend\nlocal function f(p: N.P | number): number\n    return match p with\n        case N.P { x } then x\n        case _ then 0\n    end\nend\nprint(f, N.g)\n",
+        );
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert_eq!(
+            out.ship.matches("getmetatable(p) == N_P then p.x").count(),
+            2,
+            "{}",
+            out.ship
+        );
+    }
+
+    /// The payload slots of a variant are a product: arms that cover it
+    /// only together, with no slot that covers alone, still cover it.
+    /// An arm list that leaves one pair out still reports.
+    #[test]
+    fn payload_slots_cover_as_a_product() {
+        let head = "enum Hit as\n    Landed(number)\n    Missed\nend\nenum Wrap as\n    Pair(Hit, Hit)\n    Empty\nend\nlocal function f(w: Wrap): number\n    return match w with\n        case Empty then 0\n        case Pair(Missed, _) then 1\n";
+        let full = format!(
+            "{head}        case Pair(Landed(n), Landed(l)) then n + l\n        case Pair(Landed(n), Missed) then n\n    end\nend\nprint(f)\n"
+        );
+        let gap = format!(
+            "{head}        case Pair(Landed(n), Landed(l)) then n + l\n    end\nend\nprint(f)\n"
+        );
+        let either = format!(
+            "{head}        case Pair(Landed(_), Landed(_) or Missed) then 2\n    end\nend\nprint(f)\n"
+        );
+
+        assert!(messages(&full).is_empty(), "{:?}", messages(&full));
+        assert!(messages(&either).is_empty(), "{:?}", messages(&either));
+        assert_eq!(
+            messages(&gap),
+            vec!["this match is not exhaustive; add a `default` arm"]
+        );
+    }
+
+    /// `local Pt { x = y } = s` binds through a struct pattern, as the
+    /// `if local` form does. `Pt` names the struct: the unused-name lint
+    /// reads the names in the braces, and a nested `Pt { x }` too. The
+    /// check artifact gives each pattern a local of its own, so two
+    /// patterns over two structs do not share one union.
+    #[test]
+    fn a_struct_pattern_local_binds_the_names_in_its_braces() {
+        let head = "struct Pt as\n    x: number\nend\nstruct Seg as\n    a: Pt\nend\nconst s = new Seg { a = new Pt { x = 1 } }\n";
+        let src = format!(
+            "{head}if local Pt {{ x }} = s.a then\n    print(x)\nend\nlocal Seg {{ a = Pt {{ x = ax }} }} = s\nconst Pt {{ x = only }} = s.a\nprint(ax, only)\n"
+        );
+        let out = crate::compile(&src).unwrap();
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(unused(&out.lints).is_empty(), "{:?}", out.lints);
+        assert!(
+            out.ship.contains("local ax = _1.a.x") && out.ship.contains("const only = _1.x"),
+            "{}",
+            out.ship
+        );
+
+        assert!(
+            out.check.contains("\nlocal _v1 = s if not")
+                && out.check.contains("\nlocal _v1 = s.a if not"),
+            "{}",
+            out.check
+        );
+
+        let unread =
+            crate::compile(&format!("{head}if local Pt {{ x }} = s.a then\nend\n")).unwrap();
+        let fixes: Vec<String> = unused(&unread.lints)
+            .iter()
+            .filter_map(|l| l.fix.as_ref().map(|f| f.replacement.clone()))
+            .collect();
+        assert_eq!(fixes, ["x = _x"]);
+    }
+
+    /// A match that holds a parse error lost the arm it could not read,
+    /// so it reports that error alone and no missing arm.
+    #[test]
+    fn a_match_with_a_broken_arm_claims_no_coverage() {
+        let head = "enum Hit as\n    Block(number)\n    Miss\nend\nlocal function f(h: Hit)\n    match h with\n        case Block(n) then print(n)\n";
+
+        assert_eq!(
+            messages(&format!("{head}        case\n    end\nend\nprint(f)\n")),
+            ["expected a pattern after `case`"]
+        );
+        assert_eq!(
+            messages(&format!(
+                "{head}        case Miss(\n    end\nend\nprint(f)\n"
+            )),
+            ["this arm opens `(` and never closes it; write `)` before `then`"]
+        );
+        assert_eq!(
+            messages(&format!("{head}    end\nend\nprint(f)\n")),
+            [
+                "this match is not exhaustive: `Hit` has no arm for `Miss`; add it or a `default` arm"
+            ]
+        );
     }
 }

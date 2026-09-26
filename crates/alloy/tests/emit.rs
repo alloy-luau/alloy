@@ -61,6 +61,25 @@ fn a_nested_struct_serializes_through_its_own_pair() {
     );
 }
 
+/// `from_table` copied an enum field as it was, so `"Middle"` read as a
+/// `Tier`. Each enum read now goes through the std check, which names
+/// the struct and the field; a payload enum passes its metatable, and
+/// an array checks each item.
+#[test]
+fn an_enum_field_reads_back_through_the_variant_check() {
+    let out = ship(
+        "import { Deserialize } from \"@alloy/std/serde\"\nenum Tier as\n    Low\n    High\nend\nenum Shape as\n    Circle(number)\n    Empty\nend\n@derive(Deserialize)\nstruct Card as\n    tier: Tier\n    shape: Shape\n    maybe: Tier?\n    all: Tier[]\nend\n",
+    );
+    for want in [
+        "tier = (if t.tier == nil then nil else __alloy.serde_variant(t.tier, { Low = 0, High = 0 }, nil, \"Tier\", \"Card.tier\"))",
+        "shape = (if t.shape == nil then nil else __alloy.serde_variant(t.shape, { Circle = 1, Empty = 0 }, Shape, \"Shape\", \"Card.shape\"))",
+        "maybe = if t.maybe == nil then nil else __alloy.serde_variant(t.maybe, { Low = 0, High = 0 }, nil, \"Tier\", \"Card.maybe\")",
+        "__alloy.Array.map(t.all, function(_v0) return __alloy.serde_variant(_v0, { Low = 0, High = 0 }, nil, \"Tier\", \"Card.all\") end)",
+    ] {
+        assert!(out.contains(want), "{want}\n{out}");
+    }
+}
+
 #[test]
 fn a_derive_reports_a_key_or_a_name_it_cannot_hold() {
     assert_eq!(

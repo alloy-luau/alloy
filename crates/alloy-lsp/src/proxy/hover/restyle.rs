@@ -8,6 +8,11 @@ use super::*;
 /// the header names something else or the source used the same keyword.
 pub(crate) fn restyle_hover(value: &str, doc: &Doc, line: u32, character: u32) -> Option<String> {
     let word = word_at(doc, line, character)?;
+    // A use reads the keywords of the declaration in scope, so a `const
+    // bag` and a `local bag` in two functions each keep their own.
+    let line = Caret::at(&doc.source, line, character)
+        .and_then(|c| alloy::flux::binding_of(&doc.source, c.start))
+        .map_or(line, |at| position_of(&doc.source, at).0);
     let binding = declaring_binding(doc, line, word)?;
 
     restyle_with(value, word, binding)
@@ -1706,6 +1711,29 @@ pub(crate) fn bind_receiver_arguments(
     (out != body).then(|| format!("{fence}\n{out}\n```{tail}"))
 }
 
+/// `bind_receiver_arguments` for a hover on the method's name:
+/// `parts:take()` on `local parts: Pool<Part>` reads `take(): Part`.
+/// The caret sits on the name, so the call's `(` stands after the word.
+pub(crate) fn bind_hover_receiver(
+    value: &str,
+    doc: &Doc,
+    line: u32,
+    character: u32,
+) -> Option<String> {
+    let text = doc.source.lines().nth(line as usize)?;
+    let rest = text.chars().skip(character as usize);
+    let word = rest
+        .clone()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .count();
+
+    if rest.clone().nth(word) != Some('(') {
+        return None;
+    }
+
+    bind_receiver_arguments(value, doc, line, character + word as u32 + 1)
+}
+
 /// The column of the callee's name on the cursor's line, for a
 /// signature label `function Owner:name(` or `function name(`.
 fn callee_column(doc: &Doc, label: &str, line: u32, character: u32) -> Option<u32> {
@@ -1717,6 +1745,24 @@ fn callee_column(doc: &Doc, label: &str, line: u32, character: u32) -> Option<u3
     let call = before.rfind(&format!("{name}("))?;
 
     Some(call as u32)
+}
+
+/// The name of the call open at the caret, when a `case` pattern binds
+/// it. An expression match calls the payload path in its place, so the
+/// child names the call after the path, `Item._1`, or not at all.
+fn case_bound_callee(doc: &Doc, line: u32, character: u32) -> Option<&str> {
+    let offset = offset_of(&doc.source, line, character)?;
+    let (start, end, _) = crate::proxy::completion::open_paren_word(&doc.source, offset)?;
+
+    // `t.f(` and `x:m(` call a member, which no pattern binds.
+    if doc.source[..start].ends_with(['.', ':']) {
+        return None;
+    }
+
+    let word = &doc.source[start..end];
+    case_arm_of_binding(doc, line as usize, word)?;
+
+    Some(word)
 }
 
 /// Signature help through the hover's restyle: the source's own head
@@ -1762,6 +1808,14 @@ pub(crate) fn restyle_signatures(result: &mut Value, doc: &Doc, line: u32, chara
         let rebuilt = typed.as_deref().unwrap_or(rebuilt);
         let plain = crate::proxy::patterns::without_pattern_temps(rebuilt, &doc.source);
         let rebuilt = plain.as_deref().unwrap_or(rebuilt);
+        let named = case_bound_callee(doc, line, character).and_then(|word| {
+            let rest = rebuilt.strip_prefix("function")?;
+            let open = rest.find('(')?;
+            let name_end = rest[..open].find('<').unwrap_or(open);
+
+            Some(format!("function {word}{}", &rest[name_end..]))
+        });
+        let rebuilt = named.as_deref().unwrap_or(rebuilt);
 
         if rebuilt == label {
             continue;
@@ -2155,9 +2209,48 @@ pub(crate) fn name_self_receiver(
         return None;
     }
 
-    let out = format!("self: {}", impl_self_type(doc, line)?);
+    let named = impl_self_type(doc, line).or_else(|| table_self_name(doc, line))?;
+    let out = format!("self: {named}");
 
     (out != body).then(|| format!("{fence}\n{out}\n```{tail}"))
+}
+
+/// The name of `self` in a colon method on a top-level table, from the
+/// method head above the line. The checker prints the shape, and for a
+/// class the metatable too; the reader wrote a name. An instance of a
+/// class reads as the class, the way an instance of a struct does.
+fn table_self_name(doc: &Doc, line: u32) -> Option<String> {
+    let mut owner: Option<(usize, String)> = None;
+
+    for l in doc.source.lines().take(line as usize + 1) {
+        let indent = l.len() - l.trim_start().len();
+        let text = l.trim_start();
+
+        if let Some((at, _)) = &owner
+            && indent == *at
+            && (text == "end" || text.starts_with("end "))
+        {
+            owner = None;
+
+            continue;
+        }
+
+        if let Some(rest) = text.strip_prefix("function ")
+            && let Some((name, _)) = rest.split_once(':')
+            && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+        {
+            owner = Some((indent, name.to_string()));
+        }
+    }
+
+    let (_, name) = owner?;
+    let kind = alloy::tables::self_types(&doc.source).remove(&name)?;
+
+    Some(match kind {
+        alloy::tables::SelfType::Instance(_) => name,
+
+        _ => format!("typeof({name})"),
+    })
 }
 
 /// `local rows = checked(ids)`: the child prints a solver variable for

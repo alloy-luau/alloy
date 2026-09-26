@@ -43,6 +43,32 @@ pub(crate) fn run(s: &Scan) -> Vec<Lint> {
     out
 }
 
+/// A function a call can name, as `Scan::callables` finds it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Callable {
+    /// The parameters, `self` counted. `None` when a vararg, a default,
+    /// or a second declaration makes the count a range.
+    pub params: Option<usize>,
+    /// The note of its `@deprecated`: empty for a mark with no note.
+    pub deprecated: Option<String>,
+    /// Whether another module reaches it: an `export function`, or a
+    /// method or a static of a struct.
+    pub exported: bool,
+}
+
+/// The functions a module sends out, keyed the way `Scan::callables`
+/// keys them. A source that does not lex sends none.
+pub fn exported_callables(src: &str) -> Vec<(String, Callable)> {
+    let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
+        return Vec::new();
+    };
+    let st = crate::fmt::structure::structure(src, &lexed.toks);
+    let mut out = Scan::new(src, &lexed.toks, &st).callables();
+    out.retain(|(_, c)| c.exported);
+
+    out
+}
+
 /// The rewrites `prefer_const` writes, `local` to `const`, for `alloy
 /// fmt` to apply. A source that does not lex gets none.
 pub(crate) fn prefer_const_fixes(src: &str) -> Vec<crate::lint::Fix> {
@@ -54,6 +80,40 @@ pub(crate) fn prefer_const_fixes(src: &str) -> Vec<crate::lint::Fix> {
     Scan::new(src, &lexed.toks, &st).prefer_const(&mut out);
 
     out.into_iter().filter_map(|l| l.fix).collect()
+}
+
+/// Whether a statement after the declaration writes a new value to the
+/// local whose name starts at byte `name_at`. A write in a scope where a
+/// later `local` hides the name does not count. A source that does not
+/// lex counts as written, so a caller shows no stale value.
+pub fn reassigned(src: &str, name_at: usize) -> bool {
+    let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
+        return true;
+    };
+    let st = crate::fmt::structure::structure(src, &lexed.toks);
+    let Some(n) = lexed.toks.iter().position(|t| t.start as usize == name_at) else {
+        return true;
+    };
+
+    Scan::new(src, &lexed.toks, &st).written_after(n)
+}
+
+/// The byte where the declaration of the name at byte `at` starts: the
+/// `local`, `const` or parameter in scope there. A name that a `local`
+/// or a `const` declares is its own declaration. `None` for a name that
+/// no such declaration binds, and for a source that does not lex.
+pub fn binding_of(src: &str, at: usize) -> Option<usize> {
+    let lexed = alloy_syntax::lexer::lex(src).ok()?;
+    let st = crate::fmt::structure::structure(src, &lexed.toks);
+    let n = lexed.toks.iter().position(|t| t.start as usize == at)?;
+    let s = Scan::new(src, &lexed.toks, &st);
+    let d = match s.prev(n) {
+        "local" | "const" => n,
+
+        _ => s.binding_at(n)?,
+    };
+
+    Some(s.start(d) as usize)
 }
 
 impl<'s> Scan<'s> {

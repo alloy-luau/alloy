@@ -518,14 +518,19 @@ fn namespace_summaries(
         // shows its header alone; a body says nothing a hover needs.
         let body = text(m.stmt.span());
         let at = start_of(member) - start_of(m.stmt.span());
+        // The span starts at an attribute line above the declaration.
+        // The hover adds the `@derive` lines itself, so the head is the
+        // declaration's own line.
+        let own = &body[..at];
+        let own = own.rfind('\n').map_or(own, |i| own[i + 1..].trim_start());
         // `local` and `const` take a bare name, never a path, so the
         // word goes and the path stands alone: `Outer.VERSION = 1`.
-        let head = body[..at].trim_end();
+        let head = own.trim_end();
         let head = head
             .strip_suffix("local")
             .or_else(|| head.strip_suffix("const"))
             .map(str::trim_end)
-            .unwrap_or(&body[..at]);
+            .unwrap_or(own);
         let shown = format!("{head}{path}.{}", &body[at..]);
         let shown = match m.stmt.under_default() {
             Stmt::Function(_) | Stmt::LocalFunction(_) => {
@@ -1197,6 +1202,44 @@ fn param_text<'a>(p: &alloy_syntax::ast::Param, text: &impl Fn(TokSpan) -> &'a s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A field type is portable when the other file can write it; one
+    /// that names a type or an import of the module is not, since the
+    /// name may mean nothing in the other file. A std type an import of
+    /// the std binds is the ambient one. A generic struct gives no field.
+    #[test]
+    fn a_field_type_is_portable_when_the_other_file_can_write_it() {
+        let src = "import { HashMap } from \"@alloy/std/collections\"
+import { Entry } from \"./entry\"
+type Id = number
+export struct Ballot
+    votes: HashMap<string, Player>
+    rows: HashMap<string, Entry>
+    ids: HashMap<Id, string>
+end
+export struct Box<T>
+    items: HashMap<string, T>
+end
+";
+        let got = struct_field_types(src);
+
+        let field = |f: &str, ty: &str, portable: bool| (f.to_string(), ty.to_string(), portable);
+
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "Ballot".to_string(),
+                    vec![
+                        field("votes", "HashMap<string, Player>", true),
+                        field("rows", "HashMap<string, Entry>", false),
+                        field("ids", "HashMap<Id, string>", false),
+                    ]
+                ),
+                ("Box".to_string(), vec![]),
+            ]
+        );
+    }
 
     /// Luau-lsp loads definitions files in no set order, so a type one
     /// `.d.aly` named from another was unknown. Files that name each
@@ -1898,8 +1941,10 @@ fn namespace_enums(
 }
 
 /// One struct under one of its names: the name, then each field with
-/// whether it carries a default and whether it is private.
-type StructFields = (String, Vec<(String, bool, bool)>);
+/// whether it carries a default, whether it is private, and its type
+/// text. A generic struct gives an empty type text, since a field type
+/// may name the struct's own parameters.
+type StructFields = (String, Vec<(String, bool, bool, String)>);
 
 /// Every struct a source declares, under each name a module that
 /// imports it writes, with each field's default and its visibility.
@@ -1936,14 +1981,21 @@ fn struct_fields_of(
 
     match stmt.under_default() {
         Stmt::Struct(s) => {
-            let fields: Vec<(String, bool, bool)> = s
+            let fields: Vec<(String, bool, bool, String)> = s
                 .fields
                 .iter()
                 .map(|f| {
+                    let ty = text(f.ty).trim().to_string();
+
                     (
                         text(f.name),
-                        field_can_stay_unset(&text(f.ty), f.default.is_some()),
+                        field_can_stay_unset(&ty, f.default.is_some()),
                         f.visibility.is_some_and(|v| text(v) == "private"),
+                        if s.generics.is_some() {
+                            String::new()
+                        } else {
+                            ty
+                        },
                     )
                 })
                 .collect();
@@ -2067,7 +2119,7 @@ pub fn struct_field_defaults(src: &str) -> Vec<(String, Vec<(String, bool)>)> {
         .map(|(name, fields)| {
             let fields = fields
                 .into_iter()
-                .map(|(f, default, _)| (f, default))
+                .map(|(f, default, _, _)| (f, default))
                 .collect();
 
             (name, fields)
@@ -2084,11 +2136,83 @@ pub fn struct_privates(src: &str) -> Vec<(String, Vec<String>)> {
         .filter_map(|(name, fields)| {
             let private: Vec<String> = fields
                 .into_iter()
-                .filter(|(_, _, p)| *p)
-                .map(|(f, _, _)| f)
+                .filter(|(_, _, p, _)| *p)
+                .map(|(f, _, _, _)| f)
                 .collect();
 
             (!private.is_empty()).then_some((name, private))
+        })
+        .collect()
+}
+
+/// One field of a struct: its name, its type text, and whether another
+/// file can write that text.
+pub type FieldText = (String, String, bool);
+
+/// Every struct a source declares, with the type text of each field and
+/// whether another file can write that text the way the source does. A
+/// construction in that file reads it, so `new Ballot { votes =
+/// HashMap.new() }` passes `<<string, string>>` to the constructor, as
+/// the declaring file does.
+///
+/// A name the source binds, a type, an import, or a namespace, means
+/// one thing there and may mean nothing in the other file, so a field
+/// type that names one cannot be written there. A std type an import of
+/// the std binds is the ambient one, and can. A generic struct gives no
+/// field, since a field type may name the struct's own parameters.
+pub fn struct_field_types(src: &str) -> Vec<(String, Vec<FieldText>)> {
+    let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let stmts = &parsed.chunk.block.stmts;
+    let mut own = crate::desugar::top_level_names(src, toks, &parsed.chunk);
+
+    for stmt in stmts {
+        match stmt.under_default() {
+            Stmt::Namespace(n) => {
+                own.insert(n.name.text(src, toks).to_string());
+            }
+
+            Stmt::Import(i) => {
+                let spec = i.path.text(src, toks).trim_matches(['"', '\'', '`']);
+
+                if crate::std_names::module_of_spec(spec).is_some() {
+                    for n in crate::desugar::import_names(i) {
+                        own.remove(n.text(src, toks));
+                    }
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    let mut structs = Vec::new();
+
+    for stmt in stmts {
+        struct_fields_of(src, toks, stmt, "", &mut structs);
+    }
+
+    let names_own = |ty: &str| {
+        ty.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .any(|word| own.contains(word))
+    };
+
+    structs
+        .into_iter()
+        .map(|(name, fields)| {
+            let typed = fields
+                .into_iter()
+                .filter(|(_, _, _, ty)| !ty.is_empty())
+                .map(|(f, _, _, ty)| {
+                    let portable = !names_own(&ty);
+
+                    (f, ty, portable)
+                })
+                .collect();
+
+            (name, typed)
         })
         .collect()
 }

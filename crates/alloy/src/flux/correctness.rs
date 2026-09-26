@@ -596,8 +596,9 @@ impl<'s> Scan<'s> {
             }
 
             // `a.b!` asserts a field, whose type the annotations of the
-            // file do not name. Only a bound name reads here.
-            if matches!(self.prev(i - 1), "." | ":" | "?." | "?:") {
+            // file do not name, and `a->b!` a child found by name. Only a
+            // bound name reads here.
+            if matches!(self.prev(i - 1), "." | ":" | "?." | "?:" | "->") {
                 continue;
             }
 
@@ -943,6 +944,12 @@ mod tests {
         );
         assert_eq!(
             names("local function f(p: Part)\n    print(p.Parent!.Name)\nend\n"),
+            Vec::<&str>::new()
+        );
+        // The name after `->` is a child's name, never the local of
+        // that name.
+        assert_eq!(
+            names("local folder: { number } = {}\nprint(#folder)\nprint(script.Parent->folder!)\n"),
             Vec::<&str>::new()
         );
         // A name nothing annotates says nothing either way.

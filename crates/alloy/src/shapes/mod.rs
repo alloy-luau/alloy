@@ -800,6 +800,9 @@ pub fn fold(text: &str, known: &Known) -> String {
     fold_rig_characters(&mut out);
     fold_interfaces(&mut out, known);
     fold_bound_records(&mut out, known);
+    // Before the parentheses fold: `(Player & { ... }) | Player` keeps
+    // `(Player)` once the table goes, and that fold drops the pair.
+    fold_refinement_tables(&mut out);
     fold_name_parens(&mut out);
     fold_signalish(&mut out);
     fold_array_alias(&mut out);
@@ -1275,6 +1278,77 @@ fn fold_negated_members(text: &mut String) {
             None => return,
         }
     }
+}
+
+/// `Player & { read Character: ~(false?) }` is how the checker writes a
+/// value after `if player.Character then`: a table whose fields hold
+/// negations alone. The `else` branch gets `{ read Character: false? }`.
+/// Alloy cannot write either, and the value is still a `Player`. The
+/// table goes with its `&`, and the union that held the refined
+/// `Player` beside the plain one then folds to one `Player`.
+fn fold_refinement_tables(text: &mut String) {
+    let mut from = 0;
+
+    while let Some(i) = text[from..].find('{') {
+        let open = from + i;
+        let Some(len) = group_len(&text[open..], '{', '}') else {
+            return;
+        };
+        let end = open + len;
+
+        // A record of real fields may hold a refined one inside it.
+        if !refines(&text[open + 1..end - 1]) {
+            from = open + 1;
+
+            continue;
+        }
+
+        let before = text[..open].trim_end();
+
+        if let Some(head) = before.strip_suffix('&') {
+            let start = head.trim_end().len();
+            text.replace_range(start..end, "");
+            from = start;
+
+            continue;
+        }
+
+        match text[end..].trim_start().strip_prefix('&') {
+            Some(rest) => {
+                let keep = text.len() - rest.trim_start().len();
+                text.replace_range(open..keep, "");
+                from = open;
+            }
+
+            // A table that stands alone is the whole type.
+            None => from = end,
+        }
+    }
+}
+
+/// Whether the fields of a table each hold a refinement: a negation,
+/// `~nil` or `~(false?)`; a `read` field of `false?` or `nil`, which a
+/// failed test proves; or a table of such fields.
+fn refines(fields: &str) -> bool {
+    let parts: Vec<&str> = split_list(fields)
+        .into_iter()
+        .filter(|p| !p.is_empty())
+        .collect();
+
+    !parts.is_empty()
+        && parts.iter().all(|p| {
+            let Some(at) = label_end(p) else {
+                return false;
+            };
+            let ty = p[at..].trim();
+
+            ty.starts_with('~')
+                || p.starts_with("read ") && matches!(ty, "false?" | "nil")
+                || ty
+                    .strip_prefix('{')
+                    .and_then(|t| t.strip_suffix('}'))
+                    .is_some_and(refines)
+        })
 }
 
 /// The parts of a comma separated list at depth zero.
@@ -2460,6 +2534,70 @@ mod tests {
         assert_eq!(fold("Item & ~nil", &known), "Item");
         assert_eq!(fold("intersect<A, ~nil>[]", &known), "A[]");
         assert_eq!(fold("intersect<Item, Named>", &known), "Item & Named");
+    }
+
+    /// `if player.Character then` refines `player` to a `Player` whose
+    /// `Character` is not false or nil. The hover printed the table the
+    /// checker writes for that, in a union with the plain `Player`. A
+    /// union that holds `T` and `T & { refinement }` is `T`.
+    #[test]
+    fn a_field_refinement_reads_as_the_type_it_refines() {
+        let known = Known::default();
+        let refined = "Player & {\n    read Character: ~(false?)\n}";
+
+        // The declaration, as the child prints it.
+        assert_eq!(
+            fold(
+                &format!("```luau\nlocal player: ({refined}) | Player\n```"),
+                &known
+            ),
+            "```luau\nlocal player: Player\n```"
+        );
+        // Two refinements, one per test, fold the same way.
+        assert_eq!(
+            fold(
+                &format!(
+                    "local player: ({refined}) | (Player & {{\n    read Character: ~nil\n}}) | Player"
+                ),
+                &known
+            ),
+            "local player: Player"
+        );
+        // A use inside the branch holds the refined member alone.
+        assert_eq!(
+            fold(&format!("local player: {refined}"), &known),
+            "local player: Player"
+        );
+        // A refinement of a field of the field, and one written first.
+        assert_eq!(
+            fold(
+                "local m: (({ read Parent: ~nil } & Model) | Model | Model)?",
+                &known
+            ),
+            "local m: Model?"
+        );
+        assert_eq!(
+            fold(
+                "local p: Part & { read Parent: { read Parent: ~(false?) } }",
+                &known
+            ),
+            "local p: Part"
+        );
+        // The `else` branch proves the field false or nil.
+        assert_eq!(
+            fold(
+                "local m: ((Model & {\n    read Parent: false?\n}) | (Model & {\n    read Parent: ~(false?)\n}) | Model)?",
+                &known
+            ),
+            "local m: Model?"
+        );
+        // A record with a real field keeps it, and a negation the source
+        // wrote as the whole type stays.
+        assert_eq!(
+            fold("local r: Part & { Size: number }", &known),
+            "local r: Part & { Size: number }"
+        );
+        assert_eq!(fold("local v: ~nil", &known), "local v: ~nil");
     }
 
     fn known() -> Known {

@@ -450,18 +450,19 @@ pub const TABLE: &[(&str, &str)] = &[
         "declare",
         "```alloy\ndeclare function name(params): R\ndeclare name: T\ndeclare extern type Name with ... end\ndeclare class Name extends Base ... end\n```\nA definition-file statement. Luau's own definition syntax, in a `.d.aly`: a file of globals that every file sees with no import. It holds no runtime, and `alloy build` writes nothing for it. A class or an extern type lists members: `name: T`, `read name: T`, `write name: T`, a method `function name(self, ...): R`, and an indexer `[K]: V`; `extends` names the base.\n\nThe rest of the file declares types, and each one is global: `type`, `interface`, `struct`, `trait`, and `enum`, which is a type alone, with no constructors. A file may name a type of another `.d.aly`. A `T[]` is a plain table, `{ T }`, since the host gives no std array, and a std type such as `Result` is out of reach. The editor and `alloy flux` load every `.d.aly` under `[build] in` and each file of `[flux] definitions`, which may sit outside `in`. The editor's `alloy-luau.types.definitionFiles` setting adds files for the editor alone.",
     ),
-    // The std: ambient names, no import. The child sees `__alloy.Name`.
+    // The std: a file imports each name, so the lead example does too.
+    // The child sees `__alloy.Name`.
     (
         "HashMap",
-        "```alloy\nlocal prices = $map[[\"sword\", 10], [\"pet\", 25]]\nlocal m: HashMap<string, number> = HashMap.new()\nm:set(\"gem\", 5)\nfor key, value in m:entries() do end\n```\nA map with methods, from the std. Any value that is not nil is a key. `HashMap.new()` is empty, `HashMap.from(t)` copies a table's pairs, and `$map[[k, v], ...]` is the literal. `for key, value in m` walks the pairs.",
+        "```alloy\nimport { HashMap } from \"@alloy/std/collections\"\n\nlocal prices = $map[[\"sword\", 10], [\"pet\", 25]]\nlocal m: HashMap<string, number> = HashMap.new()\nm:set(\"gem\", 5)\nfor key, value in m:entries() do end\n```\nA map with methods, from the std. Any value that is not nil is a key. `HashMap.new()` is empty, `HashMap.from(t)` copies a table's pairs, and `$map[[k, v], ...]` is the literal. `for key, value in m` walks the pairs.",
     ),
     (
         "Set",
-        "```alloy\nlocal seen = $set[1, 2, 3]\nlocal s: Set<string> = Set.new()\nif s:add(\"a\"):has(\"a\") then end\n```\nA set with methods, from the std. Any value that is not nil is a member. `Set.new()` is empty, `Set.from(t)` takes an array's items, and `$set[a, b]` is the literal. `for value in s` walks the members, in no set order.",
+        "```alloy\nimport { Set } from \"@alloy/std/collections\"\n\nlocal seen = $set[1, 2, 3]\nlocal s: Set<string> = Set.new()\nif s:add(\"a\"):has(\"a\") then end\n```\nA set with methods, from the std. Any value that is not nil is a member. `Set.new()` is empty, `Set.from(t)` takes an array's items, and `$set[a, b]` is the literal. `for value in s` walks the members, in no set order.",
     ),
     (
         "BitSet",
-        "```alloy\nlocal visited = BitSet.new(1024)\nvisited:add(7):add(40)\nif visited:has(7) then end\nfor i in visited do print(i) end\n```\nA set of whole numbers from 0 up, from the std, with one bit per number in a buffer. A `Set<number>` spends a table slot on each member. A BitSet spends one bit on each number up to its largest member, and `add` and `has` run about 2x faster. It suits dense numbers: tile indices, entity ids, visited flags. `BitSet.new(size)` makes room for the numbers below `size`, and a larger number grows the buffer. `for i in bits` walks the members in rising order.",
+        "```alloy\nimport { BitSet } from \"@alloy/std/collections\"\n\nlocal visited = BitSet.new(1024)\nvisited:add(7):add(40)\nif visited:has(7) then end\nfor i in visited do print(i) end\n```\nA set of whole numbers from 0 up, from the std, with one bit per number in a buffer. A `Set<number>` spends a table slot on each member. A BitSet spends one bit on each number up to its largest member, and `add` and `has` run about 2x faster. It suits dense numbers: tile indices, entity ids, visited flags. `BitSet.new(size)` makes room for the numbers below `size`, and a larger number grows the buffer. `for i in bits` walks the members in rising order.",
     ),
     (
         "Array",
@@ -501,27 +502,27 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "Queue",
-        "```alloy\nlocal jobs: Queue<Job> = Queue.new()\njobs:push(job)\nwhile local next = jobs:pop() do\n    run(next)\nend\n```\nA first-in, first-out queue over a ring of indices, from the std: `push` at the back costs the same at any size, and so does `pop` at the front. `Queue.from(t)` fills one from an array. A `for` loop reads it front to back without a pop.",
+        "```alloy\nimport { Queue } from \"@alloy/std/collections\"\n\nlocal jobs: Queue<Job> = Queue.new()\njobs:push(job)\nwhile local next = jobs:pop() do\n    run(next)\nend\n```\nA first-in, first-out queue over a ring of indices, from the std: `push` at the back costs the same at any size, and so does `pop` at the front. `Queue.from(t)` fills one from an array. A `for` loop reads it front to back without a pop.",
     ),
     (
         "Heap",
-        "```alloy\nlocal open = Heap.new(function(a, b) return a.cost < b.cost end)\nopen:push(node)\nlocal nearest = open:pop()\n```\nA binary heap, from the std: `pop` yields the least value under `less`, which defaults to `<`, so numbers and strings need no comparator and tables take one. `Heap.new(less?)` and `Heap.from(t, less?)` both give a `Heap<T>`, and `Heap.from` builds one from an array. A `for` loop reads it least first without a pop; `to_array` returns the items sorted.",
+        "```alloy\nimport { Heap } from \"@alloy/std/collections\"\n\ntype Node = { cost: number }\nlocal open = Heap.new(function(a: Node, b: Node): boolean return a.cost < b.cost end)\nopen:push({ cost = 3 })\nprint(open:pop())\n```\nA binary heap, from the std: `pop` yields the least value under `less`, which defaults to `<`, so numbers and strings need no comparator and tables take one. `Heap.new(less?)` and `Heap.from(t, less?)` both give a `Heap<T>`, and `Heap.from` builds one from an array. A `for` loop reads it least first without a pop; `to_array` returns the items sorted.",
     ),
     (
         "Scope",
-        "```alloy\nlocal scope = Scope.new()\nscope:add(part.Touched:Connect(on_touch))\nscope:add(function() print(\"bye\") end)\ndelete scope\n```\nA cleanup bag, from the std. `add` takes anything `delete` accepts, an Instance, a connection, a thread, a table with `Destroy` or `Disconnect`, or a function, and gives it back, so `local conn = scope:add(signal:Connect(f))` reads as before. `clean` runs the cleanups newest first and empties the bag; `delete scope` does the same through `Destroy`. A scope may hold another scope.",
+        "```alloy\nimport { Scope } from \"@alloy/std/async\"\n\nlocal scope = Scope.new()\nscope:add(part.Touched:Connect(on_touch))\nscope:add(function() print(\"bye\") end)\ndelete scope\n```\nA cleanup bag, from the std. `add` takes anything `delete` accepts, an Instance, a connection, a thread, a table with `Destroy` or `Disconnect`, or a function, and gives it back, so `local conn = scope:add(signal:Connect(f))` reads as before. `clean` runs the cleanups newest first and empties the bag; `delete scope` does the same through `Destroy`. A scope may hold another scope.",
     ),
     (
         "Iter",
-        "```alloy\nlocal names = Iter.from(players)\n    :filter(function(p) return p.Team == team end)\n    :map(function(p) return p.Name end)\n    :take(5)\n    :collect()\nfor i in Iter.range(1, 10, 2) do end\n```\nA lazy iterator, from the std: each step wraps the last, and nothing runs until `collect`, `for_each`, a reducer, or a `for` loop pulls. `Iter.from` takes an array, a function that returns the next value or nil, or a `Set`, `Queue`, `Heap`, or `HashMap`; it keeps the element type, so `Iter.from(number[])` is `Iter<number>` and `:collect()` is `number[]`. Another table with an `__iter` metamethod needs a cast. `Iter.range(from, to, step?)` counts, inclusive.\n\n`map` keeps the element type through any number of steps, so every callback in a chain knows its parameter type.",
+        "```alloy\nimport { Iter } from \"@alloy/std/iter\"\n\nlocal names = Iter.from(players)\n    :filter(function(p) return p.Team == team end)\n    :map(function(p) return p.Name end)\n    :take(5)\n    :collect()\nfor i in Iter.range(1, 10, 2) do end\n```\nA lazy iterator, from the std: each step wraps the last, and nothing runs until `collect`, `for_each`, a reducer, or a `for` loop pulls. `Iter.from` takes an array, a function that returns the next value or nil, or a `Set`, `Queue`, `Heap`, or `HashMap`; it keeps the element type, so `Iter.from(number[])` is `Iter<number>` and `:collect()` is `number[]`. Another table with an `__iter` metamethod needs a cast. `Iter.range(from, to, step?)` counts, inclusive.\n\n`map` keeps the element type through any number of steps, so every callback in a chain knows its parameter type.",
     ),
     (
         "Symbol",
-        "```alloy\nlocal key = Symbol.new(\"name\")\nlocal t = { [key] = 1 }\n```\nA unique key that no string can collide with, from the std: a frozen table that prints as `Symbol(name)`. Use one for a private table slot, or a sentinel a value cannot forge.",
+        "```alloy\nimport { Symbol } from \"@alloy/std/collections\"\n\nlocal key = Symbol.new(\"name\")\nlocal t = { [key] = 1 }\n```\nA unique key that no string can collide with, from the std: a frozen table that prints as `Symbol(name)`. Use one for a private table slot, or a sentinel a value cannot forge.",
     ),
     (
         "Signal",
-        "```alloy\nlocal damaged = Signal.new<<Player, number>>()\nlocal conn = damaged:Connect(function(player, amount) end)\ndamaged:Fire(player, 10)\nlocal who, amount = damaged:Wait(5)\n```\nA typed signal, from the std, with the shape of `RBXScriptSignal`, so code that takes one takes the other. `Signal.new<T...>()` fires `T...`; handlers run in connection order, each on a reused thread, and a handler may disconnect any connection during a fire.\n\nEach has a snake_case twin, `connect`, `once`, `wait`, `fire`, `fire_deferred`, `disconnect_all`, `destroy`. A connection has `Connected`, `Disconnect`, and `disconnect`. `Signal.is(value)` says whether a value is one.\n\n`Signal.collect(source)` turns any signal with `Connect` or `connect`, the shape `Signalish<T...>`, a Roblox one included, into an iterator that drains the queued events in order, plus the connection: `for id, value in Signal.collect(changed) do`. `Signal.wrap(source)` gives a Signal that fires with the source.",
+        "```alloy\nimport { Signal } from \"@alloy/std/signal\"\n\nlocal damaged = Signal.new<<Player, number>>()\nlocal conn = damaged:Connect(function(player, amount) end)\ndamaged:Fire(player, 10)\nlocal who, amount = damaged:Wait(5)\n```\nA typed signal, from the std, with the shape of `RBXScriptSignal`, so code that takes one takes the other. `Signal.new<T...>()` fires `T...`; handlers run in connection order, each on a reused thread, and a handler may disconnect any connection during a fire.\n\nEach has a snake_case twin, `connect`, `once`, `wait`, `fire`, `fire_deferred`, `disconnect_all`, `destroy`. A connection has `Connected`, `Disconnect`, and `disconnect`. `Signal.is(value)` says whether a value is one.\n\n`Signal.collect(source)` turns any signal with `Connect` or `connect`, the shape `Signalish<T...>`, a Roblox one included, into an iterator that drains the queued events in order, plus the connection: `for id, value in Signal.collect(changed) do`. `Signal.wrap(source)` gives a Signal that fires with the source.",
     ),
     (
         "Traits",
@@ -541,7 +542,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "Attributes",
-        "```alloy\nattribute icon(asset: string) on struct, variant\n\n@icon(\"rbxassetid://1\")\nstruct Sword ... end\n\nlocal asset = Attributes.get(Sword, icon)\n```\nDeclared metadata, readable at runtime. An `attribute` declaration binds its name to an `Attribute<T>` value, so the `attr` of each static is the name as written, not a string.\n\nAn attribute with one parameter reads as that value, several as a table that names them, and none as `true`.",
+        "```alloy\nimport { Attributes } from \"@alloy/std/roblox\"\n\nattribute icon(asset: string) on struct, variant\n\n@icon(\"rbxassetid://1\")\nstruct Sword ... end\n\nlocal asset = Attributes.get(Sword, icon)\n```\nDeclared metadata, readable at runtime. An `attribute` declaration binds its name to an `Attribute<T>` value, so the `attr` of each static is the name as written, not a string.\n\nAn attribute with one parameter reads as that value, several as a table that names them, and none as `true`.",
     ),
     (
         "@sealed",

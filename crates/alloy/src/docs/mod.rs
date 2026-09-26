@@ -434,6 +434,31 @@ mod tests {
         }
     }
 
+    /// A fresh project imports each std name, so a lead example that
+    /// reads a std value without its import reports an `ImportError`
+    /// when a reader copies it.
+    #[test]
+    fn every_std_lead_example_imports_the_value_it_reads() {
+        for (module, names) in crate::std_names::MODULES {
+            for name in *names {
+                let Some(text) = super::lookup(name) else {
+                    continue;
+                };
+                let lead = text
+                    .strip_prefix("```alloy\n")
+                    .and_then(|t| t.split("```").next())
+                    .unwrap_or_default();
+
+                if crate::std_names::owned(name) || !lead.contains(&format!("{name}.")) {
+                    continue;
+                }
+
+                let import = format!("import {{ {name} }} from \"@alloy/std/{module}\"");
+                assert!(lead.contains(&import), "`{name}` reads without `{import}`");
+            }
+        }
+    }
+
     /// Every member's example is Alloy the compiler accepts. A doc
     /// example that does not compile is worse than none: a reader
     /// copies it.

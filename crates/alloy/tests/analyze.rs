@@ -1707,3 +1707,17 @@ fn an_impl_on_a_class_table_reads_the_instance() {
     };
     assert_eq!(reported.len(), 1, "{}", reported.join("\n"));
 }
+
+/// The lead example of `alloy doc Heap` failed under the default strict
+/// mode, since the comparator took untyped values, and it read `Heap`
+/// with no import. A reader copies it, so it checks as written.
+#[test]
+fn the_heap_doc_example_checks_in_strict_mode() {
+    let text = alloy::docs::lookup("Heap").expect("the Heap entry");
+    let example = text
+        .strip_prefix("```alloy\n")
+        .and_then(|t| t.split("```").next())
+        .expect("a lead example");
+    assert!(example.starts_with("import { Heap } from \"@alloy/std/collections\""));
+    analyze(example, "doc-heap");
+}

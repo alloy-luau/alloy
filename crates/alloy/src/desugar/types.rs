@@ -666,7 +666,57 @@ impl<'s> Desugar<'s> {
             return format!("{head}<{}>", parts.join(", "));
         }
 
+        if text.starts_with("typeof(") {
+            let mut out = String::new();
+            let mut at = 0;
+
+            for (s, e, require) in self.typeof_imports(text) {
+                out.push_str(&text[at..s as usize]);
+                out.push_str(&require);
+                at = e as usize;
+            }
+
+            out.push_str(&text[at..]);
+
+            return out;
+        }
+
         self.lower_type_name(text)
+    }
+
+    /// Each `import('./m')` in the text of a `typeof`, as its byte range
+    /// and the `require` that an import in an expression writes. Luau has
+    /// no `import`, and a `typeof` holds an expression.
+    pub(crate) fn typeof_imports(&self, text: &str) -> Vec<(u32, u32, String)> {
+        // A local named `import` is the file's own function.
+        if self.is_local("import") {
+            return Vec::new();
+        }
+
+        let Ok(lexed) = alloy_syntax::lexer::lex(text) else {
+            return Vec::new();
+        };
+        let toks = &lexed.toks;
+        let word = |i: usize| toks.get(i).map_or("", |t| t.text(text));
+        let string = |i: usize| {
+            toks.get(i)
+                .is_some_and(|t| matches!(t.kind, alloy_syntax::lexer::TokKind::Str { .. }))
+        };
+
+        (0..toks.len())
+            .filter(|&i| {
+                word(i) == "import"
+                    && !matches!(i.checked_sub(1).map(word), Some("." | ":"))
+                    && word(i + 1) == "("
+                    && string(i + 2)
+                    && word(i + 3) == ")"
+            })
+            .map(|i| {
+                let path = self.require_literal(word(i + 2));
+
+                (toks[i].start, toks[i + 3].end, format!("require({path})"))
+            })
+            .collect()
     }
 
     /// One `name: T` pair of a table type or a parameter list. Text with

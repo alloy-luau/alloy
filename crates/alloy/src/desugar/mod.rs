@@ -579,6 +579,8 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
             toks[tildes.start as usize].start,
             u32::MAX - toks[operand.end as usize - 1].end,
         ),
+
+        TypeEdit::TypeOf(span) => (toks[span.start as usize].start, 0),
     });
 
     let (std_imports, std_namespaces, std_aliases) = std_imports(src, toks, chunk);
@@ -2906,6 +2908,10 @@ impl<'s> Desugar<'s> {
             TypeEdit::Negation { tildes, operand } => {
                 self.byte_start(*tildes) >= start && self.byte_end(*operand) <= end
             }
+
+            TypeEdit::TypeOf(span) => {
+                self.byte_start(*span) >= start && self.byte_end(*span) <= end
+            }
         });
 
         let edit = match edit {
@@ -2984,6 +2990,24 @@ impl<'s> Desugar<'s> {
                 self.copy(os, oe);
                 self.generate(oe, ">");
                 self.copy(oe, end);
+
+                return;
+            }
+
+            // Only the calls change, so the rest of the `typeof` keeps
+            // its bytes and its lines.
+            Some(TypeEdit::TypeOf(span)) => {
+                let base = self.byte_start(span);
+                let text = self.text_of(span).to_string();
+                let mut at = start;
+
+                for (s, e, require) in self.typeof_imports(&text) {
+                    self.r.copy(at, base + s);
+                    self.generate(base + s, &require);
+                    at = base + e;
+                }
+
+                self.copy(at, end);
 
                 return;
             }
@@ -3080,6 +3104,8 @@ impl<'s> Desugar<'s> {
                     TypeEdit::Negation { tildes, operand } => {
                         (self.byte_start(*tildes), self.byte_end(*operand))
                     }
+
+                    TypeEdit::TypeOf(span) => (self.byte_start(*span), self.byte_end(*span)),
                 };
 
                 (s >= start && x <= end).then_some(s)

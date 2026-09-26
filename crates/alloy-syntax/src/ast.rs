@@ -102,6 +102,9 @@ pub enum TypeEdit {
         /// `T[K]` alone, or `T[K]?`.
         optional: bool,
     },
+    /// `typeof(...)` that calls `import`: emit writes the call as the
+    /// `require` Luau reads.
+    TypeOf(TokSpan),
 }
 
 #[derive(Debug)]

@@ -1086,3 +1086,33 @@ fn an_import_of_a_bare_string_is_a_require() {
         assert!(!text.contains("import"), "{text}");
     }
 }
+
+/// A `typeof` in a type holds an expression, so `import(...)` there is
+/// the `require` it is in an expression. It stayed `import`, which Luau
+/// reads as an unknown global. The annotation and the type argument of
+/// a call take the same rewrite.
+#[test]
+fn an_import_inside_typeof_is_a_require() {
+    let out = alloy::compile(
+        "type App = typeof(import('./app'))\nlocal a: typeof(import('./app').mount) = nil :: any\nlocal b = import<<typeof(import('./app'))>>(script.app)\nprint(a, b)\n",
+    )
+    .unwrap();
+
+    for text in [&out.check, &out.ship] {
+        assert!(
+            text.contains("type App = typeof(require('./app'))"),
+            "{text}"
+        );
+        assert!(
+            text.contains("local a: typeof(require('./app').mount)"),
+            "{text}"
+        );
+        assert!(!text.contains("import"), "{text}");
+    }
+
+    assert!(
+        out.check.contains(":: typeof(require('./app')))"),
+        "{}",
+        out.check
+    );
+}

@@ -594,6 +594,64 @@ fn an_alias_only_mount_resolves_and_adds_no_instance() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// An instance path resolves through the mount that holds it, a mount of
+/// sources or of plain Luau. The resolver read `@game` as an alias,
+/// found none, and reported that the path names no module.
+#[test]
+fn an_instance_path_resolves_through_its_mount() {
+    let dir = std::env::temp_dir().join(format!("alloy-instance-path-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    write(
+        &dir,
+        "alloy.toml",
+        &format!("[build]\nin = \"src\"\nout = \"build\"\n{MOUNTS}"),
+    );
+    write(
+        &dir,
+        "src/shared/util.aly",
+        "export const NAME = \"util\"\n",
+    );
+    write(&dir, "packages/roblox/jecs.luau", "return { world = 1 }\n");
+    write(
+        &dir,
+        "src/server/main.server.aly",
+        "import { NAME } from \"@game/ReplicatedStorage/Shared/util\"\nimport jecs from \"@game/ReplicatedStorage/Packages/jecs\"\nprint(NAME, jecs)\n",
+    );
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run_project(&dir, &config).unwrap();
+
+    assert!(report.is_clean(), "{:?}", report.diagnostics);
+
+    let main = fs::read_to_string(dir.join("build/server/main.server.luau")).unwrap_or_default();
+
+    assert!(
+        main.contains("require(\"@game/ReplicatedStorage/Shared/util\")"),
+        "{main}"
+    );
+
+    // A name the module does not export still reports.
+    write(
+        &dir,
+        "src/server/main.server.aly",
+        "import { NOPE } from \"@game/ReplicatedStorage/Shared/util\"\nprint(NOPE)\n",
+    );
+    let report = alloy::build::check_project(&dir, &config).unwrap();
+    let messages: Vec<&str> = report
+        .diagnostics
+        .iter()
+        .map(|(_, d)| d.message.as_str())
+        .collect();
+
+    assert_eq!(
+        messages,
+        ["\"@game/ReplicatedStorage/Shared/util\" does not export `NOPE`; it exports `NAME`"]
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// An alias-only entry whose folder no mount holds is an error: the
 /// name resolves here and names nothing in the DataModel.
 #[test]

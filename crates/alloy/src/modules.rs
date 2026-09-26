@@ -823,11 +823,40 @@ pub fn alias_problems(root: &Path, config: &Config) -> Vec<AliasProblem> {
 /// The alias table of a project, each alias to an absolute folder: the
 /// aliases the tree carries, which come from `.config.luau` or
 /// `.luaurc`, and from the `[mount]` table when that is the tree.
+///
+/// Each mount also sits under its place, `game/ReplicatedStorage/Lib`,
+/// so `resolve` reads an instance path. No alias holds a `/`, so the
+/// two kinds of entry never meet.
 pub fn aliases(root: &Path, tree: &crate::project::Tree) -> Vec<(String, PathBuf)> {
+    let places = tree.mounts.iter().map(|m| {
+        (
+            format!("game/{}", m.place.join("/")),
+            normalize(&root.join(&m.disk)),
+        )
+    });
+
     tree.aliases
         .iter()
         .map(|(a, p)| (a.clone(), normalize(&root.join(p))))
+        .chain(places)
         .collect()
+}
+
+/// The path on disk of an instance path, `game/ReplicatedStorage/Lib/x`
+/// with the `@` gone: the mount with the longest place ahead of it, and
+/// the rest of the path under the mount's folder.
+fn place_on_disk(rest: &str, aliases: &[(String, PathBuf)]) -> Option<PathBuf> {
+    aliases
+        .iter()
+        .filter(|(a, _)| a.starts_with("game/"))
+        .filter_map(|(a, dir)| {
+            let tail = rest.strip_prefix(a.as_str())?;
+
+            (tail.is_empty() || tail.starts_with('/'))
+                .then(|| (a.len(), dir.join(tail.trim_start_matches('/'))))
+        })
+        .max_by_key(|(len, _)| *len)
+        .map(|(_, path)| path)
 }
 
 /// The file an import spec names from a source file: `./x`, `../x`,
@@ -844,9 +873,13 @@ pub fn resolve(spec: &str, from: &Path, aliases: &[(String, PathBuf)]) -> Option
         from.parent()?.join(tail)
     } else if let Some(rest) = spec.strip_prefix('@') {
         let (alias, tail) = rest.split_once('/').unwrap_or((rest, ""));
-        let (_, dir) = aliases.iter().find(|(a, _)| a == alias)?;
 
-        dir.join(tail)
+        match aliases.iter().find(|(a, _)| a == alias) {
+            Some((_, dir)) => dir.join(tail),
+
+            // `@game/...` is an instance path: a mount holds it.
+            None => place_on_disk(rest, aliases)?,
+        }
     } else if spec.starts_with("./") || spec.starts_with("../") {
         from.parent()?.join(spec)
     } else {

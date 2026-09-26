@@ -982,7 +982,16 @@ impl<'s> Desugar<'s> {
                     });
                 self.diagnose(span, &message);
 
-                self.text_of(span).to_string()
+                // Luau cannot parse `$`. A parse error hid every export
+                // of the module from its importers and added a second
+                // report, so the call becomes `nil`. The newlines stay.
+                let lines = "\n".repeat(self.text_of(span).matches('\n').count());
+
+                match self.macro_stmt {
+                    true => lines,
+
+                    false => format!("{}{lines}", self.any_cast("nil")),
+                }
             }
         }
     }
@@ -1261,6 +1270,33 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}\n{}", out.ship));
 
         assert_eq!(hits, 3, "{}", out.ship);
+    }
+
+    /// `return $pick(...)` copied the call into the output, and Luau
+    /// cannot parse `$`. Flux added "Expected <eof>, got 'end'", and
+    /// each importer read no export from the module. The call is `nil`
+    /// now, and the report is the one line that names the intrinsic.
+    #[test]
+    fn an_unknown_intrinsic_leaves_valid_luau() {
+        let src = "export function spend(a: number): boolean\n    return $pick(a > 0,\n        true, false)\nend\n$nope()\nprint(spend)\n";
+        let out = crate::compile(src).unwrap();
+        assert_eq!(
+            messages(src),
+            vec![
+                "unknown macro or intrinsic `$pick` with 3 arguments",
+                "unknown macro or intrinsic `$nope` with 0 arguments",
+            ]
+        );
+
+        let lua = mlua::Lua::new();
+
+        for text in [&out.ship, &out.check] {
+            assert_eq!(text.lines().count(), src.lines().count(), "{text}");
+
+            if let Err(e) = lua.load(text.as_str()).into_function() {
+                panic!("{e}\n{text}");
+            }
+        }
     }
 
     /// A macro substitutes; there is no call for the checker to count.

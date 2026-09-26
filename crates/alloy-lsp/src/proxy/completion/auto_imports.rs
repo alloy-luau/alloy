@@ -199,6 +199,12 @@ impl State {
                     continue;
                 }
 
+                // A default import binds the value alone, even of a
+                // struct, so the type report stays after it.
+                if export.is_default && message.contains("Unknown type '") {
+                    continue;
+                }
+
                 let typed = as_type && !export.is_default && matches!(export.kind, 7 | 8 | 13);
                 let export = imports::Export {
                     is_type: export.is_type || typed,

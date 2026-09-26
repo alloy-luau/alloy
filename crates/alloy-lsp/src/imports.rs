@@ -545,7 +545,10 @@ pub fn bound_names(src: &str) -> Vec<String> {
 }
 
 /// The line an import lands on: under the last line of the last
-/// `import`, else under the hot comments at the top.
+/// `import`, else under the hot comments at the top. A comment block
+/// that a blank line ends is the file's header, and the import goes
+/// under it too. A comment right above code is the doc of that code,
+/// and the import stays above it.
 pub fn import_insertion_line(src: &str) -> u32 {
     let last_import = import_statements(src)
         .into_iter()
@@ -553,13 +556,36 @@ pub fn import_insertion_line(src: &str) -> u32 {
         .map(|s| s.line + src[s.start..s.end].matches('\n').count() + 1)
         .max();
 
-    match last_import {
-        Some(line) => line as u32,
+    if let Some(line) = last_import {
+        return line as u32;
+    }
 
-        None => src
-            .lines()
-            .take_while(|l| l.trim_start().starts_with("--!"))
-            .count() as u32,
+    let lines: Vec<&str> = src.lines().collect();
+    let hot = lines
+        .iter()
+        .take_while(|l| l.trim_start().starts_with("--!"))
+        .count();
+    let mut end = hot;
+    let mut block = false;
+
+    // A `--[[` comment runs to the line that holds its `]]`.
+    while let Some(line) = lines.get(end).map(|l| l.trim_start()) {
+        if !block && !line.starts_with("--") {
+            break;
+        }
+
+        block = match block {
+            true => !line.contains("]]"),
+
+            false => line.starts_with("--[[") && !line.contains("]]"),
+        };
+        end += 1;
+    }
+
+    match lines.get(end).is_none_or(|l| l.trim().is_empty()) {
+        true => end as u32,
+
+        false => hot as u32,
     }
 }
 
@@ -1294,6 +1320,26 @@ namespace Inner as end
         assert_eq!(edit["newText"], "import { b } from \"./n\"\n");
         assert_eq!(edit["range"]["start"]["line"], 2);
         assert_eq!(import_insertion_line("--!strict\nlocal x = 1\n"), 1);
+    }
+
+    /// A file with no import takes the new one under its header
+    /// comment. A comment right above code documents that code, and
+    /// the import stays above it.
+    #[test]
+    fn an_import_lands_under_the_header_comment() {
+        assert_eq!(import_insertion_line("-- Header.\n\nlocal x = 1\n"), 1);
+        assert_eq!(
+            import_insertion_line("--!strict\n-- Header.\n-- More.\n\nlocal x = 1\n"),
+            3
+        );
+        assert_eq!(
+            import_insertion_line("--[[\n  Header.\n]]\n\nlocal x = 1\n"),
+            3
+        );
+        assert_eq!(
+            import_insertion_line("--!strict\n-- Doubles.\nlocal function f() end\n"),
+            1
+        );
     }
 
     /// The project's `quote_style` writes a generated import, and the

@@ -2769,6 +2769,39 @@ fn a_name_read_as_a_member_takes_the_value_import() {
     );
 }
 
+/// "Unknown type 'Box'" on a class module offered the default import
+/// as a preferred fix next to the type import. A default import binds
+/// the value alone, so the report stayed. A type report offers the type
+/// import alone. With no import in the file, the import goes under the
+/// file's header comment.
+#[test]
+fn a_type_report_offers_no_default_import() {
+    let st = files(&[
+        (
+            "file:///Box.aly",
+            "local Box = {}\nBox.__index = Box\nexport type Box = typeof(setmetatable({} :: { n: number }, Box))\nfunction Box.new(): Box\n    return setmetatable({ n = 1 }, Box)\nend\nreturn Box\n",
+        ),
+        (
+            "file:///use.aly",
+            "-- Holds the boxes.\n\nlocal boxes: { Box } = {}\nprint(boxes)\n",
+        ),
+    ]);
+    let report = json!({
+        "message": "TypeError: Unknown type 'Box'",
+        "range": { "start": { "line": 2, "character": 15 }, "end": { "line": 2, "character": 18 } },
+    });
+    let actions = st.import_actions("file:///use.aly", &[report]);
+
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    assert_eq!(
+        actions[0]["edit"]["changes"]["file:///use.aly"][0],
+        json!({
+            "range": { "start": { "line": 1, "character": 0 }, "end": { "line": 1, "character": 0 } },
+            "newText": "import { type Box } from './Box'\n",
+        })
+    );
+}
+
 /// `Frost.new()` on a class module offered `import { type Frost }` next
 /// to the default import, and the child put its raw `require` first.
 /// The type import binds no value, so the file then reported "imported

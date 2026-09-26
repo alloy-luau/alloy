@@ -927,15 +927,31 @@ fn map_path(path: &Path, renames: &[Rename]) -> PathBuf {
 /// relative specs re-based too. `aliases` gives the aliases a folder
 /// sees: an `@alias/...` spec keeps its alias while the target stays
 /// under the alias's folder.
+///
+/// A document may already stand at its new path: the watcher reports
+/// the delete and the create before the editor reports the rename. Its
+/// specs still read from the folder it left.
 pub fn rename_edits(
     docs: &[(String, PathBuf, String)],
     renames: &[Rename],
     aliases: &dyn Fn(&Path) -> Vec<(String, PathBuf)>,
 ) -> HashMap<String, Vec<Value>> {
     let mut out: HashMap<String, Vec<Value>> = HashMap::new();
+    let back: Vec<Rename> = renames
+        .iter()
+        .map(|r| Rename {
+            old: r.new.clone(),
+            new: r.old.clone(),
+        })
+        .collect();
 
-    for (uri, old_path, src) in docs {
-        let new_path = map_path(old_path, renames);
+    for (uri, path, src) in docs {
+        let before = map_path(path, &back);
+        let (old_path, new_path) = match before == *path {
+            true => (before, map_path(path, renames)),
+
+            false => (before, path.clone()),
+        };
         let old_dir = old_path.parent().unwrap_or(Path::new("."));
         let new_dir = new_path.parent().unwrap_or(Path::new("."));
         let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
@@ -1420,6 +1436,34 @@ namespace Inner as end
             "{edits:?}"
         );
         assert_eq!(edits.len(), 2);
+    }
+
+    /// The watcher reported the move first, so the state held `a2.aly`
+    /// at its new path when the rename came. Its own `./b` stayed, and
+    /// no longer named a file. The specs read from the folder it left.
+    #[test]
+    fn a_file_already_at_its_new_path_rebases_its_own_specs() {
+        let docs = vec![
+            (
+                "file:///w/src/deep/a2.aly".to_string(),
+                PathBuf::from("/w/src/deep/a2.aly"),
+                "import { B } from './b'\nexport const A = B\n".to_string(),
+            ),
+            (
+                "file:///w/src/c.aly".to_string(),
+                PathBuf::from("/w/src/c.aly"),
+                "import { A } from './a2'\n".to_string(),
+            ),
+        ];
+        let renames = vec![Rename {
+            old: PathBuf::from("/w/src/a2.aly"),
+            new: PathBuf::from("/w/src/deep/a2.aly"),
+        }];
+        let edits = rename_edits(&docs, &renames, &|_| Vec::new());
+        let text = |uri: &str| edits[uri][0]["newText"].clone();
+
+        assert_eq!(text("file:///w/src/deep/a2.aly"), "../b");
+        assert_eq!(text("file:///w/src/c.aly"), "./deep/a2");
     }
 
     /// A move of `Placement.aly` also rewrote the unrelated

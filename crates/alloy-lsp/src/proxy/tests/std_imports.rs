@@ -1,6 +1,7 @@
 //! `[std] globals = "none"` in the editor: a std row names its module
 //! and writes the import the file lacks, and the report takes a fix.
 
+use super::super::completion::is_auto_import;
 use super::super::*;
 use alloy::std_names::Globals;
 
@@ -38,6 +39,9 @@ fn row<'a>(items: &'a [Value], label: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("no row {label}"))
 }
 
+/// A std name the file does not reach is no global: its row is an
+/// auto-import, which names the line, sorts after the names in scope,
+/// and writes the import. A name the file reaches is a plain row.
 #[test]
 fn a_std_row_names_its_module_and_writes_its_import() {
     let child = json!([{ "label": "print", "kind": 3 }]);
@@ -45,11 +49,27 @@ fn a_std_row_names_its_module_and_writes_its_import() {
     let items = st.std_completions(uri, 0, 10, &child);
     let map = row(&items, "HashMap");
 
-    assert_eq!(map["detail"], "alloy:std:collections");
+    assert_eq!(
+        map["detail"],
+        "auto-import: import { HashMap } from '@alloy/std/collections'"
+    );
+    assert_eq!(map["sortText"], "zzHashMap");
+    assert!(is_auto_import(map), "{map}");
     assert_eq!(
         map["additionalTextEdits"][0]["newText"],
         "import { HashMap } from '@alloy/std/collections'\n"
     );
+
+    // A name that joins a list the file has names that list's quote.
+    let (st, uri) = none_file("import { Set } from \"@alloy/std/collections\"\nlocal x = \n");
+    let items = st.std_completions(uri, 1, 10, &child);
+    let map = row(&items, "HashMap");
+    assert_eq!(
+        map["detail"],
+        "auto-import: import { HashMap } from \"@alloy/std/collections\""
+    );
+    assert_eq!(map["additionalTextEdits"][0]["newText"], ", HashMap");
+    assert_eq!(row(&items, "Set")["detail"], "alloy:std:collections");
 
     // The language owns `Ok`: no import.
     let ok = row(&items, "Ok");
@@ -61,11 +81,14 @@ fn a_std_row_names_its_module_and_writes_its_import() {
     let (st, uri) = none_file("import { HashMap } from \"@alloy/std/collections\"\nlocal x = \n");
     let items = st.std_completions(uri, 1, 10, &child);
     assert!(row(&items, "HashMap").get("additionalTextEdits").is_none());
+    assert!(!is_auto_import(row(&items, "HashMap")));
 
     let (st, uri) = super::support::one_file("local x = \n");
     let items = st.std_completions(uri, 0, 10, &child);
-    assert!(row(&items, "HashMap").get("additionalTextEdits").is_none());
-    assert_eq!(row(&items, "HashMap")["detail"], "alloy:std:collections");
+    let map = row(&items, "HashMap");
+    assert!(map.get("additionalTextEdits").is_none());
+    assert!(map.get("sortText").is_none(), "{map}");
+    assert_eq!(map["detail"], "alloy:std:collections");
 }
 
 #[test]
@@ -77,7 +100,11 @@ fn a_derive_name_writes_its_serde_import() {
     let items = st.context_items(uri, at, &ctx);
     let ser = row(&items, "Serialize");
 
-    assert_eq!(ser["detail"], "alloy:std:serde");
+    assert_eq!(
+        ser["detail"],
+        "auto-import: import { Serialize } from '@alloy/std/serde'"
+    );
+    assert_eq!(ser["sortText"], "zzSerialize");
     assert_eq!(
         ser["additionalTextEdits"][0]["newText"],
         "import { Serialize } from '@alloy/std/serde'\n"
@@ -88,6 +115,7 @@ fn a_derive_name_writes_its_serde_import() {
             .is_some()
     );
     assert!(row(&items, "Clone").get("additionalTextEdits").is_none());
+    assert_eq!(row(&items, "Clone")["detail"], "alloy:std:traits");
     // `Eq` stands in the list already.
     assert!(!items.iter().any(|i| i["label"] == "Eq"));
 }
@@ -112,14 +140,83 @@ fn a_type_slot_std_row_writes_its_import() {
         };
         let item = row(&items, name);
         let module = alloy::std_names::module_of(name).unwrap();
+        let line = format!("import {{ {name} }} from '@alloy/std/{module}'");
 
-        assert_eq!(item["detail"], format!("alloy:std:{module}"), "{src}");
+        assert_eq!(item["detail"], format!("auto-import: {line}"), "{src}");
+        assert_eq!(item["sortText"], format!("1zz{name}"), "{src}");
         assert_eq!(
             item["additionalTextEdits"][0]["newText"],
-            format!("import {{ {name} }} from '@alloy/std/{module}'\n"),
+            format!("{line}\n"),
             "{src}"
         );
+
+        // A project that keeps the std ambient offers the plain name.
+        let (st, uri) = super::support::one_file(src);
+        let items = st.context_items(uri, at, &ctx);
+        let item = row(&items, name);
+        assert_eq!(item["detail"], format!("alloy:std:{module}"), "{src}");
+        assert_eq!(item["sortText"], format!("1{name}"), "{src}");
+        assert!(item.get("additionalTextEdits").is_none(), "{src}");
     }
+
+    // A bound takes a trait first, the one the file must import too.
+    let src = "local function f<T: Seri";
+    let (st, uri) = none_file(src);
+    let ctx = context::detect(src, src.len()).expect("a context");
+    let items = st.context_items(uri, src.len(), &ctx);
+    let ser = row(&items, "Serialize");
+    assert!(
+        ser["sortText"]
+            .as_str()
+            .is_some_and(|s| s.ends_with("zzSerialize")),
+        "{ser}"
+    );
+}
+
+/// A hover on a std name the file does not reach, and a signature help
+/// on a call it heads, answer nothing: the name is no global, and the
+/// report and its import fix speak for it. An import, a binding of the
+/// file's own, a member, and an ambient project keep the answer.
+#[test]
+fn an_unreached_std_name_takes_no_hover_or_signature() {
+    let asks = |st: State, src: &str, needle: &str, call: bool| {
+        let server = Server::new(
+            Box::new(std::io::sink()),
+            Box::new(std::io::sink()),
+            Vec::new(),
+            None,
+        );
+        *server.state.lock().expect("state") = st;
+        let (line, character) = position_of(src, src.find(needle).expect("the needle"));
+        let message = json!({ "params": {
+            "textDocument": { "uri": "file:///t.aly" },
+            "position": { "line": line, "character": character },
+        } });
+
+        server.on_unreached_std("file:///t.aly", &message, call)
+    };
+    let src = "local m = HashMap.new()\nlocal q: Queue<number>? = nil\nprint(m.Set, q)\n";
+
+    assert!(asks(none_file(src).0, src, "HashMap.new", false));
+    assert!(asks(none_file(src).0, src, "Queue<", false));
+    assert!(asks(none_file(src).0, src, ")\nlocal q", true));
+    assert!(!asks(none_file(src).0, src, "Set,", false));
+    assert!(!asks(none_file(src).0, src, "print", false));
+    let ambient = || super::support::one_file(src).0;
+    assert!(!asks(ambient(), src, "HashMap.new", false));
+    assert!(!asks(ambient(), src, ")\nlocal q", true));
+
+    let src = "import { HashMap } from \"@alloy/std/collections\"\nlocal m = HashMap.new()\n";
+    assert!(!asks(none_file(src).0, src, "HashMap.new", false));
+    assert!(!asks(none_file(src).0, src, ")\n", true));
+
+    // The entry of an aliased import names the std's own `HashMap`.
+    let src = "import { HashMap as Map } from \"@alloy/std/collections\"\nlocal m = Map.new()\n";
+    assert!(!asks(none_file(src).0, src, "HashMap as", false));
+
+    // A struct of the file's own under a std name is the file's.
+    let src = "struct Queue as\n    n: number\nend\nlocal q: Queue? = nil\n";
+    assert!(!asks(none_file(src).0, src, "Queue? =", false));
 }
 
 #[test]

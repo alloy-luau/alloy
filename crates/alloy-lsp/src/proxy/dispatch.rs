@@ -720,6 +720,16 @@ impl Server {
                     return true;
                 }
 
+                // A std name the file does not import is no global.
+                if m == "textDocument/hover"
+                    && let Some(id) = message.get("id").cloned()
+                    && self.on_unreached_std(&uri, &message, false)
+                {
+                    self.respond(&id, Value::Null);
+
+                    return true;
+                }
+
                 if m == "textDocument/hover"
                     && let Some(id) = message.get("id").cloned()
                     && (self.impl_header_hover(&uri, &message, &id)
@@ -892,7 +902,10 @@ impl Server {
                 let uri = text_document_uri(&message).unwrap_or_default();
 
                 // `remote test(` declares; the child sees a call there.
-                if self.in_declared_params(&uri, &message) {
+                // `HashMap.new(` with no import calls no global.
+                if self.in_declared_params(&uri, &message)
+                    || self.on_unreached_std(&uri, &message, true)
+                {
                     self.respond(&message["id"], Value::Null);
 
                     return true;

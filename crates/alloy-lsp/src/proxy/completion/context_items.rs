@@ -475,12 +475,7 @@ impl State {
                         offset - prefix.len(),
                     );
                     let row = super::std_completions::std_item(&doc.source, &reach, name, 21, None);
-                    item["detail"] = row["detail"].clone();
-
-                    if let Some(edits) = row.get("additionalTextEdits") {
-                        item["additionalTextEdits"] = edits.clone();
-                    }
-
+                    super::std_completions::carry_std_row(&mut item, &row);
                     items.push(item);
                 }
             }
@@ -953,16 +948,24 @@ impl State {
                     let kind = item["kind"].as_u64().unwrap_or(7);
                     let doc_text = item["documentation"]["value"].as_str().map(str::to_string);
                     let detail = item["detail"].clone();
-                    let rank = type_rank(*prefers, detail.as_str().unwrap_or(""));
+                    // An auto-import's detail is its import line, so a
+                    // trait row reads its kind.
+                    let rank = match kind {
+                        8 => type_rank(*prefers, "trait"),
+
+                        _ => type_rank(*prefers, detail.as_str().unwrap_or("")),
+                    };
                     // A type function inserts its brackets, so the text
                     // the accept writes rides along with the label.
                     let insert = item["insertText"].as_str().map(str::to_string);
                     let format = item["insertTextFormat"].clone();
-                    // A std type the file does not reach writes its import.
+                    // A std type the file does not reach writes its import
+                    // and sorts after the names in scope of its rank.
                     let imports = item.get("additionalTextEdits").cloned();
+                    let sort = item["sortText"].as_str().unwrap_or(&label).to_string();
                     item = word(&label, kind, doc_text, from);
                     item["detail"] = detail;
-                    item["sortText"] = json!(format!("{rank}{label}"));
+                    item["sortText"] = json!(format!("{rank}{sort}"));
 
                     if let Some(edits) = imports {
                         item["additionalTextEdits"] = edits;
@@ -1035,12 +1038,7 @@ impl State {
                 ] {
                     let mut item = word(name, 7, keywords::doc(name).map(str::to_string), from);
                     let row = super::std_completions::std_item(&doc.source, &reach, name, 7, None);
-                    item["detail"] = row["detail"].clone();
-
-                    if let Some(edits) = row.get("additionalTextEdits") {
-                        item["additionalTextEdits"] = edits.clone();
-                    }
-
+                    super::std_completions::carry_std_row(&mut item, &row);
                     items.push(item);
                 }
 

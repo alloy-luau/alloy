@@ -105,6 +105,47 @@ impl Server {
             .is_some_and(|(start, _, _)| super::completion::declares_params(&doc.source, start))
     }
 
+    /// Whether the caret names a std name the file does not reach: the
+    /// word under a hover, or the head of the call a signature help
+    /// sits in, as `HashMap` in `HashMap.new(`. The emit writes the name
+    /// as the runtime's either way, so the child would type it as a
+    /// global. The report and its import fix answer for it instead.
+    pub(crate) fn on_unreached_std(&self, uri: &str, message: &Value, call: bool) -> bool {
+        if !is_alloy_uri(uri) {
+            return false;
+        }
+
+        let Some((line, character)) = position_of_message(message) else {
+            return false;
+        };
+        let st = self.state.lock().expect("state");
+        let Some(doc) = st.docs.get(uri) else {
+            return false;
+        };
+        let Some(offset) = offset_of(&doc.source, line, character) else {
+            return false;
+        };
+        let src = &doc.source;
+        let (start, end) = match call {
+            true => {
+                let Some((_, end, _)) = super::completion::open_paren_word(src, offset) else {
+                    return false;
+                };
+                let start = src[..end]
+                    .trim_end_matches(|c: char| c.is_alphanumeric() || c == '_' || c == '.')
+                    .len();
+
+                (start, src[start..end].find('.').map_or(end, |i| start + i))
+            }
+
+            false if keywords::is_word_caret(src, offset) => keywords::word_range(src, offset),
+
+            false => return false,
+        };
+
+        unreached_std(doc, start, end)
+    }
+
     /// The shadow position of a signature-help caret inside a call in
     /// an intrinsic's argument, where the argument stands as code, or
     /// on the base of an index. `None` for any other caret.
@@ -1114,6 +1155,29 @@ pub(crate) fn doc_binds(doc: &Doc, name: &str) -> bool {
     doc.decls.iter().any(|d| d.name == name)
         || doc.bindings.iter().any(|b| b.name == name)
         || imports::bound_names(&doc.source).iter().any(|n| n == name)
+}
+
+/// Whether the word at `start..end` is a std name the file does not
+/// reach: no import, no `[std] globals`, and no binding of its own. The
+/// name is no global there. A member after a `.`, a string, and an
+/// entry of an import list name no global either.
+pub(crate) fn unreached_std(doc: &Doc, start: usize, end: usize) -> bool {
+    let src = &doc.source;
+    let word = &src[start..end];
+    let member = src[..start].ends_with('.') && !src[..start].ends_with("..");
+    let listed = || {
+        super::navigation::import_entries(src)
+            .into_iter()
+            .chain(super::navigation::reexport_entries(src))
+            .any(|e| e.name_at.0 <= start && start < e.name_at.1)
+    };
+
+    alloy::std_names::is_std_name(word)
+        && !member
+        && !context::in_string(src, start)
+        && !super::completion::StdReach::of(doc).reaches(word)
+        && !doc_binds(doc, word)
+        && !listed()
 }
 
 /// The struct a method's `self` belongs to: the nearest `impl` above

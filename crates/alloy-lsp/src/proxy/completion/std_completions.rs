@@ -21,9 +21,10 @@ impl StdReach {
 }
 
 /// A std name as a completion row: the module it sits in, as
-/// `alloy:std:collections`, and the import it writes when the file does
-/// not reach the name. A name the std table does not hold keeps
-/// `alloy:std`.
+/// `alloy:std:collections`. A name the std table does not hold keeps
+/// `alloy:std`. A name the file does not reach is no global, so its row
+/// is an auto-import: the detail names the import line, the row sorts
+/// after the names in scope, and the accept writes the import.
 pub(crate) fn std_item(
     src: &str,
     reach: &StdReach,
@@ -44,10 +45,36 @@ pub(crate) fn std_item(
 
     if alloy::std_names::is_std_name(name) && !reach.reaches(name) {
         let fixes = alloy::std_names::import_fixes(src, &[name]);
+        let spec = alloy::std_names::spec_of(name).unwrap_or_default();
+        // The quote the edit writes: its own on a new line, else the
+        // one of the list the name joins.
+        let q = fixes
+            .first()
+            .and_then(|f| {
+                f.replacement
+                    .chars()
+                    .chain(src[f.start as usize..].chars())
+                    .find(|c| matches!(c, '\'' | '"'))
+            })
+            .unwrap_or('\'');
+        item["detail"] = json!(format!(
+            "auto-import: import {{ {name} }} from {q}{spec}{q}"
+        ));
+        item["sortText"] = json!(format!("zz{name}"));
         item["additionalTextEdits"] = json!(fix_edits(src, &fixes));
     }
 
     item
+}
+
+/// Carries what a std row says onto an item built for a range: its
+/// detail, and for an auto-import the sort and the import edit.
+pub(crate) fn carry_std_row(item: &mut Value, row: &Value) {
+    for key in ["detail", "sortText", "additionalTextEdits"] {
+        if let Some(v) = row.get(key) {
+            item[key] = v.clone();
+        }
+    }
 }
 
 /// Rewrites of a source as LSP edits.

@@ -298,7 +298,9 @@ impl<'a> Parser<'a> {
                 || self.at("@")
                 || (self.at("async") && self.text_at(1) == "function");
 
-            if self.body_ends_early() && (dedents || !heads) {
+            // A line left of the members that opens no member, `print(1)`,
+            // is the file going on too.
+            if (self.body_ends_early() || dedents) && (dedents || !heads) {
                 break;
             }
 

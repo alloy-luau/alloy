@@ -1015,3 +1015,31 @@ fn an_as_cast_is_one_report_at_every_value_position() {
     );
     assert!(parser::parse(src, &lexed.toks).is_err());
 }
+
+/// A block that takes an `end` left of its own indent took the `end` of
+/// a block further out. The report blamed the outer block, or a trait
+/// signature with no body; it now names the inner block.
+#[test]
+fn a_missing_end_names_the_block_the_indent_leaves_open() {
+    for (src, want) in [
+        (
+            "local function g(n: number): number\n    return match n with\n        case 1 then 10\n        default 0\nend\nprint(g(1))\n",
+            "`match` on line 2 needs an `end`",
+        ),
+        (
+            "trait T\n    function f(self): number\n    function g(self): number\n        return 1\nend\nprint(1)\n",
+            "`function` on line 3 needs an `end`",
+        ),
+        (
+            "local function tick(dt: number)\n    if dt > 1 then\n        print(\"slow\")\n    for i = 1, 3 do\n        print(i)\n    end\nend\n\nlocal function other()\n    print(2)\nend\n",
+            "`if` on line 2 needs an `end`",
+        ),
+    ] {
+        let (_, count) = lenient(src);
+        let lexed = lexer::lex(src).unwrap();
+        let (_, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+
+        assert_eq!(count, 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].message, want);
+    }
+}

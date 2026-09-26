@@ -84,7 +84,7 @@ impl<'a> Parser<'a> {
 
     pub(super) fn match_stmt(&mut self, start: usize) -> Result<Stmt, ParseError> {
         let reports = self.diagnostics.len();
-        self.bump();
+        let open = self.bump();
         let (scrutinees, aliases) = self.match_head()?;
         self.expect("with")?;
         let mut arms = Vec::new();
@@ -95,6 +95,9 @@ impl<'a> Parser<'a> {
 
         loop {
             if self.at("end") {
+                // `expect_end` reads the pair when a block further out
+                // misses its `end`.
+                self.closes.push((open, self.pos));
                 self.bump();
 
                 break;
@@ -657,7 +660,7 @@ impl<'a> Parser<'a> {
     pub(in super::super) fn match_expr(&mut self) -> Result<Expr, ParseError> {
         let start = self.pos;
         let reports = self.diagnostics.len();
-        self.bump();
+        let open = self.bump();
         let (scrutinees, aliases) = self.match_head()?;
         self.expect("with")?;
         let mut arms = Vec::new();
@@ -668,6 +671,9 @@ impl<'a> Parser<'a> {
 
         loop {
             if self.at("end") {
+                // `expect_end` reads the pair when a block further out
+                // misses its `end`.
+                self.closes.push((open, self.pos));
                 self.bump();
 
                 break;

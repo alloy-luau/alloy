@@ -180,6 +180,17 @@ impl<'a> Parser<'a> {
                 continue;
             }
 
+            // A statement at or left of the `impl` that opens no method is
+            // the file going on: the body has no `end`.
+            if self.body_ends_early()
+                && !matches!(self.text(), "function" | "async")
+                && self.column_at(self.pos) <= self.column_at(head_start)
+            {
+                self.expect_end(head_start)?;
+
+                break;
+            }
+
             let m_start = self.pos;
             // `@route("/x")` takes arguments, as it does on a function.
             let attrs = if self.at("@") {

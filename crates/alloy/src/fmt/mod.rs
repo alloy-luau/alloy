@@ -1186,6 +1186,20 @@ mod tests {
         assert_eq!(fmt(short), short);
     }
 
+    /// The `;` between two bindings ended the scan of the `if`, so it
+    /// found no `then` and the index `ITEMS[s.item]` broke instead.
+    #[test]
+    fn a_long_if_expression_with_bindings_breaks_at_its_keywords() {
+        let head = "if const s = stack_of_the_player_that_holds_it; const def = ITEMS[s.item]";
+        let src =
+            format!("local function f(): string\n  return {head} then def.name else ''\nend\n");
+        let want = format!(
+            "local function f(): string\n  return {head}\n    then def.name\n    else ''\nend\n"
+        );
+        assert_eq!(fmt(&src), want);
+        assert_eq!(fmt(&want), want);
+    }
+
     /// The `)` of a call in a branch ended the `if` expression, so the
     /// `else` of a broken `local` or `const` fell to column 0. A closer
     /// now ends only an `if` that opened inside its group. A hand-broken

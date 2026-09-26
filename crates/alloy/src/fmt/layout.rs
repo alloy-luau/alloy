@@ -1361,6 +1361,10 @@ impl<'s> Formatter<'s> {
                         out.push(i);
                     }
 
+                    // Before the first `then`, a `;` joins two bindings,
+                    // as in `if const a = x; const b = a.y then`.
+                    ";" if out.is_empty() => {}
+
                     "," | ";" | "end" | "do" | "return" => break,
 
                     _ => {}

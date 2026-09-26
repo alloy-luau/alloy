@@ -694,6 +694,9 @@ impl<'s> Scan<'s> {
                         // No statement opens with a binary operator, so
                         // `return a` over `+ b` is one `return a + b`.
                         || BINARY_OPS.contains(&text)
+                        // The `then` of an `if` expression goes on with
+                        // it, as its `else` and `elseif` do above.
+                        || (open_ifs > 0 && text == "then")
                         || ((open_ifs > 0 || else_branch) && matches!(prev, "then" | "else"));
 
                     if !continues {

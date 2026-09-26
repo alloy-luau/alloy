@@ -1026,6 +1026,18 @@ mod tests {
             Vec::<&str>::new()
         );
 
+        // A line that opens with the `then`, `elseif` or `else` of an
+        // `if` expression goes on with it.
+        for rest in [
+            "if const s = t; const x = s.x\n        then x.y\n        else ''",
+            "if t\n        then 'a'\n        elseif t.x\n        then 'b'\n        else ''",
+        ] {
+            let src = format!(
+                "local function m(t: {{ x: {{ y: string }}? }}?): string\n    return {rest}\nend\n"
+            );
+            assert_eq!(names(&src), Vec::<&str>::new(), "{src}");
+        }
+
         // A real statement after the jump still fires.
         assert_eq!(
             names("local function j(a: number)\n    return a\n    print(a)\nend\n"),

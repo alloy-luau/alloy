@@ -409,6 +409,11 @@ impl<'s> Renderer<'s> {
         self.out.len() as u32
     }
 
+    /// The output so far.
+    pub fn text(&self) -> &str {
+        &self.out
+    }
+
     /// Copies a byte range of the source.
     /// The newlines the output gained since it was `from` bytes long.
     pub fn newlines_since(&self, from: u32) -> usize {

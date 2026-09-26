@@ -68,6 +68,40 @@ fn a_binder_name_on_its_line_copies_from_the_source() {
     }
 }
 
+/// `a ?? b` and `a?.b` lower to generated text. The operands keep their
+/// place in the map, so a token, a colour swatch and a hover inside them
+/// land on the text the reader wrote.
+#[test]
+fn the_operands_of_a_coalesce_and_a_guarded_chain_copy_from_the_source() {
+    let src = concat!(
+        "local a: Color3? = nil\n",
+        "local b = a ?? Color3.fromRGB(255, 0, 0)\n",
+        "local c = a?.R\n",
+        "local d = f() ?? g(1)\n",
+        "print(b, c, d)\n",
+    );
+    let out = alloy::compile(src).unwrap();
+
+    for (text, word) in [
+        ("a ??", "a"),
+        ("Color3.fromRGB(255", "Color3.fromRGB(255, 0, 0)"),
+        ("a?.R", "a"),
+        ("R\n", "R"),
+        ("g(1)", "g(1)"),
+    ] {
+        let s = src.find(text).unwrap() as u32;
+        let o = out
+            .map
+            .to_output(s)
+            .unwrap_or_else(|| panic!("{word} is generated"));
+        assert!(
+            out.check[o as usize..].starts_with(word),
+            "{word}: {}",
+            &out.check[o as usize..]
+        );
+    }
+}
+
 #[test]
 fn forward_then_back_is_identity_on_copied_bytes() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases");

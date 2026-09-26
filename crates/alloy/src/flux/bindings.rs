@@ -441,9 +441,26 @@ impl<'s> Scan<'s> {
     fn call_args(&self, open: usize) -> Option<(usize, usize)> {
         let mut depth = 0i32;
         let mut commas = 0;
+        // The depth inside the type arguments of a call, `f<<K, V>>()`:
+        // their commas split no argument. Two `<` side by side open them
+        // and nothing else, since Luau has no shift operator.
+        let mut angle = 0i32;
 
         for k in open..self.toks.len() {
             let text = self.t(k);
+
+            if angle > 0 || (text == "<" && self.at(k + 1, "<")) {
+                match text {
+                    "<" => angle += 1,
+
+                    ">" => angle -= 1,
+
+                    _ => {}
+                }
+
+                continue;
+            }
+
             depth += match self.toks[k].kind {
                 TokKind::InterpHead => 1,
 

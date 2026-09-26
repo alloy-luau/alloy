@@ -1315,6 +1315,19 @@ mod tests {
             ),
             Vec::<&str>::new()
         );
+        // The commas of `<<K, V>>` split no argument.
+        assert_eq!(
+            names(
+                "local function pick<K, V>(k: K, v: V): V\n    return v\nend\nlocal function count(n: number, extra: number): number\n    return n + extra\nend\nprint(count(pick<<string, number>>(\"a\", 1), 1))\n"
+            ),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            names(
+                "local function pick<K, V>(k: K, v: V): V\n    return v\nend\nlocal function count(n: number, extra: number): number\n    return n + extra\nend\nprint(count(pick<<string, number>>(\"a\", 1), 1, 2))\n"
+            ),
+            vec!["argument_count"]
+        );
         // A vararg and a default make the count a range.
         assert_eq!(
             names(

@@ -1427,7 +1427,7 @@ fn walk_dependencies(
 
 /// One workspace root as a directory name. Two servers run at once, one
 /// per project, and neither may write where the other reads.
-pub fn root_key(root: Option<&Path>) -> String {
+pub(crate) fn root_key(root: Option<&Path>) -> String {
     use std::hash::{Hash, Hasher};
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1476,6 +1476,27 @@ fn mirror_parent() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("alloy-lsp"))
 }
 
+/// The folder beside the mirrors that holds each root's definitions.
+const DEFINITIONS: &str = "definitions";
+
+/// The folder of one root's patched definitions. It sits under the
+/// mirrors' folder, so `ALLOY_LSP_MIRRORS` moves it too. It is no part
+/// of the mirror: `initialize` empties the mirror, and the child reads
+/// the definitions after that.
+pub fn definitions_dir(root: Option<&Path>) -> PathBuf {
+    mirror_parent().join(DEFINITIONS).join(root_key(root))
+}
+
+/// The definitions folder of the root a mirror belongs to.
+pub(crate) fn definitions_of(mirror: &Path) -> PathBuf {
+    let base = mirror_base(mirror);
+    let parent = base.parent().unwrap_or(base);
+
+    parent
+        .join(DEFINITIONS)
+        .join(base.file_name().unwrap_or_default())
+}
+
 pub(crate) fn mirror_dir(root: Option<&Path>, above: usize) -> PathBuf {
     let mut dir = mirror_parent().join(root_key(root));
 
@@ -1503,31 +1524,49 @@ pub(crate) fn claim_mirror(mirror: &Path) {
 /// behind, and a test or a probe that opens many roots leaves one each.
 /// Only a folder named like a root key goes, so a parent set by hand
 /// loses nothing else.
+///
+/// The definitions of a root go by the same rule, and the owner of the
+/// mirror of that root owns them. They grew to 7 GB in 9199 folders.
 pub(crate) fn purge_stale_mirrors(mirror: &Path) {
     const DAY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
     let own = mirror_base(mirror).to_path_buf();
     let Some(parent) = own.parent() else {
         return;
     };
-    let Ok(entries) = std::fs::read_dir(parent) else {
-        return;
+    let keyed = |n: &std::ffi::OsStr| {
+        n.to_str()
+            .is_some_and(|n| n.len() == 16 && n.chars().all(|c| c.is_ascii_hexdigit()))
     };
+    let mut folders = vec![parent.to_path_buf(), parent.join(DEFINITIONS)];
+    // The folder an older server wrote the definitions to. Its keys are
+    // the keys of the default mirrors, so only a default parent reads it.
+    let legacy = std::env::temp_dir().join("alloy-lsp-definitions");
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let keyed = entry
-            .file_name()
-            .to_str()
-            .is_some_and(|n| n.len() == 16 && n.chars().all(|c| c.is_ascii_hexdigit()));
+    if parent == std::env::temp_dir().join("alloy-lsp") {
+        folders.push(legacy.clone());
+    }
 
-        if path == own || !keyed {
+    for folder in folders {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
             continue;
-        }
+        };
 
-        if age(&path).is_some_and(|a| a > DAY) && !owner_alive(&path) {
-            let _ = std::fs::remove_dir_all(&path);
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+
+            if Some(name.as_os_str()) == own.file_name() || !keyed(&name) {
+                continue;
+            }
+
+            if age(&path).is_some_and(|a| a > DAY) && !owner_alive(&parent.join(&name)) {
+                let _ = std::fs::remove_dir_all(&path);
+            }
         }
     }
+
+    // `remove_dir` removes an empty folder only.
+    let _ = std::fs::remove_dir(&legacy);
 }
 
 /// How long ago a file or a folder last changed.

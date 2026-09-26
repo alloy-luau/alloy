@@ -1098,6 +1098,56 @@ pub(crate) fn stale_mirrors_of_other_roots_are_purged() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// The definitions of each root sat in their own temp folder, and
+/// nothing removed them: 9199 folders, 7 GB. They sit beside the
+/// mirrors now and go by the mirrors' rule. The session's own, a fresh
+/// one, and one whose root a live server owns stay.
+#[test]
+pub(crate) fn stale_definitions_of_other_roots_are_purged() {
+    let base = std::env::temp_dir().join(format!("alloy-lsp-defs-purge-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let own = base.join("0000000000000000").join("root");
+    std::fs::create_dir_all(&own).expect("own");
+    let live = base.join("3333333333333333");
+    std::fs::create_dir_all(&live).expect("live");
+    claim_mirror(&live.join("root"));
+
+    assert_eq!(
+        definitions_of(&own),
+        base.join("definitions").join("0000000000000000")
+    );
+
+    let [mine, old, owned, fresh] = [
+        "0000000000000000",
+        "1111111111111111",
+        "3333333333333333",
+        "4444444444444444",
+    ]
+    .map(|n| base.join("definitions").join(n));
+    let two_days_ago =
+        std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 24 * 60 * 60);
+
+    for dir in [&mine, &old, &owned, &fresh] {
+        std::fs::create_dir_all(dir).expect("dir");
+    }
+
+    for dir in [&mine, &old, &owned] {
+        std::fs::File::open(dir)
+            .expect("dir")
+            .set_modified(two_days_ago)
+            .expect("mtime");
+    }
+
+    purge_stale_mirrors(&own);
+
+    assert!(mine.exists(), "the session's own");
+    assert!(owned.exists(), "a live server owns its root");
+    assert!(fresh.exists());
+    assert!(!old.exists());
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// A type from a module the file imports whole reads by the path the
 /// file reaches it through. The checker prints `Scheduler<>`, which
 /// names nothing here; the hint reads and inserts `planck.Scheduler<>`.

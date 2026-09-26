@@ -215,7 +215,7 @@ fn run() -> ExitCode {
     let (declared, plain): (Vec<PathBuf>, Vec<PathBuf>) = definitions
         .into_iter()
         .partition(|p| p.to_string_lossy().ends_with(".d.aly"));
-    let merged = merge_declared(&declared, workspace_root.as_deref());
+    let merged = merge_declared(&declared, &extensions::cache_dir(workspace_root.as_deref()));
 
     for (path, segments) in plain.into_iter().map(|p| (p, Vec::new())).chain(merged) {
         match extensions::apply(&path, &exts, &rig, &mut injected, workspace_root.as_deref()) {
@@ -494,14 +494,14 @@ fn workspace_files(root: &Path, keep: impl Fn(&str) -> bool) -> Vec<PathBuf> {
     found
 }
 
-/// Every `.d.aly` compiled, and merged into definitions files in the
-/// workspace's cache folder, with the line each one starts on. The
+/// Every `.d.aly` compiled, and merged into definitions files in `dir`,
+/// the workspace's cache folder, with the line each one starts on. The
 /// child loads its definitions in no set order, so the files that name
 /// each other share one file. A file that does not compile stays out,
 /// and the log says why.
 fn merge_declared(
     paths: &[PathBuf],
-    root: Option<&Path>,
+    dir: &Path,
 ) -> Vec<(PathBuf, Vec<alloy::declarations::Segment>)> {
     let mut parts = Vec::new();
 
@@ -527,7 +527,6 @@ fn merge_declared(
         }
     }
 
-    let dir = extensions::cache_dir(root);
     let mut out = Vec::new();
 
     for (i, (text, segments)) in alloy::declarations::merge_definitions(&parts)
@@ -536,7 +535,7 @@ fn merge_declared(
     {
         let target = dir.join(format!("declared-{i}.d.luau"));
 
-        match std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&target, text)) {
+        match std::fs::create_dir_all(dir).and_then(|()| std::fs::write(&target, text)) {
             Ok(()) => out.push((target, segments)),
 
             Err(e) => log::error(&format!("definitions {}: {e}", target.display())),
@@ -573,7 +572,7 @@ mod tests {
             dir.join("client/types.d.aly"),
             dir.join("server/types.d.aly"),
         ];
-        let merged = merge_declared(&paths, Some(&dir));
+        let merged = merge_declared(&paths, &dir.join("cache"));
         let texts: Vec<String> = merged
             .iter()
             .map(|(p, _)| std::fs::read_to_string(p).unwrap())

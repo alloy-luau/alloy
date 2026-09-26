@@ -267,9 +267,11 @@ impl Server {
                 self.to_child(&message);
 
                 // The mirror is this session's alone; a root opened
-                // once and never again left its copy behind.
+                // once and never again left its copy behind. The
+                // definitions of the root go with it.
                 let mirror = self.state.lock().expect("state").mirror.clone();
                 let _ = std::fs::remove_dir_all(mirror_base(&mirror));
+                let _ = std::fs::remove_dir_all(definitions_of(&mirror));
 
                 return false;
             }

@@ -220,6 +220,17 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         .collect();
 
     let parsed_clean = diagnostics.is_empty();
+
+    // A contract reads the members of a declaration, and a recovered
+    // tree can lose them: an impl the parser closed early declares none.
+    // The parse error comes first, and alone.
+    if !parsed_clean {
+        rendered
+            .diagnostics
+            .retain(|d| docs::kind_for(&d.message) != "AttributeContract");
+        rendered.contract_gaps.clear();
+    }
+
     diagnostics.extend(rendered.diagnostics);
 
     // A `const` of a namespace this file declares is reached by its

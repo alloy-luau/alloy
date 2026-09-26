@@ -728,6 +728,10 @@ pub struct CondBinding {
     pub is_const: bool,
     pub pattern: Pattern,
     pub ty: Option<TokSpan>,
+    /// `if const a, b = f()`: the names after the first, each with its
+    /// type. Each takes the next value of `f()`, as in `local a, b =
+    /// f()`, and the test reads the first alone.
+    pub rest: Vec<(TokSpan, Option<TokSpan>)>,
     pub value: Expr,
 }
 

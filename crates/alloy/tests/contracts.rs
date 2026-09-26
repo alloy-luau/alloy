@@ -365,6 +365,18 @@ fn a_contract_names_a_namespace_member_by_its_path() {
     }
 }
 
+/// A syntax error in an impl made the parser close it early, and the
+/// contract reported that the impl declares none of its methods. The
+/// syntax error comes alone.
+#[test]
+fn a_syntax_error_draws_no_contract_report() {
+    let src = "attribute starts on struct as\n    requires function Start(self)\nend\n\n@starts\nstruct Counter as\n    n: number\nend\n\nimpl Counter as\n    function add(self, name: string): ()\n        if const stem n = string.match(name, 'x') then\n            print(stem)\n        end\n    end\n\n    function Start(self): ()\n    end\nend\n\nprint(Counter)\n";
+    let got = messages(src);
+    assert!(!got.is_empty());
+    assert!(!got.iter().any(|m| m.contains("declares none")), "{got:?}");
+    assert!(compile(src).contract_gaps.is_empty());
+}
+
 /// The contract is a check: the emit is what it was.
 #[test]
 fn a_contract_emits_nothing_of_its_own() {

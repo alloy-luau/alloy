@@ -1053,7 +1053,7 @@ impl Server {
     /// Publishes the Alloy diagnostics and the mapped child diagnostics
     /// of one source document.
     pub(crate) fn publish(&self, uri: &str) {
-        let mut st = self.state.lock().expect("state");
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
         if !st.docs.contains_key(uri) {
             return;
@@ -1112,7 +1112,12 @@ impl Server {
     /// file's own URI. Every pass republishes all three files, empty
     /// where nothing is wrong, so a renamed alias clears its report.
     pub(crate) fn publish_alias_problems(&self) {
-        let root = self.state.lock().expect("state").root.clone();
+        let root = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .root
+            .clone();
         let Some(root) = root else {
             return;
         };

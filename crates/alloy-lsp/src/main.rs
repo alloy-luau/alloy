@@ -282,7 +282,7 @@ fn run() -> ExitCode {
                 eprintln!("{line}");
 
                 if !line.trim().is_empty() {
-                    *tail.lock().expect("stderr tail") = line;
+                    *tail.lock().unwrap_or_else(|e| e.into_inner()) = line;
                 }
             }
         })
@@ -295,7 +295,7 @@ fn run() -> ExitCode {
         docs.map(PathBuf::from),
     ));
     {
-        let mut st = server.state.lock().expect("state");
+        let mut st = server.state.lock().unwrap_or_else(|e| e.into_inner());
         st.definitions = given;
         st.definition_sources = sources;
         st.old_solver = !child_args.iter().any(|a| a == "--flag:LuauSolverV2=true");
@@ -346,7 +346,10 @@ fn run() -> ExitCode {
             }
         }
 
-        let last = stderr_tail.lock().expect("stderr tail").clone();
+        let last = stderr_tail
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let text = match last.is_empty() {
             true => format!("luau-lsp ({child_name}) exited"),
 

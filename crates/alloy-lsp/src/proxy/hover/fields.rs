@@ -13,7 +13,7 @@ impl Server {
             return false;
         };
 
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
         let Some(doc) = st.docs.get(uri) else {
             return false;
@@ -1124,7 +1124,7 @@ impl Server {
         }
 
         let (line, character) = position_of_message(message)?;
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let doc = st.docs.get(uri)?;
         let Caret { offset, .. } = Caret::at(&doc.source, line, character)?;
         let (at, _) = literal_key(&doc.source, offset)?;

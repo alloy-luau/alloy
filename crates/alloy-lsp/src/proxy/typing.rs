@@ -9,7 +9,7 @@ impl Server {
     /// says why.
     pub(crate) fn format_document(&self, uri: &str, id: &Value) {
         let open = {
-            let st = self.state.lock().expect("state");
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
             st.docs.get(uri).map(|d| (d.source.clone(), d.bom))
         };
@@ -23,7 +23,7 @@ impl Server {
         // file out the way `alloy fmt` does. Reading none of it made
         // the editor ignore `indent_width` and the rest.
         let (ingots, options) = {
-            let st = self.state.lock().expect("state");
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
             (st.ingots.clone(), st.fmt_config(uri))
         };
@@ -90,7 +90,7 @@ impl Server {
             .map(str::to_string)
             .or_else(|| text_document_uri(message))
             .unwrap_or_default();
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let at = position_of_message(message);
         let name = match st.editor.auto_close_tags && uri.ends_with(".alx") {
             true => at
@@ -120,7 +120,7 @@ impl Server {
     /// inserts at the caret, which leaves the caret where it is and puts
     /// the `end` under the opener.
     pub(crate) fn end_after_opener(&self, uri: &str, message: &Value, id: &Value) {
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let ch = message
             .pointer("/params/ch")
             .and_then(Value::as_str)

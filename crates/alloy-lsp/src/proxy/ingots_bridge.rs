@@ -94,20 +94,25 @@ impl Server {
     /// run. A problem with one is a warning in the editor; the others
     /// still load.
     pub(crate) fn load_ingots(&self) {
-        let root = self.state.lock().expect("state").root.clone();
+        let root = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .root
+            .clone();
         let Some(root) = root else {
             return;
         };
         let config =
             Config::find_within(&root, &root).and_then(|p| Config::load(&p).ok().map(|c| (p, c)));
         let Some((path, config)) = config else {
-            self.state.lock().expect("state").ingots = None;
+            self.state.lock().unwrap_or_else(|e| e.into_inner()).ingots = None;
 
             return;
         };
 
         if config.ingots.is_empty() {
-            self.state.lock().expect("state").ingots = None;
+            self.state.lock().unwrap_or_else(|e| e.into_inner()).ingots = None;
 
             return;
         }
@@ -125,7 +130,8 @@ impl Server {
         }
 
         log::info(&format!("{} ingots running", ingots.list.len()));
-        self.state.lock().expect("state").ingots = Some(std::sync::Arc::new(ingots));
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).ingots =
+            Some(std::sync::Arc::new(ingots));
     }
 
     /// A hover an ingot answers; false when none does.
@@ -137,7 +143,7 @@ impl Server {
         let Some((line, character)) = position_of_message(message) else {
             return false;
         };
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let Some(ingots) = st.ingots.clone() else {
             return false;
         };
@@ -172,7 +178,7 @@ impl Server {
         let Some((line, character)) = position_of_message(message) else {
             return false;
         };
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let Some(doc) = st.docs.get(uri) else {
             return false;
         };
@@ -198,7 +204,7 @@ impl Server {
         let Some((line, character)) = position_of_message(message) else {
             return false;
         };
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let Some(doc) = st.docs.get(uri) else {
             return false;
         };
@@ -237,7 +243,7 @@ impl Server {
             .pointer("/params/context/triggerCharacter")
             .and_then(Value::as_str)
             .map(str::to_string);
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let Some((mut items, completed)) = st.ingot_items(uri, line, character, trigger.as_deref())
         else {
             return false;
@@ -285,7 +291,7 @@ impl Server {
         let Some(color) = message.pointer("/params/color").cloned() else {
             return false;
         };
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let Some(ingots) = st.ingots.clone() else {
             return false;
         };

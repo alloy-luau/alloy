@@ -194,7 +194,7 @@ impl Server {
     /// Forwards a message whose URIs name real files: each becomes its
     /// mirror URI.
     pub(crate) fn forward_plain(&self, mut message: Value) {
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         map_uris_into_mirror(&mut message, &st);
         drop(st);
         self.to_child(&message);
@@ -203,7 +203,7 @@ impl Server {
     /// A plain Luau document changed in the editor: the mirror copy
     /// follows the text.
     pub(crate) fn plain_changed(&self, uri: &str, whole: Option<String>, changes: &[Value]) {
-        let mut st = self.state.lock().expect("state");
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let mut text = whole
             .or_else(|| st.plain.get(uri).cloned())
             .unwrap_or_default();
@@ -246,7 +246,7 @@ impl Server {
     pub(crate) fn refresh_dependents(&self, data: &Path) {
         let data = normalize(data);
         let messages: Vec<Value> = {
-            let st = self.state.lock().expect("state");
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
             st.docs
                 .iter()
@@ -292,7 +292,7 @@ impl Server {
         Option<std::sync::Arc<alloy::ingot::Ingots>>,
     ) {
         let (mut options, jsx, ingots) = {
-            let st = self.state.lock().expect("state");
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let (o, j) = st.options_for(uri);
 
             (o, j, st.ingots.clone())
@@ -308,7 +308,7 @@ impl Server {
     /// Opens or replaces a document and its shadow.
     pub(crate) fn open_doc(&self, uri: &str, text: String, version: i64, by_editor: bool) {
         let had_exports = {
-            let st = self.state.lock().expect("state");
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
             match st.docs.get(uri) {
                 Some(d) => export_surface(d),
@@ -320,7 +320,7 @@ impl Server {
         let doc = Doc::new(text, version, &options, &jsx, ingots.as_deref());
         let fresh_exports = export_surface(&doc);
         let (shadow, existed) = {
-            let mut st = self.state.lock().expect("state");
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let shadow = st.child_uri(uri);
 
             // The editor's buffer wins over the disk. The workspace
@@ -351,7 +351,7 @@ impl Server {
             (shadow, existed)
         };
 
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let doc = &st.docs[uri];
 
         let message = if existed {
@@ -405,7 +405,7 @@ impl Server {
     /// nothing. The compile is what makes the text new.
     pub(crate) fn resend_doc(&self, uri: &str) {
         let Some((source, version)) = ({
-            let st = self.state.lock().expect("state");
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
             st.docs.get(uri).map(|d| (d.source.clone(), d.version))
         }) else {
@@ -414,7 +414,7 @@ impl Server {
         let (options, jsx, ingots) = self.compile_options(uri, &source);
         let fresh = Doc::new(source.clone(), version, &options, &jsx, ingots.as_deref());
         let message = {
-            let mut st = self.state.lock().expect("state");
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let shadow = st.child_uri(uri);
 
             // The editor typed while this compile ran: its own
@@ -450,8 +450,12 @@ impl Server {
     }
 
     pub(crate) fn change_doc(&self, uri: &str, version: i64, changes: &[Value]) {
-        let (mut options, jsx) = self.state.lock().expect("state").options_for(uri);
-        let mut st = self.state.lock().expect("state");
+        let (mut options, jsx) = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .options_for(uri);
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let ingots = st.ingots.clone();
 
         let Some(doc) = st.docs.get_mut(uri) else {
@@ -541,7 +545,13 @@ impl Server {
         for target in alloy::modules::import_targets_for_file(path, source) {
             let uri = path_to_uri(&normalize(&target));
 
-            if !self.state.lock().expect("state").docs.contains_key(&uri) {
+            if !self
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .docs
+                .contains_key(&uri)
+            {
                 continue;
             }
 
@@ -552,7 +562,7 @@ impl Server {
     }
 
     pub(crate) fn close_shadow(&self, uri: &str) {
-        let mut st = self.state.lock().expect("state");
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let existed = st.docs.remove(uri).is_some();
         let shadow = st.child_uri(uri);
         st.shadows.remove(&shadow);
@@ -592,7 +602,10 @@ impl Server {
         // every open file that imports the file compiles again: the
         // import now names no module, and the editor sends no edit.
         if let Some(path) = uri_to_path(uri).filter(|p| !p.exists()) {
-            self.state.lock().expect("state").forget_disk();
+            self.state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .forget_disk();
             self.refresh_importers(&[path]);
         }
     }
@@ -613,10 +626,18 @@ impl Server {
     /// the Alloy sources the walk found, for the shadow pass.
     pub(crate) fn open_mirror(&self) -> Vec<PathBuf> {
         let started = std::time::Instant::now();
-        self.state.lock().expect("state").forget_disk();
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .forget_disk();
         self.load_ingots();
         self.publish_alias_problems();
-        let root = self.state.lock().expect("state").root.clone();
+        let root = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .root
+            .clone();
         let Some(root) = root else {
             return Vec::new();
         };
@@ -677,7 +698,7 @@ impl Server {
         // mode, and a root with no configuration gets one: strict is
         // the default.
         {
-            let st = self.state.lock().expect("state");
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
             for path in plain {
                 if let Ok(text) = std::fs::read_to_string(&path) {
@@ -719,7 +740,7 @@ impl Server {
         }
 
         let runtime = {
-            let mut st = self.state.lock().expect("state");
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             // The runtime goes where the build puts it, the place the
             // mirror's `alloy` alias names.
             let real = normalize(
@@ -759,7 +780,12 @@ impl Server {
 
         // One pass at a time, the way `open_mirror` holds it.
         let _pass = self.scan.lock().unwrap_or_else(|e| e.into_inner());
-        let held_before = self.state.lock().expect("state").editor_open.clone();
+        let held_before = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .editor_open
+            .clone();
 
         for path in dependencies_first(files) {
             if self.stopping.load(std::sync::atomic::Ordering::Relaxed) {
@@ -768,7 +794,12 @@ impl Server {
 
             self.wait_for_requests();
             let uri = path_to_uri(&path);
-            let already = self.state.lock().expect("state").docs.contains_key(&uri);
+            let already = self
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .docs
+                .contains_key(&uri);
 
             if already {
                 continue;
@@ -783,7 +814,7 @@ impl Server {
         // against a mirror that still lacked some shadows. The mirror
         // is whole now, so the child checks it again.
         let opened: Vec<String> = {
-            let st = self.state.lock().expect("state");
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
             st.editor_open.difference(&held_before).cloned().collect()
         };
@@ -850,7 +881,12 @@ impl Server {
     /// there, and a poll of it would answer its own writes. Each tick
     /// reads the list again, so an import added since follows.
     pub(crate) fn poll_roots(&self) -> Vec<PathBuf> {
-        let root = self.state.lock().expect("state").root.clone();
+        let root = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .root
+            .clone();
         let Some(root) = root else {
             return Vec::new();
         };
@@ -886,8 +922,16 @@ impl Server {
     /// that each plain module changed, and every document that imports
     /// one is sent again, or its import keeps the type it had.
     pub(crate) fn rescan_workspace(&self) {
-        self.state.lock().expect("state").forget_disk();
-        let root = self.state.lock().expect("state").root.clone();
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .forget_disk();
+        let root = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .root
+            .clone();
         let Some(root) = root else {
             return;
         };
@@ -915,7 +959,7 @@ impl Server {
         // its shadow: a dependency edited in another window. The shadow
         // follows the disk, the way a watched change makes it.
         let stale: Vec<(String, String)> = {
-            let st = self.state.lock().expect("state");
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
             files
                 .iter()
@@ -939,7 +983,7 @@ impl Server {
         // the pass rewrites some files on the way in, and a compare
         // against the file reads those as changed on every tick.
         let changed: Vec<PathBuf> = {
-            let st = self.state.lock().expect("state");
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let from_tree = tree_sourcemap(&root, config.as_ref());
 
             plain
@@ -983,7 +1027,7 @@ impl Server {
                 .collect()
         };
         let fresh: Vec<PathBuf> = {
-            let st = self.state.lock().expect("state");
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
             files
                 .into_iter()
@@ -1010,7 +1054,7 @@ impl Server {
         // The child caches a module it has read; it re-reads one it
         // hears about.
         let notice: Vec<Value> = {
-            let st = self.state.lock().expect("state");
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let mut list: Vec<Value> = Vec::new();
 
             for path in &changed {
@@ -1052,7 +1096,7 @@ impl Server {
             .map(|p| imports::module_path(&normalize(p)))
             .collect();
         let importers: Vec<String> = {
-            let st = self.state.lock().expect("state");
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
             st.docs
                 .iter()
@@ -1086,7 +1130,7 @@ impl Server {
     */
     pub(crate) fn schedule_import_refresh(self: &Arc<Self>, path: PathBuf) {
         let alone = {
-            let mut edited = self.edited.lock().expect("edited");
+            let mut edited = self.edited.lock().unwrap_or_else(|e| e.into_inner());
             let alone = edited.is_empty();
             edited.insert(path, std::time::Instant::now());
 
@@ -1110,7 +1154,7 @@ impl Server {
                 // They leave the map here, so a file edited again
                 // during the pass waits for the next one.
                 let quiet: Vec<PathBuf> = {
-                    let mut edited = server.edited.lock().expect("edited");
+                    let mut edited = server.edited.lock().unwrap_or_else(|e| e.into_inner());
                     let ready: Vec<PathBuf> = edited
                         .iter()
                         .filter(|(_, last)| last.elapsed() >= IMPORT_REFRESH_WAIT)
@@ -1134,7 +1178,12 @@ impl Server {
 
                 // The map is read again under its own lock: an edit
                 // that arrives now finds it empty and starts a thread.
-                if server.edited.lock().expect("edited").is_empty() {
+                if server
+                    .edited
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_empty()
+                {
                     return;
                 }
             }
@@ -1147,12 +1196,17 @@ impl Server {
     /// the child types an import of a module it never read as `any`.
     /// An editor that takes no dynamic registration is polled instead.
     pub(crate) fn watch_project_files(&self) {
-        if !self.state.lock().expect("state").watch_registration {
+        if !self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .watch_registration
+        {
             return;
         }
 
         let id = {
-            let mut st = self.state.lock().expect("state");
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let id = st.fresh_id();
             st.asked.insert(id.clone(), Asked::Watch);
 
@@ -1204,7 +1258,7 @@ impl Server {
 
         // The edits come from the texts as they were before the move.
         let docs: Vec<(String, PathBuf, String)> = {
-            let st = self.state.lock().expect("state");
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             st.docs
                 .iter()
                 .filter_map(|(uri, doc)| {
@@ -1212,7 +1266,12 @@ impl Server {
                 })
                 .collect()
         };
-        let root = self.state.lock().expect("state").root.clone();
+        let root = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .root
+            .clone();
         let changes = imports::rename_edits(&docs, &renames, &|dir| {
             project_aliases(dir, root.as_deref())
         });
@@ -1227,7 +1286,12 @@ impl Server {
             }
 
             let text = std::fs::read_to_string(&moved).unwrap_or_else(|_| source.clone());
-            let open = self.state.lock().expect("state").editor_open.contains(uri);
+            let open = self
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .editor_open
+                .contains(uri);
             self.close_shadow(uri);
             let new_uri = path_to_uri(&moved);
             self.open_doc(&new_uri, text, 0, open);
@@ -1240,7 +1304,7 @@ impl Server {
         let count: usize = changes.values().map(Vec::len).sum();
         let edit = json!({ "changes": changes });
         let id = {
-            let mut st = self.state.lock().expect("state");
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let id = st.fresh_id();
             st.asked.insert(id.clone(), Asked::Rename(edit));
 

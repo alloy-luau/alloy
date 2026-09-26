@@ -75,7 +75,7 @@ impl Server {
             ));
         }
 
-        let mut w = self.child_in.lock().expect("child stdin");
+        let mut w = self.child_in.lock().unwrap_or_else(|e| e.into_inner());
 
         if let Err(e) = crate::rpc::write_message(&mut *w, message) {
             log::error(&format!("write to child failed: {e}"));
@@ -83,7 +83,7 @@ impl Server {
     }
 
     pub(crate) fn to_client(&self, message: &Value) {
-        let mut w = self.client_out.lock().expect("client stdout");
+        let mut w = self.client_out.lock().unwrap_or_else(|e| e.into_inner());
 
         if let Err(e) = crate::rpc::write_message(&mut *w, message) {
             log::error(&format!("write to client failed: {e}"));
@@ -143,7 +143,7 @@ impl Server {
                             .and_then(Value::as_str)
                             .and_then(uri_to_path)
                     });
-                let mut st = self.state.lock().expect("state");
+                let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
                 st.mirror = mirror_dir(root.as_deref(), mirror_above(root.as_deref()));
                 let _ = std::fs::remove_dir_all(mirror_base(&st.mirror));
                 purge_stale_mirrors(&st.mirror);
@@ -269,7 +269,12 @@ impl Server {
                 // The mirror is this session's alone; a root opened
                 // once and never again left its copy behind. The
                 // definitions of the root go with it.
-                let mirror = self.state.lock().expect("state").mirror.clone();
+                let mirror = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .mirror
+                    .clone();
                 let _ = std::fs::remove_dir_all(mirror_base(&mirror));
                 let _ = std::fs::remove_dir_all(definitions_of(&mirror));
 
@@ -277,7 +282,7 @@ impl Server {
             }
 
             Some("workspace/didChangeConfiguration") => {
-                let mut st = self.state.lock().expect("state");
+                let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
                 if let Some(settings) = message.pointer("/params/settings") {
                     st.editor = settings::editor(settings, st.editor);
@@ -355,7 +360,7 @@ impl Server {
                 if is_alloy_uri(&uri) {
                     // The shadow stays open so other files still resolve
                     // it; its text goes back to the disk version.
-                    let mut st = self.state.lock().expect("state");
+                    let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
                     st.editor_open.remove(&uri);
                     drop(st);
 
@@ -366,7 +371,7 @@ impl Server {
                     }
                 } else {
                     // Back to the disk version in the mirror.
-                    let mut st = self.state.lock().expect("state");
+                    let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
                     st.plain.remove(&uri);
 
                     if let Some(path) = uri_to_path(&uri) {
@@ -401,7 +406,7 @@ impl Server {
                 {
                     self.state
                         .lock()
-                        .expect("state")
+                        .unwrap_or_else(|e| e.into_inner())
                         .project_shapes
                         .borrow_mut()
                         .take();
@@ -435,7 +440,10 @@ impl Server {
                     let config_file = uri.ends_with("/alloy.toml") || uri.ends_with("/.config.aly");
 
                     if config_file || uri.ends_with("/.luaurc") || uri.ends_with("/luaux.toml") {
-                        self.state.lock().expect("state").forget_disk();
+                        self.state
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .forget_disk();
                         config_changed = true;
                     }
 
@@ -446,7 +454,7 @@ impl Server {
                     if !is_alloy_uri(&uri) {
                         // A plain file: the mirror copy follows the disk
                         // unless the editor holds the file open.
-                        let st = self.state.lock().expect("state");
+                        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
                         if let Some(path) = uri_to_path(&uri)
                             && !st.plain.contains_key(&uri)
@@ -468,7 +476,12 @@ impl Server {
                         continue;
                     }
 
-                    let open = self.state.lock().expect("state").editor_open.contains(&uri);
+                    let open = self
+                        .state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .editor_open
+                        .contains(&uri);
 
                     match kind {
                         3 => self.close_shadow(&uri),
@@ -514,7 +527,7 @@ impl Server {
                     let open: Vec<String> = self
                         .state
                         .lock()
-                        .expect("state")
+                        .unwrap_or_else(|e| e.into_inner())
                         .editor_open
                         .iter()
                         .cloned()
@@ -557,7 +570,7 @@ impl Server {
                     && is_alloy_uri(&uri)
                 {
                     let symbols = {
-                        let st = self.state.lock().expect("state");
+                        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
                         let path = uri_to_path(&uri).unwrap_or_else(|| PathBuf::from(&uri));
 
@@ -581,7 +594,7 @@ impl Server {
             Some("textDocument/foldingRange") => {
                 let uri = text_document_uri(&message).unwrap_or_default();
                 let ranges = {
-                    let st = self.state.lock().expect("state");
+                    let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
                     st.docs.get(&uri).map(|d| folding_ranges(&d.source))
                 };
@@ -839,7 +852,7 @@ impl Server {
                 let indent = self
                     .state
                     .lock()
-                    .expect("state")
+                    .unwrap_or_else(|e| e.into_inner())
                     .docs
                     .get(&uri)
                     .and_then(|d| block_end::needs_end(&d.source, line));
@@ -942,7 +955,12 @@ impl Server {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                let asked = self.state.lock().expect("state").asked.remove(&key);
+                let asked = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .asked
+                    .remove(&key);
 
                 match asked {
                     Some(Asked::Watch) => {}
@@ -954,7 +972,11 @@ impl Server {
                             .unwrap_or_default();
 
                         if chosen == UPDATE_IMPORTS {
-                            let id = self.state.lock().expect("state").fresh_id();
+                            let id = self
+                                .state
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .fresh_id();
                             self.to_client(&json!({
                                 "jsonrpc": "2.0",
                                 "id": id,
@@ -1038,21 +1060,25 @@ impl Server {
 
         if let Some(id) = message.get("id") {
             let key = id_key(id);
-            self.state.lock().expect("state").pending.insert(
-                key,
-                Pending {
-                    method: method.unwrap_or_default().to_string(),
-                    ctx: ctx.clone(),
-                    position,
-                    trigger,
-                    range,
-                    diagnostics,
-                    query,
-                },
-            );
+            self.state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pending
+                .insert(
+                    key,
+                    Pending {
+                        method: method.unwrap_or_default().to_string(),
+                        ctx: ctx.clone(),
+                        position,
+                        trigger,
+                        range,
+                        diagnostics,
+                        query,
+                    },
+                );
         }
 
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
         if let Some(ctx) = &ctx
             && let Some(doc) = st.docs.get(ctx)
@@ -1136,7 +1162,7 @@ impl Server {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                let st = self.state.lock().expect("state");
+                let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
                 if st.runtime_uri.as_deref() == Some(uri.as_str()) || uri.ends_with(SCRATCH_SUFFIX)
                 {
@@ -1192,7 +1218,7 @@ impl Server {
                     for (source, list, open) in lists {
                         self.state
                             .lock()
-                            .expect("state")
+                            .unwrap_or_else(|e| e.into_inner())
                             .child_diagnostics
                             .insert(source.clone(), list.clone());
 
@@ -1220,7 +1246,7 @@ impl Server {
                             .and_then(Value::as_array)
                             .cloned()
                             .unwrap_or_default();
-                        let mut st = self.state.lock().expect("state");
+                        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
                         let doc_path = uri_to_path(&source);
                         let mapped: Vec<Value> = match st.docs.get(&source) {
                             Some(doc) => {
@@ -1283,7 +1309,12 @@ impl Server {
                     .pointer("/params/items")
                     .and_then(Value::as_array)
                     .map_or(1, Vec::len);
-                let settings = self.state.lock().expect("state").settings.clone();
+                let settings = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .settings
+                    .clone();
                 let result: Vec<Value> = (0..count).map(|_| settings.clone()).collect();
 
                 if let Some(id) = message.get("id") {
@@ -1310,7 +1341,7 @@ impl Server {
 
             Some(_) => {
                 // A server request or notification: map any locations.
-                let st = self.state.lock().expect("state");
+                let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
                 if let Some(params) = message.get_mut("params") {
                     map_from_shadow(params, None, &st);
@@ -1344,7 +1375,7 @@ impl Server {
 
     pub(crate) fn child_response(&self, mut message: Value) {
         let key = message.get("id").map(id_key);
-        let mut st = self.state.lock().expect("state");
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let pending = key.as_ref().and_then(|k| st.pending.remove(k));
         let is_init = key.is_some() && key == st.initialize_id;
 

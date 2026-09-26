@@ -58,7 +58,7 @@ impl Server {
         }
 
         let (line, character) = position_of_message(message)?;
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let doc = st.docs.get(uri)?;
         let Caret { start, end, .. } = Caret::at(&doc.source, line, character)?;
         let word = &doc.source[start..end];
@@ -93,7 +93,7 @@ impl Server {
         let Some((line, character)) = position_of_message(message) else {
             return false;
         };
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let Some(doc) = st.docs.get(uri) else {
             return false;
         };
@@ -118,7 +118,7 @@ impl Server {
         let Some((line, character)) = position_of_message(message) else {
             return false;
         };
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let Some(doc) = st.docs.get(uri) else {
             return false;
         };
@@ -155,7 +155,7 @@ impl Server {
         }
 
         let (line, character) = position_of_message(message)?;
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let doc = st.docs.get(uri)?;
         let shadow = doc.to_shadow(line, character);
         // The code copy of an intrinsic's argument takes the same moves
@@ -181,7 +181,7 @@ impl Server {
         }
 
         let (line, character) = position_of_message(message)?;
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let doc = st.docs.get(uri)?;
         let caret = Caret::at(&doc.source, line, character)?;
         let word = &doc.source[caret.start..caret.end];
@@ -199,7 +199,7 @@ impl Server {
         }
 
         let (line, character) = position_of_message(message)?;
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let doc = st.docs.get(uri)?;
         let offset = offset_of(&doc.source, line, character)?;
         let (base, _, sep, word) = context::member_at(&doc.source, offset)?;
@@ -223,7 +223,7 @@ impl Server {
         }
 
         let (line, character) = position_of_message(message)?;
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let doc = st.docs.get(uri)?;
         let offset = offset_of(&doc.source, line, character)?;
         let line_start = doc.source[..offset].rfind('\n').map_or(0, |i| i + 1);
@@ -281,7 +281,7 @@ impl Server {
         }
 
         let (line, character) = position_of_message(message)?;
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let doc = st.docs.get(uri)?;
         let offset = offset_of(&doc.source, line, character)?;
         let start = context::child_name_start(&doc.source, offset)?;
@@ -302,7 +302,7 @@ impl Server {
         }
 
         let (line, character) = position_of_message(message)?;
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let doc = st.docs.get(uri)?;
         let offset = offset_of(&doc.source, line, character)?;
         let line_start = doc.source[..offset].rfind('\n').map_or(0, |i| i + 1);
@@ -339,7 +339,7 @@ impl Server {
         }
 
         let (line, character) = position_of_message(message)?;
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let doc = st.docs.get(uri)?;
 
         if member_position(doc, line, character).is_some() {
@@ -371,7 +371,7 @@ impl Server {
             return false;
         };
 
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
         let Some(doc) = st.docs.get(uri) else {
             return false;
@@ -495,7 +495,7 @@ impl Server {
         let Some((line, character)) = position_of_message(message) else {
             return false;
         };
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
         st.docs.get(uri).is_some_and(|doc| {
             offset_of(&doc.source, line, character).is_some_and(|at| doc.in_blanked_markup(at))
@@ -514,7 +514,7 @@ impl Server {
         let Some((line, character)) = position_of_message(message) else {
             return false;
         };
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let Some(doc) = st.docs.get(uri) else {
             return false;
         };

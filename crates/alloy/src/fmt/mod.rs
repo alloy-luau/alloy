@@ -333,6 +333,8 @@ fn format_tokens(src: &str, options: &FmtConfig) -> Result<String, String> {
         at_line: Vec::new(),
         hole: Vec::new(),
         held: Vec::new(),
+        conds: Vec::new(),
+        cond_line: Vec::new(),
     };
     f.rewrite_tokens();
     f.sort_requires();
@@ -342,6 +344,7 @@ fn format_tokens(src: &str, options: &FmtConfig) -> Result<String, String> {
     f.forced = vec![false; f.items.len()];
     f.at_line = vec![0; f.items.len()];
     f.hole = f.holes();
+    f.read_conditions(&colons::if_conditions(src, &toks, &chunk));
     f.measure_lines();
 
     // An `if` expression and a `match` are no bracket group, so the
@@ -539,6 +542,12 @@ struct Formatter<'s> {
     /// bracket group among them keeps its line, so a long `if` breaks at
     /// its keywords first.
     held: Vec<bool>,
+    /// The `if` or `elseif` and the `then` of each `if` condition.
+    conds: Vec<(usize, usize)>,
+    /// The items that open a line of an `if` condition that spans lines.
+    /// Each line sits one level under the `if`, with no step for the
+    /// operator it opens with.
+    cond_line: Vec<bool>,
 }
 
 /// Openers of bracket groups, as token text.
@@ -574,6 +583,66 @@ impl<'s> Formatter<'s> {
     fn measure_lines(&mut self) {
         self.depths = self.block_depths();
         self.generic = self.generic_brackets();
+        self.split_conditions();
+    }
+
+    /// The `if` conditions the tree names by byte, as items.
+    fn read_conditions(&mut self, conds: &[(usize, usize)]) {
+        let at: std::collections::HashMap<usize, usize> = (0..self.items.len())
+            .filter(|&i| !self.items[i].is_comment() && self.items[i].start != usize::MAX)
+            .map(|i| (self.items[i].start, i))
+            .collect();
+
+        self.conds = conds
+            .iter()
+            .filter_map(|(k, t)| Some((*at.get(k)?, *at.get(t)?)))
+            .collect();
+    }
+
+    /// Marks each line of an `if` condition that spans lines, and puts a
+    /// `then` that opens a line back under its `if`. The layout of a
+    /// split condition is StyLua's: `if`, each line one level in, `then`.
+    fn split_conditions(&mut self) {
+        self.cond_line = vec![false; self.items.len()];
+
+        for &(kw, then) in &self.conds {
+            let mut depth = 0i32;
+            let mut lines = Vec::new();
+
+            for k in kw + 1..then {
+                let t = &self.items[k];
+
+                if t.is_comment() {
+                    continue;
+                }
+
+                if closes(&t.text) {
+                    depth -= 1;
+                }
+
+                if depth == 0 && t.newlines_before > 0 {
+                    lines.push(k);
+                }
+
+                if opens(&t.text) {
+                    depth += 1;
+                }
+            }
+
+            let then_opens = self.items[then].newlines_before > 0;
+
+            if lines.is_empty() && !then_opens {
+                continue;
+            }
+
+            for k in lines {
+                self.cond_line[k] = true;
+            }
+
+            if then_opens {
+                self.depths[then] = self.depths[then].saturating_sub(1);
+            }
+        }
     }
 
     fn prev_code(&self, i: usize) -> Option<usize> {
@@ -1851,6 +1920,24 @@ mod tests {
         stable(
             &format!("copy({{ {fields} }}, second_argument_here)\n"),
             &format!("copy(\n  {{ {fields} }},\n  second_argument_here\n)\n"),
+        );
+    }
+
+    /// Each line of a split `if` condition sits one level under the
+    /// `if`, and `then` goes back under the `if`. fmt put each `or` line
+    /// one level deeper than the first operand, and `then` one level in.
+    #[test]
+    fn a_split_if_condition_indents_once_and_then_closes_it() {
+        let want = "do\n  if\n    head is not table\n    or head.format ~= 1\n    or head.parts is not number\n  then\n    return false\n  elseif\n    a\n    or b\n  then\n    return true\n  end\nend\n";
+        stable(
+            "do\n  if\n      head is not table\n        or head.format ~= 1\n     or head.parts is not number\n    then\n    return false\n  elseif\n  a\n  or b\n  then\n    return true\n  end\nend\n",
+            want,
+        );
+
+        // A split that starts on the `if` line takes the same steps.
+        stable(
+            "if a\nor b\nthen\n  print(1)\nend\n",
+            "if a\n  or b\nthen\n  print(1)\nend\n",
         );
     }
 

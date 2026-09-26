@@ -21,7 +21,8 @@ impl<'s> Formatter<'s> {
 
         let mut level = self.depths[i] + extra;
 
-        if self.continues_at(i) {
+        // A line of a split `if` condition already sits one level in.
+        if self.continues_at(i) && !self.cond_line[i] {
             level += 1;
         }
 

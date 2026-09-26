@@ -2,9 +2,10 @@
 //! parameter, a field, or a return type, and every `:` inside a type,
 //! a generic list, a trait signature, or a type alias. `a:b()` and
 //! `a: b` lex the same, so the spacing reads the tree for the answer.
-//! The same walk finds each `if` that opens an expression.
+//! The same walk finds each `if` that opens an expression, and the
+//! condition of each `if` statement.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use alloy_syntax::ast::{
     Block, Chunk, ClassMember, Cond, DefaultExport, Expr, FunctionBody, Stmt, TokSpan,
@@ -46,13 +47,30 @@ pub(crate) fn expr_ifs(src: &str, toks: &[Tok], chunk: &Chunk) -> HashSet<usize>
     walk.ifs.iter().map(|&i| toks[i].start as usize).collect()
 }
 
-/// The type spans of a tree, in source order, and the token of each
-/// `if` expression.
+/// The `if` or `elseif` and the `then` of each condition of an `if`
+/// statement, by byte.
+pub(crate) fn if_conditions(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<(usize, usize)> {
+    let walk = Walk::new(src, toks, chunk);
+
+    walk.conds
+        .iter()
+        .map(|(&(start, _), &then)| {
+            (
+                toks[start as usize - 1].start as usize,
+                toks[then].start as usize,
+            )
+        })
+        .collect()
+}
+
+/// The type spans of a tree, in source order, the token of each `if`
+/// expression, and the span of each `if` condition with its `then`.
 struct Walk<'a> {
     src: &'a str,
     toks: &'a [Tok],
     spans: Vec<TokSpan>,
     ifs: Vec<usize>,
+    conds: HashMap<(u32, u32), usize>,
 }
 
 impl<'a> Walk<'a> {
@@ -62,6 +80,7 @@ impl<'a> Walk<'a> {
             toks,
             spans: Vec::new(),
             ifs: Vec::new(),
+            conds: HashMap::new(),
         };
         walk.block(&chunk.block);
 
@@ -133,6 +152,17 @@ impl<'a> Walk<'a> {
             Stmt::If(i) => {
                 for (c, _) in &i.branches {
                     self.cond(c);
+
+                    let span = c.span();
+
+                    if matches!(c, Cond::Expr(_))
+                        && self
+                            .toks
+                            .get(span.end as usize)
+                            .is_some_and(|t| t.text(self.src) == "then")
+                    {
+                        self.conds.insert((span.start, span.end), span.end as usize);
+                    }
                 }
             }
 

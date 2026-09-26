@@ -1567,6 +1567,42 @@ end
     /// `$assert` lowers to the Luau `assert`, so the body needs nothing
     /// of the runtime. The spec still calls `__alloy.set_testing`, on
     /// the first line, so `@cfg(test)` holds while the module loads.
+    /// An import that only a test reads left its `require` in the
+    /// build. It leaves with the test now, and the spec keeps it. An
+    /// import in a test required its module when the test ran, and
+    /// lest's native backend resolves a `require` only while the spec
+    /// loads. The spec now requires it on the first line.
+    #[test]
+    fn a_test_only_import_leaves_the_build_and_loads_with_the_spec() {
+        let top = "import { use_base } from './testing'\n\nexport function content(): number\n    return 1\nend\n\n@test\nfunction loads()\n    use_base()\nend\n";
+        let ship = crate::compile(top).unwrap().ship;
+        assert!(!ship.contains("require('./testing')"), "{ship}");
+
+        // A read outside the test keeps the import.
+        let kept = top.replace("return 1", "use_base()\n    return 1");
+        let ship = crate::compile(&kept).unwrap().ship;
+        assert!(ship.contains("require('./testing')"), "{ship}");
+
+        let inner = "export function inner(): number\n    return 2\nend\n\n@test\nfunction loads()\n    import { use_base } from './testing'\n    use_base()\nend\n";
+        let (text, _, _) = spec(
+            &Config::default(),
+            Path::new("/none"),
+            Path::new("src/m.aly"),
+            inner,
+            None,
+            &[],
+        )
+        .unwrap()
+        .unwrap();
+        let head = text.lines().find(|l| l.contains("set_testing")).unwrap();
+        assert!(head.contains("local _m1 = require("), "{text}");
+        assert_eq!(text.matches("require('").count(), 1, "{text}");
+        assert!(
+            text.contains("    local use_base = _m1.use_base\n"),
+            "{text}"
+        );
+    }
+
     #[test]
     fn a_spec_requires_the_runtime_it_calls() {
         let src = "@test

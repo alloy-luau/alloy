@@ -446,10 +446,8 @@ impl<'s> Desugar<'s> {
         let specs = match &i.kind {
             ImportKind::Namespace(n, specs) => {
                 let name = self.text_of(*n).to_string();
-                lines.push(format!(
-                    "local {name} = require({})",
-                    luau_string(&self.options.std_require)
-                ));
+                let std = self.require_text(&luau_string(&self.options.std_require));
+                lines.push(format!("local {name} = {std}"));
 
                 specs
             }
@@ -510,6 +508,33 @@ impl<'s> Desugar<'s> {
         self.generate(anchor, &lines.join(" "));
     }
 
+    /// Blanks a top-level import in the ship artifact when each name it
+    /// binds is read, and read only in code the ship artifact drops: a
+    /// test. The require would run a module nothing there reads.
+    pub(crate) fn drop_test_only_imports(&mut self) {
+        let dropped = self.ship_blanks.clone();
+        let inside = |at: u32| dropped.iter().any(|(a, b)| at >= *a && at < *b);
+
+        for (start, end, names) in std::mem::take(&mut self.top_imports) {
+            let only_tests = !names.is_empty()
+                && names.iter().all(|name| {
+                    let mut reads = self
+                        .toks
+                        .iter()
+                        .filter(|t| t.kind == TokKind::Ident && t.text(self.src) == name)
+                        .map(|t| t.start)
+                        .filter(|at| !(start..end).contains(at))
+                        .peekable();
+
+                    reads.peek().is_some() && reads.all(inside)
+                });
+
+            if only_tests && !inside(start) {
+                self.ship_blanks.push((start, end));
+            }
+        }
+    }
+
     pub(crate) fn import_stmt(&mut self, i: &Import) {
         let anchor = self.byte_start(i.span);
         // The spec as written: `strip_literal` drops a data extension,
@@ -537,13 +562,32 @@ impl<'s> Desugar<'s> {
             return;
         }
 
+        if !self.options.tests && self.at_top_level() {
+            let (head, specs) = match &i.kind {
+                ImportKind::Namespace(n, specs) | ImportKind::Both(n, specs) => {
+                    (Some(*n), &specs[..])
+                }
+
+                ImportKind::Default(n) => (Some(*n), &[][..]),
+
+                ImportKind::Named(specs) | ImportKind::TypeOnly(specs) => (None, &specs[..]),
+            };
+            let names = head
+                .into_iter()
+                .chain(specs.iter().map(|s| s.alias.unwrap_or(s.name)))
+                .map(|n| self.text_of(n).to_string())
+                .collect();
+            self.top_imports
+                .push((anchor, self.byte_end(i.span), names));
+        }
+
         match &i.kind {
             // `import * as M from "p"`, and `import * as M, { a }`,
             // which reads the names off `M` itself: the alias already
             // binds the whole module.
             ImportKind::Namespace(n, specs) => {
                 let name = self.text_of(*n).to_string();
-                let mut text = format!("local {name} = require({target})");
+                let mut text = format!("local {name} = {}", self.require_text(&target));
                 let picked = self.spec_bindings(&path, &name, specs);
                 text.push_str(&picked);
                 self.generate(anchor, &text);
@@ -563,7 +607,8 @@ impl<'s> Desugar<'s> {
                 }
 
                 let suffix = self.default_suffix(&spec);
-                self.generate(anchor, &format!("local {name} = require({target}){suffix}"));
+                let req = self.require_text(&target);
+                self.generate(anchor, &format!("local {name} = {req}{suffix}"));
             }
 
             // `import M, { a } from "p"`: the default binds as `M`, and
@@ -575,7 +620,11 @@ impl<'s> Desugar<'s> {
                 // module's default is one field of its export table, so
                 // the table takes a name of its own.
                 let (temp, mut text) = match self.is_plain_module(&spec) {
-                    true => (base.clone(), format!("local {base} = require({target})")),
+                    true => {
+                        let req = self.require_text(&target);
+
+                        (base.clone(), format!("local {base} = {req}"))
+                    }
 
                     false => {
                         let temp = self.hoist_import(&target, anchor);

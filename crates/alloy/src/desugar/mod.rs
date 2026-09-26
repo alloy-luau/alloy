@@ -680,6 +680,8 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         type_members: HashMap::new(),
         renames: Vec::new(),
         ship_blanks: Vec::new(),
+        top_imports: Vec::new(),
+        head_requires: Vec::new(),
         structs: HashSet::new(),
         hoisted: Vec::new(),
         hoisted_fns: Vec::new(),
@@ -847,6 +849,13 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         d.generate(insert_at, &line);
     }
 
+    // After `set_testing`, so a module an import in a test names loads
+    // under the test flag too.
+    if !d.head_requires.is_empty() {
+        let line = d.head_requires.concat();
+        d.generate(insert_at, &line);
+    }
+
     // Luau's solver crashes on the negation of a union or an
     // intersection with a table in it, and the crash drops every check
     // of the file. Each member negates first, so a table member errors
@@ -890,6 +899,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     let body_start = d.r.out_len();
     d.r.append(side);
 
+    d.drop_test_only_imports();
     let blanks = d.ship_blanks.clone();
     let (text, map) = d.r.finish();
 
@@ -1429,6 +1439,12 @@ struct Desugar<'s> {
     renames: Vec<HashMap<String, String>>,
     /// Source ranges whose output the ship artifact blanks: type-only imports.
     ship_blanks: Vec<(u32, u32)>,
+    /// The source range of each top-level import and the names it binds.
+    /// One that only tests read leaves the ship artifact with them.
+    top_imports: Vec<(u32, u32, Vec<String>)>,
+    /// `local _m1 = require(...) ` for each import below the top level
+    /// of a spec, to write on the first line. See `require_text`.
+    head_requires: Vec<String>,
     /// Declared struct names, for pattern tests and `is`.
     structs: HashSet<String>,
     /// The type parameters of a struct or an enum as the source writes
@@ -3530,18 +3546,47 @@ impl<'s> Desugar<'s> {
     /// Hoists a module require into a local of its own, `_m1`, so its
     /// type is the module's and a type alias through it resolves.
     fn hoist_import(&mut self, path: &str, anchor: u32) -> String {
+        if self.require_at_head() {
+            return self.require_text(path);
+        }
+
+        let name = self.next_import_temp();
+        self.hoists.push(Hoist::Fresh {
+            name: name.clone(),
+            value: HoistValue::Text(format!("require({path})")),
+            anchor,
+        });
+
+        name
+    }
+
+    fn next_import_temp(&mut self) -> String {
         self.import_next += 1;
 
         while self.taken_temps.contains(&self.import_next) {
             self.import_next += 1;
         }
 
-        let name = format!("_m{}", self.import_next);
-        self.hoists.push(Hoist::Fresh {
-            name: name.clone(),
-            value: HoistValue::Text(format!("require({path})")),
-            anchor,
-        });
+        format!("_m{}", self.import_next)
+    }
+
+    /// Whether an import here requires its module on the first line. A
+    /// spec runs under lest, and its native backend resolves a `require`
+    /// only while the spec loads. An import in a test runs later.
+    fn require_at_head(&self) -> bool {
+        self.options.tests && !self.at_top_level()
+    }
+
+    /// `require(path)`, or the temp that the first line of a spec binds
+    /// to it. See `require_at_head`.
+    pub(crate) fn require_text(&mut self, path: &str) -> String {
+        if !self.require_at_head() {
+            return format!("require({path})");
+        }
+
+        let name = self.next_import_temp();
+        self.head_requires
+            .push(format!("local {name} = require({path}) "));
 
         name
     }

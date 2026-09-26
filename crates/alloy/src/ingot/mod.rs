@@ -641,6 +641,9 @@ impl Ingot {
             "options": serde_json::to_value(&options).unwrap_or(Value::Null),
             "lints": lint_levels.iter().map(|(k, v)| (k.clone(), level_name(*v))).collect::<BTreeMap<_, _>>(),
             "fmt": serde_json::to_value(&config.fmt).unwrap_or(Value::Null),
+            // The markup settings, from `alloy.toml` or `.config.aly` alike,
+            // so an ingot never parses the config file itself.
+            "alx": serde_json::to_value(&config.alx).unwrap_or(Value::Null),
         });
 
         Ok((

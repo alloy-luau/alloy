@@ -249,6 +249,26 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         });
     }
 
+    // A module in a folder that Roblox copies for each player runs from
+    // the copy. From another mount, the require loads the template, a
+    // second module with its own state, and no path reaches the copy.
+    for i in desugar::imports_in(&parsed.chunk.block) {
+        let t = parsed.lexed.toks[i.path.start as usize];
+        let spec = t.text(src).trim_matches(['"', '\'']);
+
+        if let Some((_, place)) = options.mount_requires.iter().find(|(s, _)| s == spec)
+            && project::in_copied_folder(place)
+        {
+            diagnostics.push(Diagnostic {
+                start: t.start,
+                end: t.end,
+                message: format!(
+                    "\"{spec}\" is in a folder that Roblox copies for each player; from another mount, the require loads a second module with its own state; move the module to a shared mount, or import it only from its own mount"
+                ),
+            });
+        }
+    }
+
     // A directive the compiler does not know silences nothing, so it
     // reads as a working one and is not. A directive it knows but
     // cannot accept reports the same way, on its own line.

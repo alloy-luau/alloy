@@ -2343,6 +2343,57 @@ fn a_namespace_struct_value_hovers_by_its_name() {
     );
 }
 
+/// `local first = boxes[1]` with `boxes: { Box }` hovered as `Crate`, a
+/// struct of the same fields, and a `for` variable over the list as
+/// `t1`. The element type the annotation writes names both. A class by
+/// hand is no struct, so the shape of its instance names none.
+#[test]
+fn an_element_of_a_list_hovers_by_the_type_its_annotation_writes() {
+    const SRC: &str = concat!(
+        "local Box = {}\n",
+        "Box.__index = Box\n",
+        "export type Box = typeof(setmetatable({} :: { n: number }, Box))\n",
+        "function Box.new(): Box\n",
+        "  return setmetatable({ n = 1 }, Box)\n",
+        "end\n",
+        "struct Crate\n",
+        "  n: number\n",
+        "end\n",
+        "local boxes: { Box } = { Box.new() }\n",
+        "local first = boxes[1]\n",
+        "for _, b in ipairs(boxes) do\n",
+        "  print(b.n)\n",
+        "end\n",
+        "print(first, new Crate { n = 1 })\n",
+    );
+    let (st, uri) = one_file(SRC);
+    let doc = st.docs.get(uri).expect("doc");
+    let printed =
+        "t2 where t1 = {\n    new: () -> t2\n} ; t2 = { @metatable t1,\n{\n    n: number\n} }";
+    let local = |name: &str, line: u32, character: u32| {
+        let value = format!("```alloy\nlocal {name}: {printed}\n```");
+
+        crate::proxy::hover::name_solver_local(&st, &value, doc, line, character)
+    };
+
+    assert_eq!(
+        local("first", 10, 7).as_deref(),
+        Some("```alloy\nlocal first: Box\n```")
+    );
+    assert_eq!(
+        local("b", 11, 7).as_deref(),
+        Some("```alloy\nlocal b: Box\n```")
+    );
+    assert_eq!(
+        local("b", 12, 9).as_deref(),
+        Some("```alloy\nlocal b: Box\n```")
+    );
+    assert_eq!(
+        name_solver_struct(&format!("```alloy\nlocal x: {printed}\n```"), doc, &[]),
+        None
+    );
+}
+
 /// A remote of `net` sends `{ Stack }`, and only `net` imports `Stack`.
 /// The client reaches the struct through `net`: the hover names it, and
 /// `s.` offers no `new`. An enum field of a struct binds its own

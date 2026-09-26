@@ -22,6 +22,9 @@ pub(crate) struct Scan<'s> {
     /// The byte ranges an ingot's transform wrote. See
     /// `EmitOptions::generated`.
     pub(crate) generated: &'s [(u32, u32)],
+    /// The token of each `:` of a ternary. See
+    /// `fmt::colons::ternary_colons`.
+    pub(crate) ternary_colons: &'s [usize],
 }
 
 pub(crate) const KEYWORDS: &[&str] = &[
@@ -99,7 +102,14 @@ impl<'s> Scan<'s> {
             privates: &[],
             callables: &[],
             generated: &[],
+            ternary_colons: &[],
         }
+    }
+
+    /// The same scan, with the `:` of each ternary.
+    pub(crate) fn with_ternary_colons(mut self, colons: &'s [usize]) -> Self {
+        self.ternary_colons = colons;
+        self
     }
 
     /// The same scan, with the byte ranges an ingot wrote.

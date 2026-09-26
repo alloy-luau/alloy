@@ -121,6 +121,17 @@ pub(crate) fn if_conditions(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<(usiz
         .collect()
 }
 
+/// The token of each `:` of a ternary, `c ? a : b()`. It lexes as the
+/// `:` of the method call `a:b()`, so only the tree tells them apart.
+pub(crate) fn ternary_colons(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<usize> {
+    Walk::new(src, toks, chunk)
+        .chains
+        .into_iter()
+        .flat_map(|(_, ops)| ops)
+        .filter(|&o| toks[o].text(src) == ":")
+        .collect()
+}
+
 /// The type spans of a tree, in source order, the token of each `if`
 /// expression, each binary chain with its operators, and the span of
 /// each `if` condition with its `then`.

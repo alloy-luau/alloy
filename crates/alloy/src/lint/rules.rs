@@ -1322,7 +1322,9 @@ pub fn run(src: &str, toks: &[Tok], chunk: &Chunk, options: &crate::EmitOptions)
     }
 
     let privates = options.privates();
+    let ternary_colons = crate::fmt::colons::ternary_colons(src, toks, chunk);
     let scan = crate::flux::scan::Scan::new(src, toks, &st)
+        .with_ternary_colons(&ternary_colons)
         .with_privates(&privates)
         .with_callables(&options.import_callables)
         .with_generated(&options.generated);

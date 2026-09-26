@@ -1305,6 +1305,25 @@ mod tests {
         assert!(!crate::lint::fix_applies(src, &moved));
     }
 
+    /// `on ? <On /> : <Off />` lowers to `on ? On({}) : Off({})`, and
+    /// the `:` read as the method call `On({}):Off({})`, so `Off` was
+    /// never called. The `:` of a ternary names no method.
+    #[test]
+    fn a_component_after_the_colon_of_a_ternary_is_called() {
+        let src = "import { create } from \"./util\"\n\nlocal function On()\n    return <Frame />\nend\n\nlocal function Off()\n    return <Frame />\nend\n\nreturn function(on: boolean)\n    return on ? <On /> : <Off />\nend\n";
+        let out = compile_alx(src, &EmitOptions::default(), luaux::Config::bare())
+            .expect("the markup compiles")
+            .output;
+        let unused: Vec<&str> = out
+            .lints
+            .iter()
+            .filter(|l| l.name.starts_with("unused_"))
+            .map(|l| l.message.as_str())
+            .collect();
+
+        assert!(unused.is_empty(), "{unused:?}");
+    }
+
     /// A function that returns markup, or that a tag names, is a
     /// component and takes `[lint.naming] component`, PascalCase by
     /// default. Any other function takes the function style.

@@ -1334,6 +1334,36 @@ mod tests {
         );
     }
 
+    /// The `:` of a ternary read as a method call, `a():b()`, so the
+    /// function after it was never called. A method keeps no local of
+    /// its name alive.
+    #[test]
+    fn a_call_after_the_colon_of_a_ternary_reads_the_function() {
+        let unused = |src: &str| -> Vec<&'static str> {
+            crate::compile(src)
+                .unwrap()
+                .lints
+                .iter()
+                .map(|l| l.name)
+                .filter(|n| n.starts_with("unused_"))
+                .collect()
+        };
+        let fns = "local function a(): number\n    return 1\nend\nlocal function b(): number\n    return 2\nend\n";
+
+        assert_eq!(
+            unused(&format!(
+                "{fns}export function f(c: boolean): number\n    return c ? a() : b()\nend\n"
+            )),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            unused(&format!(
+                "{fns}export function f(t: any): number\n    return a() + t:b()\nend\n"
+            )),
+            vec!["unused_function"]
+        );
+    }
+
     #[test]
     fn a_function_nothing_calls_fires() {
         let unused = |src: &str| -> Vec<&'static str> {

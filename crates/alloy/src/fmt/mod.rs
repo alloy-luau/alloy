@@ -620,7 +620,7 @@ fn closer_of(open: &str) -> &'static str {
     }
 }
 
-mod colons;
+pub(crate) mod colons;
 mod layout;
 mod rewrite;
 mod spacing;

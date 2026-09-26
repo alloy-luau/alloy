@@ -1188,10 +1188,13 @@ impl<'s> Scan<'s> {
 
     /// Whether the name at `j` is a member of the value before it:
     /// `t.name`, or `t:name(...)`. A name after `:` that no argument
-    /// follows is a type annotation, which does read the name.
+    /// follows is a type annotation, which does read the name, and so
+    /// is the branch after the `:` of a ternary, `c ? a() : b()`.
     fn is_member(&self, j: usize) -> bool {
         match self.prev(j) {
             "." | "?." => true,
+
+            ":" if self.ternary_colons.contains(&(j - 1)) => false,
 
             ":" | "?:" => {
                 let arg = self.t(j + 1);

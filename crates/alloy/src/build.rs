@@ -848,6 +848,7 @@ fn run_inner(
                 out_file: &absolute(&target),
                 input: &absolute(&input),
                 root,
+                tree: Some(&tree),
             },
             &compiled.imports,
             &compiled.data_refs,
@@ -856,17 +857,11 @@ fn run_inner(
         );
 
         if !outside.rewrites.is_empty() {
-            let map = |text: &str| {
-                crate::project::map_requires(text, |p| {
-                    outside
-                        .rewrites
-                        .iter()
-                        .find(|(spec, _)| spec == p)
-                        .map(|(_, to)| to.clone())
-                })
-            };
-            compiled.ship = map(&compiled.ship);
-            compiled.check = map(&compiled.check);
+            let top = deps.stack.len() == 1;
+            compiled.ship =
+                crate::project::map_requires(&compiled.ship, |p| outside.require_of(p, true));
+            compiled.check =
+                crate::project::map_requires(&compiled.check, |p| outside.require_of(p, top));
         }
 
         for d in &compiled.diagnostics {
@@ -1236,17 +1231,46 @@ pub struct Site<'a> {
     pub input: &'a Path,
     /// The project root, for the paths a message shows.
     pub root: &'a Path,
+    /// The tree of the project, when the run reads one: a mount of the
+    /// other project's output gives the require its place.
+    pub tree: Option<&'a crate::project::Tree>,
 }
 
 /// What the imports of one source that leave `in` came to.
 #[derive(Default)]
 pub struct Outside {
-    /// The require path each spec becomes in the output.
+    /// The require path each spec becomes in the output: the path on
+    /// disk from the output file.
     pub rewrites: Vec<(String, String)>,
+    /// The `@game/...` place of each spec whose output a mount of this
+    /// project holds. Roblox climbs instances, and luau-lsp reads the
+    /// relative require of a placed script the same way, so the disk
+    /// path finds nothing there.
+    pub places: Vec<(String, String)>,
     /// The specs of data files another project holds; the build of this
     /// project leaves them to that one.
     pub data: Vec<String>,
     pub problems: Vec<crate::modules::ImportProblem>,
+}
+
+impl Outside {
+    /// The require one spec that leaves `in` becomes: the place a mount
+    /// gives, else the path on disk. `placed` is false for the check
+    /// artifact of a project an import leads into, which sits outside
+    /// the sourcemap and keeps the disk path.
+    pub fn require_of(&self, spec: &str, placed: bool) -> Option<String> {
+        let find = |list: &[(String, String)]| {
+            list.iter()
+                .find(|(s, _)| s == spec)
+                .map(|(_, to)| to.clone())
+        };
+
+        match placed {
+            true => find(&self.places).or_else(|| find(&self.rewrites)),
+
+            false => find(&self.rewrites),
+        }
+    }
 }
 
 impl Deps {
@@ -1355,6 +1379,20 @@ impl Deps {
                 key.to_string(),
                 relative(from_dir, &dep_out.with_extension("")),
             ));
+
+            // The output from the root, `lib/build/lib.luau` inside it or
+            // `../Lib/build/lib.luau` beside it.
+            let shown = relative(&absolute(site.root), &dep_out);
+            let from_root = Path::new(&shown);
+            let from_root = from_root.strip_prefix(".").unwrap_or(from_root);
+
+            if let Some(place) = site
+                .tree
+                .and_then(|t| crate::project::instance_path(t, from_root))
+            {
+                out.places
+                    .push((key.to_string(), format!("@game/{}", place.join("/"))));
+            }
         }
 
         out
@@ -1509,6 +1547,7 @@ pub fn file_outside(
             out_file: &out_file,
             input: &input,
             root: &root,
+            tree: None,
         },
         imports,
         data_refs,

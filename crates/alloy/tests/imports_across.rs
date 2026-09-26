@@ -290,6 +290,58 @@ fn flux_sees_the_other_project_and_types_the_import() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// A mount of the other project's output gives the require its place.
+/// Roblox climbs instances, so the disk path failed there, and luau-lsp
+/// read it the same way in the check artifact. The mount may sit beside
+/// the root, `../shared/build`, or inside it.
+#[test]
+fn a_mounted_dependency_takes_its_place() {
+    let dir = workspace("mounted", &["main", "shared"]);
+    fs::write(dir.join("shared/src/util.aly"), UTIL).unwrap();
+    fs::create_dir_all(dir.join("main/src/server")).unwrap();
+    fs::write(
+        dir.join("main/src/server/main.server.aly"),
+        "import { double } from \"../../../shared/src/util\"\n\nprint(double(21))\n",
+    )
+    .unwrap();
+    let place = "require(\"@game/ReplicatedStorage/Shared/util\")";
+
+    for mount in ["../shared/build", "lib/build"] {
+        if mount == "lib/build" {
+            fs::rename(dir.join("shared"), dir.join("main/lib")).unwrap();
+            fs::write(
+                dir.join("main/src/server/main.server.aly"),
+                "import { double } from \"../../lib/src/util\"\n\nprint(double(21))\n",
+            )
+            .unwrap();
+        }
+
+        fs::write(
+            dir.join("main/alloy.toml"),
+            format!(
+                "{TOML}\n[mount]\nserver = [\"src/server\", \"@game/ServerScriptService/Server\"]\nlib = [\"{mount}\", \"@game/ReplicatedStorage/Shared\"]\n"
+            ),
+        )
+        .unwrap();
+
+        let root = dir.join("main");
+        let report = build(&root);
+        assert!(report.is_clean(), "{mount}: {:?}", messages(&report));
+        let ship = fs::read_to_string(root.join("build/server/main.server.luau")).unwrap();
+        assert!(ship.contains(place), "{mount}: {ship}");
+
+        let config = Config::load(&root.join("alloy.toml")).unwrap();
+        let report = alloy::build::flux_project(&root, &config).unwrap();
+        assert!(
+            report.checks[0].check.contains(place),
+            "{mount}: {}",
+            report.checks[0].check
+        );
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn one_file_follows_the_same_route() {
     let dir = workspace("one", &["main", "shared"]);

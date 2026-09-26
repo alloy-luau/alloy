@@ -404,7 +404,9 @@ pub fn in_copied_folder(require: &str) -> bool {
     )
 }
 
-/// A path with `.` and `..` folded, no file system access.
+/// A path with `.` and `..` folded, no file system access. A `..` with
+/// no folder before it stays: `../Lib/build` is a mount above the root,
+/// and `Lib/build` would name another folder.
 fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
 
@@ -412,9 +414,15 @@ fn normalize(path: &Path) -> PathBuf {
         match c {
             Component::CurDir => {}
 
-            Component::ParentDir => {
-                out.pop();
-            }
+            Component::ParentDir => match out.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+
+                _ => out.push(".."),
+            },
 
             other => out.push(other),
         }
@@ -1017,6 +1025,36 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
         let config = Config::parse(MOUNTS, Path::new("alloy.toml")).unwrap();
 
         Tree::load(Path::new("/does-not-exist"), &config)
+    }
+
+    /// A mount above the root keeps its `..`. `normalize` dropped it, so
+    /// a require into `../Lib/build` met no mount and kept its disk path.
+    #[test]
+    fn a_mount_above_the_root_holds_its_files() {
+        let config = Config::parse(
+            &format!("{MOUNTS}lib = [\"../Lib/build\", \"@game/ReplicatedStorage/Lib\"]\n"),
+            Path::new("alloy.toml"),
+        )
+        .unwrap();
+        let t = Tree::load(Path::new("/does-not-exist"), &config);
+
+        assert_eq!(
+            normalize(Path::new("src/../../Lib/x")),
+            Path::new("../Lib/x")
+        );
+        assert_eq!(normalize(Path::new("/a/../../b")), Path::new("/b"));
+        assert_eq!(
+            rewrite_requires(
+                &t,
+                Path::new("src/server/main.server.aly"),
+                "require('../../../Lib/build/lib')"
+            ),
+            "require('@game/ReplicatedStorage/Lib/lib')"
+        );
+        assert_eq!(
+            instance_path(&t, Path::new("../Lib/build/lib.luau")).unwrap(),
+            vec!["ReplicatedStorage", "Lib", "lib"]
+        );
     }
 
     #[test]

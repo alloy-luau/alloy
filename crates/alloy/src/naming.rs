@@ -1162,68 +1162,127 @@ impl Markup {
 }
 
 /// The functions of a file that return markup, by the token of their
-/// name: a `return` whose value lies in a markup region.
-fn markup_returns(toks: &[Tok], block: &Block, markup: &Markup, out: &mut HashSet<usize>) {
-    fn returns(toks: &[Tok], block: &Block, markup: &Markup) -> bool {
-        block.stmts.iter().any(|s| match s {
-            // A region inside the value: `return <Frame />`, and
-            // `return ( <Frame /> )` in parentheses too.
-            Stmt::Return(r) => r.values.iter().any(|v| {
-                let span = v.span();
-                let from = toks.get(span.start as usize).map_or(0, |t| t.start);
-                let to = toks
-                    .get((span.end as usize).saturating_sub(1))
-                    .map_or(0, |t| t.end);
+/// name: a `return` whose value lies in a markup region, or names a
+/// local of the function that holds one.
+fn markup_returns(
+    src: &str,
+    toks: &[Tok],
+    block: &Block,
+    markup: &Markup,
+    out: &mut HashSet<usize>,
+) {
+    // A region inside the value: `<Frame />`, and `( <Frame /> )` too.
+    fn holds(toks: &[Tok], v: &Expr, markup: &Markup) -> bool {
+        let span = v.span();
+        let from = toks.get(span.start as usize).map_or(0, |t| t.start);
+        let to = toks
+            .get((span.end as usize).saturating_sub(1))
+            .map_or(0, |t| t.end);
 
-                markup.regions.iter().any(|(a, _)| from <= *a && *a < to)
+        markup.regions.iter().any(|(a, _)| from <= *a && *a < to)
+    }
+
+    // The locals of a function body that hold markup,
+    // `local box = <input />`. A nested function binds for itself.
+    fn bound<'s>(
+        src: &'s str,
+        toks: &[Tok],
+        block: &Block,
+        markup: &Markup,
+        out: &mut HashSet<&'s str>,
+    ) {
+        for s in &block.stmts {
+            match s {
+                Stmt::Local(l) => {
+                    for (b, v) in l.names.iter().zip(&l.values) {
+                        if b.destructure.is_none()
+                            && !matches!(v, Expr::Function { .. })
+                            && holds(toks, v, markup)
+                        {
+                            out.insert(b.name.text(src, toks));
+                        }
+                    }
+                }
+
+                Stmt::LocalFunction(_) | Stmt::Function(_) => {}
+
+                other => {
+                    for c in stmt_children(other) {
+                        if let Child::Block(b) = c {
+                            bound(src, toks, b, markup, out);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn returns(
+        src: &str,
+        toks: &[Tok],
+        block: &Block,
+        markup: &Markup,
+        names: &HashSet<&str>,
+    ) -> bool {
+        block.stmts.iter().any(|s| match s {
+            Stmt::Return(r) => r.values.iter().any(|v| {
+                holds(toks, v, markup)
+                    || matches!(v, Expr::Name(n) if names.contains(n.text(src, toks)))
             }),
 
             // A nested function returns for itself.
             Stmt::LocalFunction(_) | Stmt::Function(_) => false,
 
             other => stmt_children(other).iter().any(|c| match c {
-                Child::Block(b) => returns(toks, b, markup),
+                Child::Block(b) => returns(src, toks, b, markup, names),
 
                 _ => false,
             }),
         })
     }
 
+    let component = |body: &Block| {
+        let mut names = HashSet::new();
+        bound(src, toks, body, markup, &mut names);
+
+        returns(src, toks, body, markup, &names)
+    };
+
     for s in &block.stmts {
         match s.under_default() {
             Stmt::LocalFunction(f) => {
-                if returns(toks, &f.body.block, markup) {
+                if component(&f.body.block) {
                     out.insert(f.name.start as usize);
                 }
 
-                markup_returns(toks, &f.body.block, markup, out);
+                markup_returns(src, toks, &f.body.block, markup, out);
             }
 
             Stmt::Function(f) => {
                 if let [name] = f.path.as_slice()
-                    && returns(toks, &f.body.block, markup)
+                    && component(&f.body.block)
                 {
                     out.insert(name.start as usize);
                 }
 
-                markup_returns(toks, &f.body.block, markup, out);
+                markup_returns(src, toks, &f.body.block, markup, out);
             }
 
             // `local Row = function(props) return <Frame /> end`.
             Stmt::Local(l) if l.names.len() == 1 && l.values.len() == 1 => {
                 if let Expr::Function { body, .. } = &l.values[0] {
-                    if returns(toks, &body.block, markup) {
+                    if component(&body.block) {
                         out.insert(l.names[0].name.start as usize);
                     }
 
-                    markup_returns(toks, &body.block, markup, out);
+                    markup_returns(src, toks, &body.block, markup, out);
                 }
             }
 
             other => {
                 for c in stmt_children(other) {
                     if let Child::Block(b) = c {
-                        markup_returns(toks, b, markup, out);
+                        markup_returns(src, toks, b, markup, out);
                     }
                 }
             }
@@ -1346,7 +1405,7 @@ pub(crate) fn lints(
     let classes = class_tables(src, toks, &chunk.block.stmts);
 
     if !markup.regions.is_empty() {
-        markup_returns(toks, &chunk.block, markup, &mut components);
+        markup_returns(src, toks, &chunk.block, markup, &mut components);
     }
 
     for (at, d) in w.decls.iter().enumerate() {

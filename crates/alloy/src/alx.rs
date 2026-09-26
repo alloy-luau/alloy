@@ -1326,6 +1326,29 @@ mod tests {
         );
     }
 
+    /// A function that returns a local holding markup is a component
+    /// too. A local that holds anything else does not make one.
+    #[test]
+    fn a_component_may_return_its_markup_through_a_local() {
+        let src = "local function create(n: string): any return n end\nlocal function NameInput()\n    local box = <TextBox />\n    if box then\n        return box\n    end\n    return box\nend\nlocal function Count(): number\n    local n = 1\n    return n\nend\nreturn { NameInput = NameInput, Count = Count }\n";
+        let mut config = luaux::Config::bare();
+        config.create = "create".to_string();
+        let out = compile_alx(src, &EmitOptions::default(), config)
+            .expect("the markup compiles")
+            .output;
+        let naming: Vec<&str> = out
+            .lints
+            .iter()
+            .filter(|l| l.name == "naming_convention")
+            .map(|l| l.message.as_str())
+            .collect();
+
+        assert_eq!(
+            naming,
+            ["`Count` is a function, and functions are snake_case here: `count`"]
+        );
+    }
+
     /// A lint message quotes the markup the author wrote, not the
     /// calls it lowers to.
     #[test]

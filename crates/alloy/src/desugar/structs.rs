@@ -2895,11 +2895,18 @@ impl<'s> Desugar<'s> {
 
         let mut after = None;
 
-        if i.branches.len() == 1
-            && let Cond::Expr(e) = &i.branches[0].0
-            && let Some((name, ty)) = self.negative_test(e)
-        {
-            let text = format!("local {name} = (({name} :: any) :: {ty})");
+        let mut tests = Vec::new();
+
+        if let [(Cond::Expr(e), _)] = i.branches.as_slice() {
+            self.negative_tests(e, &mut tests);
+        }
+
+        if !tests.is_empty() {
+            let text = tests
+                .iter()
+                .map(|(name, ty)| format!("local {name} = (({name} :: any) :: {ty})"))
+                .collect::<Vec<_>>()
+                .join(" ");
 
             match &i.else_block {
                 Some(b) => blocks.push((b.span.start, format!("{text} "))),
@@ -2937,6 +2944,22 @@ impl<'s> Desugar<'s> {
             }
 
             _ => {}
+        }
+    }
+
+    /// The `x is not T` tests an `or` chain holds, as (name, type). Each
+    /// one holds where the whole chain is false: `a or b or c` reaches `c`
+    /// only when `a` and `b` are both false.
+    pub(crate) fn negative_tests(&self, e: &Expr, out: &mut Vec<(String, String)>) {
+        match e {
+            Expr::Paren { inner, .. } => self.negative_tests(inner, out),
+
+            Expr::Binary { op, lhs, rhs, .. } if self.text_of(*op) == "or" => {
+                self.negative_tests(lhs, out);
+                self.negative_tests(rhs, out);
+            }
+
+            _ => out.extend(self.negative_test(e)),
         }
     }
 
@@ -3010,7 +3033,12 @@ impl<'s> Desugar<'s> {
 
             tests
         };
-        let negative = |c: &Expr| self.negative_test(c).into_iter().collect::<Vec<_>>();
+        let negative = |c: &Expr| {
+            let mut tests = Vec::new();
+            self.negative_tests(c, &mut tests);
+
+            tests
+        };
 
         match e {
             Expr::Binary { op, lhs, rhs, .. } => match self.text_of(*op) {
@@ -4532,6 +4560,29 @@ mod tests {
         ] {
             assert!(out.check.contains(want), "{want}\n{}", out.check);
         }
+    }
+
+    /// `a or b or c` reaches `c` only when `a` and `b` are false, so each
+    /// `x is not T` in an `or` chain narrows every later operand, the else
+    /// value, and the code after a guard. Only the operand right after the
+    /// test took the cast, and `v.b` in `v is not P or v.a or v.b` reported.
+    #[test]
+    fn an_or_chain_narrows_every_later_operand() {
+        let src = "struct P as\n    a: number\n    b: number\nend\n\nlocal function one(v: unknown): boolean\n    return v is not P or v.a ~= 1 or v.b ~= 2\nend\n\nlocal function two(p: unknown, q: unknown): number\n    if p is not P or q is not P then\n        return 0\n    end\n\n    return p.a + q.b\nend\n\nprint(one, two)\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert_eq!(
+            out.check.matches("((v :: any) :: P).").count(),
+            2,
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check
+                .contains("local p = ((p :: any) :: P) local q = ((q :: any) :: P)"),
+            "{}",
+            out.check
+        );
     }
 
     /// `import { Box as B }` binds the type as `B`, and `if v is B` gave

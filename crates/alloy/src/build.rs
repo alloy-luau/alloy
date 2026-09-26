@@ -1838,13 +1838,15 @@ fn resolve_import(from: &Path, path: &str, sources: &[PathBuf]) -> Option<PathBu
 }
 
 /// `circular_import`: an import that leads back to the file it sits in.
-/// Each file on the cycle reports the import that starts it.
+/// Each file on the cycle reports the import that starts it. An import
+/// the ship artifact drops, such as `import type`, runs nothing, so it
+/// closes no cycle.
 fn circular_imports(imports: &[(PathBuf, Vec<crate::ImportRef>)]) -> Vec<(PathBuf, Lint)> {
     let sources: Vec<PathBuf> = imports.iter().map(|(p, _)| p.clone()).collect();
     let mut edges: Vec<(usize, &crate::ImportRef, usize)> = Vec::new();
 
     for (i, (from, list)) in imports.iter().enumerate() {
-        for im in list {
+        for im in list.iter().filter(|im| im.runs) {
             if let Some(to) = resolve_import(from, &im.path, &sources)
                 && let Some(j) = sources.iter().position(|s| *s == to)
             {
@@ -2083,6 +2085,7 @@ mod tests {
             start: 0,
             end: 1,
             path: path.to_string(),
+            runs: true,
         };
         let imports = vec![
             (PathBuf::from("a.aly"), vec![im("./b")]),
@@ -2102,6 +2105,25 @@ mod tests {
             vec![im("./data.json"), im("./data.luau")],
         )];
         assert!(circular_imports(&data).is_empty());
+    }
+
+    /// `import type` requires nothing in the ship artifact, so it closes
+    /// no cycle. The value import back still counts.
+    #[test]
+    fn a_type_import_closes_no_cycle() {
+        let refs = |src: &str| crate::compile(src).unwrap().imports;
+        let a = refs("import type { B } from './b'\n\nexport struct A as\n    b: B?\nend\n");
+        let b = refs(
+            "import { A } from './a'\n\nexport function make(): A\n    return A.new({})\nend\n",
+        );
+        assert!(!a[0].runs, "{a:?}");
+        assert!(b[0].runs, "{b:?}");
+        // The build drops a test, and an import in it with it.
+        let t = refs("@test\nfunction t(): ()\n    import { A } from './a'\n    print(A)\nend\n");
+        assert!(!t[0].runs, "{t:?}");
+
+        let imports = vec![(PathBuf::from("a.aly"), a), (PathBuf::from("b.aly"), b)];
+        assert!(circular_imports(&imports).is_empty());
     }
 
     #[test]

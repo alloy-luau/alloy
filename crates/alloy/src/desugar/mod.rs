@@ -468,6 +468,9 @@ pub struct Rendered {
     pub lints: Vec<Lint>,
     /// Output byte ranges to blank in the ship artifact.
     pub ship_blanks: Vec<(u32, u32)>,
+    /// The source byte ranges of those blanks: a type-only import, a
+    /// test.
+    pub ship_dropped: Vec<(u32, u32)>,
     /// Whether the file required the std.
     pub uses_std: bool,
     /// Whether the file declares an extension on a foreign type, so the
@@ -926,6 +929,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         diagnostics: d.diagnostics,
         lints: d.lints,
         ship_blanks: out_blanks,
+        ship_dropped: blanks,
         uses_std: d.uses_std,
         ext_used: d.ext_hit,
         tests: d.test_names,

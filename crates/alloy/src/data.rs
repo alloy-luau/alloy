@@ -218,6 +218,7 @@ pub fn references(source: &str) -> Vec<crate::ImportRef> {
                     start: (line_start + a) as u32,
                     end: (line_start + b) as u32,
                     path: inner.to_string(),
+                    runs: true,
                 });
             }
 

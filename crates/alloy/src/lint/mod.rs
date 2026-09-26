@@ -492,7 +492,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Correctness,
         default: Level::Warn,
         summary: "two files that import each other",
-        detail: "A cycle of `import` lines: Luau's `require` of a module that is still loading is an error at runtime, and the first file to load decides which one fails. Move the shared part into a third module that both import. `alloy flux` reports it; a single-file lint cannot see it.",
+        detail: "A cycle of `import` lines: Luau's `require` of a module that is still loading is an error at runtime, and the first file to load decides which one fails. Move the shared part into a third module that both import. An `import type`, or an import in a test, requires nothing in the build, so it closes no cycle. `alloy flux` reports it; a single-file lint cannot see it.",
     },
     // --- suspicious ------------------------------------------------------------
     LintInfo {

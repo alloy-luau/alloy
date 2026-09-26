@@ -104,6 +104,9 @@ pub struct ImportRef {
     pub start: u32,
     pub end: u32,
     pub path: String,
+    /// Whether the ship artifact keeps the require. A type-only import
+    /// and an import in a test require nothing there.
+    pub runs: bool,
 }
 
 /// A source that could not be lexed or parsed even leniently.
@@ -404,15 +407,23 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
     // does `export { } from`, which requires its module as an import
     // does.
     let re_exports = parsed.chunk.block.stmts.iter().filter_map(|s| match s {
-        alloy_syntax::ast::Stmt::ExportList(x) => x.from,
+        alloy_syntax::ast::Stmt::ExportList(x) => x.from.map(|f| (f, true)),
 
         _ => None,
     });
     let imports = desugar::imports_in(&parsed.chunk.block)
         .into_iter()
-        .map(|i| i.path)
+        .map(|i| {
+            let at = parsed.lexed.toks[i.span.start as usize].start;
+            let dropped = rendered
+                .ship_dropped
+                .iter()
+                .any(|(a, b)| at >= *a && at < *b);
+
+            (i.path, !dropped)
+        })
         .chain(re_exports)
-        .filter_map(|path| {
+        .filter_map(|(path, runs)| {
             let t = parsed.lexed.toks[path.start as usize];
             let text = t.text(src);
             let path = text
@@ -429,6 +440,7 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
                 start: t.start,
                 end: t.end,
                 path,
+                runs,
             })
         })
         .collect();

@@ -1039,6 +1039,93 @@ fn member_signature(
     Some(format!("    {visibility} {head}"))
 }
 
+/// Whether the byte at `offset` sits in the body of an `if` or an
+/// `elseif` that tests `path` for a value: `if player.Character then`,
+/// `if path ~= nil then`, or such a test joined to others by `and`. No
+/// assignment to `path` may stand between the test and the byte. The
+/// checker narrows the field there, and its hover of the field does not.
+pub fn tested_at(src: &str, path: &str, offset: usize) -> bool {
+    use crate::desugar::{Child, expr_children, stmt_children};
+    use alloy_syntax::ast::{Block, Cond};
+    use alloy_syntax::lexer::Tok;
+
+    fn bytes(toks: &[Tok], span: TokSpan) -> Option<(usize, usize)> {
+        let first = toks.get(span.start as usize)?;
+        let last = toks.get((span.end as usize).checked_sub(1)?)?;
+
+        Some((first.start as usize, last.end as usize))
+    }
+
+    fn walk(src: &str, toks: &[Tok], child: Child, path: &str, offset: usize) -> bool {
+        let block = match child {
+            Child::Block(b) => b,
+
+            Child::Function(f) => &f.block,
+
+            Child::Expr(e) => {
+                return expr_children(e)
+                    .into_iter()
+                    .any(|c| walk(src, toks, c, path, offset));
+            }
+        };
+
+        block
+            .stmts
+            .iter()
+            .any(|s| tests(src, toks, s, path, offset) || in_children(src, toks, s, path, offset))
+    }
+
+    fn in_children(src: &str, toks: &[Tok], s: &Stmt, path: &str, offset: usize) -> bool {
+        stmt_children(s)
+            .into_iter()
+            .any(|c| walk(src, toks, c, path, offset))
+    }
+
+    fn tests(src: &str, toks: &[Tok], s: &Stmt, path: &str, offset: usize) -> bool {
+        let Stmt::If(i) = s else {
+            return false;
+        };
+
+        i.branches.iter().any(|(cond, body): &(Cond, Block)| {
+            let Cond::Expr(e) = cond else {
+                return false;
+            };
+            let (Some((from, to)), Some((start, end))) =
+                (bytes(toks, e.span()), bytes(toks, body.span))
+            else {
+                return false;
+            };
+
+            if !(to <= start && start <= offset && offset <= end) {
+                return false;
+            }
+
+            let proved = src[from..to].split(" and ").any(|part| {
+                let part = part.split_whitespace().collect::<Vec<_>>().join(" ");
+
+                part == path || part == format!("{path} ~= nil") || part == format!("nil ~= {path}")
+            });
+            let assigned = src[to..offset]
+                .match_indices(&format!("{path} ="))
+                .any(|(k, _)| !src[to + k + path.len() + 2..].starts_with('='));
+
+            proved && !assigned
+        })
+    }
+
+    let Ok(parsed) = alloy_syntax::parse_lenient(src, crate::fmt::parse_options()) else {
+        return false;
+    };
+
+    walk(
+        src,
+        &parsed.lexed.toks,
+        Child::Block(&parsed.chunk.block),
+        path,
+        offset,
+    )
+}
+
 /// The type a top-level `local` or `const` binding holds: the
 /// annotation it wrote, or the type its literal value writes. A file
 /// that reaches the name from somewhere else reads it from here.
@@ -1776,6 +1863,24 @@ pub fn bindings(src: &str) -> Vec<Binding> {
 #[cfg(test)]
 mod binding_tests {
     use super::*;
+
+    /// A field reads as tested in the body of the `if` that tested it,
+    /// in no `else`, after no assignment, and outside the `if` not at
+    /// all. A closure body counts, since the test holds there too.
+    #[test]
+    fn a_field_is_tested_in_the_body_of_its_if() {
+        let src = "local function a()\n    if p.C then\n        print(p.C)\n    else\n        print(p.C)\n    end\n    if m and m.P ~= nil then\n        f(function() print(m.P) end)\n    end\n    if p.C then\n        p.C = nil\n        print(p.C)\n    end\n    print(p.C)\nend\n";
+        let at = |needle: &str, nth: usize| {
+            src.match_indices(needle).nth(nth).expect("the needle").0 + needle.len() - 1
+        };
+
+        assert!(tested_at(src, "p.C", at("print(p.C", 0)));
+        assert!(!tested_at(src, "p.C", at("print(p.C", 1)), "the else");
+        assert!(tested_at(src, "m.P", at("print(m.P", 0)), "a closure");
+        assert!(!tested_at(src, "p.C", at("print(p.C", 2)), "an assignment");
+        assert!(!tested_at(src, "p.C", at("print(p.C", 3)), "after the if");
+        assert!(!tested_at(src, "m.P", at("print(p.C", 0)), "another field");
+    }
 
     fn prefix_of(src: &str, name: &str) -> Option<String> {
         bindings(src)

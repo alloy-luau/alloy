@@ -3102,3 +3102,28 @@ fn a_remote_through_a_barrel_hovers_by_its_declaration() {
     assert!(named.is_some_and(|s| s.contains("remote Plant(slot: number) from client")));
     assert!(pathed.is_some_and(|s| s.contains("remote Plant(slot: number) from client")));
 }
+
+/// `player.Character` inside `if player.Character then` read the
+/// optional type the class declares. The checker reads the value there
+/// as not nil, so the hover drops the `?`. Outside the `if` and in the
+/// `else`, the `?` stays.
+#[test]
+fn a_tested_field_hovers_without_its_optional() {
+    let src = "local function a()\n    if player.Character then\n        print(player.Character)\n    else\n        print(player.Character)\n    end\n    print(player.Character)\nend\n";
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let child = "```alloy\nR15Character?\n```";
+
+    assert_eq!(
+        narrowed_field(child, doc, 2, 24).as_deref(),
+        Some("```alloy\nR15Character\n```")
+    );
+    assert_eq!(narrowed_field(child, doc, 4, 24), None);
+    assert_eq!(narrowed_field(child, doc, 6, 20), None);
+    // The receiver is a value of its own, and a declaration is no field.
+    assert_eq!(narrowed_field(child, doc, 2, 14), None);
+    assert_eq!(
+        narrowed_field("```alloy\nlocal x: R15Character?\n```", doc, 2, 24),
+        None
+    );
+}

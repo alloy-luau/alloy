@@ -810,6 +810,31 @@ pub(crate) fn keep_annotation(value: &str, doc: &Doc, line: u32, character: u32)
     Some(format!("{fence}\n{head}: {annotation}\n```{tail}"))
 }
 
+/// A field inside the `if` that tested it: `player.Character` in the
+/// body of `if player.Character then`. The child prints the type the
+/// class declares, `R15Character?`, and the checker reads the value
+/// there as `R15Character`. The hover drops the `?`.
+pub(crate) fn narrowed_field(value: &str, doc: &Doc, line: u32, character: u32) -> Option<String> {
+    let Caret { offset, start, end } = Caret::at(&doc.source, line, character)?;
+    let (fence, rest) = value
+        .split_once('\n')
+        .filter(|(f, _)| f.starts_with("```"))?;
+    let (ty, tail) = rest.split_once("\n```")?;
+    let narrowed = ty.strip_suffix('?').filter(|t| !t.contains(['\n', ':']))?;
+    // The path the field ends: `player.Character`, `a.b.c`.
+    let holder = doc.source[..start].strip_suffix('.')?;
+    let from = holder
+        .rfind(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+        .map_or(0, |i| i + 1);
+    let source = alloy::luaux::resolve::blank_luaux_regions(
+        &doc.source,
+        &crate::markup::regions(&doc.source),
+    );
+
+    alloy::declarations::tested_at(&source, &doc.source[from..end], offset)
+        .then(|| format!("{fence}\n{narrowed}\n```{tail}"))
+}
+
 /// The type text after the `name:` nearest before `at`: up to a `,`, a
 /// `)`, an `=`, or the line's end at bracket depth zero. The result
 /// carries the declaration's offset. A use never comes before its

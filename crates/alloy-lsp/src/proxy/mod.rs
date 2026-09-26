@@ -71,7 +71,7 @@ use hover::{
     is_byte_count, keep_annotation, let_else_binding, literal_key, literal_key_path,
     lowers_a_block, method_owner, module_hover, name_by_declaration, name_method_doc,
     name_method_receiver, name_self_receiver, name_solver_local, name_solver_struct,
-    name_solver_variable, name_trait_method, names_a_key, optional_index_hover,
+    name_solver_variable, name_trait_method, names_a_key, narrowed_field, optional_index_hover,
     prefer_constructed_struct, receiver_type, record_entry, remote_parameter_hover, remote_spec,
     restates_itself, restore_struct_arguments, restyle_hover, restyle_signatures, service_hover,
     split_top, std_member_hover, unlocal_parameter, used_field_hover, used_field_owner,

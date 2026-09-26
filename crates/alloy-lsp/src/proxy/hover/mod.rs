@@ -29,9 +29,9 @@ pub(crate) use restyle::{
     declared_signature, dedupe_item_details, drop_bound_intersections, empty_parameter_names,
     fold_std_shapes, invents_a_type, is_byte_count, keep_annotation, lowers_a_block, member_doc,
     name_by_declaration, name_method_doc, name_method_receiver, name_self_receiver,
-    name_solver_variable, name_trait_method, names_a_key, prefer_constructed_struct,
-    restates_itself, restore_struct_arguments, restyle_hover, restyle_signatures, source_type,
-    std_generic, unlocal_parameter,
+    name_solver_variable, name_trait_method, names_a_key, narrowed_field,
+    prefer_constructed_struct, restates_itself, restore_struct_arguments, restyle_hover,
+    restyle_signatures, source_type, std_generic, unlocal_parameter,
 };
 
 use super::completion::{lands_on_member, member_position, sep_of};

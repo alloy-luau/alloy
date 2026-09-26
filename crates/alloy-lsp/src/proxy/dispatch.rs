@@ -1475,6 +1475,10 @@ impl Server {
                             text = alloy::shapes::fold(&text, &st.known_shapes_at(ctx.as_deref()));
                             text = colon_without_self(&text);
 
+                            if let Some(narrowed) = narrowed_field(&text, doc, line, character) {
+                                text = narrowed;
+                            }
+
                             // A module's table prints every member the
                             // solver inferred, and a function defined
                             // with no parameters carries a variadic

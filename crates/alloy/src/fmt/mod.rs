@@ -1186,6 +1186,24 @@ mod tests {
         assert_eq!(fmt(short), short);
     }
 
+    /// A long ternary broke the arguments of the call in its last
+    /// branch. It breaks at its `?` and its `:`, one branch a line.
+    #[test]
+    fn a_long_ternary_breaks_at_its_operators() {
+        let branches = "is_the_base\n    ? piece('base_piece_name', 0).column\n    : piece('middle_piece_name', variant).column";
+        let src = format!(
+            "local function f(): number\n  return {}\nend\n",
+            branches.replace("\n    ", " ")
+        );
+        let want = format!("local function f(): number\n  return {branches}\nend\n");
+        assert_eq!(fmt(&src), want);
+        assert_eq!(fmt(&want), want);
+
+        // One that fits keeps its line.
+        let short = "local x = flag ? 1 : 2\n";
+        assert_eq!(fmt(short), short);
+    }
+
     /// The `;` between two bindings ended the scan of the `if`, so it
     /// found no `then` and the index `ITEMS[s.item]` broke instead.
     #[test]

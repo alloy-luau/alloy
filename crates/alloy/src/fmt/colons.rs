@@ -311,6 +311,22 @@ impl<'a> Walk<'a> {
                 }
             }
 
+            // `c ? a : b` is a chain of its `?` and its `:`, so a long one
+            // breaks there, one branch a line, and not inside a branch.
+            Expr::Ternary {
+                cond,
+                then_value,
+                span,
+                ..
+            } => {
+                let (q, colon) = (cond.span().end as usize, then_value.span().end as usize);
+                let text = |i: usize| TokSpan::new(i, i + 1).text(self.src, self.toks);
+
+                if text(q) == "?" && text(colon) == ":" {
+                    self.chains.push((*span, vec![q, colon]));
+                }
+            }
+
             _ => {}
         }
 

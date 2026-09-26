@@ -2073,6 +2073,21 @@ mod tests {
         stable("attribute tag on function\n", "attribute tag on function\n");
     }
 
+    /// A blank line after the first statement of a callback stays. fmt
+    /// read `mode(x)` after `function()` as the end of a header and
+    /// dropped the blank line under it.
+    #[test]
+    fn a_blank_line_after_a_call_in_a_callback_stays() {
+        let src = "event:Connect(function()\n  mode(read_mode())\n\n  print(1)\nend)\n";
+        stable(src, src);
+
+        // The blank line right under a header still goes.
+        stable(
+            "local function f<T>(x: T)\n\n  print(x)\nend\nlocal g = function()\n\n  print(1)\nend\n",
+            "local function f<T>(x: T)\n  print(x)\nend\nlocal g = function()\n  print(1)\nend\n",
+        );
+    }
+
     #[test]
     fn formatting_is_idempotent_on_the_examples() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../examples");

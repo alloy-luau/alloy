@@ -53,27 +53,26 @@ impl<'s> Formatter<'s> {
     }
 
     /// Whether the `)` at `p` closes a function's parameter list, with
-    /// or without a return type after it.
+    /// or without a return type after it: the `(` follows `function`, or
+    /// the name after it, with its type parameters. A call on the first
+    /// line of a callback, `function()` then `mode(x)`, is no header.
     fn function_header_ends(&self, p: usize) -> bool {
-        let mut j = p;
-        let mut depth = 0;
+        let Some(mut j) = self.opener_of(p) else {
+            return false;
+        };
 
-        while j > 0 {
-            j -= 1;
-            let t = &self.items[j];
-
-            if t.is(")") {
-                depth += 1;
-            } else if t.is("(") {
-                if depth == 0 {
-                    return (j.saturating_sub(4)..j).any(|k| self.items[k].is("function"));
-                }
-
-                depth -= 1;
+        // `function f<T>(`: the type parameters stand between.
+        if j > 0 && self.items[j - 1].is(">") && self.generic[j - 1] {
+            while j > 0 && !(self.items[j - 1].is("<") && self.generic[j - 1]) {
+                j -= 1;
             }
+
+            j = j.saturating_sub(1);
         }
 
-        false
+        j > 0
+            && (self.items[j - 1].is("function")
+                || (self.items[j - 1].is_ident() && self.function_name_before(j - 1)))
     }
 
     fn continues_at(&self, i: usize) -> bool {

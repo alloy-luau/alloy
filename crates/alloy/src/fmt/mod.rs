@@ -472,7 +472,38 @@ fn items_of(src: &str, toks: &[Tok], comments: &[(u32, u32)]) -> Vec<Item> {
         prev_end = b;
     }
 
+    mark_names(&mut out);
     merge_operators(out)
+}
+
+/// `on` is a keyword only in `attribute Name on ...`, and `read` and
+/// `write` only before a field of a table type, never before a `(`.
+/// Anywhere else each is a name, as in `if on() then`, so the layout and
+/// the spacing read it as one.
+fn mark_names(items: &mut [Item]) {
+    let mut attribute_line = false;
+
+    for i in 0..items.len() {
+        if items[i].newlines_before > 0 {
+            attribute_line = false;
+        }
+
+        if items[i].is_comment() {
+            continue;
+        }
+
+        match items[i].text.as_str() {
+            "attribute" => attribute_line = true,
+
+            "on" => items[i].name_here |= !attribute_line,
+
+            "read" | "write" => {
+                items[i].name_here |= items.get(i + 1).is_some_and(|n| n.is("("));
+            }
+
+            _ => {}
+        }
+    }
 }
 
 /// The lexer emits `?`, `<`, and `>` one character at a time. The
@@ -2029,6 +2060,17 @@ mod tests {
         );
         let noted = "print(a == 'first_long_name' or b == 'second_long_name') -- a note that runs on past the column\n";
         stable(noted, noted);
+    }
+
+    /// `on` is a keyword only in `attribute Name on ...`. fmt spaced a
+    /// call of a local named `on` as `on ()`.
+    #[test]
+    fn a_call_of_a_local_named_on_stays_tight() {
+        stable(
+            "local x = if on() then on[1] else 2\n",
+            "local x = if on() then on[1] else 2\n",
+        );
+        stable("attribute tag on function\n", "attribute tag on function\n");
     }
 
     #[test]

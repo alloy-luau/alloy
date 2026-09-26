@@ -900,8 +900,6 @@ pub fn spec(
         "\nlocal __lest = require(\"@{}\")\n",
         LEST_ALIAS.0
     ));
-    // `@cfg(test)` holds while the spec runs.
-    text.push_str("__alloy.set_testing(true)\n");
     // `$expect(v)` reaches the matchers through the runtime.
     text.push_str("__alloy.set_expect(__lest.expect)\n");
     text.push_str(&format!(
@@ -1567,7 +1565,8 @@ end
     }
 
     /// `$assert` lowers to the Luau `assert`, so the body needs nothing
-    /// of the runtime. The spec still calls `__alloy.set_testing`.
+    /// of the runtime. The spec still calls `__alloy.set_testing`, on
+    /// the first line, so `@cfg(test)` holds while the module loads.
     #[test]
     fn a_spec_requires_the_runtime_it_calls() {
         let src = "@test
@@ -1587,9 +1586,12 @@ end
         .unwrap();
         assert_eq!(count, 1);
         assert!(
-            text.contains("local __alloy = require(\"./.modules/alloy\")"),
+            text.contains(
+                "local __alloy = require(\"./.modules/alloy\") __alloy.set_testing(true)"
+            ),
             "{text}"
         );
+        assert_eq!(text.matches("set_testing").count(), 1, "{text}");
     }
 
     /// A source that does not parse gives the recovery's tree, not the

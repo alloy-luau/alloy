@@ -844,8 +844,15 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     let mut prefix_len = 0u32;
 
     if d.uses_std && !options.definitions {
+        // A spec marks the run before the module's own code, so
+        // `@cfg(test)` holds while the module loads too.
+        let testing = match options.tests {
+            true => "__alloy.set_testing(true) ",
+
+            false => "",
+        };
         let line = format!(
-            "local __alloy = require({}) ",
+            "local __alloy = require({}) {testing}",
             luau_string(&options.std_require)
         );
         prefix_len = line.len() as u32;

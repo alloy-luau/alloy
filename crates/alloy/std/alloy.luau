@@ -4084,9 +4084,8 @@ function alloy.remote(spec: any): Remote
 		})
 	end
 
-	-- Nothing the engine owns is touched until the first call. A spec
-	-- requires the module before it calls `alloy.set_testing`, so a
-	-- service lookup at load time broke every test in the file.
+	-- Nothing the engine owns is touched until the first call, so a
+	-- module that declares a remote loads where no engine runs.
 	local bound = false
 
 	local function bind()

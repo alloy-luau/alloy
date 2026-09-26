@@ -97,10 +97,23 @@ impl<'s> Formatter<'s> {
 
     fn for_header_before(&self, i: usize) -> bool {
         let mut j = i;
+        // A newline inside a bracket group is the group's. A header whose
+        // group broke goes on past it, so its `do` opens no second block.
+        let mut depth = 0usize;
 
         while j > 0 {
             j -= 1;
             let t = &self.items[j];
+
+            if !t.is_comment() && closes(&t.text) {
+                depth += 1;
+            } else if !t.is_comment() && opens(&t.text) {
+                depth = depth.saturating_sub(1);
+            }
+
+            if depth > 0 {
+                continue;
+            }
 
             if self.is_loop_head(j) {
                 return true;
@@ -162,10 +175,29 @@ impl<'s> Formatter<'s> {
     /// signature; write the comment above the function instead.
     fn next_line_starts_signature(&self, i: usize) -> bool {
         let mut k = i + 1;
+        // A newline inside the parameter list is the list's, so a broken
+        // list still reads as a signature.
+        let mut depth = 0usize;
 
-        while k < self.items.len()
-            && (self.items[k].newlines_before == 0 || self.items[k].is_comment())
-        {
+        while k < self.items.len() {
+            let t = &self.items[k];
+
+            if t.is_comment() {
+                k += 1;
+
+                continue;
+            }
+
+            if depth == 0 && t.newlines_before > 0 {
+                break;
+            }
+
+            if opens(&t.text) {
+                depth += 1;
+            } else if closes(&t.text) {
+                depth = depth.saturating_sub(1);
+            }
+
             k += 1;
         }
 
@@ -459,11 +491,14 @@ impl<'s> Formatter<'s> {
 
             let mut depth = 0i32;
             let mut marks = Vec::new();
+            // `<<` is a bracket group, and a group that broke holds
+            // newlines. A plain `<` still ends at the line.
+            let group = it.is("<<");
 
             for j in i..self.items.len() {
                 let t = &self.items[j];
 
-                if (t.newlines_before > 0 && j != i)
+                if (t.newlines_before > 0 && j != i && !group)
                     || t.is("then")
                     || t.is("do")
                     || (t.is("=") && depth == 0)
@@ -506,12 +541,15 @@ impl<'s> Formatter<'s> {
     fn nodes(&self, pos: &mut usize, until: Option<&str>) -> Vec<Node> {
         let mut out = Vec::new();
         let mut block_depth = 0i32;
+        // The open `<` of type arguments. A comma inside them, as in
+        // `Result<T, E>`, separates no elements of the group.
+        let mut angle = 0usize;
 
         while *pos < self.items.len() {
             let it = &self.items[*pos];
 
             if until.is_some() && !it.is_comment() {
-                let separator = (it.is(",") || it.is(";")) && block_depth <= 0;
+                let separator = (it.is(",") || it.is(";")) && block_depth <= 0 && angle == 0;
 
                 if separator || Some(it.text.as_str()) == until {
                     return out;
@@ -522,6 +560,16 @@ impl<'s> Formatter<'s> {
                 out.push(self.group(pos));
 
                 continue;
+            }
+
+            if self.generic[*pos] {
+                match it.text.as_str() {
+                    "<" => angle += 1,
+
+                    ">" => angle = angle.saturating_sub(1),
+
+                    _ => {}
+                }
             }
 
             block_depth += self.block_delta(*pos);
@@ -991,13 +1039,16 @@ impl<'s> Formatter<'s> {
 
     /// Whether the group at `open` writes a comma after its last element
     /// when it expands. A call, type arguments, and an index take none:
-    /// `t[k,]` does not parse.
+    /// `t[k,]`, `t![k,]`, and `w->[k,]` do not parse.
     fn trailing_comma(&self, open: usize) -> bool {
         let opener = self.items[open].text.as_str();
+        let index = opener.ends_with('[')
+            && (self.is_index(open)
+                || self
+                    .prev_code(open)
+                    .is_some_and(|p| matches!(self.items[p].text.as_str(), "->" | "=>" | "!")));
 
-        self.options.trailing_comma
-            && !matches!(opener, "(" | "?(" | "<<")
-            && !(opener.ends_with('[') && self.is_index(open))
+        self.options.trailing_comma && !matches!(opener, "(" | "?(" | "<<") && !index
     }
 
     /// The width of item `i` on a flat line, with the space the render

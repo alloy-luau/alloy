@@ -1249,15 +1249,56 @@ mod tests {
     }
 
     /// An index that breaks takes no trailing comma: `t[k,]` does not
-    /// parse.
+    /// parse. The child index `w->[k]` and the index after an assert,
+    /// `t![k]`, take none either.
     #[test]
     fn a_broken_index_takes_no_trailing_comma() {
-        let key =
-            "a_very_long_key_name_that_runs_on_and_on_and_on_past_the_column_width_of_the_file";
-        let src = format!("local event = (instance :: any)[{key}] :: unknown\n");
-        let want = format!("local event = (instance :: any)[\n  {key}\n] :: unknown\n");
-        assert_eq!(fmt(&src), want);
-        assert_eq!(fmt(&want), want);
+        let key = "a_very_long_key_name_that_runs_on_and_on_and_on_past_the_column_width_of_the_whole_file";
+
+        for (head, tail) in [
+            ("local event = (instance :: any)[", "] :: unknown"),
+            ("local j = w->Map->[", "]"),
+            ("local k = map![", "]"),
+        ] {
+            let src = format!("{head}{key}{tail}\n");
+            let want = format!("{head}\n  {key}\n{tail}\n");
+            assert_eq!(fmt(&src), want);
+            assert_eq!(fmt(&want), want);
+        }
+    }
+
+    /// A comma inside type arguments split the parameter list around
+    /// them, as `Result<any,` and `string>` on two lines. The second run
+    /// then read `<` as a comparison. The comma now stays inside.
+    #[test]
+    fn a_broken_group_keeps_its_type_arguments_whole() {
+        let src = "local function report(player: Player, result: Result<any, string>, success: string, extra: number, more: number)\nend\n";
+        let want = "local function report(\n  player: Player,\n  result: Result<any, string>,\n  success: string,\n  extra: number,\n  more: number\n)\nend\n";
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want);
+
+        // Explicit type arguments that break keep their tight brackets.
+        let src = "local damaged = Signal.new<<Player, number, string, boolean, Instance, Vector3, CFrame, Color3, Vector2>>()\n";
+        let want = "local damaged = Signal.new<<\n  Player,\n  number,\n  string,\n  boolean,\n  Instance,\n  Vector3,\n  CFrame,\n  Color3,\n  Vector2\n>>()\n";
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want);
+    }
+
+    /// A header whose group broke put a newline before its `do`, or
+    /// before the next line of a trait signature. The layout read a
+    /// second block there, and the second run indented every line after
+    /// it one level more.
+    #[test]
+    fn a_broken_header_opens_one_block() {
+        let src = "for name, r in Attributes.fields(struct_type_with_a_long_name, range_with_a_long_name, more_args, extra) do\n  print(name, r)\nend\nprint(1)\n";
+        let want = "for name, r in Attributes.fields(\n  struct_type_with_a_long_name,\n  range_with_a_long_name,\n  more_args,\n  extra\n) do\n  print(name, r)\nend\nprint(1)\n";
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want);
+
+        let src = "trait Codec\n  function decode(self, raw_input_string: string, options: DecodeOptions, fallback: SaveData): SaveData\nend\nprint(1)\n";
+        let want = "trait Codec\n  function decode(\n    self,\n    raw_input_string: string,\n    options: DecodeOptions,\n    fallback: SaveData\n  ): SaveData\nend\nprint(1)\n";
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want);
     }
 
     /// A service import keeps the form the reader wrote, and the

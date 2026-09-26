@@ -195,17 +195,6 @@ impl<'s> Scan<'s> {
             .unwrap_or(self.toks.len())
     }
 
-    /// Whether a `local` or a `const` of the name at `n`, declared after
-    /// it, holds the name at `j` in its block. The name at `j` then reads
-    /// that binding, not the one at `n`.
-    pub(crate) fn shadowed(&self, n: usize, j: usize) -> bool {
-        (n + 1..j).any(|d| {
-            self.t(d) == self.t(n)
-                && matches!(self.prev(d), "local" | "const")
-                && j < self.scope_end(d)
-        })
-    }
-
     /// The declaration that the name at `at` reads: the last `local`,
     /// `const`, or parameter of the name before it whose block still
     /// holds it. `None` for a name that no such declaration binds.

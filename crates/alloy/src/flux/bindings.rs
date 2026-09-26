@@ -876,9 +876,9 @@ impl<'s> Scan<'s> {
     /// or a call of a method that changes it. `const` freezes the
     /// binding alone, which the keyword does not say.
     pub(crate) fn const_mutation(&self, out: &mut Vec<Lint>) {
-        // Each const name with the token that declares it. A write above
-        // the declaration reaches another binding of the name, such as a
-        // parameter of a function higher in the file.
+        // Each const name with the token that declares it. A write reaches
+        // the const only inside its block and past any nearer binding of
+        // the name, such as a `local` in another function.
         let mut names: Vec<(&'s str, usize)> = Vec::new();
 
         for i in 0..self.toks.len() {
@@ -902,7 +902,11 @@ impl<'s> Scan<'s> {
         }
 
         for i in 0..self.toks.len() {
-            if !self.is_name(i) || !names.iter().any(|&(n, at)| n == self.t(i) && at < i) {
+            if !self.is_name(i)
+                || !names
+                    .iter()
+                    .any(|&(n, at)| n == self.t(i) && self.reads_binding(at, i))
+            {
                 continue;
             }
 
@@ -934,6 +938,13 @@ impl<'s> Scan<'s> {
                 None => {}
             }
         }
+    }
+
+    /// Whether the name at `j` reads the binding that the name at `n`
+    /// declares: `j` is in the block of `n`, and no nearer `local`,
+    /// `const` or parameter of the name holds it.
+    fn reads_binding(&self, n: usize, j: usize) -> bool {
+        n < j && j < self.scope_end(n) && self.binding_at(j).is_none_or(|d| d <= n)
     }
 
     /// How the statement at the name `i` writes into the value the name
@@ -1350,7 +1361,7 @@ impl<'s> Scan<'s> {
                             self.t(j) == self.t(n)
                                 && !self.is_member(j)
                                 && self.value_write(j).is_some()
-                                && !self.shadowed(n, j)
+                                && self.reads_binding(n, j)
                         })
                 })
             {
@@ -1394,7 +1405,7 @@ impl<'s> Scan<'s> {
                 k += 2;
             }
 
-            if !self.assigns_at(k) || self.shadowed(n, j) {
+            if !self.assigns_at(k) || !self.reads_binding(n, j) {
                 return false;
             }
 

@@ -1563,13 +1563,14 @@ mod tests {
             [1]
         );
         // A `local` in one branch does not reach the other: the write
-        // in the `else` keeps the outer `q` a local.
+        // in the `else` keeps the outer `q` a local, and the inner `q`,
+        // which nothing writes, takes `const`.
         assert_eq!(
             lines(
                 "local q = 1\nif q then\n    local q = 2\n    print(q)\nelse\n    q = 3\nend\nprint(q)\n",
                 "prefer_const"
             ),
-            Vec::<usize>::new()
+            [3]
         );
     }
 
@@ -1595,6 +1596,34 @@ mod tests {
                 "const_mutation"
             ),
             [2, 3]
+        );
+    }
+
+    /// A `const` reaches only its own block. `const_mutation` read any
+    /// later name of its text, so a write through a `local` or a
+    /// parameter of that name in another function fired.
+    #[test]
+    fn a_const_does_not_reach_a_name_in_another_function() {
+        let lines = |src: &str, lint: &str| -> Vec<usize> {
+            crate::compile(src)
+                .unwrap()
+                .lints
+                .into_iter()
+                .filter(|l| l.name == lint)
+                .map(|l| src[..l.start as usize].matches('\n').count() + 1)
+                .collect()
+        };
+        let src = "local function read(): number\n    const held = { x = 1 }\n    held.x = 2\n    return held.x\nend\nlocal function write(): ()\n    local held = { x = 1 }\n    held.x = 3\n    print(held)\nend\nlocal function take(held: { x: number }): ()\n    held.x = 4\nend\nprint(read, write, take)\n";
+        assert_eq!(lines(src, "const_mutation"), [3]);
+        // The write in `write` keeps that `held` a `local`, and reaches no other.
+        assert_eq!(lines(src, "prefer_const"), Vec::<usize>::new());
+        // A top-level const reaches into a function that has no binding of the name.
+        assert_eq!(
+            lines(
+                "const T = { n = 0 }\nlocal function bump(): ()\n    T.n += 1\nend\nprint(bump)\n",
+                "const_mutation"
+            ),
+            [3]
         );
     }
 

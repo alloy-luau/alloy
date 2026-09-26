@@ -1076,7 +1076,7 @@ fn fold_repeated_members(text: &mut String) {
 }
 
 /// The type text with every union's repeated members dropped.
-fn dedupe_type(text: &str) -> String {
+pub fn dedupe_type(text: &str) -> String {
     let parts = split_union(text);
 
     if parts.len() > 1 {

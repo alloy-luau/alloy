@@ -2540,9 +2540,47 @@ pub(crate) fn close_item_packs(value: &mut Value, empty: &HashSet<String>) {
     }
 }
 
+/// A completion detail is a type alone. The shape fold names both
+/// halves of a mixed enum, the unit variants and the ones with a
+/// payload, so a field reads `State | State` in the list while the
+/// hover, which dedupes the type after its `: `, reads `State`.
+pub(crate) fn dedupe_item_details(value: &mut Value) {
+    match value {
+        Value::Array(items) => items.iter_mut().for_each(dedupe_item_details),
+
+        Value::Object(map) => {
+            if let Some(Value::String(detail)) = map.get_mut("detail") {
+                *detail = alloy::shapes::dedupe_type(detail);
+            }
+
+            if let Some(items) = map.get_mut("items") {
+                dedupe_item_details(items);
+            }
+        }
+
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `State | State` in a completion detail reads `State`, inside a
+    /// table type too. A list under `items` takes the same pass.
+    #[test]
+    fn a_completion_detail_drops_a_repeated_member() {
+        let mut list = json!({ "items": [
+            { "label": "cur", "detail": "State | State" },
+            { "label": "slots", "detail": "{State | State}" },
+            { "label": "n", "detail": "number | string" },
+        ] });
+        dedupe_item_details(&mut list);
+
+        assert_eq!(list["items"][0]["detail"], "State");
+        assert_eq!(list["items"][1]["detail"], "{State}");
+        assert_eq!(list["items"][2]["detail"], "number | string");
+    }
 
     fn doc_of(src: &str) -> Doc {
         Doc::new(

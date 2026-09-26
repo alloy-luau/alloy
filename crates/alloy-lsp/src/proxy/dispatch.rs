@@ -1876,6 +1876,7 @@ impl Server {
                 ) && let Some(doc) = ctx.as_ref().and_then(|u| st.docs.get(u))
                 {
                     close_item_packs(result, &empty_parameter_names(doc));
+                    dedupe_item_details(result);
                 }
 
                 // A type hint inserts its edit on a click: the label shows

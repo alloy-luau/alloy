@@ -459,6 +459,47 @@ mod tests {
         }
     }
 
+    /// A reader copies the lead example of an entry into a fresh project,
+    /// so the first `alloy` block of each entry checks there as written.
+    /// A form, a fragment, or code that needs a second file takes a bare
+    /// fence instead. The type check of `alloy flux` is too slow for a
+    /// unit test, so this test runs `alloy check` alone.
+    #[test]
+    fn every_lead_example_checks_in_a_fresh_project() {
+        let dir = std::env::temp_dir().join(format!("alloy-doc-leads-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("alloy.toml"), crate::config::TEMPLATE).unwrap();
+        let config = crate::config::Config::load(&dir.join("alloy.toml")).unwrap();
+        let mut failed = Vec::new();
+
+        for (key, text) in super::TABLE {
+            let Some(lead) = text
+                .split("```alloy\n")
+                .nth(1)
+                .and_then(|t| t.split("```").next())
+            else {
+                continue;
+            };
+
+            std::fs::write(dir.join("src/example.aly"), lead).unwrap();
+            let report = crate::build::check_project(&dir, &config).unwrap();
+            let errors: Vec<&str> = report
+                .diagnostics
+                .iter()
+                .map(|(_, d)| d.message.as_str())
+                .chain(report.failures.iter().map(|(_, f)| f.as_str()))
+                .collect();
+
+            if !errors.is_empty() {
+                failed.push(format!("`{key}`: {}", errors.join("; ")));
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(failed.is_empty(), "{}", failed.join("\n"));
+    }
+
     /// Every member's example is Alloy the compiler accepts. A doc
     /// example that does not compile is worse than none: a reader
     /// copies it.

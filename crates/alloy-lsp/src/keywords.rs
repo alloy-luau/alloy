@@ -650,7 +650,7 @@ mod tests {
         for o in at..at + 3 {
             let (s, e, text) = hover(src, o).unwrap();
             assert_eq!((s, e), (at, at + 3));
-            assert!(text.starts_with("```alloy\na ??= b"));
+            assert!(text.starts_with("```\na ??= b"));
         }
     }
 

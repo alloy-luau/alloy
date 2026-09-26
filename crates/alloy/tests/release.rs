@@ -153,9 +153,16 @@ fn the_release_script_bumps_every_path_dependency() {
                         .to_string()
                 });
 
+            // The line that bumps the dependency must also name this
+            // manifest. `luaux` named `alloy-syntax` and the script left
+            // its version behind.
+            let file = format!("crates/{name}/Cargo.toml");
+
             assert!(
-                script.contains(&key),
-                "scripts/release.sh never names {key}, so crates/{name}/Cargo.toml keeps its old version"
+                script
+                    .lines()
+                    .any(|l| l.contains(&key) && l.contains(&file)),
+                "scripts/release.sh never bumps {key} in {file}, so it keeps its old version"
             );
         }
     }

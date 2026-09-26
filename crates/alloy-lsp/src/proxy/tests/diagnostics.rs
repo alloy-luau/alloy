@@ -1840,6 +1840,43 @@ fn an_inline_that_moves_a_call_leaves_the_list() {
     assert!(!keeps("twice", 7));
 }
 
+/// "Inline variable" moved `a * 2` past `a = 10` and `t.n` past
+/// `t.n = 5`, so the use read the new value. A write to a name or a
+/// field the value reads, before the use, drops the action. A write
+/// after the use, or a table key of the same name, keeps it.
+#[test]
+fn an_inline_past_a_write_leaves_the_list() {
+    let src = concat!(
+        "local function f(a: number, t: { n: number }, u: { n: number })\n",
+        "    local x = a * 2\n",
+        "    a = 10\n",
+        "    local y = t.n\n",
+        "    t.n = 5\n",
+        "    local z = a\n",
+        "    a += 1\n",
+        "    local w = t.n + 1\n",
+        "    u.n, a = 1, 2\n",
+        "    local k = a + 1\n",
+        "    local v = { a = 3 }\n",
+        "    local j = a + 2\n",
+        "    print(x, y, z, w, k, v, j)\n",
+        "    a = 0\n",
+        "end\n",
+    );
+    let (st, uri) = one_file(src);
+    let inline = |name: &str| json!({ "title": format!("Inline variable '{name}'"), "kind": "refactor.inline", "data": { "type": "inlineVariable" } });
+    let keeps = |name: &str, line: u32| {
+        st.keeps_child_action(&inline(name), uri, Some(((line, 10), (line, 10))))
+    };
+
+    assert!(!keeps("x", 1));
+    assert!(!keeps("y", 3));
+    assert!(!keeps("z", 5));
+    assert!(!keeps("w", 7));
+    assert!(keeps("k", 9));
+    assert!(keeps("j", 11));
+}
+
 /// The child's "Change 'flyer' to 'Flyer'" replaced all of `t.flyer`
 /// with `Flyer`, a global the file does not have. The edit now takes
 /// the name alone. On an enum, Alloy's "Rename to `Flyer`" stays and

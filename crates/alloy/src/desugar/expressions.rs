@@ -479,6 +479,7 @@ impl<'s> Desugar<'s> {
                     || self.chain_has_ext(e)
                     || self.is_struct_call(e)
                     || self.is_import_call(e)
+                    || self.dispatches(e)
                     || self.expected_generic.is_some() =>
             {
                 let text = self.chain_expr(e);
@@ -1687,7 +1688,7 @@ impl<'s> Desugar<'s> {
         let (base, links) = flatten(e);
         self.check_child_chain(base, &links);
         let timed_waits = self.options.wait_timeout.is_some();
-        let casts: Vec<Option<String>> = (0..links.len())
+        let mut casts: Vec<Option<String>> = (0..links.len())
             .map(|i| self.child_cast(&links, i, target, bare, timed_waits))
             .collect();
         // A timed `WaitForChild` can return nil, so the link after it
@@ -1802,7 +1803,35 @@ impl<'s> Desugar<'s> {
             links.remove(0);
         }
 
-        let mut inner_simple = self.is_simple(base);
+        // `self:m(a)` in a trait default calls through the impl's table,
+        // `(__impl or self).m(self, a)`; see `trait_decl`.
+        let mut dispatched = false;
+
+        if let (
+            Expr::Name(n),
+            Some(Link::Plain(Step::Call {
+                method: Some(m),
+                type_args: None,
+                args,
+            })),
+        ) = (base, links.first())
+            && self.self_dispatch.contains(&n.start)
+        {
+            let a = match (args, self.args_text(args)) {
+                (CallArgs::Paren(list), _) if list.is_empty() => "(self)".to_string(),
+
+                (CallArgs::Paren(_), a) => format!("(self, {}", &a[1..]),
+
+                (_, a) => format!("(self, {a})"),
+            };
+            inner = format!("(__impl or self).{}{a}", self.text_of(*m));
+            self.effects = true;
+            dispatched = true;
+            links.remove(0);
+            casts.remove(0);
+        }
+
+        let mut inner_simple = self.is_simple(base) && !dispatched;
         // Names and fields only, `?` links included: safe to read again.
         // The checker narrows a field path and not a computed key, so a
         // key ends it.
@@ -2079,6 +2108,13 @@ impl<'s> Desugar<'s> {
         let tests: Vec<String> = guards.iter().map(|g| format!("{g} == nil")).collect();
 
         format!("(if {} then nil else {inner})", tests.join(" or "))
+    }
+
+    /// Whether a call is a `self:m()` that a trait default makes
+    /// through the impl's table; see `trait_decl`.
+    fn dispatches(&self, e: &Expr) -> bool {
+        matches!(e, Expr::Call { func, method: Some(_), .. }
+            if matches!(func.as_ref(), Expr::Name(n) if self.self_dispatch.contains(&n.start)))
     }
 
     pub(crate) fn apply(&mut self, prefix: &str, step: &Step<'_>) -> String {

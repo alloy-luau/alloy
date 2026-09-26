@@ -687,6 +687,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         self_inject: None,
         declared_types: HashSet::new(),
         traits: HashMap::new(),
+        self_dispatch: HashSet::new(),
         trait_required: HashMap::new(),
         struct_fields: HashMap::new(),
         generic_types: HashSet::new(),
@@ -1441,6 +1442,9 @@ struct Desugar<'s> {
     declared_types: HashSet<String>,
     /// Declared trait names with their default-method names.
     traits: HashMap<String, Vec<String>>,
+    /// The `self` of each `self:m()` in the trait default under render
+    /// that calls through `__impl`, by token index; see `trait_decl`.
+    self_dispatch: HashSet<u32>,
     /// Declared trait names with the methods an impl must write: name,
     /// parameter count with `self` included, and the return type the
     /// signature declares.

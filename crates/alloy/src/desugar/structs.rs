@@ -607,8 +607,20 @@ impl<'s> Desugar<'s> {
                         };
                         tail.push_str(&format!(" {target}.{m} = {value}"));
                     } else {
+                        // A default that calls `self:m()` has a factory,
+                        // see `trait_decl`, and a unit variant needs the
+                        // copy that calls through the enum's table.
+                        let value = match as_enum {
+                            true => {
+                                let factory = format!("{trait_name}[\"{m}@for\"]");
+
+                                format!("{factory} and {factory}({target}) or {trait_name}.{m}")
+                            }
+
+                            false => format!("{trait_name}.{m}"),
+                        };
                         tail.push_str(&format!(
-                            " if rawget({target}, \"{m}\") == nil then {target}.{m} = {trait_name}.{m} end"
+                            " if rawget({target}, \"{m}\") == nil then {target}.{m} = {value} end"
                         ));
                     }
                 }
@@ -2137,13 +2149,46 @@ impl<'s> Desugar<'s> {
                         }
                     }
 
-                    self.generate(ms, &format!("function {name}.{mname}{sig}"));
+                    // A unit variant is a string, so `self:m()` in the
+                    // default finds the string library on it. The ship
+                    // artifact builds the default from a factory that
+                    // takes the impl's table: `self:m()` becomes
+                    // `(__impl or self).m(self)`. An enum with a unit
+                    // variant passes its table; every other impl takes
+                    // the copy built with nil, which reads as before.
+                    let mut calls = HashSet::new();
+
+                    if !self.options.check {
+                        self.outer_self_calls(vec![Child::Block(&body.block)], &mut calls);
+                    }
+
+                    let factory = format!("{name}[\"{mname}@for\"]");
+
+                    match calls.is_empty() {
+                        true => self.generate(ms, &format!("function {name}.{mname}{sig}")),
+
+                        false => self.generate(
+                            ms,
+                            &format!("{factory} = function(__impl) return function{sig}"),
+                        ),
+                    }
+
                     self.write_pieces(self.byte_end(m.signature), &prologue);
                     let body_start = self.block_start_or(&body.block, self.byte_end(m.span));
                     self.copy(self.byte_end(m.signature), body_start);
+                    let dispatch = !calls.is_empty();
+                    self.self_dispatch = calls;
                     self.block(&body.block);
+                    self.self_dispatch.clear();
                     let after = self.block_end_or(&body.block, body_start);
                     self.copy(after, self.byte_end(m.span));
+
+                    if dispatch {
+                        self.generate(
+                            self.byte_end(m.span),
+                            &format!(" end {name}.{mname} = {factory}(nil)"),
+                        );
+                    }
                 }
 
                 None => self.blank_lines(ms, self.byte_end(m.span)),
@@ -2156,6 +2201,49 @@ impl<'s> Desugar<'s> {
 
         if t.exported {
             self.exports.push((name.clone(), name));
+        }
+    }
+
+    /// The `self` token of each `self:m()` call in a trait default. A
+    /// nested function that takes its own `self` holds another value, so
+    /// the walk skips it.
+    fn outer_self_calls(&self, children: Vec<Child<'_>>, out: &mut HashSet<u32>) {
+        for child in children {
+            match child {
+                Child::Block(b) => {
+                    for s in &b.stmts {
+                        if !matches!(s, Stmt::Function(f) if f.is_method) {
+                            self.outer_self_calls(stmt_children(s), out);
+                        }
+                    }
+                }
+
+                Child::Function(f) => {
+                    if f.params
+                        .first()
+                        .is_none_or(|p| self.text_of(p.name) != "self")
+                    {
+                        self.outer_self_calls(vec![Child::Block(&f.block)], out);
+                    }
+                }
+
+                Child::Expr(e) => {
+                    if let Expr::Call {
+                        func,
+                        method: Some(m),
+                        type_args: None,
+                        ..
+                    } = e
+                        && let Expr::Name(n) = func.as_ref()
+                        && self.text_of(*n) == "self"
+                        && !self.ext_methods.contains(self.text_of(*m))
+                    {
+                        out.insert(n.start);
+                    }
+
+                    self.outer_self_calls(expr_children(e), out);
+                }
+            }
         }
     }
 
@@ -4484,5 +4572,45 @@ mod tests {
         assert!(out.check.contains("Shape.hi = Named.hi"), "{}", out.check);
         assert!(out.check.contains("Dog.hi = Named.hi"), "{}", out.check);
         assert!(!out.ship.contains("function<A..."), "{}", out.ship);
+    }
+
+    /// A unit variant is a string, so `self:name()` in a trait default
+    /// looked in the string library and `Enemy.label(Enemy.Flyer)`
+    /// failed at run time. The default now comes from a factory that
+    /// takes the impl's table, and an enum with a unit variant passes
+    /// its own. A payload variant, a struct, and a nested `self` of its
+    /// own read as before.
+    #[test]
+    fn a_trait_default_calls_self_methods_through_a_unit_enum() {
+        let src = "trait Describe as\n    function name(self): string\n    function label(self, pre: string): string\n        local t = { f = function(self) return self.n end }\n        return `{pre}[{self:name()}]` .. tostring(t:f())\n    end\n    function twice(self): string\n        return self:label(\"a\") .. self:label(\"b\")\n    end\nend\nenum Enemy as\n    Grunt(number)\n    Flyer\nend\nimpl Describe for Enemy as\n    function name(self): string\n        return if self == Enemy.Flyer then \"flyer\" else \"grunt\"\n    end\nend\nstruct Dog as\n    n: number\nend\nimpl Describe for Dog as\n    function name(self): string\n        return \"dog\"\n    end\nend\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(
+            out.ship
+                .contains("`{pre}[{(__impl or self).name(self)}]` .. tostring(t:f())"),
+            "{}",
+            out.ship
+        );
+        assert!(
+            out.ship.contains(
+                "Enemy.twice = Describe[\"twice@for\"] and Describe[\"twice@for\"](Enemy) or Describe.twice"
+            ),
+            "{}",
+            out.ship
+        );
+        assert!(!out.check.contains("@for"), "{}", out.check);
+        assert_eq!(out.ship.lines().count(), src.lines().count());
+
+        // The runtime is a require away; the enum only needs a table.
+        let (head, body) = out.ship.split_once(" local Describe").unwrap();
+        assert!(head.starts_with("local __alloy = require("), "{head}");
+        let program = format!(
+            "local __alloy = {{}} local Describe{body}\nreturn Enemy.twice(Enemy.Flyer), Enemy.twice(Enemy.Grunt(1)), Dog.twice(Dog.new({{ n = 1 }}))"
+        );
+        let got: (String, String, String) = mlua::Lua::new().load(&program).eval().unwrap();
+
+        assert_eq!(got.0, "a[flyer]nilb[flyer]nil");
+        assert_eq!(got.1, "a[grunt]nilb[grunt]nil");
+        assert_eq!(got.2, "a[dog]nilb[dog]nil");
     }
 }

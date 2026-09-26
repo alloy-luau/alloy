@@ -805,6 +805,17 @@ impl<'s> Desugar<'s> {
             return true;
         }
 
+        // A `self:m()` of a trait default calls through the impl's table.
+        let span = s.span();
+
+        if self
+            .self_dispatch
+            .iter()
+            .any(|t| (span.start..span.end).contains(t))
+        {
+            return true;
+        }
+
         let text = self.text_of(s.span());
 
         match s {

@@ -3534,10 +3534,11 @@ pub fn import_problems(
             // read: a name in braces takes one key of it. A name the
             // module exports as a type alone is the exception: it has
             // no value at run time, so the import binds the type and
-            // the table needs no key. The emit does the same.
+            // the table needs no key. The emit does the same. `default`
+            // is the returned value itself, as a bare import reads it.
             let missing_key = match (returns, &keys, type_only || item.is_type) {
                 (true, Some(keys), false) => {
-                    !keys.contains(&name) && !type_only_names.contains(&name)
+                    name != "default" && !keys.contains(&name) && !type_only_names.contains(&name)
                 }
 
                 _ => false,

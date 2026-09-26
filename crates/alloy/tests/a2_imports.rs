@@ -468,7 +468,8 @@ fn a_named_import_reads_the_returned_keys() {
         Some(vec!["speed".to_string(), "label".to_string()])
     );
 
-    let source = "import { a, c } from \"./flat\"\nimport { speed, missing } from \"./shaped\"\nprint(a, c, speed, missing)\n";
+    // `default` is the returned value itself, as a bare import reads it.
+    let source = "import { a, c, default as whole } from \"./flat\"\nimport { speed, missing } from \"./shaped\"\nprint(a, c, whole, speed, missing)\n";
     let main = dir.join("main.aly");
     std::fs::write(&main, source).unwrap();
 

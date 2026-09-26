@@ -371,6 +371,17 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /// What a name in braces reads off the required module: `.name`.
+    /// `default` reads what a bare import reads, so of a module that
+    /// ends in `return K` it is `K` itself, not a field of it.
+    fn member_suffix(&self, quoted: &str, name: &str) -> String {
+        match name {
+            "default" => self.default_suffix(quoted).to_string(),
+
+            _ => format!(".{name}"),
+        }
+    }
+
     /// Reports a std name the file writes with no import, once per
     /// name: the first use carries the report, and its fix writes the
     /// import that covers every use.
@@ -682,7 +693,7 @@ impl<'s> Desugar<'s> {
 
                 types.extend(self.namespace_type_aliases(path, &name, &local, temp));
                 names.push(local);
-                values.push(format!("{temp}.{name}"));
+                values.push(format!("{temp}{}", self.member_suffix(path, &name)));
             }
         }
 
@@ -1054,7 +1065,9 @@ impl<'s> Desugar<'s> {
                                 self.namespace_type_aliases(&spec, &name, &exported, &temp);
                             types.extend(members.into_iter().map(|t| format!("export {t}")));
                         }
-                        self.exports.push((exported, format!("{temp}.{name}")));
+
+                        let suffix = self.member_suffix(self.text_of(path), &name);
+                        self.exports.push((exported, format!("{temp}{suffix}")));
                     }
                 }
 
@@ -1436,6 +1449,30 @@ print(ex)
                 out.ship
             );
         }
+    }
+
+    /// `export { default as Klass } from "./Klass"` of a module that ends
+    /// in `return Klass` read `_m1.default`, and the barrel sent on nil:
+    /// such a module has no export table. Its returned value is its
+    /// default, as `import Klass from` reads it.
+    #[test]
+    fn the_default_of_a_returning_module_is_its_value() {
+        let options = crate::EmitOptions {
+            plain_modules: vec!["./Klass".to_string()],
+            ..crate::EmitOptions::default()
+        };
+        let compile = |src: &str| crate::compile_with(src, &options).unwrap().ship;
+
+        let barrel = compile("export { default as Klass } from \"./Klass\"\n");
+        assert!(barrel.contains("return { Klass = _m1 }"), "{barrel}");
+
+        let named = compile("import { default as K } from \"./Klass\"\nprint(K)\n");
+        assert!(named.contains("local K = _m1"), "{named}");
+        assert!(!named.contains(".default"), "{named}");
+
+        // A module with an export table keeps the field.
+        let table = compile("export { default as Other } from \"./Other\"\n");
+        assert!(table.contains("return { Other = _m1.default }"), "{table}");
     }
 
     #[test]

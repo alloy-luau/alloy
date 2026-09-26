@@ -67,43 +67,91 @@ fn format_alx_inner(src: &str, options: &FmtConfig, whole: bool) -> Result<Strin
         return code_fmt(src, options);
     }
 
-    let mut code = String::with_capacity(src.len());
-    let mut printed: Vec<Vec<Line>> = Vec::new();
-    let mut last = 0;
+    // The indent of the line each span lands on, which the markup lines
+    // take on top of their own. It is known only after the code formats,
+    // and a span that breaks can move its line, so the print runs again
+    // until each span keeps its indent. Two rounds settle a file; the
+    // third is for a span that the second round broke.
+    let mut bases = vec![0; spans.len()];
 
-    for (n, (a, b)) in spans.iter().enumerate() {
-        code.push_str(&src[last..*a]);
+    for round in 0..3 {
+        let mut code = String::with_capacity(src.len());
+        let mut printed: Vec<Vec<Line>> = Vec::new();
+        let mut last = 0;
 
-        if masked[*a..*b] != src[*a..*b] {
-            let lines = as_written(src, *a, *b);
-            let width = match lines.len() {
-                1 => lines[0].1.chars().count(),
+        for (n, (a, b)) in spans.iter().enumerate() {
+            code.push_str(&src[last..*a]);
 
-                _ => options.column_width + 1,
+            if masked[*a..*b] != src[*a..*b] {
+                let lines = as_written(src, *a, *b);
+                let width = match lines.len() {
+                    1 => lines[0].1.chars().count(),
+
+                    _ => options.column_width + 1,
+                };
+                code.push_str(&placeholder(n, width));
+                printed.push(lines);
+                last = *b;
+
+                continue;
+            }
+
+            let (node, _) = luaux::markup::parse_node(src, *a)
+                .map_err(|e| unparsed(src, e.offset, &e.message))?;
+            let at_base = FmtConfig {
+                column_width: options.column_width.saturating_sub(bases[n]),
+                ..options.clone()
+            };
+            let lines = print_node(src, &node, &at_base, 0);
+            let width = if lines.len() == 1 && !parenthesized_block(src, *a, *b) {
+                lines[0].1.chars().count()
+            } else {
+                options.column_width + 1
             };
             code.push_str(&placeholder(n, width));
             printed.push(lines);
             last = *b;
-
-            continue;
         }
 
-        let (node, _) =
-            luaux::markup::parse_node(src, *a).map_err(|e| unparsed(src, e.offset, &e.message))?;
-        let lines = print_node(src, &node, options, 0);
-        let width = if lines.len() == 1 && !parenthesized_block(src, *a, *b) {
-            lines[0].1.chars().count()
-        } else {
-            options.column_width + 1
-        };
-        code.push_str(&placeholder(n, width));
-        printed.push(lines);
-        last = *b;
+        code.push_str(&src[last..]);
+        let formatted = code_fmt(&code, options)?;
+        let landed = placeholder_bases(&formatted, spans.len(), options);
+
+        if landed == bases || round == 2 {
+            return Ok(substitute(&formatted, &printed, options));
+        }
+
+        bases = landed;
     }
 
-    code.push_str(&src[last..]);
-    let formatted = code_fmt(&code, options)?;
-    Ok(substitute(&formatted, &printed, options))
+    unreachable!("the last round returns")
+}
+
+/// The indent, in columns, of the line each placeholder stands on.
+fn placeholder_bases(formatted: &str, count: usize, options: &FmtConfig) -> Vec<usize> {
+    let mut out = vec![0; count];
+
+    for line in formatted.lines() {
+        let base: usize = line
+            .chars()
+            .take_while(|c| c.is_whitespace())
+            .map(|c| if c == '\t' { indent_width(options) } else { 1 })
+            .sum();
+        let mut rest = line;
+
+        while let Some(at) = rest.find(PLACEHOLDER) {
+            let tail = &rest[at + PLACEHOLDER.len()..];
+            let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
+
+            if let Some(slot) = digits.parse::<usize>().ok().and_then(|n| out.get_mut(n)) {
+                *slot = base;
+            }
+
+            rest = &tail[digits.len()..];
+        }
+    }
+
+    out
 }
 
 /// A span as the source wrote it, one line per source line. A later
@@ -315,7 +363,13 @@ fn print_tag(
             }
         })
         .collect();
-    let kids = print_children(src, children, options, start, end);
+    // A child prints at level 0 and lands one indent in, so it fits in
+    // the width less that indent.
+    let inside = FmtConfig {
+        column_width: options.column_width.saturating_sub(indent_width(options)),
+        ..options.clone()
+    };
+    let kids = print_children(src, children, &inside, start, end);
     let self_closing =
         children.is_empty() && !src[start..end].trim_end().ends_with(&format!("</{name}>"));
     let close_text = if self_closing {
@@ -765,6 +819,25 @@ mod tests {
             fmt("local x = <TextLabel>{title}</TextLabel>\n"),
             "local x = <TextLabel>{title}</TextLabel>\n"
         );
+    }
+
+    /// Text deep in a page wrapped at 108 columns. A child printed with
+    /// the width of its parent, and the markup with no room for the
+    /// indent of the line it lands on, so neither indent counted.
+    #[test]
+    fn deep_text_wraps_inside_the_column() {
+        let words = "One two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen.";
+        let src = format!(
+            "local function Note()\n  return (\n    <Frame>\n      <Frame>\n        <Frame>\n          <TextLabel>\n            {words}\n          </TextLabel>\n        </Frame>\n      </Frame>\n    </Frame>\n  )\nend\n"
+        );
+        let out = fmt(&src);
+
+        assert!(out.lines().all(|l| l.chars().count() <= 100), "{out}");
+        assert!(
+            out.contains("fifteen\n            sixteen seventeen."),
+            "{out}"
+        );
+        assert_eq!(fmt(&out), out);
     }
 
     #[test]

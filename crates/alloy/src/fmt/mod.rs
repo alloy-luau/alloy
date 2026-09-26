@@ -333,6 +333,8 @@ fn format_tokens(src: &str, options: &FmtConfig) -> Result<String, String> {
         at_line: Vec::new(),
         hole: Vec::new(),
         held: Vec::new(),
+        chains: Vec::new(),
+        held_chain: Vec::new(),
         conds: Vec::new(),
         cond_line: Vec::new(),
     };
@@ -344,7 +346,10 @@ fn format_tokens(src: &str, options: &FmtConfig) -> Result<String, String> {
     f.forced = vec![false; f.items.len()];
     f.at_line = vec![0; f.items.len()];
     f.hole = f.holes();
-    f.read_conditions(&colons::if_conditions(src, &toks, &chunk));
+    f.read_chains(
+        &colons::binary_chains(src, &toks, &chunk),
+        &colons::if_conditions(src, &toks, &chunk),
+    );
     f.measure_lines();
 
     // An `if` expression and a `match` are no bracket group, so the
@@ -356,6 +361,7 @@ fn format_tokens(src: &str, options: &FmtConfig) -> Result<String, String> {
         let tree = f.tree();
         let hard = f.hard_breaks(&tree);
         f.held = f.held_items(&hard);
+        f.held_chain = f.held_chains(&hard);
         f.render_nodes(&tree, &hard, 0);
         f.flush();
 
@@ -365,8 +371,9 @@ fn format_tokens(src: &str, options: &FmtConfig) -> Result<String, String> {
 
         let broke_ifs = f.force_long_expr_ifs();
         let broke_matches = f.force_long_matches();
+        let broke_chains = f.force_long_chains();
 
-        if !broke_ifs && !broke_matches {
+        if !broke_ifs && !broke_matches && !broke_chains {
             break;
         }
 
@@ -542,12 +549,26 @@ struct Formatter<'s> {
     /// bracket group among them keeps its line, so a long `if` breaks at
     /// its keywords first.
     held: Vec<bool>,
+    /// The binary chains the layout may break, outer before inner.
+    chains: Vec<Chain>,
+    /// The items of a chain that has not broken yet. As in `held`, a
+    /// group among them keeps its line, so a long chain breaks at its
+    /// operators first.
+    held_chain: Vec<bool>,
     /// The `if` or `elseif` and the `then` of each `if` condition.
     conds: Vec<(usize, usize)>,
     /// The items that open a line of an `if` condition that spans lines.
     /// Each line sits one level under the `if`, with no step for the
     /// operator it opens with.
     cond_line: Vec<bool>,
+}
+
+/// A binary chain by item; see `colons::Chain`.
+struct Chain {
+    first: usize,
+    last: usize,
+    ops: Vec<usize>,
+    then: Option<usize>,
 }
 
 /// Openers of bracket groups, as token text.
@@ -586,16 +607,40 @@ impl<'s> Formatter<'s> {
         self.split_conditions();
     }
 
-    /// The `if` conditions the tree names by byte, as items.
-    fn read_conditions(&mut self, conds: &[(usize, usize)]) {
+    /// The chains and the `if` conditions the tree names by byte, as
+    /// items. A chain whose last operand is a table breaks the table
+    /// instead: `x = options or {` then the fields.
+    fn read_chains(&mut self, chains: &[colons::Chain], conds: &[(usize, usize)]) {
         let at: std::collections::HashMap<usize, usize> = (0..self.items.len())
             .filter(|&i| !self.items[i].is_comment() && self.items[i].start != usize::MAX)
             .map(|i| (self.items[i].start, i))
             .collect();
+        let item = |byte: &usize| at.get(byte).copied();
 
+        self.chains = chains
+            .iter()
+            .filter_map(|c| {
+                let chain = Chain {
+                    first: item(&c.first)?,
+                    last: item(&c.last)?,
+                    ops: c.ops.iter().map(item).collect::<Option<Vec<_>>>()?,
+                    then: match c.then {
+                        Some(t) => Some(item(&t)?),
+
+                        None => None,
+                    },
+                };
+                let table_tail = self.items[chain.last].is("}")
+                    && self.opener_of(chain.last).is_some_and(|o| {
+                        chain.ops.last().and_then(|&op| self.next_code(op)) == Some(o)
+                    });
+
+                (!table_tail).then_some(chain)
+            })
+            .collect();
         self.conds = conds
             .iter()
-            .filter_map(|(k, t)| Some((*at.get(k)?, *at.get(t)?)))
+            .filter_map(|(k, t)| Some((item(k)?, item(t)?)))
             .collect();
     }
 
@@ -1939,6 +1984,38 @@ mod tests {
             "if a\nor b\nthen\n  print(1)\nend\n",
             "if a\n  or b\nthen\n  print(1)\nend\n",
         );
+    }
+
+    /// A long chain of binary operators breaks before its operators, at
+    /// the lowest precedence it holds. fmt broke the arguments of the
+    /// last call and left `* 3` after its closing parenthesis.
+    #[test]
+    fn a_long_chain_breaks_at_its_operators() {
+        stable(
+            "function terms(x: number): number\n  return math.noise(x * 0.0035, 1) * 46 + math.noise(x * 0.018, 2) * 12 + math.noise(x * 0.07, 3) * 3\nend\n",
+            "function terms(x: number): number\n  return math.noise(x * 0.0035, 1) * 46\n    + math.noise(x * 0.018, 2) * 12\n    + math.noise(x * 0.07, 3) * 3\nend\n",
+        );
+
+        // The condition of an `if` takes a line of its own first, and
+        // breaks at its operators only when that line is too long too.
+        stable(
+            "if some_function_call(a, b, c) == other_function_call(a, b, c, 'with a long string argument here') then\n  print(1)\nend\n",
+            "if\n  some_function_call(a, b, c) == other_function_call(a, b, c, 'with a long string argument here')\nthen\n  print(1)\nend\n",
+        );
+        stable(
+            "if first_long_name == 'first' or second_long_name == 'second' or third_long_name == 'third' or a == b or c == d then\n  print(1)\nend\n",
+            "if\n  first_long_name == 'first'\n  or second_long_name == 'second'\n  or third_long_name == 'third'\n  or a == b\n  or c == d\nthen\n  print(1)\nend\n",
+        );
+
+        // A last operand that is a table breaks inside, and a trailing
+        // comment runs past the column without a break.
+        let tail = "local opts = options_from_somewhere or { alpha = 1, beta = 2, gamma = 3, delta = 4, epsilon = 5, zeta = 6 }\n";
+        stable(
+            tail,
+            "local opts = options_from_somewhere or {\n  alpha = 1,\n  beta = 2,\n  gamma = 3,\n  delta = 4,\n  epsilon = 5,\n  zeta = 6,\n}\n",
+        );
+        let noted = "print(a == 'first_long_name' or b == 'second_long_name') -- a note that runs on past the column\n";
+        stable(noted, noted);
     }
 
     #[test]

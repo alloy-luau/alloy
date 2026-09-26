@@ -760,6 +760,7 @@ impl<'s> Formatter<'s> {
         let (open, close) = (*open, *close);
 
         self.open_place(open, hard, extra);
+        self.at_line[open] = self.lines.len();
 
         let opener = self.items[open].text.clone();
         let closer = self.items[close].text.clone();
@@ -831,6 +832,7 @@ impl<'s> Formatter<'s> {
             self.flush();
             self.line_level = base;
             self.line = self.indent(base);
+            self.at_line[close] = self.lines.len();
             self.line.push_str(&closer);
         }
     }
@@ -918,8 +920,9 @@ impl<'s> Formatter<'s> {
         }
 
         // The `if` expression around the group breaks at its keywords
-        // before the group breaks, the way StyLua lays one out.
-        if self.held[open] {
+        // before the group breaks, the way StyLua lays one out, and the
+        // chain around it breaks at its operators.
+        if self.held[open] || self.held_chain[open] {
             return false;
         }
 
@@ -1201,7 +1204,13 @@ impl<'s> Formatter<'s> {
         let mut broke_until = 0;
 
         for i in 0..self.items.len() {
-            if i < broke_until || self.hole[i] || !self.items[i].is("if") || self.starts_block(i) {
+            // A chain around the `if` that has not broken breaks first.
+            if i < broke_until
+                || self.hole[i]
+                || self.held_chain[i]
+                || !self.items[i].is("if")
+                || self.starts_block(i)
+            {
                 continue;
             }
 
@@ -1326,6 +1335,93 @@ impl<'s> Formatter<'s> {
         }
 
         held
+    }
+
+    /// The items of each chain that has no hard break inside it yet. See
+    /// `held_chain`.
+    pub(crate) fn held_chains(&self, hard: &[bool]) -> Vec<bool> {
+        let mut held = vec![false; self.items.len()];
+
+        for c in &self.chains {
+            if !self.hole[c.first] && !hard[c.first + 1..=c.last].contains(&true) {
+                held[c.first..=c.last].fill(true);
+            }
+        }
+
+        held
+    }
+
+    // --- the binary chain ------------------------------------------------------------
+
+    /// Breaks every chain of binary operators the last render left on one
+    /// line past `column_width`, before each operator of the chain. True
+    /// when one broke, so the caller renders again. An `if` expression
+    /// around the chain breaks first, and a chain inside the operands
+    /// waits for the next pass, as with `force_long_expr_ifs`.
+    ///
+    /// The condition of an `if` statement first takes a line of its own,
+    /// between the `if` and the `then`. It breaks at its operators only
+    /// when that line is too long too.
+    pub(crate) fn force_long_chains(&mut self) -> bool {
+        let mut changed = false;
+        // The last item of the last chain that broke in this pass.
+        let mut broke_until = 0;
+
+        for c in 0..self.chains.len() {
+            let (first, last) = (self.chains[c].first, self.chains[c].last);
+
+            if (changed && first <= broke_until) || self.hole[first] || self.held[first] {
+                continue;
+            }
+
+            let line = self.at_line[first];
+
+            if self.at_line[last] != line
+                || self.code_width(line, last) <= self.options.column_width
+            {
+                continue;
+            }
+
+            let breaks = match self.chains[c].then {
+                Some(then) if self.items[first].newlines_before == 0 => vec![first, then],
+
+                _ => self.chains[c].ops.clone(),
+            };
+
+            if breaks.iter().any(|b| self.forced[*b]) {
+                continue;
+            }
+
+            for b in breaks {
+                self.forced[b] = true;
+                self.items[b].newlines_before = self.items[b].newlines_before.max(1);
+            }
+
+            broke_until = last;
+            changed = true;
+        }
+
+        changed
+    }
+
+    /// The width of output line `line` without the line comment that ends
+    /// it: a comment runs on past the column and breaks nothing. `from`
+    /// is an item on the line; the comment, if any, comes after it.
+    fn code_width(&self, line: usize, from: usize) -> usize {
+        let text = self.lines.get(line).map_or("", String::as_str);
+        let comment = (from + 1..self.items.len())
+            .take_while(|&k| self.at_line[k] <= line)
+            .find(|&k| self.items[k].kind == ItemKind::LineComment && self.at_line[k] == line);
+        let code = match comment {
+            Some(k) => text
+                .strip_suffix(self.items[k].text.as_str())
+                .unwrap_or(text)
+                .trim_end(),
+
+            None => text,
+        };
+
+        code.chars().count()
     }
 
     /// Whether each item sits inside an interpolation hole. The `}` that

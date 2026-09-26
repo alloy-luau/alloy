@@ -959,7 +959,8 @@ fn a_struct_pattern_covers_its_shape() {
 /// shipped into the `.luau` and `build` called it a success.
 #[test]
 fn a_class_reports_once_and_leaves_no_text() {
-    let src = "class Critter\n    public hp: number\n    function heal(self) end\nend\n";
+    // A field default parses too, so it keeps the one report.
+    let src = "class Critter\n    public hp: number\n    belt: number = 8\n    function heal(self) end\nend\n";
     let (ship, check, messages) = compile(src);
 
     assert_eq!(

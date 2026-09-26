@@ -675,35 +675,27 @@ impl<'s> Scan<'s> {
                 continue;
             }
 
-            // The receiver decides which struct the member belongs to.
-            // Without it, a field named `coins` on an unrelated record
-            // reads as the private `coins` of a struct nearby.
-            let base = i
+            // The receiver decides which struct the member belongs to:
+            // a name the file types as the struct, or the struct's own
+            // name for a static. The project lists the private members
+            // of every struct, so a receiver of no known type, such as
+            // `task` in `task.spawn` or `new Forge()`, proves nothing
+            // and the lint stays quiet. `self` is the impl's own value.
+            let Some(base) = i
                 .checked_sub(2)
-                .filter(|b| self.is_name(*b))
-                .map(|b| self.t(b))
-                .filter(|n| *n != "self");
-            let owner = match base.and_then(|n| self.declared_type(n)) {
-                Some(ty) => members.iter().find(|(m, o)| *m == name && *o == ty),
-
-                None => members.iter().find(|(m, _)| *m == name),
-            };
-            let Some((_, owner)) = owner else {
+                .filter(|b| self.is_name(*b) && !matches!(self.prev(*b), "." | ":" | "?." | "?:"))
+            else {
                 continue;
             };
 
-            // `Lifecycle.Start` reads a variant of the enum; it is not
-            // the private `Start` of a struct elsewhere in the file. A
-            // receiver the file gives no type and spells with a capital
-            // is a type, a namespace, or a module, so the member is
-            // that one's, unless the receiver is the owner itself.
-            if base.is_some_and(|n| {
-                n != *owner
-                    && self.declared_type(n).is_none()
-                    && n.starts_with(|c: char| c.is_ascii_uppercase())
-            }) {
+            if self.at(base, "self") {
                 continue;
             }
+
+            let ty = self.type_at(base).unwrap_or(self.t(base));
+            let Some((_, owner)) = members.iter().find(|(m, o)| *m == name && *o == ty) else {
+                continue;
+            };
 
             if self.enclosing_owner(i) == Some(*owner) {
                 continue;

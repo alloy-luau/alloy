@@ -1443,9 +1443,58 @@ mod tests {
         let src = "struct Profile as\n    private coins: number\nend\n\nimpl Profile as\n    public function earn(self, n: number)\n        self.coins += n\n    end\nend\n\ntype Raw = { coins: number }\n\nlocal function load(raw: Raw, p: Profile)\n    p:earn(raw.coins)\nend\n\nreturn load\n";
         assert_eq!(names(src), Vec::<&str>::new());
 
-        // A receiver the file does not type still fires.
+        // A receiver the file does not type proves nothing.
         let bare = "struct Profile as\n    private coins: number\nend\n\nlocal p = make()\nprint(p.coins)\n";
-        assert_eq!(names(bare), vec!["private_access"]);
+        assert_eq!(names(bare), Vec::<&str>::new());
+
+        // The struct's own name reaches a private static.
+        let own = "struct Profile as\n    x: number\nend\n\nimpl Profile as\n    private function load(): number\n        return 1\n    end\nend\n\nprint(Profile.load())\n";
+        assert_eq!(names(own), vec!["private_access"]);
+    }
+
+    /// The project lists the private members of every struct. The lint
+    /// matched a member by its name alone, so `task.spawn` fired for a
+    /// private `spawn`, and `:Start()` on a value of another type for a
+    /// private `Start`.
+    #[test]
+    fn private_access_stays_quiet_on_a_receiver_of_another_type() {
+        let privates = vec![(
+            "Provider".to_string(),
+            vec!["spawn".to_string(), "Start".to_string()],
+        )];
+        let run = |src: &str| -> Vec<String> {
+            let Ok(parsed) =
+                alloy_syntax::parse_lenient(src, alloy_syntax::parser::ParseOptions::default())
+            else {
+                panic!("the source does not lex");
+            };
+            crate::lint::run(
+                src,
+                &parsed.lexed.toks,
+                &parsed.chunk,
+                false,
+                &crate::lint::Thresholds::default(),
+                &privates,
+                &[],
+            )
+            .into_iter()
+            .filter(|l| l.name == "private_access")
+            .map(|l| l.message)
+            .collect()
+        };
+        assert_eq!(
+            run("task.spawn(print, 'hi')\nnew Forge():Start()\nlocal f = make()\nf:Start()\n"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            run("local p: Provider = make()\np:spawn()\n"),
+            vec!["`spawn` is private to `Provider`; only its impl reaches it"]
+        );
+
+        // One file: a public field of one struct is not the private
+        // field of another struct with the same name.
+        let src = "struct A as\n    x: number\nend\n\nstruct B as\n    private x: number\nend\n\nlocal a = new A { x = 1 }\nprint(a.x)\n";
+        assert_eq!(names(src), Vec::<&str>::new());
     }
 
     /// `impl Zoo.Lion` is the struct's own impl: the owner of a private

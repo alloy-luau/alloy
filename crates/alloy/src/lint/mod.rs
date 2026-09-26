@@ -471,7 +471,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Correctness,
         default: Level::Warn,
         summary: "a private field or method read outside its struct's impl",
-        detail: "A member marked `private` belongs to the struct's own methods. This access sits outside every `impl` of that struct, in the same file; in the editor and under `alloy flux` the type checker reports it as an error, since the public type of the struct has no such member. The lint reads names, so a plain table with a field of the same name fires it too; `--@alloy-ignore` silences that line.",
+        detail: "A member marked `private` belongs to the struct's own methods. This access sits outside every `impl` of that struct, in the same file; in the editor and under `alloy flux` the type checker reports it as an error, since the public type of the struct has no such member. The lint reads the receiver: a name the file types as the struct, with an annotation or a `new`, or the struct's own name. A receiver of another type or of no known type stays quiet, so `task.spawn` is not the private `spawn` of a struct.",
     },
     LintInfo {
         name: "duplicate_function",

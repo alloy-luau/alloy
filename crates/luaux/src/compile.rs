@@ -571,7 +571,7 @@ fn compile_children(
                 if level != LintLevel::Off {
                     let spans = luaux_spans(expression).unwrap_or_default();
 
-                    if lint::has_unwrapped_luaux(expression, &spans) {
+                    if lint::has_static_conditional_luaux(expression, &spans) {
                         let warning = lint::static_conditional_child(
                             span.start,
                             expression.len(),

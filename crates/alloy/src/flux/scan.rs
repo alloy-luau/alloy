@@ -1,6 +1,7 @@
 //! The token scanner the Flux lints share: one file's tokens, its
 //! block structure, and the small questions every lint asks of them.
 
+use alloy_syntax::contextual::binop_priority;
 use alloy_syntax::lexer::{Tok, TokKind};
 
 use crate::fmt::structure::Structure;
@@ -337,6 +338,18 @@ impl<'s> Scan<'s> {
         }
 
         Some(j)
+    }
+
+    /// Whether the token at `j` goes on with the right operand of an
+    /// `and` before it: an operator that binds tighter, such as `>`, `+`,
+    /// `..`, `??` or `!=`, or a type suffix, such as `::` or `is`.
+    pub(crate) fn binds_tighter_than_and(&self, j: usize) -> bool {
+        let t = self.t(j);
+
+        // `and` binds at 2 and `or` at 1: see `binop_priority`.
+        binop_priority(t).is_some_and(|(left, _)| left > 2)
+            || matches!((t, self.t(j + 1)), ("?", "?") | ("!", "="))
+            || matches!(t, "::" | "is" | "satisfies" | "as")
     }
 
     /// The content of a plain string literal at `i`, without its quotes.

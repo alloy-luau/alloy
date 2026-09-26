@@ -152,6 +152,15 @@ impl<'s> Scan<'s> {
             let member = self.t(q_end + 1);
             let op = self.t(q_end);
             let chain_end = self.expr_end(p_end + 1).unwrap_or(q_end + 2);
+
+            // `a and a.b > c` is `a and (a.b > c)`. The chain only starts
+            // the operand, and `a?.b > c` compares nil when `a` is nil.
+            if self.binds_tighter_than_and(chain_end) {
+                i += 1;
+
+                continue;
+            }
+
             let followed_by_or = self.at(chain_end, "or");
             let fix = if followed_by_or {
                 None
@@ -1057,6 +1066,38 @@ mod tests {
         assert_eq!(
             fixed("local n = p and p.Name or \"x\"\n"),
             "local n = p and p.Name or \"x\"\n"
+        );
+    }
+
+    /// `a and a.b > c` is `a and (a.b > c)`. The chain is only the start
+    /// of the operand, so `a?.b > c` would compare nil with a number.
+    #[test]
+    fn a_guard_before_an_operator_draws_no_safe_access() {
+        for rhs in [
+            "a.b > 0",
+            "a.b == c",
+            "a.b + 1",
+            "a.b .. \"x\"",
+            "a.b ?? 1",
+            "a.b\n    > 0",
+        ] {
+            let src = format!("local n = a and {rhs}\n");
+            assert!(
+                !names(&src).contains(&"manual_safe_access"),
+                "{src}: {:?}",
+                names(&src)
+            );
+        }
+
+        assert_eq!(fixed("local n = a and a.b.c\n"), "local n = a?.b.c\n");
+        assert_eq!(fixed("local n = a and a:m()\n"), "local n = a?:m()\n");
+        assert_eq!(
+            fixed("local n = a and a.b and a.b.c\n"),
+            "local n = a?.b and a.b.c\n"
+        );
+        assert_eq!(
+            names("local n = a and a.b or d\n"),
+            vec!["manual_safe_access"]
         );
     }
 

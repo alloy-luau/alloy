@@ -822,18 +822,19 @@ impl<'s> Desugar<'s> {
 
     /// The arguments a use of an attribute carries, as Luau. A parameter
     /// the use leaves out takes the default its declaration writes.
-    // ponytail: a default is its source text; an Alloy literal, `[1]`,
-    // needs the renderer.
     pub(crate) fn attr_args(&mut self, a: &Attr, name: &str) -> Vec<String> {
         let mut args: Vec<String> = a.args.iter().map(|e| self.render_to_string(e)).collect();
         let defaults = self
             .attr_decl_of(name)
             .map(|d| d.defaults.clone())
             .unwrap_or_default();
+        let at = self.byte_start(a.span);
 
         for default in defaults.iter().skip(args.len()) {
             let Some(default) = default else { break };
-            args.push(default.clone());
+            // The default is source text, and may come from another
+            // file, so it compiles on its own: `[]` is Alloy, not Luau.
+            args.push(self.compile_fragment(&format!("return {default}"), at, true));
         }
 
         args
@@ -2996,6 +2997,21 @@ print(a)
             messages(mixed),
             vec!["the attribute `weight` takes 1 to 2 arguments, 0 given"]
         );
+    }
+
+    /// A default is Alloy: `[]` compiles to an Array, as an argument
+    /// does, and never reaches the Luau as it is.
+    #[test]
+    fn an_attribute_default_compiles_as_an_argument_does() {
+        let src = "attribute options(steps: string[] = [], n: number = 0) on struct\n@options()\nstruct S as x: number end\nprint(S)\n";
+        assert!(messages(src).is_empty(), "{:?}", messages(src));
+        let out = crate::compile(src).unwrap();
+        assert!(
+            out.ship.contains("options = { __alloy.Array.from({}), 0 }"),
+            "{}",
+            out.ship
+        );
+        assert!(!out.ship.contains("[]"), "{}", out.ship);
     }
 
     /// An attribute on an `impl` is one on its type, so the runtime

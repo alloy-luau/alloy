@@ -72,6 +72,37 @@ impl<'a> Parser<'a> {
                 }
 
                 self.expect(")")?;
+            } else if self.at("{") {
+                // The struct habit, `Grunt { hp: number }`. A payload is
+                // a list of types in parentheses. The parse takes each
+                // type, so one report covers the variant and the rest of
+                // the enum still reads.
+                let at = self.toks[self.pos].start as usize;
+                self.bump();
+
+                while !self.at("}") && !self.at_end() {
+                    if self.at_name() && self.text_at(1) == ":" {
+                        self.bump();
+                        self.bump();
+                    }
+
+                    payload.push(self.type_()?);
+
+                    if !self.eat(",") && !self.eat(";") {
+                        break;
+                    }
+                }
+
+                self.expect("}")?;
+                let head = self.span_text(vname).to_string();
+                let types: Vec<&str> = payload.iter().map(|t| self.span_text(*t)).collect();
+                self.report_at(
+                    at,
+                    &format!(
+                        "a variant takes its payload in parentheses, as types: `{head}({})`",
+                        types.join(", ")
+                    ),
+                );
             }
 
             let value = if self.eat("=") {

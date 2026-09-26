@@ -23,6 +23,26 @@ fn a_named_payload_reads_once_and_names_the_form() {
     assert!(out.ship.contains("Playing"), "{}", out.ship);
 }
 
+/// `Grunt { hp: number }` is the struct habit. It read "expected a
+/// name, found `{`" and a cascade after it. It now reads once, names the
+/// form, and the parse goes on with the types as the payload.
+#[test]
+fn a_braced_variant_reads_once_and_names_the_form() {
+    let src = "enum Enemy as\n    Grunt { hp: number, speed: number }\n    Flyer\nend\nlocal e = Enemy.Flyer\nprint(e)\n";
+    assert_eq!(
+        messages(src),
+        vec!["a variant takes its payload in parentheses, as types: `Grunt(number, number)`"]
+    );
+
+    let out = alloy::compile_with(src, &alloy::EmitOptions::default()).unwrap();
+    assert!(
+        out.ship
+            .contains("function Enemy.Grunt(_1, _2) return setmetatable({ tag = \"Grunt\", _1 = _1, _2 = _2 }, Enemy) end"),
+        "{}",
+        out.ship
+    );
+}
+
 /// A payload with no name still parses with nothing to say.
 #[test]
 fn a_plain_payload_says_nothing() {

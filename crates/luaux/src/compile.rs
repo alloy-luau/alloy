@@ -1944,6 +1944,30 @@ mod tests {
             );
         }
 
+        /// React takes `ref` and `key` on every host element. The class has
+        /// no such members, and the check refused them. The one-table
+        /// arrangement declares no such props, so it still refuses them.
+        #[test]
+        fn a_host_element_takes_ref_and_key() {
+            assert_eq!(
+                build("local e = <Frame ref={f} key=\"a\" Size={s}/>"),
+                "local e = React.createElement(\"Frame\", { ref = f, key = \"a\", Size = s })"
+            );
+
+            let table = compile_configured(
+                &format!("{BINDING}local e = <Frame ref={{f}}/>"),
+                &crate::backend::Table,
+                Config::parse("[factory]\nbackend = \"table\"\ncreate = \"React.create\"\n")
+                    .expect("config"),
+            );
+            assert!(
+                table
+                    .as_ref()
+                    .is_err_and(|e| e.message == "Frame has no property or event named ref"),
+                "{table:?}"
+            );
+        }
+
         /// A plain table is a fragment under a one-table library and is not one
         /// here, so it needs a component of its own.
         #[test]

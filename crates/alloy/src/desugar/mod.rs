@@ -839,17 +839,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     let mut prefix_len = 0u32;
 
     if d.uses_std && !options.definitions {
-        // A spec marks the run before the module's own code, so
-        // `@cfg(test)` holds while the module loads too.
-        let testing = match options.tests {
-            true => "__alloy.set_testing(true) ",
-
-            false => "",
-        };
-        let line = format!(
-            "local __alloy = require({}) {testing}",
-            luau_string(&options.std_require)
-        );
+        let line = runtime_prologue(options);
         prefix_len = line.len() as u32;
         d.generate(insert_at, &line);
     }
@@ -1164,6 +1154,22 @@ pub(crate) fn import_names(i: &alloy_syntax::ast::Import) -> Vec<TokSpan> {
             specs.iter().map(|s| s.alias.unwrap_or(s.name)).collect()
         }
     }
+}
+
+/// The line that binds the runtime, on the first line of code. A spec
+/// marks the run before the module's own code, so `@cfg(test)` holds
+/// while the module loads too.
+pub(crate) fn runtime_prologue(options: &EmitOptions) -> String {
+    let testing = match options.tests {
+        true => "__alloy.set_testing(true) ",
+
+        false => "",
+    };
+
+    format!(
+        "local __alloy = require({}) {testing}",
+        luau_string(&options.std_require)
+    )
 }
 
 /// The byte offset of the line that holds the first token: every

@@ -3125,6 +3125,25 @@ print(a)
         assert!(!out.ship.contains("[]"), "{}", out.ship);
     }
 
+    /// A spec compiles with `tests` on. The default kept the
+    /// `set_testing` call of its own prologue, in a closure. It
+    /// compiles as it does in a build.
+    #[test]
+    fn an_attribute_default_in_a_spec_compiles_as_in_a_build() {
+        let src = "attribute options(steps: string[] = [], n: number = 0) on struct\n@options()\nstruct S as x: number end\nprint(S)\n";
+        let options = crate::EmitOptions {
+            tests: true,
+            ..Default::default()
+        };
+        let out = crate::compile_with(src, &options).unwrap();
+        assert!(
+            out.ship.contains("options = { __alloy.Array.from({}), 0 }"),
+            "{}",
+            out.ship
+        );
+        assert_eq!(out.ship.matches("set_testing").count(), 1, "{}", out.ship);
+    }
+
     /// A use by key writes each value in its parameter's place, as a use
     /// by position does, so `Attributes.get` reads the key form by key.
     #[test]

@@ -708,10 +708,10 @@ impl<'s> Desugar<'s> {
                 }
 
                 let text = out.ship.replace('\n', " ");
-                let prefix = format!(
-                    "local __alloy = require({}) ",
-                    luau_string(&self.options.std_require)
-                );
+                // The prologue the fragment wrote. In a spec it also
+                // marks the run, and the file around the fragment does
+                // that once.
+                let prefix = runtime_prologue(&self.options);
                 let text = text
                     .strip_prefix(&prefix)
                     .unwrap_or(&text)

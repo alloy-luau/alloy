@@ -335,7 +335,25 @@ impl Server {
 /// The ingot's items, then the host's markup items it does not already
 /// hold. `hide_roblox` leaves out the Roblox classes and their properties
 /// and events.
+///
+/// The editor orders a list by `sortText`, not by its place in the
+/// reply. The host's items carry one and an ingot's often do not, so
+/// Silk's `div` sorted after 364 Roblox classes. A lead digit on each
+/// side keeps the ingot's items first.
 fn merged(mut items: Vec<Value>, host: Vec<Value>, hide_roblox: bool) -> Vec<Value> {
+    let lead = |item: &mut Value, digit: char| {
+        let key = item["sortText"]
+            .as_str()
+            .or_else(|| item["label"].as_str())
+            .unwrap_or_default();
+
+        item["sortText"] = json!(format!("{digit}{key}"));
+    };
+
+    for item in &mut items {
+        lead(item, '0');
+    }
+
     let roblox = |item: &Value| {
         let detail = item["detail"].as_str().unwrap_or_default();
 
@@ -348,9 +366,17 @@ fn merged(mut items: Vec<Value>, host: Vec<Value>, hide_roblox: bool) -> Vec<Val
         .filter_map(|i| i["label"].as_str().map(str::to_string))
         .collect();
 
-    items.extend(host.into_iter().filter(|item| {
-        !(hide_roblox && roblox(item)) && !item["label"].as_str().is_some_and(|l| taken.contains(l))
-    }));
+    items.extend(
+        host.into_iter()
+            .filter(|item| {
+                !(hide_roblox && roblox(item))
+                    && !item["label"].as_str().is_some_and(|l| taken.contains(l))
+            })
+            .map(|mut item| {
+                lead(&mut item, '1');
+                item
+            }),
+    );
 
     items
 }
@@ -380,8 +406,19 @@ mod merge_tests {
             ["div", "key", "Frame", "Card", "Size", "Activated"]
         );
         assert_eq!(
-            labels(super::merged(items, host, true)),
+            labels(super::merged(items.clone(), host.clone(), true)),
             ["div", "key", "Card"]
         );
+
+        // The editor sorts by `sortText`: the ingot's items still come
+        // first, and the host keeps its own order after them.
+        let host = vec![
+            json!({ "label": "Frame", "detail": "Roblox class", "sortText": "1Frame" }),
+            json!({ "label": "Card", "detail": "component", "sortText": "0Card" }),
+        ];
+        let mut sorted = super::merged(items, host, false);
+        sorted.sort_by_key(|i| i["sortText"].as_str().unwrap().to_string());
+
+        assert_eq!(labels(sorted), ["div", "key", "Card", "Frame"]);
     }
 }

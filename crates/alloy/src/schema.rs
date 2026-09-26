@@ -874,8 +874,8 @@ pub const TABLES: &[Table] = &[
             ),
             unset(
                 "interpolate",
-                Ty::Choice(&["plain", "compute"]),
-                "How `{expr}` in text lowers: `plain` inserts the value, `compute` wraps it.",
+                Ty::Choice(&["wrap", "plain"]),
+                "How `{expr}` in text lowers: `wrap` wraps it so a reactive library re-runs it (through `compute` when set), `plain` inserts the value.",
             ),
             unset(
                 "merge",

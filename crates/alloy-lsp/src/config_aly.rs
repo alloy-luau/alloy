@@ -1116,6 +1116,22 @@ mod tests {
         assert!(at(&src.replace("'PascalCase'", "|")).is_some());
     }
 
+    /// `interpolate` takes the values the compiler reads: `wrap` and
+    /// `plain`. The schema listed `plain` and `compute`, so the default
+    /// of the table form reported as wrong.
+    #[test]
+    fn interpolate_takes_wrap_and_plain() {
+        let config = |value: &str| {
+            format!(
+                "export default {{\n  alx = {{ factory = {{ backend = 'table', create = 'vide.create', interpolate = '{value}' }} }},\n}}\n"
+            )
+        };
+
+        assert!(check(&schema(), &config("wrap")).is_empty());
+        assert!(check(&schema(), &config("plain")).is_empty());
+        assert!(!check(&schema(), &config("compute")).is_empty());
+    }
+
     #[test]
     fn ordinary_code_is_no_config() {
         assert_eq!(place("local t = {\n    |\n}\nprint(t)\n"), None);

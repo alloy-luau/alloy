@@ -1827,6 +1827,33 @@ mod tests {
         );
     }
 
+    /// A lone table argument hugs its parentheses. fmt wrote `copy(`,
+    /// then `{` on a line of its own and the fields one level deeper:
+    /// three lines of brackets for one argument.
+    #[test]
+    fn a_lone_table_argument_hugs_its_parentheses() {
+        let fields = "first_long_key_name = 1, second_long_key_name = 2, third_long_key_name = 3, fourth = 4";
+        let hugged = "  local t = copy({\n    first_long_key_name = 1,\n    second_long_key_name = 2,\n    third_long_key_name = 3,\n    fourth = 4,\n  })\n";
+
+        for call in [
+            format!("copy({{ {fields} }})"),
+            format!("copy {{ {fields} }}"),
+        ] {
+            stable(
+                &format!("do\n  local t = {call}\nend\n"),
+                &format!("do\n{hugged}end\n"),
+            );
+        }
+
+        // A table that fits stays on the line, and a second argument
+        // breaks the list as before.
+        stable("copy({ a = 1 })\n", "copy({ a = 1 })\n");
+        stable(
+            &format!("copy({{ {fields} }}, second_argument_here)\n"),
+            &format!("copy(\n  {{ {fields} }},\n  second_argument_here\n)\n"),
+        );
+    }
+
     #[test]
     fn formatting_is_idempotent_on_the_examples() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../examples");

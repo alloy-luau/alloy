@@ -763,8 +763,9 @@ impl<'s> Formatter<'s> {
 
         let opener = self.items[open].text.clone();
         let closer = self.items[close].text.clone();
-        let expand =
-            !elements.is_empty() && self.should_expand(elements, *magic_comma, hard, open, close);
+        let expand = !elements.is_empty()
+            && !self.hugs(elements, open)
+            && self.should_expand(elements, *magic_comma, hard, open, close);
         self.line.push_str(&opener);
 
         if !expand {
@@ -832,6 +833,17 @@ impl<'s> Formatter<'s> {
             self.line = self.indent(base);
             self.line.push_str(&closer);
         }
+    }
+
+    /// Whether the parentheses at `open` hold one table and nothing else,
+    /// `f({ ... })`. They hug it: the table breaks inside them, so the
+    /// call takes no lines of brackets of its own.
+    fn hugs(&self, elements: &[(Vec<Node>, Option<usize>)], open: usize) -> bool {
+        matches!(self.items[open].text.as_str(), "(" | "?(")
+            && matches!(
+                elements,
+                [(el, None)] if matches!(el.as_slice(), [Node::Group { open: o, .. }] if self.items[*o].is("{"))
+            )
     }
 
     /// Whether a group breaks: a magic trailing comma, a comment among

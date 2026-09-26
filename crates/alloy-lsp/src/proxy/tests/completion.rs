@@ -868,6 +868,27 @@ pub(crate) fn an_arm_binding_joins_the_childs_list() {
     assert_eq!(labels, ["radius"]);
 }
 
+/// A member list names what the value has. `t.` inside an arm offered
+/// the arm's `radius` as a member.
+#[test]
+fn a_member_list_takes_no_case_binding() {
+    let src = concat!(
+        "enum Shape as\n",
+        "    Circle(number)\n",
+        "    Dot\n",
+        "end\n",
+        "local t = { a = 1 }\n",
+        "local z = match Shape.Dot with\n",
+        "    case Circle(radius) then t.a\n",
+        "    default 0\n",
+        "end\n",
+    );
+    let (st, uri) = one_file(src);
+    let child = json!([{ "label": "a" }]);
+
+    assert!(st.value_scope(uri, 6, 31, &child).is_empty());
+}
+
 /// An imported attribute joins the list. Its hover opens with
 /// `@slow(...)`, not `export`, so the scope took it for private.
 #[test]

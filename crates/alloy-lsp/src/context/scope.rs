@@ -103,13 +103,30 @@ pub fn value_openers(text: &str) -> i32 {
                 false => count += 1,
             },
 
-            "if" if !expression_if(&text[..at]) => count += 1,
+            "if" if !expression_if(&text[..at]) && !one_line_value(&text[at..]) => count += 1,
 
             _ => {}
         }
     }
 
     count
+}
+
+/// Whether the text from an `if` is an `if` expression on one line with
+/// no `end`: `if base > 0 then base else 0`, the value that closes a
+/// `case` arm. A statement `if` takes an `end`, on its line or below.
+fn one_line_value(text: &str) -> bool {
+    let words: Vec<&str> = words_at(text).into_iter().map(|(_, w)| w).collect();
+    let then = words.iter().position(|w| *w == "then");
+    // A value stands after the `else`, on the same line.
+    let valued_else = |t: usize| {
+        words[t + 1..]
+            .iter()
+            .rposition(|w| *w == "else")
+            .is_some_and(|e| t + 1 + e + 1 < words.len())
+    };
+
+    then.is_some_and(valued_else) && !words.contains(&"end")
 }
 
 /// Splits at the commas of the top level. A bracket, an angle bracket,
@@ -666,6 +683,34 @@ mod tests {
         assert!(!names.contains(&"doubled".to_string()), "{names:?}");
         // A name the caret's own line declares is not bound yet.
         assert!(!names.contains(&"kind".to_string()), "{names:?}");
+    }
+
+    /// `if base > 0 then base else 0` closes a `case` arm as its value.
+    /// The walk read the `if` as a block that waits for an `end`, so a
+    /// binding of the arm stayed in scope past the function around it.
+    #[test]
+    fn a_one_line_if_value_opens_no_block() {
+        assert_eq!(value_openers("if base > 0 then base else 0"), 0);
+        assert_eq!(value_openers("if ok then run() else stop() end"), 1);
+        assert_eq!(value_openers("if ok then"), 1);
+        assert_eq!(value_openers("if ok then run() else"), 1);
+
+        let src = concat!(
+            "local function quote(s: State): number\n",
+            "  local price = match s with\n",
+            "    case Ripe(kind) then\n",
+            "      const base = kind\n",
+            "      if base > 0 then base else 0\n",
+            "    default 0\n",
+            "  end\n",
+            "  return price\n",
+            "end\n",
+            "print(|)\n",
+        );
+        let names = scope_at(src);
+
+        assert!(!names.contains(&"kind".to_string()), "{names:?}");
+        assert!(!names.contains(&"base".to_string()), "{names:?}");
     }
 
     /// `match e as name with` names the value for every arm. The

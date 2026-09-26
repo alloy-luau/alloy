@@ -45,12 +45,14 @@ impl State {
 
             // A member list names what the value has, not the scope.
             let starts = context::expression_start(&doc.source, offset);
+            let member = context::member_at(&doc.source, offset).is_some();
 
             return context::locals_in_scope(&doc.source, offset)
                 .into_iter()
                 .filter(|l| !child.iter().any(|i| i["label"] == l.name.as_str()))
                 .filter(|l| {
-                    (!compiles && starts) || case_arm_of_binding(doc, line, &l.name).is_some()
+                    (!compiles && starts)
+                        || (!member && case_arm_of_binding(doc, line, &l.name).is_some())
                 })
                 .map(|l| {
                     json!({

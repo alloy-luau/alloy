@@ -3031,9 +3031,25 @@ function alloy.attribute(name: string, targets, params)
 	return table.freeze({ name = name, targets = targets, params = params })
 end
 
---- Attributes on a struct or enum, from its declaration.
+--- Attributes on a struct or enum, from its declaration. An impl adds
+--- its own to the ones its type holds: a struct and its impls are one
+--- type, so `Attributes.get` reads both.
 function alloy.attrs(target: any, data: any)
-	target.__attrs = data
+	local had = rawget(target, "__attrs")
+	if had == nil then
+		target.__attrs = data
+		return target
+	end
+	for part, entries in data do
+		local into = had[part]
+		if into == nil then
+			had[part] = entries
+		else
+			for key, value in entries do
+				into[key] = value
+			end
+		end
+	end
 	return target
 end
 

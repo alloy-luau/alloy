@@ -636,6 +636,15 @@ impl<'s> Desugar<'s> {
             }
         }
 
+        // An attribute on the impl is one on its type, so it lands on
+        // the table the struct's own attributes sit on, beside them.
+        let own = self.attr_table(&i.attributes);
+
+        if own != "{}" && !foreign {
+            let std = self.std();
+            tail.push_str(&format!(" {std}.attrs({target}, {{ own = {own} }})"));
+        }
+
         // A struct's `end` line carried its tables; the impl adds after.
         if i.exported && !foreign {
             self.exports

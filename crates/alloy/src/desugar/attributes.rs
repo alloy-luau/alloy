@@ -2998,6 +2998,22 @@ print(a)
         );
     }
 
+    /// An attribute on an `impl` is one on its type, so the runtime
+    /// finds it on the struct's table, beside the struct's own.
+    #[test]
+    fn an_impl_attribute_lands_on_its_struct() {
+        let src = "attribute tagged(n: number) on struct, impl\n@tagged(1)\nstruct S as x: number end\n@tagged(2)\nimpl S\nend\nprint(S)\n";
+        assert!(messages(src).is_empty(), "{:?}", messages(src));
+        let out = crate::compile(src).unwrap();
+        assert!(
+            out.ship
+                .contains("end __alloy.attrs(S, { own = { tagged = { 2 } } })"),
+            "{}",
+            out.ship
+        );
+        assert_eq!(out.ship.lines().count(), src.lines().count());
+    }
+
     #[test]
     fn inline_and_noinline_never_reach_the_emit() {
         let out = crate::compile(

@@ -1787,6 +1787,24 @@ mod tests {
         );
     }
 
+    /// `src` formats to `want`, and `want` formats to itself.
+    fn stable(src: &str, want: &str) {
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want);
+    }
+
+    /// A child lookup by expression and the indexer of a table type key
+    /// a value, as `t[k]` does, so their brackets stay tight. The spacing
+    /// of an array literal wrote `part->[ name ]` and `{ read [ number ]: string }`.
+    #[test]
+    fn a_child_lookup_and_a_type_indexer_keep_tight_brackets() {
+        stable(
+            "local c = part->[name]\nlocal w = part=>[name]\nlocal v = map![name]\ntype R = { read [number]: string, write [string]: number }\n",
+            "local c = part->[name]\nlocal w = part=>[name]\nlocal v = map![name]\ntype R = { read [number]: string, write [string]: number }\n",
+        );
+        stable("local xs = [1, 2]\n", "local xs = [ 1, 2 ]\n");
+    }
+
     #[test]
     fn formatting_is_idempotent_on_the_examples() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../examples");

@@ -1042,11 +1042,7 @@ impl<'s> Formatter<'s> {
     /// `t[k,]`, `t![k,]`, and `w->[k,]` do not parse.
     fn trailing_comma(&self, open: usize) -> bool {
         let opener = self.items[open].text.as_str();
-        let index = opener.ends_with('[')
-            && (self.is_index(open)
-                || self
-                    .prev_code(open)
-                    .is_some_and(|p| matches!(self.items[p].text.as_str(), "->" | "=>" | "!")));
+        let index = opener.ends_with('[') && self.is_index(open);
 
         self.options.trailing_comma && !matches!(opener, "(" | "?(" | "<<") && !index
     }
@@ -1127,8 +1123,9 @@ impl<'s> Formatter<'s> {
             .is_some_and(|sigil| self.items[sigil].is("$"))
     }
 
-    /// `[` that indexes, as opposed to an array literal or a type's
-    /// `{ [k]: v }`.
+    /// `[` that indexes or keys, as opposed to an array literal: `t[k]`,
+    /// `t![k]`, a child by name, `w->[k]`, and the indexer of a table
+    /// type, `{ [k]: v }` and `{ read [k]: v }`.
     fn is_index(&self, i: usize) -> bool {
         if self.items[i].is("?[") {
             return true;
@@ -1138,6 +1135,7 @@ impl<'s> Formatter<'s> {
             let t = &self.items[p];
 
             (t.is_ident() && !t.is_keyword_here())
+                || matches!(t.text.as_str(), "->" | "=>" | "!" | "read" | "write")
                 || t.is(")")
                 || t.is("]")
                 || t.is("}")

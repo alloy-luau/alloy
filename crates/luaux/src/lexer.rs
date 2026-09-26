@@ -77,15 +77,46 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, LexError> {
 /// interpolation — `{ "}" }` closes at the second brace, not the one inside the
 /// string. The LuauX parser needs this to delimit `{expr}` attribute values and
 /// children without parsing the Luau inside them (PLAN.md §5.1).
+///
+/// Alloy patch: the hole is Luau, but LuauX inside it is not. Its text may
+/// hold `don't`, a lone quote, or `--`, which read as Luau open a string or a
+/// comment that swallows the `}`. So the hole lexes the way a file does: the
+/// scanner finds each LuauX region, and the LuauX parser skips it, holes and
+/// all.
 pub fn find_matching_brace(src: &str, open: usize) -> Result<usize, LexError> {
     debug_assert_eq!(src.as_bytes().get(open), Some(&b'{'));
 
-    let mut lexer = Lexer::new(src);
-    lexer.pos = open + 1;
-    lexer.scan_balanced_braces(open)?;
+    let mut lexer = Lexer::at(src, open + 1);
+    let mut scanner = crate::markup_scan::Scanner::new(src);
+    let mut depth = 1usize;
 
-    // scan_balanced_braces lands just past the closing brace.
-    Ok(lexer.pos - 1)
+    while let Some(token) = lexer.next_token() {
+        let token = token?;
+        let lookahead = Lexer::at(src, token.end);
+
+        if scanner.feed(token, &lookahead) {
+            let (_, end) = crate::markup::parse_node(src, token.start).map_err(|e| LexError {
+                message: e.message,
+                offset: e.offset,
+            })?;
+            lexer.seek(end);
+            scanner.note_luaux_region();
+
+            continue;
+        }
+
+        match token.text(src) {
+            "{" => depth += 1,
+
+            "}" if depth == 1 => return Ok(token.start),
+
+            "}" => depth -= 1,
+
+            _ => {}
+        }
+    }
+
+    lexer.err("unterminated interpolation", open)
 }
 
 /// A resumable Luau lexer.

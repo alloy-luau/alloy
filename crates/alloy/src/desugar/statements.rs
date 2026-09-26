@@ -615,7 +615,13 @@ impl<'s> Desugar<'s> {
     /// carry their own `self` already, and none of them reaches this
     /// scan.
     pub(crate) fn scan_plain_tables(&mut self, block: &Block) {
-        let colon_method = |stmt: &Stmt| matches!(stmt.under_default(), Stmt::Function(f) if f.is_method && f.path.len() == 2);
+        let colon_method = |stmt: &Stmt| match stmt.under_default() {
+            Stmt::Function(f) => f.is_method && f.path.len() == 2,
+
+            Stmt::Impl(_) => true,
+
+            _ => false,
+        };
 
         if !self.options.check || !block.stmts.iter().any(colon_method) {
             return;

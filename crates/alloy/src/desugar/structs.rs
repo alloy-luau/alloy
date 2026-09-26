@@ -223,6 +223,13 @@ impl<'s> Desugar<'s> {
             self.diagnose(i.target, &message);
         }
         let types_self = self.options.check && (foreign || local_type || !impl_generics.is_empty());
+        // A class table, `local Frost = {}` with `Frost.__index = Frost`,
+        // types `self` the way its colon methods do.
+        let table_self = match self.options.check && !types_self {
+            true => self.table_selfs.get(&written).map(|k| k.text(&written)),
+
+            false => None,
+        };
 
         self.impl_target = Some(target_name.clone());
 
@@ -261,6 +268,8 @@ impl<'s> Desugar<'s> {
                 } else {
                     format!("{target_name}{impl_generics}")
                 });
+            } else if table_self.is_some() {
+                self.self_type.clone_from(&table_self);
             }
 
             let has_self = m
@@ -4612,5 +4621,32 @@ mod tests {
         assert_eq!(got.0, "a[flyer]nilb[flyer]nil");
         assert_eq!(got.1, "a[grunt]nilb[grunt]nil");
         assert_eq!(got.2, "a[dog]nilb[dog]nil");
+    }
+
+    /// `impl Ranged for Frost` on a class table wrote `self` with no
+    /// type, and a colon method of the same class took an instance.
+    /// The impl method takes the same instance, with or without a colon
+    /// method beside it.
+    #[test]
+    fn an_impl_on_a_class_table_types_self_as_an_instance() {
+        let options = crate::EmitOptions {
+            check: true,
+            ..crate::EmitOptions::default()
+        };
+        let src = "trait Ranged as\n    function range(self): number\nend\nlocal Frost = {}\nFrost.__index = Frost\nfunction Frost.new(slow: number)\n    local self = setmetatable({}, Frost)\n    self.slow = slow\n    return self\nend\nimpl Ranged for Frost as\n    function range(self): number\n        return self.slow * 10\n    end\nend\nreturn Frost\n";
+        let colon = src.replace(
+            "impl Ranged",
+            "function Frost:twice(): number\n    return self.slow * 2\nend\nimpl Ranged",
+        );
+
+        for src in [src.to_string(), colon] {
+            let out = crate::compile_with(&src, &options).unwrap();
+            assert!(
+                out.check
+                    .contains("Frost.range(self: typeof(Frost.new(nil :: any)))"),
+                "{}",
+                out.check
+            );
+        }
     }
 }

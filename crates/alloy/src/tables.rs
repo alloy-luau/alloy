@@ -48,7 +48,7 @@ impl SelfType {
 }
 
 /// The `self` type of each top-level `local X = { }` table that a colon
-/// method is written on. A table is left out when its value is not
+/// method, or an `impl` method that takes `self`, is written on. A table is left out when its value is not
 /// known at the method: a rebind after a method, or a metatable other
 /// than its own class shape.
 pub fn self_types(src: &str) -> HashMap<String, SelfType> {
@@ -117,6 +117,18 @@ pub fn self_types(src: &str) -> HashMap<String, SelfType> {
                         _ => {}
                     }
                 }
+            }
+
+            // `impl Ranged for X` writes methods on the table too.
+            Stmt::Impl(i)
+                if i.methods.iter().any(|m| {
+                    m.body
+                        .params
+                        .first()
+                        .is_some_and(|p| text(p.name) == "self")
+                }) =>
+            {
+                methods.insert(text(i.target));
             }
 
             Stmt::Function(f) if f.path.len() == 2 => {

@@ -1686,3 +1686,24 @@ fn a_trait_default_takes_a_unit_enum_as_self() {
     assert!(reported[1].contains("Expected this to be '\"Off\" | \"On\"', but got 'number'"));
     assert!(reported[2].contains("Expected this to be 'Named', but got 'number'"));
 }
+
+/// `impl Ranged for Frost` on a class table left `self` untyped, and
+/// `self.slow * 10` read `unknown`. The impl method takes the instance
+/// its colon methods take, so a right use passes and a wrong one
+/// reports.
+#[test]
+fn an_impl_on_a_class_table_reads_the_instance() {
+    let head = "trait Ranged as\n    function range(self): number\nend\nlocal Frost = {}\nFrost.__index = Frost\nfunction Frost.new(slow: number)\n    local self = setmetatable({}, Frost)\n    self.slow = slow\n    return self\nend\n";
+    let good = format!(
+        "{head}impl Ranged for Frost as\n    function range(self): number\n        return self.slow * 10\n    end\nend\nprint(Frost.new(2):range())\n"
+    );
+    analyze(&good, "impl-class-self");
+
+    let bad = format!(
+        "{head}impl Ranged for Frost as\n    function range(self): number\n        return self.slow:upper()\n    end\nend\nprint(Frost)\n"
+    );
+    let Some(reported) = reports(&bad, "impl-class-self-bad") else {
+        return;
+    };
+    assert_eq!(reported.len(), 1, "{}", reported.join("\n"));
+}

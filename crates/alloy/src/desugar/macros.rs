@@ -232,11 +232,12 @@ fn body_return(body: &str) -> BodyReturn {
     }
 }
 
-/// The one expression a macro body is, when the parser read it as a
-/// statement: `print(x)` or `new Pt { x = 0 }`. In expression position
-/// that expression is the body's value. A body of any other shape has
-/// no value, and the caller reports it.
-fn body_value(body: &str) -> Option<String> {
+/// The last expression of a macro body, when the parser read it as a
+/// statement: `print(x)` or `new Pt { x = 0 }`, with the byte it starts
+/// at. In expression position that expression is the body's value, and
+/// the statements before it run first. A body that ends in any other
+/// shape has no value, and the caller reports it.
+fn body_value(body: &str) -> Option<(usize, String)> {
     let lexed = alloy_syntax::lexer::lex(body).ok()?;
     let (chunk, errors) =
         alloy_syntax::parser::parse_lenient(body, &lexed.toks, Default::default());
@@ -245,8 +246,12 @@ fn body_value(body: &str) -> Option<String> {
         return None;
     }
 
-    match chunk.block.stmts.as_slice() {
-        [alloy_syntax::ast::Stmt::Call(e, _)] => Some(e.span().text(body, &lexed.toks).to_string()),
+    match chunk.block.stmts.last() {
+        Some(alloy_syntax::ast::Stmt::Call(e, _)) => {
+            let at = lexed.toks[e.span().start as usize].start as usize;
+
+            Some((at, e.span().text(body, &lexed.toks).to_string()))
+        }
 
         _ => None,
     }
@@ -443,14 +448,14 @@ impl<'s> Desugar<'s> {
                         return "nil".to_string();
                     }
 
-                    // A body of one expression the parser read as a
-                    // statement gives that expression. Behind the
-                    // `return` of the nested compile a `new` lowers to
-                    // its one-call form; alone it lowers to statements,
-                    // and statements cannot stand in an expression.
+                    // A body that ends in a call the parser read as a
+                    // statement gives that call. Behind the `return` of
+                    // the nested compile a `new` lowers to its one-call
+                    // form; alone it lowers to statements, and
+                    // statements cannot stand in an expression.
                     BodyReturn::None if !body.is_empty() => match body_value(body) {
-                        Some(value) => {
-                            body = "";
+                        Some((at, value)) => {
+                            body = body[..at].trim_end();
                             tail = Some(value);
                         }
 
@@ -1145,11 +1150,12 @@ mod tests {
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         assert!(out.ship.contains("local _n1 = "), "{}", out.ship);
 
-        // A body of two statements has no value, and the call says so
-        // instead of shipping statements Luau cannot read.
+        // A body that ends in a statement other than a call has no
+        // value, and the call says so instead of shipping statements
+        // Luau cannot read.
         assert_eq!(
             messages(
-                "macro two(x)\n    print(x)\n    print(x)\nend\n\nlocal t = $two(1)\nprint(t)\n"
+                "macro two(x)\n    print(x)\n    local y = x\nend\n\nlocal t = $two(1)\nprint(t)\n"
             ),
             vec![
                 "the macro `two` expands to statements; in an expression its body must end in a value"
@@ -1528,5 +1534,22 @@ mod tests {
 
         assert!(!out.check.contains("nil"), "{}", out.check);
         assert!(!out.check.contains("return"), "{}", out.check);
+    }
+
+    /// `const low = lo` then `math.max(low, ...)`: the body ends in a
+    /// call, and the parser reads a call as a statement. The call said
+    /// "expands to statements", though the body ends in a value.
+    #[test]
+    fn a_body_that_ends_in_a_call_gives_its_value() {
+        for tail in ["math.max(low, math.min(hi, x))", "tostring(low):upper()"] {
+            let src = format!(
+                "macro clamp(x, lo, hi)\n    const low = lo\n    {tail}\nend\nlocal a = $clamp(5, 0, 3)\nprint(a)\n"
+            );
+            let out = crate::compile(&src).unwrap();
+
+            assert!(out.diagnostics.is_empty(), "{tail}: {:?}", out.diagnostics);
+            assert!(out.ship.contains("(function() "), "{}", out.ship);
+            assert!(out.ship.contains(" return "), "{}", out.ship);
+        }
     }
 }

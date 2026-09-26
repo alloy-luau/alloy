@@ -35,11 +35,13 @@ pub(crate) struct Member {
 }
 
 /// The declaration a contract is checked against: the target word the
-/// attribute names, the owner's own name, and the span the members of
-/// that declaration sit in.
+/// attribute names, the owner's name, and the span the members of that
+/// declaration sit in.
 #[derive(Clone, Copy)]
 pub(crate) struct Owner<'a> {
     pub target: &'a str,
+    /// The name the tables use: `Probe_B` for a member of `Probe`. A
+    /// report shows the path, `Probe.B`.
     pub name: &'a str,
     pub body: TokSpan,
 }
@@ -477,6 +479,8 @@ impl<'s> Desugar<'s> {
         // member of another type that shares the name keeps the lint.
         self.contract_names.extend(found.iter().map(|m| m.at));
 
+        let shown = self.display_name(owner.name);
+
         let Some(m) = found.first() else {
             let visibility = match want.private {
                 Some(true) => "private ",
@@ -489,7 +493,7 @@ impl<'s> Desugar<'s> {
                 "`@{attr}` requires a {visibility}{} `{}`; `{}` declares none",
                 want.kind,
                 member_sketch(want),
-                owner.name
+                shown
             );
             self.diagnose(at, &message);
             self.note_gap(at, attr, owner, want);
@@ -507,7 +511,7 @@ impl<'s> Desugar<'s> {
             };
             let message = format!(
                 "`@{attr}` requires `{}` to be {asked}; `{}` declares it {has}",
-                want.member, owner.name
+                want.member, shown
             );
             self.diagnose(at, &message);
 
@@ -523,7 +527,7 @@ impl<'s> Desugar<'s> {
             let message = format!(
                 "`@{attr}` requires `{}`; `{}` declares `{}`",
                 member_sketch(want),
-                owner.name,
+                shown,
                 match m.shape.is_empty() {
                     true => want.member.clone(),
 

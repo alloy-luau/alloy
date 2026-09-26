@@ -216,12 +216,13 @@ impl<'s> Desugar<'s> {
             Stmt::Struct(st) => {
                 self.check_attrs(&st.attributes, "struct");
                 let name = self.text_of(st.name).to_string();
-                let members = self.type_members_of(&self.decl_name(st.name));
+                let key = self.decl_name(st.name);
+                let members = self.type_members_of(&key);
                 self.check_contracts(
                     &st.attributes,
                     Owner {
                         target: "struct",
-                        name: &name,
+                        name: &key,
                         body: st.span,
                     },
                     &members,
@@ -241,8 +242,8 @@ impl<'s> Desugar<'s> {
 
             Stmt::Enum(e) => {
                 self.check_attrs(&e.attributes, "enum");
-                let name = self.text_of(e.name).to_string();
-                let members = self.type_members_of(&self.decl_name(e.name));
+                let name = self.decl_name(e.name);
+                let members = self.type_members_of(&name);
                 self.check_contracts(
                     &e.attributes,
                     Owner {
@@ -323,8 +324,8 @@ impl<'s> Desugar<'s> {
 
             Stmt::Interface(i) => {
                 self.check_attrs(&i.attributes, "interface");
-                let name = self.text_of(i.name).to_string();
-                let members = self.type_members_of(&self.decl_name(i.name));
+                let name = self.decl_name(i.name);
+                let members = self.type_members_of(&name);
                 self.check_contracts(
                     &i.attributes,
                     Owner {

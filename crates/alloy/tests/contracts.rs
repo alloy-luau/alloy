@@ -313,6 +313,31 @@ fn a_contract_reads_a_struct_inside_a_namespace_member() {
     );
 }
 
+/// A member of a namespace renders as `Probe_B`, and the report on the
+/// `impl` named it so. It names the path, as the report on the struct
+/// and a StructError do.
+#[test]
+fn a_contract_names_a_namespace_member_by_its_path() {
+    let src = "attribute probe on struct, impl as\n    requires function Start(self)\nend\n\nnamespace Probe as\n    @probe\n    public struct B as\n        x: number\n    end\n\n    @probe\n    impl B as\n    end\nend\n\nprint(Probe.B.new({ x = 1 }))\n";
+    assert_eq!(
+        messages(src),
+        ["`@probe` requires a function `Start(self)`; `Probe.B` declares none"; 2]
+    );
+
+    // The tables keep the rendered name, so the method gap of the
+    // struct finds its impl.
+    let gaps = compile(src).contract_gaps;
+    assert_eq!(gaps.len(), 2, "{gaps:?}");
+
+    for gap in gaps {
+        assert!(
+            src[..gap.insert_at as usize].ends_with("impl B as\n    "),
+            "{}",
+            &src[..gap.insert_at as usize]
+        );
+    }
+}
+
 /// The contract is a check: the emit is what it was.
 #[test]
 fn a_contract_emits_nothing_of_its_own() {

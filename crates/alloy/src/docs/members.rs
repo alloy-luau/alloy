@@ -221,6 +221,13 @@ pub const MEMBERS: &[(&str, &[Member])] = &[
                 example: "local a = $set[1, 2]\nlocal b = $set[2, 3]\nprint(a:difference(b):len())",
             },
             Member {
+                name: "clear",
+                kind: MemberKind::Method,
+                signature: "Set:clear()",
+                doc: "Removes every member and sets the count to zero. The set itself stays, so every reference to it sees the empty set.",
+                example: "local seen = $set[1, 2, 3]\nseen:clear()\nprint(seen:len())",
+            },
+            Member {
                 name: "to_array",
                 kind: MemberKind::Method,
                 signature: "Set:to_array(): T[]",

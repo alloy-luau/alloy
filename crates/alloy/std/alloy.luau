@@ -1380,6 +1380,7 @@ export type Set<T> = typeof(setmetatable({} :: {
 	union: (self: Set<T>, other: Set<T>) -> Set<T>,
 	intersection: (self: Set<T>, other: Set<T>) -> Set<T>,
 	difference: (self: Set<T>, other: Set<T>) -> Set<T>,
+	clear: (self: Set<T>) -> (),
 	to_array: (self: Set<T>) -> Array<T>,
 	to_table: (self: Set<T>) -> { [T]: boolean },
 }, {} :: { __iter: (self: any) -> (({ [T]: boolean }, T?) -> (T, boolean), { [T]: boolean }) }))
@@ -1548,6 +1549,11 @@ end
 
 function Set.len(self)
 	return self._count
+end
+
+function Set.clear(self)
+	table.clear(self._items)
+	self._count = 0
 end
 
 -- The set ops write the new table directly. An `add` per member cost a

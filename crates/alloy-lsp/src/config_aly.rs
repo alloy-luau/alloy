@@ -145,6 +145,12 @@ impl<'a> Lexed<'a> {
             .rev()
             .find(|&k| matches!(self.text(k), "const" | "local"))?
             + 1;
+
+        // `local =`, half typed, binds no name.
+        if name >= eq {
+            return None;
+        }
+
         let one_line = !self.src[self.toks.get(name)?.end as usize..self.toks[eq].start as usize]
             .contains('\n');
 
@@ -1086,6 +1092,15 @@ mod tests {
             place("export const build: { out: string } = {\n    o|\n}\n"),
             key(&["build"], "o")
         );
+    }
+
+    /// `local =` or `const =`, half typed, binds no name. The span
+    /// between the name and the `=` ran backwards and panicked.
+    #[test]
+    fn a_half_typed_binding_is_no_config() {
+        assert_eq!(place("local = {\n    |\n}\n"), None);
+        assert_eq!(place("export const = { | }\n"), None);
+        assert!(check(&schema(), "local = {\n    build = 1,\n}\n").len() < 100);
     }
 
     #[test]

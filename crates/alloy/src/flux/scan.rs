@@ -393,18 +393,6 @@ impl<'s> Scan<'s> {
         }
     }
 
-    /// The source between the previous token and this one: whitespace
-    /// and comments.
-    pub(crate) fn gap_before(&self, i: usize) -> &'s str {
-        let from = if i == 0 { 0 } else { self.end(i - 1) as usize };
-        let to = self
-            .toks
-            .get(i)
-            .map_or(self.src.len(), |t| t.start as usize);
-
-        &self.src[from..to]
-    }
-
     /// Whether a comment sits between token `a` and token `b`.
     pub(crate) fn comment_between(&self, a: usize, b: usize) -> bool {
         if a >= b {

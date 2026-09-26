@@ -16,10 +16,16 @@ pub struct Declaration {
 }
 
 /// The comment block right above a byte offset, as Markdown: the `--`
-/// or `---` lines that end on the line before, with attribute lines
-/// between them and the declaration skipped. A blank line ends the block.
+/// or `---` lines that end on the line before, or a `--[[ ]]` block that
+/// closes there. Attribute lines between the comment and the declaration
+/// are skipped. A blank line ends the block.
 pub fn doc_before(src: &str, offset: usize) -> Option<String> {
     let before = &src[..offset.min(src.len())];
+
+    if let Some(doc) = block_doc(before) {
+        return Some(doc);
+    }
+
     let mut lines: Vec<&str> = Vec::new();
     let mut iter = before.lines().rev();
 
@@ -52,6 +58,68 @@ pub fn doc_before(src: &str, offset: usize) -> Option<String> {
     lines.reverse();
 
     Some(lines.join("\n").trim().to_string())
+}
+
+/// The text of a block comment that closes on the line above the last
+/// line of `before`: `--[[ ... ]]` or `--[=[ ... ]=]`, with its opener at
+/// the start of a line. The common indent of its lines is removed.
+fn block_doc(before: &str) -> Option<String> {
+    // The declaration's own line, then any attribute lines, are not it.
+    let mut above = &before[..before.rfind('\n')?];
+
+    loop {
+        let from = above.rfind('\n').map_or(0, |n| n + 1);
+        let line = above[from..].trim();
+
+        if !line.starts_with('@') {
+            above = &above[..from + above[from..].trim_end().len()];
+
+            break;
+        }
+
+        above = &above[..from.checked_sub(1)?];
+    }
+
+    let body = above.strip_suffix(']')?;
+    let level = body.len() - body.trim_end_matches('=').len();
+    let body = body.trim_end_matches('=').strip_suffix(']')?;
+    let open = format!("--[{}[", "=".repeat(level));
+    let at = body.rfind(&open)?;
+    let inner = &body[at + open.len()..];
+
+    // Code ends in `]]` too, as in `t[a[1]]`. A comment's first close is
+    // its own, and a doc opens its line.
+    if inner.contains(&format!("]{}]", "=".repeat(level)))
+        || !body[..at]
+            .rsplit('\n')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+    {
+        return None;
+    }
+
+    let lines: Vec<&str> = inner.lines().collect();
+    let indent = lines
+        .iter()
+        .skip(1)
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    let doc: Vec<&str> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| match i {
+            0 => l.trim(),
+
+            _ => l.get(indent..).unwrap_or_else(|| l.trim_start()),
+        })
+        .collect();
+    let doc = doc.join("\n").trim().to_string();
+
+    (!doc.is_empty()).then_some(doc)
 }
 
 /// One `.d.aly` inside the merged definitions file: the file, and the
@@ -1753,6 +1821,25 @@ mod binding_tests {
         let b = bindings(src);
         assert_eq!(b[0].doc.as_deref(), Some("Adds one."));
         assert_eq!(b[1].doc, None);
+    }
+
+    /// A `--[[ ]]` block that closes on the line above is a doc too, at
+    /// any bracket level, with attributes between. Code that ends in
+    /// `]]` and a block after code on its line are not.
+    #[test]
+    fn a_block_comment_above_is_a_doc() {
+        let doc = |src: &str| doc_before(src, src.rfind("local").unwrap());
+        assert_eq!(
+            doc("--[[\n  Two lines,\n    one indented.\n]]\nlocal x = 1\n").as_deref(),
+            Some("Two lines,\n  one indented.")
+        );
+        assert_eq!(
+            doc("--[==[ One line. ]==]\n@inline\nlocal x = 1\n").as_deref(),
+            Some("One line.")
+        );
+        assert_eq!(doc("--[[ a ]]\nprint(t[a[1]])\nlocal x = 1\n"), None);
+        assert_eq!(doc("print(1) --[[ a ]]\nlocal x = 1\n"), None);
+        assert_eq!(doc("--[[ a ]]\n\nlocal x = 1\n"), None);
     }
 
     #[test]

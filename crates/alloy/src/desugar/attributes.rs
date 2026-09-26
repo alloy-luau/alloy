@@ -178,9 +178,16 @@ impl<'s> Desugar<'s> {
     /// `expr`; this pass sees them all.
     pub(crate) fn scan_static_checks(&mut self, block: &Block) {
         for stmt in &block.stmts {
-            self.check_stmt_attrs(stmt);
-            self.check_children_of(stmt_children(stmt));
+            self.check_stmt(stmt);
         }
+    }
+
+    /// One statement and everything under it. A namespace member goes
+    /// through here too, so a function body in a namespace reads its
+    /// own structs and impls as a top-level one does.
+    fn check_stmt(&mut self, stmt: &Stmt) {
+        self.check_stmt_attrs(stmt);
+        self.check_children_of(stmt_children(stmt));
     }
 
     /// The attributes of one declaration, against the target each one
@@ -278,7 +285,7 @@ impl<'s> Desugar<'s> {
                 });
 
                 for m in &ns.members {
-                    self.check_stmt_attrs(&m.stmt);
+                    self.check_stmt(&m.stmt);
                 }
 
                 self.ns_stack.pop();
@@ -1171,6 +1178,12 @@ impl<'s> Desugar<'s> {
         let Some(ename) = self.dotted_name(object) else {
             return;
         };
+
+        // In a namespace, a bare name reads the member first. The enum
+        // of the file with that name is another type.
+        if self.ns_member_name(&ename).is_some() {
+            return;
+        }
         let Some(variants) = self.enum_decls.get(&ename) else {
             return;
         };
@@ -2961,6 +2974,13 @@ print(a)
             got[0],
             "`Shape` has no variant `Triangle`; its variants are `Circle`, `Rect` and `Empty`"
         );
+    }
+
+    /// In a namespace, `Mode` names the member enum, not the file's.
+    #[test]
+    fn an_enum_member_reads_the_namespace_enum_first() {
+        let src = "enum Mode as\n    Fast\nend\nnamespace N as\n    public enum Mode as\n        Other\n    end\n    public function f(): ()\n        print(Mode.Other)\n    end\nend\nprint(N.f, Mode.Fast)\n";
+        assert!(messages(src).is_empty(), "{:?}", messages(src));
     }
 
     #[test]

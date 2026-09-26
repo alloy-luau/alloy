@@ -281,6 +281,38 @@ fn a_contract_reads_a_struct_inside_a_function() {
     );
 }
 
+/// The walk never went into a namespace member, so a contract in a
+/// function body there went unchecked. Each nesting reads its own
+/// structs and impls: a function, an impl method, a nested function,
+/// a nested namespace.
+#[test]
+fn a_contract_reads_a_struct_inside_a_namespace_member() {
+    let decl = "attribute starts on struct, impl as\n    requires function Start(self)\nend\n\n";
+    let local = |name: &str, start: &str| {
+        format!(
+            "        struct {name} as\n            x: number\n        end\n\n        @starts\n        impl {name} as\n{start}        end\n\n        print({name}.new({{ x = 1 }}))\n"
+        )
+    };
+    let src = |start: &str| {
+        format!(
+            "{decl}namespace Group as\n    public function e(): ()\n{}    end\n\n    struct Host as\n        y: number\n    end\n\n    impl Host as\n        function make(self): ()\n{}            print(self.y)\n        end\n    end\n\n    public function deep(): ()\n        local function inner(): ()\n{}        end\n\n        inner()\n    end\n\n    namespace Inner as\n        public function f(): ()\n{}        end\n    end\nend\n\nprint(Group.e, Group.deep, Group.Inner.f, Group.Host.new({{ y = 1 }}))\n",
+            local("E", start),
+            local("InMethod", start),
+            local("InNested", start),
+            local("InInner", start),
+        )
+    };
+
+    clean(&src(
+        "            function Start(self): ()\n                print(self.x)\n            end\n",
+    ));
+    assert_eq!(
+        messages(&src("")),
+        ["E", "InMethod", "InNested", "InInner"]
+            .map(|n| format!("`@starts` requires a function `Start(self)`; `{n}` declares none"))
+    );
+}
+
 /// The contract is a check: the emit is what it was.
 #[test]
 fn a_contract_emits_nothing_of_its_own() {

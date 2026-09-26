@@ -1209,10 +1209,9 @@ impl<'s> Desugar<'s> {
 
         // The attributes stand above the word, and the span opens on
         // the first of them. Their lines go blank; the `export` word
-        // after them goes, and the rest renders as a plain local.
-        for a in &l.attrs {
-            self.blank_lines(self.byte_start(a.span), self.byte_end(a.span));
-        }
+        // after them goes, and the rest renders as a plain local, with
+        // the guard of its `@cfg`.
+        let cfg = self.local_cfg(l);
 
         let word = l
             .attrs
@@ -1225,6 +1224,12 @@ impl<'s> Desugar<'s> {
         // The newline between the last attribute and the word.
         if let Some(after) = l.attrs.iter().map(|a| self.byte_end(a.span)).max() {
             self.copy(after, self.toks[word].start);
+        }
+
+        if let Some(cond) = cfg
+            && self.cfg_guarded_local(l, &cond, self.byte_start(rest))
+        {
+            return;
         }
 
         if local_needs_rewrite(l) {

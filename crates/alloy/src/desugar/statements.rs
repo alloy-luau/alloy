@@ -1926,23 +1926,7 @@ impl<'s> Desugar<'s> {
             // has nothing to attach to: a diagnostic, and the text goes
             // so the output stays Luau.
             Stmt::Local(l) if !l.attrs.is_empty() => {
-                let mut cfg = None;
-
-                for a in &l.attrs {
-                    let name = a.name.map(|n| self.text_of(n)).unwrap_or("").to_string();
-
-                    if name == "cfg" {
-                        match self.cfg_condition(&a.args) {
-                            Ok(cond) => cfg = Some(cond),
-
-                            Err(message) => self.diagnose(a.span, &message),
-                        }
-                    }
-
-                    // The target check runs in `check_attrs`, over every
-                    // declaration at once.
-                    self.blank_lines(self.byte_start(a.span), self.byte_end(a.span));
-                }
+                let cfg = self.local_cfg(l);
 
                 // The copy starts where the last attribute ends, so the
                 // newline between it and the keyword survives.
@@ -1953,37 +1937,10 @@ impl<'s> Desugar<'s> {
                     .max()
                     .unwrap_or(0);
 
-                // The value is read only when the condition holds; the
-                // binding keeps the value's type, so the code that uses
-                // it reads as before. `typeof` sees the value, it does
-                // not run it.
-                if let Some(cond) = cfg {
-                    let plain = l.names.len() == 1
-                        && l.values.len() == 1
-                        && !self.text_of(l.names[0].name).starts_with(['{', '[']);
-
-                    if plain {
-                        let value = &l.values[0];
-                        let vs = self.byte_start(value.span());
-                        let ve = self.byte_end(value.span());
-                        // The copy in `typeof` sits on one line: each
-                        // line of the value loses its indent.
-                        let shape = self
-                            .render_to_string(value)
-                            .lines()
-                            .map(str::trim)
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        self.copy(after_attrs, vs);
-                        self.generate(vs, &format!("(if {cond} then "));
-                        self.expr(value);
-                        self.generate(ve, &format!(" else nil) :: typeof({shape})"));
-                        self.copy(ve, self.byte_end(l.span));
-
-                        return;
-                    }
-
-                    self.diagnose(l.span, "`@cfg` goes on a local with one name and one value");
+                if let Some(cond) = cfg
+                    && self.cfg_guarded_local(l, &cond, after_attrs)
+                {
+                    return;
                 }
 
                 if local_needs_rewrite(l) {

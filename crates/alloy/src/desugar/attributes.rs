@@ -2534,6 +2534,64 @@ impl<'s> Desugar<'s> {
         self.generate(end, " end");
     }
 
+    /// The condition of the `@cfg` on a local, if it has one. The lines
+    /// of every attribute go blank. The target check runs in
+    /// `check_attrs`, over every declaration at once.
+    pub(crate) fn local_cfg(&mut self, l: &Local) -> Option<String> {
+        let mut cfg = None;
+
+        for a in &l.attrs {
+            if a.name.is_some_and(|n| self.text_of(n) == "cfg") {
+                match self.cfg_condition(&a.args) {
+                    Ok(cond) => cfg = Some(cond),
+
+                    Err(message) => self.diagnose(a.span, &message),
+                }
+            }
+
+            self.blank_lines(self.byte_start(a.span), self.byte_end(a.span));
+        }
+
+        cfg
+    }
+
+    /// A local under `@cfg`, rendered from `from`. The value is read
+    /// only when the condition holds; the binding keeps the value's
+    /// type, so the code that uses it reads as before. `typeof` sees the
+    /// value, it does not run it. A plain local and an `export` local
+    /// both come here. False, with a diagnostic, when the local binds
+    /// more than one name.
+    pub(crate) fn cfg_guarded_local(&mut self, l: &Local, cond: &str, from: u32) -> bool {
+        let plain = l.names.len() == 1
+            && l.values.len() == 1
+            && !self.text_of(l.names[0].name).starts_with(['{', '[']);
+
+        if !plain {
+            self.diagnose(l.span, "`@cfg` goes on a local with one name and one value");
+
+            return false;
+        }
+
+        let value = &l.values[0];
+        let vs = self.byte_start(value.span());
+        let ve = self.byte_end(value.span());
+        // The copy in `typeof` sits on one line: each line of the value
+        // loses its indent.
+        let shape = self
+            .render_to_string(value)
+            .lines()
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.copy(from, vs);
+        self.generate(vs, &format!("(if {cond} then "));
+        self.expr(value);
+        self.generate(ve, &format!(" else nil) :: typeof({shape})"));
+        self.copy(ve, self.byte_end(l.span));
+
+        true
+    }
+
     /// Whether a function hands its caller no value: it declares `()`
     /// as its return type, or declares none and returns nothing. An
     /// `async` function with no declared type resolves its future with

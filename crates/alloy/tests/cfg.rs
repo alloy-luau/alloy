@@ -39,6 +39,27 @@ fn a_local_keeps_the_type_of_its_value() {
 }
 
 #[test]
+fn an_exported_local_keeps_its_guard() {
+    let out =
+        compile("@cfg(server)\nexport const a = os.clock()\n@cfg(client)\nexport local b = 1\n");
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    assert!(
+        out.ship.contains(
+            "const a = (if __alloy.cfg.server() then os.clock() else nil) :: typeof(os.clock())"
+        ),
+        "{}",
+        out.ship
+    );
+    assert!(
+        out.ship
+            .contains("local b = (if __alloy.cfg.client() then 1 else nil) :: typeof(1)"),
+        "{}",
+        out.ship
+    );
+    assert_eq!(out.ship.lines().count(), 4);
+}
+
+#[test]
 fn the_conditions_join() {
     let out = compile("@cfg(any(studio, test) and not server)\nfunction f() end\n");
     assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);

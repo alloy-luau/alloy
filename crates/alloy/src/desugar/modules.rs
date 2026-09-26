@@ -596,10 +596,10 @@ impl<'s> Desugar<'s> {
             ImportKind::Named(specs) => {
                 // `import { type Meters }`, or a list of names the module
                 // exports as types alone, says the same thing an
-                // `import type { }` line says, so the flag drops its
-                // `require` too. A list with one value in it keeps the
-                // require and drops nothing.
-                if self.options.erase_type_imports && self.list_is_type_only(&path, specs) {
+                // `import type { }` line says, so its `require` goes
+                // too. A list with one value in it keeps the require and
+                // drops nothing.
+                if self.list_is_type_only(&path, specs) {
                     self.ship_blanks
                         .push((self.byte_start(i.span), self.byte_end(i.span)));
                 }
@@ -610,13 +610,12 @@ impl<'s> Desugar<'s> {
             }
 
             ImportKind::TypeOnly(specs) => {
-                // The whole statement exists for the type checker. With
-                // `erase_type_imports` it is blanked to ship: every output
-                // chunk anchored inside it goes.
-                if self.options.erase_type_imports {
-                    self.ship_blanks
-                        .push((self.byte_start(i.span), self.byte_end(i.span)));
-                }
+                // The whole statement exists for the type checker, so it
+                // is blanked to ship: every output chunk anchored inside
+                // it goes. A require there runs the module, and two
+                // modules that name each other's types would loop.
+                self.ship_blanks
+                    .push((self.byte_start(i.span), self.byte_end(i.span)));
                 let temp = self.hoist_import(&target, anchor);
                 let mut parts: Vec<String> = Vec::new();
 

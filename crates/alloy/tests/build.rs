@@ -335,17 +335,15 @@ fn one_ambient_name_declared_twice_is_an_error() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// `[emit] erase_type_imports` drops the `require` of a line that binds
-/// types alone. The build never read the key, so no shape was blanked;
-/// and only `import type { }` was blanked, not a `{ type X }` list.
+/// The build drops the `require` of a line that binds types alone, as
+/// `import type { }`, a `{ type X }` list, or a name the module exports
+/// as a type alone. The require ran the module, and two modules that
+/// name each other's types looped. `[emit] erase_type_imports` turned
+/// this on; the key still parses, does nothing, and draws a note.
 #[test]
-fn erase_type_imports_drops_a_type_only_require() {
+fn a_type_only_import_drops_its_require() {
     let dir = temp_project("erase");
-    fs::write(
-        dir.join("alloy.toml"),
-        "[emit]\nerase_type_imports = true\n",
-    )
-    .unwrap();
+    fs::write(dir.join("alloy.toml"), "[emit]\nwait_timeout = 5\n").unwrap();
     fs::write(dir.join("src/types.aly"), "export type Meters = number\n").unwrap();
     fs::write(
         dir.join("src/util.aly"),
@@ -391,15 +389,43 @@ fn erase_type_imports_drops_a_type_only_require() {
     assert!(mixed.contains("local scale = "), "{mixed}");
     assert!(mixed.contains("type Feet = "), "{mixed}");
 
-    // Off by default: the require stays in every shape.
-    let plain = Config {
-        build: Build::default(),
-        emit: Emit::default(),
-        ..config
-    };
-    alloy::build::run(&dir, &plain.build, &plain.emit).unwrap();
-    let out = fs::read_to_string(dir.join("build/spec.luau")).unwrap();
-    assert!(out.contains("require(\"./types\")"), "{out}");
+    // Two modules that name each other's types load.
+    fs::write(
+        dir.join("src/a.aly"),
+        "import type { B } from \"./b\"\n\nexport struct A as\n    b: B?\nend\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/b.aly"),
+        "import type { A } from \"./a\"\n\nexport struct B as\n    a: A?\nend\n",
+    )
+    .unwrap();
+    let report = alloy::build::run(&dir, &config.build, &config.emit).unwrap();
+    assert!(report.is_clean(), "{report:?}");
+
+    // The runtime require shares the first line with the import, and
+    // stays.
+    for (name, other) in [("a", "b"), ("b", "a")] {
+        let out = fs::read_to_string(dir.join(format!("build/{name}.luau"))).unwrap();
+        assert!(
+            !out.contains(&format!("require(\"./{other}\")")),
+            "{name}: {out}"
+        );
+        assert!(out.starts_with("local __alloy = require("), "{name}: {out}");
+    }
+
+    // The old key parses and says it does nothing.
+    let old = Config::parse(
+        "[emit]\nerase_type_imports = true\n",
+        &dir.join("alloy.toml"),
+    )
+    .unwrap();
+    assert_eq!(
+        old.deprecations(),
+        [
+            "`[emit] erase_type_imports` does nothing now: a type-only import never runs its `require`. Remove the key"
+        ]
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }

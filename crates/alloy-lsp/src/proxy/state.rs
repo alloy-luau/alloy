@@ -587,7 +587,6 @@ impl State {
                     file_name,
                     std_require: RUNTIME_ALIAS.to_string(),
                     definitions,
-                    erase_type_imports: config.emit.erase_type_imports,
                     test_runner: config.test.lest,
                     extensions: self.extensions.clone(),
                     std_globals: config.std.globals.clone(),

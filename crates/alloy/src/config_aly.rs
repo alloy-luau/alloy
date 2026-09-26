@@ -1177,7 +1177,10 @@ mod tests {
         let out = from_toml(crate::config::TEMPLATE).unwrap();
         // The template asks for single quotes and two spaces.
         assert!(out.contains("\n  build = {\n    in = 'src',\n"), "{out}");
-        assert!(out.contains("wait_timeout = 5,\n    -- std_require = \"@alloy\"\n    -- erase_type_imports = false\n  },"), "{out}");
+        assert!(
+            out.contains("wait_timeout = 5,\n    -- std_require = \"@alloy\"\n  },"),
+            "{out}"
+        );
         assert!(out.contains("-- tailwind = \"ingots/tailwind\"\n"), "{out}");
         assert!(!out.contains("schema"), "{out}");
 

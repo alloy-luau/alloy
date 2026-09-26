@@ -82,10 +82,6 @@ pub struct EmitOptions {
     pub ship_std_require: Option<String>,
     /// A `.d.aly`: declarations only, no runtime tables, no std require.
     pub definitions: bool,
-    /// Blank `import type` lines in the ship artifact, so a type-only
-    /// import creates no runtime dependency. Off by default, because the
-    /// output is then untyped for anyone who analyzes it directly.
-    pub erase_type_imports: bool,
     /// Macros visible to an expansion, as source: a nested compile of a
     /// macro body sees the macros of the file it came from.
     pub macros: Vec<MacroSource>,
@@ -425,7 +421,6 @@ impl Default for EmitOptions {
             std_require: "@alloy".to_string(),
             ship_std_require: None,
             definitions: false,
-            erase_type_imports: false,
             macros: Vec::new(),
             shapes: Vec::new(),
             wire_scopes: Vec::new(),
@@ -897,6 +892,9 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     // The export return follows the last statement; a blanked test at
     // the end of the file must not take it along.
     let return_start = d.return_at.map(|at| d.r.out_len() + at);
+    // The prologue anchors on the first statement, so a blanked import
+    // there must not take the runtime require along.
+    let body_start = d.r.out_len();
     d.r.append(side);
 
     let blanks = d.ship_blanks.clone();
@@ -920,7 +918,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
 
         let start = map.chunk_start(i);
 
-        if return_start.is_some_and(|r| start >= r) {
+        if start < body_start || return_start.is_some_and(|r| start >= r) {
             continue;
         }
 

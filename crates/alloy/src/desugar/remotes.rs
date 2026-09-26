@@ -950,6 +950,17 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /// The sides of the remote an expression names: `Ping`, `Net.Ping`,
+    /// or a local that holds one.
+    pub(crate) fn remote_named(&self, object: &Expr) -> Option<(bool, bool)> {
+        let receiver = self.text_of(object.span()).trim().to_string();
+
+        self.remotes_under(&receiver, object.span().start as usize)
+            .into_iter()
+            .find(|(rest, _)| rest.is_empty())
+            .map(|(_, sides)| sides)
+    }
+
     /*
     `Up.fire(1)` in a `.server.aly` file, where `Up` goes from the client.
     A remote declared in a shared module types both sides, so the checker
@@ -985,11 +996,7 @@ impl<'s> Desugar<'s> {
             return;
         };
         let receiver = self.text_of(object.span()).trim().to_string();
-        let Some((_, (from_client, from_server))) = self
-            .remotes_under(&receiver, object.span().start as usize)
-            .into_iter()
-            .find(|(rest, _)| rest.is_empty())
-        else {
+        let Some((from_client, from_server)) = self.remote_named(object) else {
             return;
         };
 

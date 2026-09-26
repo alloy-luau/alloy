@@ -1412,7 +1412,7 @@ pub(crate) fn lints(
             true => "never assigned again, so it is a const".to_string(),
 
             false if classes.contains(&d.tok) => {
-                "a class table, which takes the struct style".to_string()
+                "a class or module table, which takes the struct style".to_string()
             }
 
             false => format!("{article} {key}"),
@@ -1434,27 +1434,40 @@ pub(crate) fn lints(
 }
 
 /// The name token of each top-level local that holds a class or a
-/// module table: the file writes `X.__index = X` or a colon method
-/// `function X:m()` on it. Such a name reads as a type, `Timer.new()`,
-/// so it takes the struct style. A plain data table stays a variable.
+/// module table: the file writes `X.__index = X` or a function on it,
+/// `function X.f()` or `function X:m()`. Such a name reads as a type or
+/// a module, `Timer.new()`, so it takes the struct style. A plain data
+/// table stays a variable.
+///
+/// `X.f = function` also writes a callback into a data table, so it
+/// counts only on a local that starts as `{}`.
 fn class_tables(src: &str, toks: &[Tok], stmts: &[Stmt]) -> HashSet<usize> {
     let text = |span: TokSpan| span.text(src, toks);
     let mut owners: HashSet<&str> = HashSet::new();
+    let mut filled: HashSet<&str> = HashSet::new();
 
     for stmt in stmts {
         match stmt.under_default() {
             Stmt::Assign(a) => {
-                if let ([Expr::Index { object, key, .. }], [Expr::Name(v)]) =
+                if let ([Expr::Index { object, key, .. }], [value]) =
                     (a.targets.as_slice(), a.values.as_slice())
                     && let (Expr::Name(o), IndexKey::Field(k)) = (object.as_ref(), key)
-                    && text(*k) == "__index"
-                    && text(*o) == text(*v)
                 {
-                    owners.insert(text(*o));
+                    match value {
+                        Expr::Name(v) if text(*k) == "__index" && text(*o) == text(*v) => {
+                            owners.insert(text(*o));
+                        }
+
+                        Expr::Function { .. } => {
+                            filled.insert(text(*o));
+                        }
+
+                        _ => {}
+                    }
                 }
             }
 
-            Stmt::Function(f) if f.is_method && f.path.len() == 2 => {
+            Stmt::Function(f) if f.path.len() >= 2 => {
                 owners.insert(text(f.path[0]));
             }
 
@@ -1467,8 +1480,10 @@ fn class_tables(src: &str, toks: &[Tok], stmts: &[Stmt]) -> HashSet<usize> {
         .filter_map(|stmt| match stmt.under_default() {
             Stmt::Local(l) if l.names.len() == 1 && l.names[0].destructure.is_none() => {
                 let name = l.names[0].name;
+                let empty = matches!(l.values.as_slice(), [Expr::Table { fields, .. }] if fields.is_empty());
+                let class = owners.contains(text(name)) || (empty && filled.contains(text(name)));
 
-                owners.contains(text(name)).then_some(name.start as usize)
+                class.then_some(name.start as usize)
             }
 
             _ => None,
@@ -1937,6 +1952,17 @@ mod tests {
         assert_eq!(fixed(class), class);
         let module = "local Shop = {}\nfunction Shop:open() end\nreturn Shop\n";
         assert_eq!(fixed(module), module);
+        // The usual Luau module: a function written on the table, with
+        // a dot or as an assigned value.
+        let helpers = "local Helpers = {}\nfunction Helpers.double(x: number): number\n    return x * 2\nend\nHelpers.half = function(x: number): number\n    return x / 2\nend\nreturn Helpers\n";
+        assert_eq!(fixed(helpers), helpers);
+        let assigned = "local Util = {}\nUtil.run = function() end\nreturn Util\n";
+        assert_eq!(fixed(assigned), assigned);
+        // A callback written into a data table keeps the variable style.
+        assert_eq!(
+            fixed("local Hooks = { on = print }\nHooks.on = function() end\nprint(Hooks)\n"),
+            "local hooks = { on = print }\nhooks.on = function() end\nprint(hooks)\n"
+        );
 
         let lower = "local timer = {}\ntimer.__index = timer\nreturn timer\n";
         let lints: Vec<Lint> = crate::compile(lower)
@@ -1947,7 +1973,7 @@ mod tests {
             .collect();
         assert_eq!(
             lints[0].message,
-            "`timer` is a class table, which takes the struct style, and structs are PascalCase here: `Timer`"
+            "`timer` is a class or module table, which takes the struct style, and structs are PascalCase here: `Timer`"
         );
         assert_eq!(
             fixed(lower),

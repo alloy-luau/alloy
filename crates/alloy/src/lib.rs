@@ -446,11 +446,20 @@ pub fn compile_file(
     let ingots = ingots.filter(|i| !i.is_empty());
     let layer = ingots.map(|i| i.before(path, source));
     let text = layer.as_ref().map_or(source, |l| l.text.as_str());
-    let mut out = if path.ends_with(".alx") {
-        compile_alx(text, options, jsx.cloned().unwrap_or_default())?.output
+    let compiled = if path.ends_with(".alx") {
+        compile_alx(text, options, jsx.cloned().unwrap_or_default()).map(|a| a.output)
     } else {
-        compile_with(text, options)?
+        compile_with(text, options)
     };
+    // A failed compile points into the transformed text, which can run
+    // past the end of the author's file.
+    let mut out = compiled.map_err(|mut e| {
+        if let Some(map) = layer.as_ref().and_then(|l| l.map.as_ref()) {
+            e.offset = map.to_source(e.offset as u32) as usize;
+        }
+
+        e
+    })?;
 
     if let Some(layer) = layer {
         if let Some(map) = layer.map {

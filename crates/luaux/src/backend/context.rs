@@ -258,6 +258,14 @@ impl<'a> EmitContext<'a> {
         }
     }
 
+    /// Alloy patch: whether an attribute sets `Text` after aliases. It
+    /// records nothing, because the props pass reports a bad name.
+    pub fn sets_text(&self, class: &str, written: &str) -> bool {
+        self.resolver
+            .resolve_attribute(class, written, 0)
+            .is_ok_and(|canonical| canonical == "Text")
+    }
+
     /// Records an error and carries on, the way [`EmitContext::resolve`] does
     /// for a name that does not resolve.
     ///

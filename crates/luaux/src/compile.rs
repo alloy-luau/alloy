@@ -778,7 +778,7 @@ mod tests {
     fn a_text_attribute_and_text_children_conflict() {
         for source in [
             r#"local e = <TextLabel Text="A">B</TextLabel>"#,
-            "local e = <TextLabel Text={tostring(n)}>{label}</TextLabel>",
+            r#"local e = <TextLabel Text="A">B {n}</TextLabel>"#,
         ] {
             let error = try_build(source).expect_err(source);
 
@@ -788,6 +788,21 @@ mod tests {
                 source[source.find("Text=").unwrap()..source.find('>').unwrap()].trim_end(),
             );
         }
+    }
+
+    /// A `Text` attribute sets the text, so a `{ }` beside it is a child,
+    /// with element children or without. Silk and Enamel lower a classed
+    /// child to one.
+    #[test]
+    fn a_hole_beside_a_text_attribute_is_a_child() {
+        assert_eq!(
+            build(r#"local e = <TextButton Text="">{f()}</TextButton>"#),
+            "local e = create(\"TextButton\")({ Text = \"\", f() })"
+        );
+        assert_eq!(
+            build(r#"local e = <TextButton Text=""><UICorner />{f()}</TextButton>"#),
+            "local e = create(\"TextButton\")({ Text = \"\", create(\"UICorner\")({}), f() })"
+        );
     }
 
     #[test]

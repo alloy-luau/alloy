@@ -1808,13 +1808,26 @@ impl<'s> Desugar<'s> {
                 links.remove(0);
             }
         }
-        // `import(...)` is `require(...)`. A string or an instance chain
-        // types itself; a dynamic path is `unknown` unless `<<T>>` says.
+        // `import(...)` is the value of the module, as `import Name from`
+        // reads it: its default, when it exports one. A string or an
+        // instance chain types itself; a dynamic path is `unknown` unless
+        // `<<T>>` says.
         if self.is_import_call(e)
             && let Some(Link::Plain(Step::Call {
                 type_args, args, ..
             })) = links.first()
         {
+            // A plain Luau module and a data file have no export table:
+            // the value is what they return.
+            let plain = match args {
+                CallArgs::Str(s) => self.is_plain_module(self.text_of(*s)),
+
+                CallArgs::Paren(list) if list.len() == 1 && matches!(list[0], Expr::String(_)) => {
+                    self.is_plain_module(self.text_of(list[0].span()))
+                }
+
+                _ => false,
+            };
             // A data path drops its extension, as in `import` statements.
             let a = match args {
                 CallArgs::Str(s) => crate::data::strip_literal(self.text_of(*s)),
@@ -1856,12 +1869,21 @@ impl<'s> Desugar<'s> {
 
                 self.lower_type(&text)
             });
+            let value = match plain {
+                true => format!("require{a}"),
+
+                false => {
+                    self.uses_module_value = true;
+
+                    format!("__module_value(require{a})")
+                }
+            };
             inner = match ty {
-                Some(t) => format!("(require{a} :: {t})"),
+                Some(t) => format!("({value} :: {t})"),
 
-                None if is_static => format!("require{a}"),
+                None if is_static => value,
 
-                None => format!("(require{a} :: unknown)"),
+                None => format!("({value} :: unknown)"),
             };
             links.remove(0);
         }

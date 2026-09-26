@@ -1081,8 +1081,15 @@ fn an_import_of_a_bare_string_is_a_require() {
     let out = alloy::compile("import \"./fx\"\nlocal m = import './fx'\nprint(m)\n").unwrap();
 
     for text in [&out.check, &out.ship] {
-        assert!(text.starts_with("require(\"./fx\")\n"), "{text}");
-        assert!(text.contains("local m = require('./fx')"), "{text}");
+        let first = text.lines().next().unwrap_or_default();
+        assert!(
+            first.ends_with(" __module_value(require(\"./fx\"))"),
+            "{text}"
+        );
+        assert!(
+            text.contains("local m = __module_value(require('./fx'))"),
+            "{text}"
+        );
         assert!(!text.contains("import"), "{text}");
     }
 }
@@ -1100,18 +1107,19 @@ fn an_import_inside_typeof_is_a_require() {
 
     for text in [&out.check, &out.ship] {
         assert!(
-            text.contains("type App = typeof(require('./app'))"),
+            text.contains("type App = typeof(__module_value(require('./app')))"),
             "{text}"
         );
         assert!(
-            text.contains("local a: typeof(require('./app').mount)"),
+            text.contains("local a: typeof(__module_value(require('./app')).mount)"),
             "{text}"
         );
         assert!(!text.contains("import"), "{text}");
     }
 
     assert!(
-        out.check.contains(":: typeof(require('./app')))"),
+        out.check
+            .contains(":: typeof(__module_value(require('./app'))))"),
         "{}",
         out.check
     );

@@ -685,9 +685,9 @@ impl<'s> Desugar<'s> {
     }
 
     /// Each `import('./m')` in the text of a `typeof`, as its byte range
-    /// and the `require` that an import in an expression writes. Luau has
-    /// no `import`, and a `typeof` holds an expression.
-    pub(crate) fn typeof_imports(&self, text: &str) -> Vec<(u32, u32, String)> {
+    /// and the value that an import in an expression writes. Luau has no
+    /// `import`, and a `typeof` holds an expression.
+    pub(crate) fn typeof_imports(&mut self, text: &str) -> Vec<(u32, u32, String)> {
         // A local named `import` is the file's own function.
         if self.is_local("import") {
             return Vec::new();
@@ -703,7 +703,7 @@ impl<'s> Desugar<'s> {
                 .is_some_and(|t| matches!(t.kind, alloy_syntax::lexer::TokKind::Str { .. }))
         };
 
-        (0..toks.len())
+        let found: Vec<(u32, u32, String)> = (0..toks.len())
             .filter(|&i| {
                 word(i) == "import"
                     && !matches!(i.checked_sub(1).map(word), Some("." | ":"))
@@ -713,10 +713,24 @@ impl<'s> Desugar<'s> {
             })
             .map(|i| {
                 let path = self.require_literal(word(i + 2));
+                let value = match self.is_plain_module(word(i + 2)) {
+                    true => format!("require({path})"),
 
-                (toks[i].start, toks[i + 3].end, format!("require({path})"))
+                    false => format!("__module_value(require({path}))"),
+                };
+
+                (toks[i].start, toks[i + 3].end, value)
             })
-            .collect()
+            .collect();
+
+        if found
+            .iter()
+            .any(|(_, _, v)| v.starts_with("__module_value"))
+        {
+            self.uses_module_value = true;
+        }
+
+        found
     }
 
     /// One `name: T` pair of a table type or a parameter list. Text with

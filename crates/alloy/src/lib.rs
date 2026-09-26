@@ -1056,31 +1056,40 @@ mod tests {
         assert!(fine.diagnostics.is_empty(), "{:?}", fine.diagnostics);
     }
 
+    /// `import(...)` gives the value of the module, as `import Name from`
+    /// reads it: the default of an export table that carries one. The
+    /// cast of `import<<T>>` read the table, so `T` named the wrong value
+    /// and nothing reported it.
     #[test]
-    fn import_expression_is_require() {
-        let out = compile("local m = import(\"./x\")\nlocal i = import(script.Parent.Mod)\nlocal d = import(paths[1])\nlocal t = import<<Config>>(name)\nprint(m, i, d, t)\n").unwrap();
+    fn import_expression_is_the_module_value() {
+        let out = compile("local m = import(\"./x\")\nlocal i = import(script.Parent.Mod)\nlocal d = import(paths[1])\nlocal t = import<<Config>>(name)\nlocal j = import(\"./data.json\")\nprint(m, i, d, t, j)\n").unwrap();
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
-        assert!(
-            out.ship.contains("local m = require(\"./x\")"),
-            "{}",
-            out.ship
-        );
-        assert!(
-            out.ship.contains("local i = require(script.Parent.Mod)"),
-            "{}",
-            out.ship
-        );
-        assert!(
-            out.ship
-                .contains("local d = (require(paths[1]) :: unknown)"),
-            "{}",
-            out.ship
-        );
-        assert!(
-            out.ship.contains("local t = (require(name) :: Config)"),
-            "{}",
-            out.ship
-        );
+
+        for want in [
+            "local m = __module_value(require(\"./x\"))",
+            "local i = __module_value(require(script.Parent.Mod))",
+            "local d = (__module_value(require(paths[1])) :: unknown)",
+            "local t = (__module_value(require(name)) :: Config)",
+            // A data file has no export table.
+            "local j = require(\"./data\")",
+        ] {
+            assert!(out.ship.contains(want), "{want}\n{}", out.ship);
+        }
+
+        let ship = compile("export function load(m: any): any\n    return import<<any>>(m)\nend\n")
+            .unwrap()
+            .ship;
+        let lua = mlua::Lua::new();
+        lua.load("require = function(m) return m end")
+            .exec()
+            .unwrap();
+        let exports: mlua::Table = lua.load(ship.as_str()).eval().unwrap();
+        let load: mlua::Function = exports.get("load").unwrap();
+        let got: (String, String, i64) = lua
+            .load("local load = ... return load({ default = 'poll' }), load({ name = 'plain' }).name, load(5)")
+            .call(load)
+            .unwrap();
+        assert_eq!(got, ("poll".to_string(), "plain".to_string(), 5));
     }
 
     #[test]

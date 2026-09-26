@@ -730,6 +730,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         not_constructible: HashMap::new(),
         mapped_used: Vec::new(),
         uses_neg: false,
+        uses_module_value: false,
         namespaces: HashMap::new(),
         member_names: HashMap::new(),
         ns_stack: Vec::new(),
@@ -865,6 +866,10 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
             insert_at,
             "type function __neg(t) local function each(u) if u:is(\"union\") or u:is(\"intersection\") then for _, c in u:components() do each(c) end else types.negationof(u) end end each(t) return types.negationof(t) end ",
         );
+    }
+
+    if d.uses_module_value {
+        d.generate(insert_at, MODULE_VALUE);
     }
 
     for kind in d.mapped_used.clone() {
@@ -1169,6 +1174,15 @@ pub(crate) fn import_names(i: &alloy_syntax::ast::Import) -> Vec<TokSpan> {
         }
     }
 }
+
+/*
+The value `import(...)` gives, as `import Name from` reads it: the
+`export default` of an Alloy module, or the whole value of a module that
+exports no default. The export table carries the default under
+`default`, so a table with that key reads as one. The type follows the
+value, so `import<<T>>` names the value and not the table.
+*/
+const MODULE_VALUE: &str = "type function __module_value_of(t) if t:is(\"table\") then local d = t:readproperty(types.singleton(\"default\")) if d then return d end end return t end local function __module_value<T>(m: T): __module_value_of<T> if type(m) == \"table\" and rawget(m :: any, \"default\") ~= nil then return (m :: any).default end return m :: any end ";
 
 /// The line that binds the runtime, on the first line of code. A spec
 /// marks the run before the module's own code, so `@cfg(test)` holds
@@ -1546,6 +1560,9 @@ struct Desugar<'s> {
     mapped_used: Vec<&'static str>,
     /// A `~T` in the file: the first line declares `__neg`.
     uses_neg: bool,
+    /// An `import(...)` of a module that may export a default: the first
+    /// line declares `__module_value`. See `MODULE_VALUE`.
+    uses_module_value: bool,
     /// Expansions so far, for the unique names of a body's locals.
     macro_serial: u32,
     /// True while a macro call that stands alone as a statement

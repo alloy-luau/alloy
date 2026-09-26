@@ -827,6 +827,8 @@ pub fn fold(text: &str, known: &Known) -> String {
     drop_free_clauses(&mut out);
     // The two arms of a cut Result read alike once the clause goes.
     fold_repeated_members(&mut out);
+    // A union that folded to one member keeps its parentheses.
+    fold_name_parens(&mut out);
 
     // `local p: Pair<number>` of `struct Pair<A, B = string>`: the
     // print names the arguments the source wrote, and the type carries
@@ -1598,7 +1600,9 @@ fn intersection_len(text: &str) -> Option<usize> {
 }
 
 /// `(Slot)?` is `Slot?`: the parentheses held an intersection that now
-/// reads as one name.
+/// reads as one name. So is `(Slot) | nil`, and `((T))` is `(T)`: a
+/// union that folds to one member keeps the group of the union and the
+/// group of the member.
 fn fold_name_parens(text: &mut String) {
     let mut from = 0;
 
@@ -1609,6 +1613,16 @@ fn fold_name_parens(text: &mut String) {
             break;
         };
         let inner = text[open + 1..open + len - 1].to_string();
+
+        // The group holds one group and nothing else. The inner group
+        // reads again at the same place, since it may hold one name.
+        if inner.starts_with('(') && group_len(&inner, '(', ')') == Some(inner.len()) {
+            text.replace_range(open..open + len, &inner);
+            from = open;
+
+            continue;
+        }
+
         // One named type, its arguments included. A union, an
         // intersection, an arrow, or a list needs the parentheses.
         let plain = inner.chars().next().is_some_and(char::is_alphabetic)
@@ -1627,8 +1641,15 @@ fn fold_name_parens(text: &mut String) {
         let annotated = text[..open].ends_with(": ")
             && !outside_angles(&inner, ':')
             && !text[open + len..].trim_start().starts_with("->");
+        // A member of a union or an intersection that is one name, as
+        // `(R15Character) | nil`. A name binds tighter than `|` and `&`.
+        let before = text[..open].trim_end();
+        let after = text[open + len..].trim_start();
+        let member = (before.ends_with(['|', '&']) || after.starts_with(['|', '&']))
+            && !outside_angles(&inner, ':')
+            && !outside_angles(&inner, ' ');
 
-        if plain && (suffix || annotated) {
+        if plain && (suffix || annotated || member) {
             text.replace_range(open..open + len, &inner);
             from = open + inner.len();
 
@@ -2435,7 +2456,7 @@ mod tests {
         let known = Known::default();
 
         assert_eq!(fold("intersect<T, ~nil>", &known), "T");
-        assert_eq!(fold("(a & ~nil) | { }", &known), "(a) | {}");
+        assert_eq!(fold("(a & ~nil) | { }", &known), "a | {}");
         assert_eq!(fold("Item & ~nil", &known), "Item");
         assert_eq!(fold("intersect<A, ~nil>[]", &known), "A[]");
         assert_eq!(fold("intersect<Item, Named>", &known), "Item & Named");
@@ -2679,6 +2700,31 @@ mod tests {
         // Any other model keeps its shape.
         let other = "local m: Model & { Root: Part? }";
         assert_eq!(fold(other, &Known::default()), other);
+    }
+
+    /// A narrowed branch prints one type as a union of copies. Each copy
+    /// folds to one name and the union to one member, and no pair of
+    /// parentheses stays around it.
+    #[test]
+    fn a_folded_union_keeps_no_parentheses() {
+        let rig = "(Model & {\n    HumanoidRootPart: Part?,\n    UpperTorso: MeshPart?\n})";
+        let three = format!("```luau\nlocal model: ({rig} | {rig} | {rig})?\n```");
+        assert_eq!(
+            fold(&three, &Known::default()),
+            "```luau\nlocal model: R15Character?\n```"
+        );
+
+        for (text, want) in [
+            ("local a: ((Part))?", "local a: Part?"),
+            ("local a: ((Part) | (Model))?", "local a: (Part | Model)?"),
+            ("local a: (Part) & (Model)", "local a: Part & Model"),
+            // A parameter list and a group that holds more keep theirs.
+            ("local f: (Part) -> ()", "local f: (Part) -> ()"),
+            ("local f: ((Part) -> ())?", "local f: ((Part) -> ())?"),
+            ("local u: (Part | Model)?", "local u: (Part | Model)?"),
+        ] {
+            assert_eq!(fold(text, &Known::default()), want, "{text}");
+        }
     }
 
     #[test]

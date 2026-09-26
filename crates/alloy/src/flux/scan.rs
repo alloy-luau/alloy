@@ -606,6 +606,10 @@ impl<'s> Scan<'s> {
         // do not.
         let mut open_ifs = 0usize;
         let mut else_branch = false;
+        // The conditions of those `if` expressions still before their
+        // `then`. A `;` there joins two bindings, as in
+        // `if const a = x; const b = a.y then`.
+        let mut heads = 0usize;
 
         while j < self.toks.len() {
             let text = self.t(j);
@@ -617,6 +621,7 @@ impl<'s> Scan<'s> {
 
                 if text == "if" && !self.is_statement_if(j) {
                     open_ifs += 1;
+                    heads += 1;
                 } else if open_ifs > 0 && matches!(text, "else" | "elseif") {
                     // The `else` or `elseif` of the expression, not of a
                     // block: it ends no statement, and the branch below
@@ -624,14 +629,18 @@ impl<'s> Scan<'s> {
                     if text == "else" {
                         open_ifs -= 1;
                         else_branch = true;
+                    } else {
+                        heads += 1;
                     }
 
                     j += 1;
 
                     continue;
+                } else if text == "then" {
+                    heads = heads.saturating_sub(1);
                 }
 
-                if CLOSERS.contains(&text) || text == ";" {
+                if CLOSERS.contains(&text) || (text == ";" && heads == 0) {
                     return j;
                 }
 

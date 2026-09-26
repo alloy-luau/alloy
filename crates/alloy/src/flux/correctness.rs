@@ -1018,9 +1018,24 @@ mod tests {
             assert_eq!(names(&src), Vec::<&str>::new(), "{src}");
         }
 
+        // A `;` in the condition of an `if` expression joins two
+        // bindings of one `if`.
+        assert_eq!(
+            names(
+                "local function m(t: { x: { y: string }? }?): string\n    return if const s = t; const x = s.x then x.y else ''\nend\n"
+            ),
+            Vec::<&str>::new()
+        );
+
         // A real statement after the jump still fires.
         assert_eq!(
             names("local function j(a: number)\n    return a\n    print(a)\nend\n"),
+            vec!["unreachable_code"]
+        );
+        assert_eq!(
+            names(
+                "local function i(a: number)\n    return if a > 1 then a else 0; print(a)\nend\n"
+            ),
             vec!["unreachable_code"]
         );
         assert_eq!(

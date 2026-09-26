@@ -400,11 +400,20 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
     }
 
     // An import inside a function counts too: it resolves where it
-    // stands, and the module it names is a dependency all the same.
+    // stands, and the module it names is a dependency all the same. So
+    // does `export { } from`, which requires its module as an import
+    // does.
+    let re_exports = parsed.chunk.block.stmts.iter().filter_map(|s| match s {
+        alloy_syntax::ast::Stmt::ExportList(x) => x.from,
+
+        _ => None,
+    });
     let imports = desugar::imports_in(&parsed.chunk.block)
         .into_iter()
-        .filter_map(|i| {
-            let t = parsed.lexed.toks[i.path.start as usize];
+        .map(|i| i.path)
+        .chain(re_exports)
+        .filter_map(|path| {
+            let t = parsed.lexed.toks[path.start as usize];
             let text = t.text(src);
             let path = text
                 .get(1..text.len().saturating_sub(1))

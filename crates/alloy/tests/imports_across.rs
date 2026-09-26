@@ -82,6 +82,32 @@ fn a_build_requires_the_output_of_the_other_project() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// `export { } from` requires its module as an import does, so it
+/// builds the other project and requires its output. It wrote the
+/// source path, which no build writes, and built nothing.
+#[test]
+fn a_re_export_builds_the_other_project() {
+    let dir = workspace("re-export", &["main", "shared"]);
+    fs::write(dir.join("shared/src/util.aly"), UTIL).unwrap();
+    fs::write(
+        dir.join("main/src/barrel.aly"),
+        "export { double } from \"../../shared/src/util\"\n",
+    )
+    .unwrap();
+
+    let report = build(&dir.join("main"));
+
+    assert!(report.is_clean(), "{:?}", messages(&report));
+    let out = fs::read_to_string(dir.join("main/build/barrel.luau")).unwrap();
+    assert!(
+        out.contains("require(\"../../shared/build/util\")"),
+        "{out}"
+    );
+    assert!(dir.join("shared/build/util.luau").is_file());
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_chain_of_three_builds_from_the_end() {
     let dir = workspace("chain", &["a", "b", "c"]);

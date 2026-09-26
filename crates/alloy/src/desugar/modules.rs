@@ -665,7 +665,17 @@ impl<'s> Desugar<'s> {
                 // modules that name each other's types would loop.
                 self.ship_blanks
                     .push((self.byte_start(i.span), self.byte_end(i.span)));
-                let temp = self.hoist_import(&target, anchor);
+                // luau-lsp types no cycle of requires: the module it
+                // reaches second has no types. An import that closes one
+                // requires nothing here, and its names read as `any`.
+                // ponytail: `any` loses the shape; a checker-only copy of
+                // the target's types would keep it.
+                let cut = self.options.type_cuts.iter().any(|c| c == bare);
+                let temp = match cut {
+                    true => String::new(),
+
+                    false => self.hoist_import(&target, anchor),
+                };
                 let mut parts: Vec<String> = Vec::new();
 
                 for sp in specs {
@@ -690,6 +700,16 @@ impl<'s> Desugar<'s> {
                     }
 
                     parts.extend(aliases);
+                }
+
+                // The value side goes: a default in the parameters,
+                // `<T = number>`, stays with the head.
+                if cut {
+                    for p in &mut parts {
+                        if let Some((head, _)) = p.rsplit_once(" = ") {
+                            *p = format!("{head} = any");
+                        }
+                    }
                 }
 
                 self.generate(anchor, &parts.join(" "));

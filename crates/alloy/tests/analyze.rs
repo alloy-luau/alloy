@@ -1736,3 +1736,70 @@ fn result_pcall_takes_a_function_that_returns_nothing() {
     };
     assert_eq!(reported.len(), 1, "{}", reported.join("\n"));
 }
+
+/// Two modules that `import type` each other. The ship artifact drops
+/// the require, but the check artifact kept it, and luau-lsp gave the
+/// module it reached second no types: `Unknown type 'A'`. The import
+/// that closes the cycle now types its names as `any` there, and the
+/// value import back keeps its type.
+#[test]
+fn a_cycle_of_type_imports_type_checks() {
+    let dir = std::env::temp_dir().join(format!("alloy-type-cycle-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n\n[flux]\nroblox_types = false\n",
+    )
+    .unwrap();
+    let write = |name: &str, src: &str| std::fs::write(dir.join("src").join(name), src).unwrap();
+    write(
+        "a.aly",
+        "import type { B } from './b'\n\nexport struct A as\n    b: B?\nend\n",
+    );
+    // The last line misuses `A`, so `A` keeps its type in `b`.
+    write(
+        "b.aly",
+        "import { A } from './a'\n\nexport struct B as\n    count: number\nend\n\nexport function make(): A\n    return new A {}\nend\n\nlocal n: number = make()\nprint(n)\n",
+    );
+    // Both sides type-only: one import is cut, and each file checks.
+    write(
+        "c.aly",
+        "import type { D } from './d'\n\nexport struct C as\n    d: D?\nend\n",
+    );
+    write(
+        "d.aly",
+        "import type { C } from './c'\n\nexport struct D as\n    c: C?\nend\n",
+    );
+
+    let config = alloy::config::Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::flux_project(&dir, &config).unwrap();
+    assert!(report.is_clean(), "{:?}", report.diagnostics);
+
+    let check = |name: &str| {
+        let c = report.checks.iter().find(|c| c.rel.ends_with(name));
+
+        c.map(|c| c.check.clone()).unwrap_or_default()
+    };
+    assert!(check("a.aly").starts_with("local __alloy = require(\"@alloy\") type B = any\n"));
+    assert!(check("b.aly").contains("require('./a')"));
+    assert!(check("c.aly").contains("type D = any"));
+    assert!(check("d.aly").contains("require('./c')"));
+
+    let Ok(analysis) = alloy::typecheck::analyze(&dir, &config, &report.checks, &[]) else {
+        eprintln!("skipped: luau-lsp is not installed");
+
+        return;
+    };
+    let errors: Vec<String> = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| d.is_error())
+        .map(|d| format!("{}:{} {}", d.rel.display(), d.line, d.message))
+        .collect();
+
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].starts_with("b.aly:11 "), "{errors:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

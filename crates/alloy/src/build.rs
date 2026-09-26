@@ -709,6 +709,8 @@ fn run_inner(
             .push((Config::file_of(&ingots.root), p.to_string()));
     }
 
+    let type_cuts = type_cycle_cuts(&input, &sources);
+
     for path in sources {
         let rel = path.strip_prefix(&input).unwrap_or(&path).to_path_buf();
 
@@ -764,6 +766,7 @@ fn run_inner(
             file_name: rel.to_string_lossy().into_owned(),
             module_rel: build.out.join(&rel_out).to_string_lossy().into_owned(),
             mount_requires,
+            type_cuts: type_cuts.get(&path).cloned().unwrap_or_default(),
             mount_side: crate::project::place_side(&tree, &source_rel),
             definitions: rel.to_string_lossy().ends_with(".d.aly"),
             std_require,
@@ -1835,6 +1838,94 @@ fn resolve_import(from: &Path, path: &str, sources: &[PathBuf]) -> Option<PathBu
     }
 
     None
+}
+
+/// The `import type` lines that close a cycle of requires, by source.
+/// The ship artifact drops an `import type`, so the cycle runs nowhere,
+/// but the check artifact requires the module for its types, and
+/// luau-lsp gives no types to the module it reaches second. Each cut
+/// leaves the graph before the next edge is read, so a cycle loses one
+/// edge. A cycle with a value import on every edge is `circular_import`.
+pub fn type_cycle_cuts(input: &Path, sources: &[PathBuf]) -> HashMap<PathBuf, Vec<String>> {
+    let rels: Vec<PathBuf> = sources
+        .iter()
+        .map(|p| p.strip_prefix(input).unwrap_or(p).to_path_buf())
+        .collect();
+    // Each edge with its specs, and whether each of its lines is an
+    // `import type { }`.
+    let mut edges: Vec<(usize, usize, Vec<String>, bool)> = Vec::new();
+
+    for (i, path) in sources.iter().enumerate() {
+        let Ok(src) = std::fs::read_to_string(path) else {
+            continue;
+        };
+
+        for s in alloy_syntax::scan::import_statements(&src) {
+            let Some(to) = resolve_import(&rels[i], &s.spec, &rels)
+                .and_then(|t| rels.iter().position(|r| *r == t))
+            else {
+                continue;
+            };
+            let words: Vec<&str> = s.text.split_whitespace().take(3).collect();
+            let typed = matches!(words[..], ["import", "type", open] if open.starts_with('{'));
+
+            match edges.iter_mut().find(|e| (e.0, e.1) == (i, to)) {
+                Some(e) => {
+                    e.2.push(s.spec);
+                    e.3 &= typed;
+                }
+
+                None => edges.push((i, to, vec![s.spec], typed)),
+            }
+        }
+    }
+
+    let mut live = vec![true; edges.len()];
+    let mut cuts: HashMap<PathBuf, Vec<String>> = HashMap::new();
+
+    for k in 0..edges.len() {
+        let (from, to, specs, typed) = &edges[k];
+
+        if !typed {
+            continue;
+        }
+
+        live[k] = false;
+        let mut seen = vec![false; sources.len()];
+        let mut stack = vec![*to];
+        let mut back = false;
+
+        while let Some(n) = stack.pop() {
+            if n == *from {
+                back = true;
+
+                break;
+            }
+
+            if std::mem::replace(&mut seen[n], true) {
+                continue;
+            }
+
+            stack.extend(
+                edges
+                    .iter()
+                    .zip(&live)
+                    .filter(|(e, on)| **on && e.0 == n)
+                    .map(|(e, _)| e.1),
+            );
+        }
+
+        match back {
+            true => cuts
+                .entry(sources[*from].clone())
+                .or_default()
+                .extend(specs.iter().cloned()),
+
+            false => live[k] = true,
+        }
+    }
+
+    cuts
 }
 
 /// `circular_import`: an import that leads back to the file it sits in.

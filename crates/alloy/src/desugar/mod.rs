@@ -71,6 +71,10 @@ pub struct EmitOptions {
     /// `@game/...` place its `require` writes. See
     /// `crate::project::mount_requires`.
     pub mount_requires: Vec<(String, String)>,
+    /// The spec of each `import type` that closes a cycle of requires in
+    /// the check artifact. Its names type as `any` there, and it
+    /// requires nothing. See `crate::build::type_cycle_cuts`.
+    pub type_cuts: Vec<String>,
     /// The side the file's place in the game gives it, for a name with
     /// no `.server` or `.client`. See `crate::project::place_side`.
     pub mount_side: Option<crate::directives::Side>,
@@ -417,6 +421,7 @@ impl Default for EmitOptions {
             file_name: "<input>".to_string(),
             module_rel: String::new(),
             mount_requires: Vec::new(),
+            type_cuts: Vec::new(),
             mount_side: None,
             std_require: "@alloy".to_string(),
             ship_std_require: None,

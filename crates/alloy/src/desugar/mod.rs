@@ -731,6 +731,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         ns_force_local: false,
         export_listed: HashSet::new(),
         export_listed_bare: HashSet::new(),
+        reexported_types: HashSet::new(),
         export_listed_types: HashSet::new(),
         file_types: HashMap::new(),
         imported_types: HashMap::new(),
@@ -1573,6 +1574,9 @@ struct Desugar<'s> {
     /// their own name. An imported namespace among them sends its type
     /// aliases out with the word `export`.
     export_listed_bare: HashSet<String>,
+    /// The names an `export { ... } from` list sends out, `default`
+    /// aside. The type of a re-exported default takes none of them.
+    reexported_types: HashSet<String>,
     /// The types a top-level `export { ... }` list names under their
     /// own names. Luau has no way to re-export an alias, so the
     /// declaration takes the `export` word instead.

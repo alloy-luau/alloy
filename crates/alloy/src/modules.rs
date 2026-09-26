@@ -303,6 +303,50 @@ pub fn default_type(entries: &[String]) -> Option<&str> {
     entries.iter().find_map(|e| e.strip_prefix(DEFAULT_ENTRY))
 }
 
+/// Stands for the module's value in a default entry that is a type
+/// expression, not a name: `typeof(@.new(nil :: any))`, the `self` type
+/// of a class the module returns. No name holds the character.
+pub const MODULE_VALUE: char = '@';
+
+/// The default entry of a module that ends in `return Klass`. The
+/// returned value is the default, and its type is the type the module
+/// exports under the same name, or else the `self` type of the class
+/// `Klass` is. `types` are the module's other entries.
+fn returned_type(source: &str, types: &[String]) -> Option<String> {
+    use alloy_syntax::ast::{Expr, Stmt};
+
+    if !source.contains("return") {
+        return None;
+    }
+
+    let options = alloy_syntax::parser::ParseOptions {
+        definitions: true,
+        ..Default::default()
+    };
+    let source = parsable(source);
+    let parsed = alloy_syntax::parse_lenient(&source, options).ok()?;
+    let Some(Stmt::Return(r)) = parsed.chunk.block.stmts.last() else {
+        return None;
+    };
+    let [Expr::Name(n)] = r.values.as_slice() else {
+        return None;
+    };
+    let name = n.text(&source, &parsed.lexed.toks);
+
+    if let Some(entry) = types.iter().find(|e| type_head(e) == name) {
+        return Some(format!("{DEFAULT_ENTRY}{name}{}", type_args(entry)));
+    }
+
+    match crate::tables::self_types(&source).get(name)? {
+        kind @ crate::tables::SelfType::Instance(_) => Some(format!(
+            "{DEFAULT_ENTRY}{}",
+            kind.text(&MODULE_VALUE.to_string())
+        )),
+
+        _ => None,
+    }
+}
+
 /// The name a type entry carries, without its parameter list.
 pub fn type_head(entry: &str) -> &str {
     entry
@@ -952,6 +996,10 @@ fn module_types(path: &Path, aliases: &[(String, PathBuf)], depth: u8) -> Vec<St
     };
     let mut out = exported_types(&source);
 
+    if let Some(entry) = returned_type(&source, &out) {
+        out.push(entry);
+    }
+
     if depth == 0 {
         return out;
     }
@@ -973,17 +1021,37 @@ fn module_types(path: &Path, aliases: &[(String, PathBuf)], depth: u8) -> Vec<St
     // A module passed on whole sends each type out under one flat name,
     // `Leaf_Box`, and the export table holds no value of that name.
     for (exported, spec) in stars {
-        for entry in types_of(&spec) {
+        // The default entry names no type of its own; the table holds
+        // the type under its own name already.
+        for entry in types_of(&spec)
+            .iter()
+            .filter(|e| default_type(std::slice::from_ref(e)).is_none())
+        {
             out.push(format!(
                 "{exported}_{}{}=",
-                type_head(&entry),
-                type_args(&entry)
+                type_head(entry),
+                type_args(entry)
             ));
         }
     }
 
     for (name, exported, spec) in named {
         let types = types_of(&spec);
+
+        // `export { default as K } from "./m"` sends the type of the
+        // default on under `K`, as the barrel writes it.
+        if name == "default"
+            && let Some(entry) = default_type(&types)
+        {
+            let args = match entry.contains(MODULE_VALUE) {
+                true => "",
+
+                false => type_args(entry),
+            };
+
+            out.push(format!("{exported}{args}"));
+        }
+
         // A namespace sends its members on too, `Geo_Vec` as `G_Vec`.
         let members = format!("{name}_");
 

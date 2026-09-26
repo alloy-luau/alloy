@@ -160,6 +160,38 @@ fn a_reexport_of_a_missing_default_reports() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `export { default as K } from "./Klass"` carries the type of the
+/// default under `K`: the type the module exports under the name it
+/// returns, or the `self` type of the class it returns. An importer of
+/// the barrel reads `K` as a type.
+#[test]
+fn a_reexported_default_carries_its_type() {
+    let dir = scratch("reexport-default-type");
+    std::fs::write(
+        dir.join("Klass.aly"),
+        "local Klass = {}\nKlass.__index = Klass\nexport type Klass<T> = typeof(setmetatable({} :: { v: T }, Klass))\nreturn Klass\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Class.aly"),
+        "local Class = {}\nClass.__index = Class\nfunction Class.new(n: number)\n    return setmetatable({ n = n }, Class)\nend\nfunction Class:double(): number\n    return self.n * 2\nend\nreturn Class\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("barrel.aly"),
+        "export { default as K } from \"./Klass\"\nexport { default as C } from \"./Class\"\n",
+    )
+    .unwrap();
+    let main = dir.join("main.aly");
+    let types = alloy::modules::import_types("import { K, C } from \"./barrel\"\n", &main, &[]);
+    let (_, barrel) = types.iter().find(|(s, _)| s == "./barrel").unwrap();
+
+    assert!(barrel.contains(&"K<T>".to_string()), "{barrel:?}");
+    assert!(barrel.contains(&"C".to_string()), "{barrel:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_plain_luau_module_is_not_checked_for_names() {
     let dir = scratch("plain");

@@ -175,6 +175,11 @@ impl<'s> Desugar<'s> {
                     self.export_listed_bare.insert(name.clone());
                 }
 
+                if list.from.is_some() && name != "default" {
+                    self.reexported_types
+                        .insert(self.text_of(spec.alias.unwrap_or(spec.name)).to_string());
+                }
+
                 self.export_listed.insert(name);
             }
         }

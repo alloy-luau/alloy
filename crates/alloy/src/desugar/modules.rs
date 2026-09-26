@@ -296,6 +296,8 @@ impl<'s> Desugar<'s> {
             .iter()
             .filter(|(s, _)| s == spec)
             .flat_map(|(_, types)| types.iter())
+            // The default entry names no type of its own.
+            .filter(|entry| crate::modules::default_type(std::slice::from_ref(entry)).is_none())
             .map(|entry| {
                 let full = crate::modules::type_head(entry);
                 let args = crate::modules::type_args(entry);
@@ -329,6 +331,12 @@ impl<'s> Desugar<'s> {
     /// a module whose `export default` is a struct or an enum, or `None`
     /// for any other default.
     fn default_type(&mut self, quoted: &str, local: &str, anchor: u32) -> Option<String> {
+        // A module that returns its value has no `default` field, and a
+        // bare import of it binds the value alone.
+        if self.is_plain_module(quoted) {
+            return None;
+        }
+
         let target = self.require_literal(quoted);
         self.default_entry(quoted)?;
         let temp = self.hoist_import(&target, anchor);
@@ -340,13 +348,30 @@ impl<'s> Desugar<'s> {
     /// `type P = _m1.Player`: the type of a module's default struct or
     /// enum, under the name this file binds.
     fn default_type_of(&self, quoted: &str, local: &str, temp: &str) -> Option<String> {
+        let word = self.type_word(local);
+
+        self.default_alias(quoted, local, temp)
+            .map(|alias| format!("{word} {alias}"))
+    }
+
+    /// `P<T> = _m1.Player<T>`: the type of a module's default under
+    /// `local`, read off `temp`, the table the require binds. The
+    /// `self` type of a class the module returns reads off the value.
+    fn default_alias(&self, quoted: &str, local: &str, temp: &str) -> Option<String> {
         let entry = self.default_entry(quoted)?;
+
+        if entry.contains(crate::modules::MODULE_VALUE) {
+            let value = format!("{temp}{}", self.default_suffix(quoted));
+            let ty = entry.replace(crate::modules::MODULE_VALUE, &value);
+
+            return Some(format!("{local} = {ty}"));
+        }
+
         let head = crate::modules::type_head(entry);
         let args = crate::modules::type_args(entry);
         let type_args = type_arguments(args);
-        let word = self.type_word(local);
 
-        Some(format!("{word} {local}{args} = {temp}.{head}{type_args}"))
+        Some(format!("{local}{args} = {temp}.{head}{type_args}"))
     }
 
     /// The type entry of a module's default struct or enum.
@@ -1066,6 +1091,17 @@ impl<'s> Desugar<'s> {
                             types.extend(members.into_iter().map(|t| format!("export {t}")));
                         }
 
+                        // `export { default as K }`: the type of the
+                        // default goes out under `K`, as the value does.
+                        // A type another spec of the file sends out as
+                        // `K` stands, and a second one is a redefinition.
+                        if name == "default"
+                            && !self.reexported_types.contains(&exported)
+                            && let Some(alias) = self.default_alias(&spec, &exported, &temp)
+                        {
+                            types.push(format!("export type {alias}"));
+                        }
+
                         let suffix = self.member_suffix(self.text_of(path), &name);
                         self.exports.push((exported, format!("{temp}{suffix}")));
                     }
@@ -1473,6 +1509,54 @@ print(ex)
         // A module with an export table keeps the field.
         let table = compile("export { default as Other } from \"./Other\"\n");
         assert!(table.contains("return { Other = _m1.default }"), "{table}");
+    }
+
+    /// The re-export of a default carries its type under the new name:
+    /// the type the module exports under the name it returns, the
+    /// `self` type of the class it returns, or its default struct. A
+    /// type another spec sends out under that name stands alone, and a
+    /// bare import binds the value alone, as before.
+    #[test]
+    fn a_reexported_default_sends_its_type_on() {
+        let options = crate::EmitOptions {
+            plain_modules: vec!["./Klass".to_string(), "./Class".to_string()],
+            import_types: vec![
+                (
+                    "./Klass".to_string(),
+                    vec!["Klass<T>=".to_string(), "default Klass<T>".to_string()],
+                ),
+                (
+                    "./Class".to_string(),
+                    vec!["default typeof(@.new(nil :: any))".to_string()],
+                ),
+                (
+                    "./Player".to_string(),
+                    vec!["Player".to_string(), "default Player".to_string()],
+                ),
+            ],
+            ..crate::EmitOptions::default()
+        };
+        let compile = |src: &str| crate::compile_with(src, &options).unwrap().ship;
+
+        let named = compile("export { default as K } from \"./Klass\"\n");
+        assert!(named.contains("export type K<T> = _m1.Klass<T>"), "{named}");
+
+        let class = compile("export { default as C } from \"./Class\"\n");
+        assert!(
+            class.contains("export type C = typeof(_m1.new(nil :: any))"),
+            "{class}"
+        );
+
+        let record = compile("export { default as P } from \"./Player\"\n");
+        assert!(record.contains("export type P = _m1.Player"), "{record}");
+
+        let both = compile(
+            "export { default as Klass } from \"./Klass\"\nexport type { Klass } from \"./Klass\"\n",
+        );
+        assert_eq!(both.matches("export type Klass").count(), 1, "{both}");
+
+        let bare = compile("import K from \"./Klass\"\nprint(K)\n");
+        assert!(bare.contains("local K = require(\"./Klass\")\n"), "{bare}");
     }
 
     #[test]

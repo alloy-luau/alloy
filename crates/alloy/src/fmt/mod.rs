@@ -1938,6 +1938,17 @@ mod tests {
         assert_eq!(fmt(want), want);
     }
 
+    /// A header too long for one line breaks its parameters, and the
+    /// `as` then sits lines below `attribute`. fmt read no body there,
+    /// so its second run moved the `requires` clauses to column 0.
+    #[test]
+    fn a_split_attribute_header_keeps_its_clauses_indented() {
+        stable(
+            "export attribute options(first_parameter: string, second_parameter: string = 'default', third: number = 0) on struct as\n  requires field instance\nend\n",
+            "export attribute options(\n  first_parameter: string,\n  second_parameter: string = 'default',\n  third: number = 0\n) on struct as\n  requires field instance\nend\n",
+        );
+    }
+
     /// `function` after `is not` names a type, as after `is`. fmt read
     /// it as a function, and every later line took one more indent.
     #[test]

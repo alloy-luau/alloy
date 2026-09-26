@@ -34,8 +34,9 @@ impl<'s> Formatter<'s> {
 
         match text {
             // `attribute X on struct` closes on its own line; the `as`
-            // form opens a body of `requires` clauses.
-            "attribute" => self.line_has_after(i, "as"),
+            // form opens a body of `requires` clauses. The `as` may sit
+            // lines below, after a parameter list fmt broke.
+            "attribute" => self.header_has_after(i, "as"),
 
             // `x is function` and `x is not function` name a type;
             // nothing opens.
@@ -146,15 +147,33 @@ impl<'s> Formatter<'s> {
         i == 0 || self.items[i].newlines_before > 0
     }
 
-    /// Reports if `word` stands later on the line item `i` sits on.
-    pub(crate) fn line_has_after(&self, i: usize, word: &str) -> bool {
+    /// Reports if `word` stands later in the header item `i` opens. A
+    /// long header breaks its parameter list over several lines, so a
+    /// line break inside brackets does not end the header.
+    fn header_has_after(&self, i: usize, word: &str) -> bool {
+        let mut depth = 0i32;
+
         for j in i + 1..self.items.len() {
-            if self.items[j].newlines_before > 0 {
+            let it = &self.items[j];
+
+            if depth == 0 && it.newlines_before > 0 {
                 return false;
             }
 
-            if self.items[j].is(word) {
+            if it.is_comment() {
+                continue;
+            }
+
+            if depth == 0 && it.is(word) {
                 return true;
+            }
+
+            match it.text.as_str() {
+                ")" | "]" | "}" => depth -= 1,
+
+                t if t.ends_with('(') || t.ends_with('[') || t.ends_with('{') => depth += 1,
+
+                _ => {}
             }
         }
 

@@ -677,8 +677,10 @@ pub fn run(
 
     for (i, t) in toks.iter().enumerate() {
         // A `type function` takes types, which Luau lets no one annotate.
+        // `x is function` names a type and declares nothing.
         if t.text(src) != "function"
             || matches!(i.checked_sub(1).map(text), Some("." | ":" | "type"))
+            || alloy_syntax::contextual::tested_type_at(src, toks, i)
         {
             continue;
         }

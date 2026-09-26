@@ -334,6 +334,14 @@ pub fn keyword_at_byte(src: &str, at: usize) -> bool {
     }
 }
 
+/// Reports if token `i` is the type of a type test: the word after `is`
+/// or `is not`. `x is not function` tests a value and opens no function.
+pub fn tested_type_at(src: &str, toks: &[Tok], i: usize) -> bool {
+    let before = |n: usize| i.checked_sub(n).map_or("", |k| text(src, toks, k));
+
+    before(1) == "is" || (before(1) == "not" && before(2) == "is")
+}
+
 /// The source of token `i`, or the empty string past the end.
 pub fn text<'s>(src: &'s str, toks: &[Tok], i: usize) -> &'s str {
     match toks.get(i) {

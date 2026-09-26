@@ -1600,6 +1600,19 @@ mod tests {
         );
     }
 
+    /// `function` after `is` or `is not` names a type. The lint read it
+    /// as a function whose parameter list was the next call, and
+    /// reported the call's argument as a parameter with no type.
+    #[test]
+    fn a_type_test_for_function_declares_no_function() {
+        for test in ["is function", "is not function"] {
+            let src = format!(
+                "--- Hands a handler on.\nexport function hook(source: unknown, handler: () -> ()): ()\n    if source {test} then\n        print(handler)\n    end\nend\n"
+            );
+            assert_eq!(names(&src), Vec::<&str>::new(), "{test}");
+        }
+    }
+
     #[test]
     fn strict_carries_the_pedantic_group_and_is_on_by_default() {
         let src = "-- Doc.\nexport function f(x)\n    return x\nend\n";

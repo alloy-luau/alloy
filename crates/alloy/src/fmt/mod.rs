@@ -1206,6 +1206,60 @@ mod tests {
         assert_eq!(fmt(long), want);
     }
 
+    /// The width check counted the source's spaces and one more after
+    /// each comma. A 99-column call broke under a 100-column width, and
+    /// the second run broke it in a different shape. The check now
+    /// counts the spaces the render writes.
+    #[test]
+    fn a_group_measures_the_spaces_it_renders() {
+        let head = "local function f(p: { plots: { PlotSave } })\n";
+        let fits = format!(
+            "{head}  table.insert(p.plots, new PlotSave {{ slot = 1, state = CropState.Growing(CropKind.Carrot, 0.5) }})\nend\n"
+        );
+        assert_eq!(fits.lines().nth(1).unwrap().chars().count(), 99);
+        assert_eq!(fmt(&fits), fits);
+        // Tight source spacing gives the same result.
+        assert_eq!(fmt(&fits.replace(", ", ",")), fits);
+
+        // Two columns more break the call once, and the output holds.
+        let long = fits.replace("0.5", "0.525");
+        let want = format!(
+            "{head}  table.insert(\n    p.plots,\n    new PlotSave {{ slot = 1, state = CropState.Growing(CropKind.Carrot, 0.525) }}\n  )\nend\n"
+        );
+        assert_eq!(fmt(&long), want);
+        assert_eq!(fmt(&want), want);
+
+        // A magic trailing comma keeps the table open, and the call
+        // around it stays on its line.
+        let hug = format!(
+            "{head}  table.insert(p.plots, new PlotSave {{\n    slot = 1,\n    state = CropState.Growing(CropKind.Carrot, 0.5),\n  }})\nend\n"
+        );
+        assert_eq!(fmt(&hug), hug);
+    }
+
+    /// The width check stopped at the closer of the group, so `: Part`
+    /// after a parameter list ran past the column. It now counts the
+    /// line up to the next place the line can break.
+    #[test]
+    fn a_group_counts_the_text_after_its_closer() {
+        let src = "local function part(name: string, size: Vector3, position: Vector3, color: Rgb, parent: Instance): Part\nend\n";
+        let want = "local function part(\n  name: string,\n  size: Vector3,\n  position: Vector3,\n  color: Rgb,\n  parent: Instance\n): Part\nend\n";
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want);
+    }
+
+    /// An index that breaks takes no trailing comma: `t[k,]` does not
+    /// parse.
+    #[test]
+    fn a_broken_index_takes_no_trailing_comma() {
+        let key =
+            "a_very_long_key_name_that_runs_on_and_on_and_on_past_the_column_width_of_the_file";
+        let src = format!("local event = (instance :: any)[{key}] :: unknown\n");
+        let want = format!("local event = (instance :: any)[\n  {key}\n] :: unknown\n");
+        assert_eq!(fmt(&src), want);
+        assert_eq!(fmt(&want), want);
+    }
+
     /// A service import keeps the form the reader wrote, and the
     /// import list keeps its order: the formatter sorts nothing. Both
     /// spellings of the path stay as written; the `game_alias` lint is

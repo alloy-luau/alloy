@@ -106,7 +106,7 @@ impl<'s> Formatter<'s> {
     }
 
     /// The spacing rule between two adjacent items on one line.
-    fn wants_space(&self, ai: usize, bi: usize) -> bool {
+    pub(crate) fn wants_space(&self, ai: usize, bi: usize) -> bool {
         let a = &self.items[ai];
         let b = &self.items[bi];
         let at = a.text.as_str();

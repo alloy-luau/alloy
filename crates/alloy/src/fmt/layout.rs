@@ -715,7 +715,8 @@ impl<'s> Formatter<'s> {
 
         let opener = self.items[open].text.clone();
         let closer = self.items[close].text.clone();
-        let expand = !elements.is_empty() && self.should_expand(elements, *magic_comma, hard, open);
+        let expand =
+            !elements.is_empty() && self.should_expand(elements, *magic_comma, hard, open, close);
         self.line.push_str(&opener);
 
         if !expand {
@@ -730,8 +731,7 @@ impl<'s> Formatter<'s> {
             self.render_item(close, hard, extra);
         } else {
             let base = self.line_level;
-            let trailing =
-                self.options.trailing_comma && !matches!(opener.as_str(), "(" | "?(" | "<<");
+            let trailing = self.trailing_comma(open);
 
             for (k, (el, sep)) in elements.iter().enumerate() {
                 // A comment the source wrote on the separator's line
@@ -794,6 +794,7 @@ impl<'s> Formatter<'s> {
         magic: bool,
         hard: &[bool],
         open: usize,
+        close: usize,
     ) -> bool {
         if self.hole[open] {
             return false;
@@ -862,40 +863,72 @@ impl<'s> Formatter<'s> {
             return false;
         }
 
+        // The line already holds the opener's space, so the width starts
+        // at the opener itself.
         let mut width = self.items[open].width();
         let mut stopped = false;
-
-        if self.inner_space(open) {
-            width += 2;
-        }
-
-        for (k, (el, sep)) in elements.iter().enumerate() {
-            if k > 0 {
-                width += 1;
-            }
-
-            for n in el {
-                self.measure(n, hard, &mut width, &mut stopped);
-
-                if stopped {
-                    break;
-                }
-            }
-
-            if stopped {
-                break;
-            }
-
-            if sep.is_some() {
-                width += 1;
-            }
-        }
+        self.measure_inside(elements, close, hard, &mut width, &mut stopped);
 
         if !stopped {
-            width += 1;
+            width += self.tail_width(close, hard);
         }
 
         self.line.chars().count() + width > self.options.column_width
+    }
+
+    /// The width the line holds past the closer at `close`, up to the
+    /// next place it can break: a separator, the closer of the group
+    /// around, the opener of a group that is not empty, a comment, or a
+    /// hard break. Without it, `): Part` ran past the column.
+    fn tail_width(&self, close: usize, hard: &[bool]) -> usize {
+        let mut w = 0;
+        let mut j = close + 1;
+
+        while j < self.items.len() {
+            let it = &self.items[j];
+
+            if hard[j] || it.is_comment() {
+                break;
+            }
+
+            let text = it.text.as_str();
+            let closer = match text {
+                "," | ";" => self.next_code(j).filter(|n| closes(&self.items[*n].text)),
+
+                _ => closes(text).then_some(j),
+            };
+
+            // An expanded list writes a comma after its last element,
+            // so the width counts one whether the source had it or not.
+            if let Some(c) = closer {
+                let comma = matches!(self.items[c].text.as_str(), "}" | "]")
+                    && self.opener_of(c).is_some_and(|o| self.trailing_comma(o));
+
+                return w + usize::from(comma);
+            }
+
+            w += self.spaced_width(j);
+
+            if matches!(text, "," | ";") {
+                break;
+            }
+
+            if opens(text) {
+                // An empty group cannot break, so the line goes on.
+                match self.items.get(j + 1).is_some_and(|n| closes(&n.text)) {
+                    true => {
+                        w += self.spaced_width(j + 1);
+                        j += 1;
+                    }
+
+                    false => break,
+                }
+            }
+
+            j += 1;
+        }
+
+        w
     }
 
     /// The flat width of a node, up to the first hard break inside.
@@ -908,7 +941,7 @@ impl<'s> Formatter<'s> {
                     return;
                 }
 
-                *w += self.items[*i].width() + usize::from(self.items[*i].space_before);
+                *w += self.spaced_width(*i);
             }
 
             Node::Group {
@@ -923,29 +956,56 @@ impl<'s> Formatter<'s> {
                     return;
                 }
 
-                *w += self.items[*open].width();
-
-                for (k, (el, sep)) in elements.iter().enumerate() {
-                    if k > 0 {
-                        *w += 1;
-                    }
-
-                    for n in el {
-                        self.measure(n, hard, w, stopped);
-
-                        if *stopped {
-                            return;
-                        }
-                    }
-
-                    if sep.is_some() {
-                        *w += 1;
-                    }
-                }
-
-                *w += self.items[*close].width();
+                *w += self.spaced_width(*open);
+                self.measure_inside(elements, *close, hard, w, stopped);
             }
         }
+    }
+
+    /// The flat width of a group past its opener, up to the first hard
+    /// break inside.
+    fn measure_inside(
+        &self,
+        elements: &[(Vec<Node>, Option<usize>)],
+        close: usize,
+        hard: &[bool],
+        w: &mut usize,
+        stopped: &mut bool,
+    ) {
+        for (el, sep) in elements {
+            for n in el {
+                self.measure(n, hard, w, stopped);
+
+                if *stopped {
+                    return;
+                }
+            }
+
+            if let Some(s) = sep {
+                *w += self.spaced_width(*s);
+            }
+        }
+
+        *w += self.spaced_width(close);
+    }
+
+    /// Whether the group at `open` writes a comma after its last element
+    /// when it expands. A call, type arguments, and an index take none:
+    /// `t[k,]` does not parse.
+    fn trailing_comma(&self, open: usize) -> bool {
+        let opener = self.items[open].text.as_str();
+
+        self.options.trailing_comma
+            && !matches!(opener, "(" | "?(" | "<<")
+            && !(opener.ends_with('[') && self.is_index(open))
+    }
+
+    /// The width of item `i` on a flat line, with the space the render
+    /// puts before it. The source's own spacing would change the width
+    /// from one run to the next, so a second run could break a group
+    /// the first run kept on one line.
+    fn spaced_width(&self, i: usize) -> usize {
+        self.items[i].width() + usize::from(i > 0 && self.wants_space(i - 1, i))
     }
 
     /// A space inside the brackets of the group at `open`, by the options.

@@ -510,6 +510,13 @@ pub const LINTS: &[LintInfo] = &[
         detail: "`@deprecated` on a `function` passes through to Luau, which reports a call to it. A namespace has no Luau form, so this lint reports the use instead. The message the attribute carries prints after the name. Inside the namespace the members read each other by their own names, and nothing fires.",
     },
     LintInfo {
+        name: "stale_export",
+        group: Group::Suspicious,
+        default: Level::Warn,
+        summary: "a write to an exported `local` inside a function",
+        detail: "A module returns its exports as a table built when it loads, and an import copies each value into a local of the importer. `export local count = 0` sends out the number 0, not the variable. A write at the top level runs before the module returns, so the table takes it. A write inside a function runs later and never reaches an importer, which keeps the value it read when it loaded. Export a function that returns the value, or keep the value in a table: `export const state = { count = 0 }` and `state.count += 1`. An importer holds that table, so it reads every write. A `local` member of a namespace stays live through accessors and draws no report.",
+    },
+    LintInfo {
         name: "deprecated_call",
         group: Group::Suspicious,
         default: Level::Warn,
@@ -1204,6 +1211,58 @@ mod tests {
                 .iter()
                 .any(|(_, l)| l.name == "constant_condition"),
             "{remaining:?}"
+        );
+    }
+
+    /// An import copies the value an exported `local` held when the
+    /// module loaded. A write inside a function comes later and never
+    /// reaches the importer; a write at the top level does.
+    #[test]
+    fn a_write_to_an_exported_local_in_a_function_is_stale() {
+        let stale = |body: &str| {
+            let src = format!(
+                "export local count = 0\nexport local other = 0\nlocal hits = 0\nexport {{ hits }}\n\nexport function bump(): ()\n{body}\nend\n"
+            );
+            names(&src)
+                .into_iter()
+                .filter(|n| *n == "stale_export")
+                .count()
+        };
+
+        assert_eq!(stale("    count += 1"), 1);
+        assert_eq!(stale("    count = 5"), 1);
+        assert_eq!(stale("    count ??= 1"), 1);
+        assert_eq!(stale("    other, count = 1, 2"), 2);
+        assert_eq!(stale("    hits += 1"), 1);
+        assert_eq!(
+            stale("    task.defer(function()\n        count += 1\n    end)"),
+            1
+        );
+
+        // A nearer binding of the name, or a field of the value, is not
+        // the export.
+        assert_eq!(stale("    local count = 1\n    count += 1"), 0);
+        assert_eq!(
+            stale("    for count = 1, 2 do\n        count += 1\n    end"),
+            0
+        );
+
+        // The top level runs before the module returns its table.
+        let top = "export local count = 0\ncount += 1\nif count > 0 then\n    count = 2\nend\nexport const state = { count = 0 }\n\nexport function bump(): ()\n    state.count += 1\nend\n";
+        assert!(!names(top).contains(&"stale_export"), "{:?}", names(top));
+
+        let got = crate::compile(
+            "export local count = 0\n\nexport function bump(): ()\n    count += 1\nend\n",
+        )
+        .unwrap()
+        .lints;
+        let one = got
+            .iter()
+            .find(|l| l.name == "stale_export")
+            .expect("the lint");
+        assert_eq!(
+            one.message,
+            "`count` is an exported `local`; importers keep the value they read when they loaded, so they never see this write. Export a function that returns it, or hold it in a table, such as `export const state = { count = ... }`"
         );
     }
 

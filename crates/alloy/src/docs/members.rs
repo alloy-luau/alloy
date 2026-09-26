@@ -721,7 +721,7 @@ pub const MEMBERS: &[(&str, &[Member])] = &[
                 name: "pcall",
                 kind: MemberKind::Static,
                 signature: "Result.pcall<T>(f: (...any) -> T, ...: any): Result<T, string>",
-                doc: "Calls `f` with the arguments after it: `Ok` of what it returns, or `Err` of what it threw. The value type follows `f`, and the `Err` carries the traceback in `trace`.",
+                doc: "Calls `f` with the arguments after it: `Ok` of what it returns, or `Err` of what it threw. The value type follows `f`, and the `Err` carries the traceback in `trace`. A function that returns nothing gives `Result<nil, string>`.",
                 example: "local r = Result.pcall(string.rep, \"a\", 3)\nprint(r:unwrap_or(\"\"))",
             },
             Member {

@@ -362,9 +362,22 @@ function Result.ok(self)
 	return nil
 end
 
+-- The value of a call of `F`: the first type it returns, or nil for a
+-- function that returns nothing. A generic `T` for the value refuses a
+-- function of type `() -> ()`, since an empty pack binds no `T`.
+type function __call_value(F)
+	local head = (F :: any):returns().head
+
+	if head == nil or #head == 0 then
+		return types.singleton(nil)
+	end
+
+	return head[1]
+end
+
 --- The one bridge to throwing APIs. The traceback is captured where the
 --- error happened and stored on the Err.
-function Result.pcall<T>(f: (...any) -> T, ...: any): Result<T, string>
+function Result.pcall<T...>(f: (...any) -> T..., ...: any): Result<__call_value<() -> T...>, string>
 	local packed = table.pack(xpcall(f, function(e)
 		return { err = e, trace = debug.traceback(tostring(e), 2) }
 	end, ...))

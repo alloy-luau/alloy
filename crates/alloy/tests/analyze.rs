@@ -1721,3 +1721,18 @@ fn the_heap_doc_example_checks_in_strict_mode() {
     assert!(example.starts_with("import { Heap } from \"@alloy/std/collections\""));
     analyze(example, "doc-heap");
 }
+
+/// `Result.pcall` bound the value to one type `T`, and a function of
+/// type `() -> ()` returns an empty pack, which binds no `T`. It gives
+/// `Result<nil, string>` now, and a function with a value keeps it.
+#[test]
+fn result_pcall_takes_a_function_that_returns_nothing() {
+    let src = "local function one(): number\n    return 1\nend\n\nlocal function run(f: () -> ()): boolean\n    return Result.pcall(f):is_ok()\nend\n\nlocal none: Result<nil, string> = Result.pcall(print, \"hi\")\nlocal n: Result<number, string> = Result.pcall(one)\nlocal s: Result<string, string> = Result.pcall(string.rep, \"a\", 3)\nprint(run, none, n, s)\n";
+    analyze(src, "pcall-nothing");
+
+    let bad = "local function one(): number\n    return 1\nend\n\nlocal wrong: Result<string, string> = Result.pcall(one)\nprint(wrong)\n";
+    let Some(reported) = reports(bad, "pcall-wrong") else {
+        return;
+    };
+    assert_eq!(reported.len(), 1, "{}", reported.join("\n"));
+}

@@ -3033,3 +3033,72 @@ fn a_keyword_in_a_markup_value_reads_the_value_uncast() {
     assert!(!plain.contains("::"), "{plain}");
     assert!(plain.contains(")(if ok then \"a\" else \"b\")"), "{plain}");
 }
+
+/// A barrel binds `Remotes` with `import * as` and sends it on. The
+/// hover on `Remotes.Plant` printed the remote's runtime table, where
+/// `R.Plant` under a star import reads the declaration. Both reads
+/// through the barrel give the declaration too.
+#[test]
+fn a_remote_through_a_barrel_hovers_by_its_declaration() {
+    use super::documents::Recorder;
+
+    let dir = std::env::temp_dir().join(format!("alloy-barrel-remote-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n",
+    )
+    .expect("alloy.toml");
+    let src = "import { Remotes } from \"./index\"\nimport * as Idx from \"./index\"\nRemotes.Plant.fire(1)\nIdx.Remotes.Plant.fire(2)\n";
+    let sources = [
+        ("Remotes", "export remote Plant(slot: number) from client\n"),
+        (
+            "index",
+            "import * as Remotes from \"./Remotes\"\nexport { Remotes }\n",
+        ),
+        ("use", src),
+    ];
+    let mut state = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        ..State::default()
+    };
+
+    for (name, source) in sources {
+        let path = dir.join(format!("src/{name}.aly"));
+        std::fs::write(&path, source).expect("source");
+        let uri = path_to_uri(&path);
+        let (options, jsx) = state.options_for(&uri);
+        state
+            .docs
+            .insert(uri, Doc::new(source.to_string(), 1, &options, &jsx, None));
+    }
+
+    let uri = path_to_uri(&dir.join("src/use.aly"));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let server = Server::new(
+        Box::new(std::io::sink()),
+        Box::new(Recorder(Arc::clone(&log))),
+        Vec::new(),
+        None,
+    );
+    *server.state.lock().expect("state") = state;
+    let hover = |needle: &str| {
+        let (line, character) = position_of(src, src.find(needle).unwrap());
+        let message = json!({ "params": {
+            "textDocument": { "uri": uri },
+            "position": { "line": line, "character": character },
+        } });
+        log.lock().expect("the log").clear();
+        let answered = server.source_binding_hover(&uri, &message, &json!(1));
+
+        answered.then(|| String::from_utf8_lossy(&log.lock().expect("the log")).into_owned())
+    };
+    let named = hover("Plant.fire(1)");
+    let pathed = hover("Plant.fire(2)");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(named.is_some_and(|s| s.contains("remote Plant(slot: number) from client")));
+    assert!(pathed.is_some_and(|s| s.contains("remote Plant(slot: number) from client")));
+}

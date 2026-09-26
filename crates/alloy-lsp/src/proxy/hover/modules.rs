@@ -69,8 +69,48 @@ impl Server {
                     .any(|(alias, _)| *alias == head[from..])
             });
         let inner = |answer: Option<String>| answer.filter(|_| !shadowed && !member);
+        // `Remotes.Plant` under `import { Remotes } from "@shared/index"`,
+        // or `Idx.Remotes.Plant` under `import * as Idx`, where the barrel
+        // binds `Remotes` with `import * as` and sends it on: the member
+        // reads in the module the barrel binds.
+        let through_barrel = || {
+            use super::super::navigation::{import_entries, module_bindings};
+
+            let word_start = |t: &str| {
+                t.rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .map_or(0, |i| i + 1)
+            };
+            let file_of = |uri: &str, spec: &str| {
+                imports::module_file(&imports::module_path(&st.resolve_spec(uri, spec)?))
+            };
+            let head = doc.source[..start].strip_suffix('.')?;
+            let from = word_start(head);
+            let holder = &head[from..];
+            let (barrel, name) = match import_entries(&doc.source)
+                .into_iter()
+                .find(|e| e.bound == holder)
+            {
+                Some(entry) => (file_of(uri, &entry.spec)?, entry.name),
+
+                None => {
+                    let outer = head[..from].strip_suffix('.')?;
+                    let (_, spec) = module_bindings(&doc.source)
+                        .into_iter()
+                        .find(|(bound, _)| *bound == outer[word_start(outer)..])?;
+
+                    (file_of(uri, &spec)?, holder.to_string())
+                }
+            };
+            let (_, spec) = module_bindings(&st.module_text(&barrel)?)
+                .into_iter()
+                .find(|(bound, _)| *bound == name)?;
+            let module = file_of(&path_to_uri(&barrel), &spec)?;
+
+            declared(&st.module_text(&module)?, &word).filter(|_| !shadowed)
+        };
         let answer = inner(remote_hover(&doc.source, &word))
             .or_else(|| inner(imported()))
+            .or_else(through_barrel)
             .or_else(|| {
                 (!quoted)
                     .then(|| inner(std_import_hover(&doc.source, &word, start)))

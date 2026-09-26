@@ -870,6 +870,62 @@ fn the_mirror_depth_follows_the_deepest_dependency() {
     assert_eq!(mirror_above(Some(&dir)), 4);
 }
 
+/// The shadow pass opens a file after the files it imports, through
+/// an alias and a barrel too. In path order `server/Plot` comes before
+/// `shared/index`, and the child keeps the require it could not resolve
+/// then: every type Plot imports reads as `unknown` until Plot changes.
+#[test]
+fn the_shadow_pass_opens_a_file_after_its_imports() {
+    let dir = alias_root(
+        "pass-order",
+        &[
+            (
+                "alloy.toml",
+                "[build]\nin = \"src\"\nout = \"build\"\n\n[mount]\nshared = [\"src/shared\", \"@game/ReplicatedStorage/Shared\"]\n",
+            ),
+            (
+                "src/server/Plot.aly",
+                "import { CropKind } from \"@shared/index\"\nexport function plant(kind: CropKind) end\n",
+            ),
+            (
+                "src/server/Probe.aly",
+                "import * as Plot from \"./Plot\"\nPlot.plant(\"Wheat\")\n",
+            ),
+            (
+                "src/shared/index.aly",
+                "export { CropKind } from \"./crops/Crops\"\n",
+            ),
+            (
+                "src/shared/crops/Crops.aly",
+                "export type CropKind = \"Wheat\" | \"Carrot\"\n",
+            ),
+        ],
+    );
+    let mut files = Vec::new();
+    walk(&dir, None, &mut files, &mut Vec::new());
+    files.sort();
+    let order: Vec<String> = dependencies_first(files)
+        .iter()
+        .map(|p| {
+            p.strip_prefix(normalize(&dir))
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(
+        order,
+        [
+            "src/shared/crops/Crops.aly",
+            "src/shared/index.aly",
+            "src/server/Plot.aly",
+            "src/server/Probe.aly",
+        ]
+    );
+}
+
 /// The file poll watches the `[build] in` of every project the root's
 /// sources import into, so a dependency saved outside the editor
 /// reaches the next tick.
@@ -1094,6 +1150,56 @@ pub(crate) fn stale_mirrors_of_other_roots_are_purged() {
     if cfg!(target_os = "linux") {
         assert!(!dead.exists());
     }
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The definitions of each root sat in their own temp folder, and
+/// nothing removed them: 9199 folders, 7 GB. They sit beside the
+/// mirrors now and go by the mirrors' rule. The session's own, a fresh
+/// one, and one whose root a live server owns stay.
+#[test]
+pub(crate) fn stale_definitions_of_other_roots_are_purged() {
+    let base = std::env::temp_dir().join(format!("alloy-lsp-defs-purge-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let own = base.join("0000000000000000").join("root");
+    std::fs::create_dir_all(&own).expect("own");
+    let live = base.join("3333333333333333");
+    std::fs::create_dir_all(&live).expect("live");
+    claim_mirror(&live.join("root"));
+
+    assert_eq!(
+        definitions_of(&own),
+        base.join("definitions").join("0000000000000000")
+    );
+
+    let [mine, old, owned, fresh] = [
+        "0000000000000000",
+        "1111111111111111",
+        "3333333333333333",
+        "4444444444444444",
+    ]
+    .map(|n| base.join("definitions").join(n));
+    let two_days_ago =
+        std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 24 * 60 * 60);
+
+    for dir in [&mine, &old, &owned, &fresh] {
+        std::fs::create_dir_all(dir).expect("dir");
+    }
+
+    for dir in [&mine, &old, &owned] {
+        std::fs::File::open(dir)
+            .expect("dir")
+            .set_modified(two_days_ago)
+            .expect("mtime");
+    }
+
+    purge_stale_mirrors(&own);
+
+    assert!(mine.exists(), "the session's own");
+    assert!(owned.exists(), "a live server owns its root");
+    assert!(fresh.exists());
+    assert!(!old.exists());
 
     let _ = std::fs::remove_dir_all(&base);
 }

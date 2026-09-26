@@ -104,6 +104,9 @@ pub struct ImportRef {
     pub start: u32,
     pub end: u32,
     pub path: String,
+    /// Whether the ship artifact keeps the require. A type-only import
+    /// and an import in a test require nothing there.
+    pub runs: bool,
 }
 
 /// A source that could not be lexed or parsed even leniently.
@@ -217,6 +220,17 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         .collect();
 
     let parsed_clean = diagnostics.is_empty();
+
+    // A contract reads the members of a declaration, and a recovered
+    // tree can lose them: an impl the parser closed early declares none.
+    // The parse error comes first, and alone.
+    if !parsed_clean {
+        rendered
+            .diagnostics
+            .retain(|d| docs::kind_for(&d.message) != "AttributeContract");
+        rendered.contract_gaps.clear();
+    }
+
     diagnostics.extend(rendered.diagnostics);
 
     // A `const` of a namespace this file declares is reached by its
@@ -249,6 +263,26 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         });
     }
 
+    // A module in a folder that Roblox copies for each player runs from
+    // the copy. From another mount, the require loads the template, a
+    // second module with its own state, and no path reaches the copy.
+    for i in desugar::imports_in(&parsed.chunk.block) {
+        let t = parsed.lexed.toks[i.path.start as usize];
+        let spec = t.text(src).trim_matches(['"', '\'']);
+
+        if let Some((_, place)) = options.mount_requires.iter().find(|(s, _)| s == spec)
+            && project::in_copied_folder(place)
+        {
+            diagnostics.push(Diagnostic {
+                start: t.start,
+                end: t.end,
+                message: format!(
+                    "\"{spec}\" is in a folder that Roblox copies for each player; from another mount, the require loads a second module with its own state; move the module to a shared mount, or import it only from its own mount"
+                ),
+            });
+        }
+    }
+
     // A directive the compiler does not know silences nothing, so it
     // reads as a working one and is not. A directive it knows but
     // cannot accept reports the same way, on its own line.
@@ -268,15 +302,7 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
     diagnostics.sort_by_key(|d| d.start);
     diagnostics.dedup_by(|a, b| a.start == b.start && a.message == b.message);
 
-    let mut lints = lint::run(
-        src,
-        &parsed.lexed.toks,
-        &parsed.chunk,
-        options.definitions,
-        &options.thresholds,
-        &options.privates(),
-        &options.import_callables,
-    );
+    let mut lints = lint::run(src, &parsed.lexed.toks, &parsed.chunk, options);
     lints.extend(rendered.lints);
 
     // `[emit] wait_timeout` gives `=>` a limit, so the rewrite of an
@@ -388,11 +414,28 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
     }
 
     // An import inside a function counts too: it resolves where it
-    // stands, and the module it names is a dependency all the same.
+    // stands, and the module it names is a dependency all the same. So
+    // does `export { } from`, which requires its module as an import
+    // does.
+    let re_exports = parsed.chunk.block.stmts.iter().filter_map(|s| match s {
+        alloy_syntax::ast::Stmt::ExportList(x) => x.from.map(|f| (f, true)),
+
+        _ => None,
+    });
     let imports = desugar::imports_in(&parsed.chunk.block)
         .into_iter()
-        .filter_map(|i| {
-            let t = parsed.lexed.toks[i.path.start as usize];
+        .map(|i| {
+            let at = parsed.lexed.toks[i.span.start as usize].start;
+            let dropped = rendered
+                .ship_dropped
+                .iter()
+                .any(|(a, b)| at >= *a && at < *b);
+
+            (i.path, !dropped)
+        })
+        .chain(re_exports)
+        .filter_map(|(path, runs)| {
+            let t = parsed.lexed.toks[path.start as usize];
             let text = t.text(src);
             let path = text
                 .get(1..text.len().saturating_sub(1))
@@ -408,6 +451,7 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
                 start: t.start,
                 end: t.end,
                 path,
+                runs,
             })
         })
         .collect();
@@ -446,11 +490,35 @@ pub fn compile_file(
     let ingots = ingots.filter(|i| !i.is_empty());
     let layer = ingots.map(|i| i.before(path, source));
     let text = layer.as_ref().map_or(source, |l| l.text.as_str());
-    let mut out = if path.ends_with(".alx") {
-        compile_alx(text, options, jsx.cloned().unwrap_or_default())?.output
-    } else {
-        compile_with(text, options)?
+    // A block the transform wrote around the author's code, such as a
+    // helper function around a tag, adds no depth to the lints.
+    let marked;
+    let options = match layer.as_ref().and_then(|l| l.map.as_ref()) {
+        Some(map) => {
+            marked = EmitOptions {
+                generated: map.generated(),
+                ..options.clone()
+            };
+
+            &marked
+        }
+
+        None => options,
     };
+    let compiled = if path.ends_with(".alx") {
+        compile_alx(text, options, jsx.cloned().unwrap_or_default()).map(|a| a.output)
+    } else {
+        compile_with(text, options)
+    };
+    // A failed compile points into the transformed text, which can run
+    // past the end of the author's file.
+    let mut out = compiled.map_err(|mut e| {
+        if let Some(map) = layer.as_ref().and_then(|l| l.map.as_ref()) {
+            e.offset = map.to_source(e.offset as u32) as usize;
+        }
+
+        e
+    })?;
 
     if let Some(layer) = layer {
         if let Some(map) = layer.map {
@@ -999,31 +1067,40 @@ mod tests {
         assert!(fine.diagnostics.is_empty(), "{:?}", fine.diagnostics);
     }
 
+    /// `import(...)` gives the value of the module, as `import Name from`
+    /// reads it: the default of an export table that carries one. The
+    /// cast of `import<<T>>` read the table, so `T` named the wrong value
+    /// and nothing reported it.
     #[test]
-    fn import_expression_is_require() {
-        let out = compile("local m = import(\"./x\")\nlocal i = import(script.Parent.Mod)\nlocal d = import(paths[1])\nlocal t = import<<Config>>(name)\nprint(m, i, d, t)\n").unwrap();
+    fn import_expression_is_the_module_value() {
+        let out = compile("local m = import(\"./x\")\nlocal i = import(script.Parent.Mod)\nlocal d = import(paths[1])\nlocal t = import<<Config>>(name)\nlocal j = import(\"./data.json\")\nprint(m, i, d, t, j)\n").unwrap();
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
-        assert!(
-            out.ship.contains("local m = require(\"./x\")"),
-            "{}",
-            out.ship
-        );
-        assert!(
-            out.ship.contains("local i = require(script.Parent.Mod)"),
-            "{}",
-            out.ship
-        );
-        assert!(
-            out.ship
-                .contains("local d = (require(paths[1]) :: unknown)"),
-            "{}",
-            out.ship
-        );
-        assert!(
-            out.ship.contains("local t = (require(name) :: Config)"),
-            "{}",
-            out.ship
-        );
+
+        for want in [
+            "local m = __module_value(require(\"./x\"))",
+            "local i = __module_value(require(script.Parent.Mod))",
+            "local d = (__module_value(require(paths[1])) :: unknown)",
+            "local t = (__module_value(require(name)) :: Config)",
+            // A data file has no export table.
+            "local j = require(\"./data\")",
+        ] {
+            assert!(out.ship.contains(want), "{want}\n{}", out.ship);
+        }
+
+        let ship = compile("export function load(m: any): any\n    return import<<any>>(m)\nend\n")
+            .unwrap()
+            .ship;
+        let lua = mlua::Lua::new();
+        lua.load("require = function(m) return m end")
+            .exec()
+            .unwrap();
+        let exports: mlua::Table = lua.load(ship.as_str()).eval().unwrap();
+        let load: mlua::Function = exports.get("load").unwrap();
+        let got: (String, String, i64) = lua
+            .load("local load = ... return load({ default = 'poll' }), load({ name = 'plain' }).name, load(5)")
+            .call(load)
+            .unwrap();
+        assert_eq!(got, ("poll".to_string(), "plain".to_string(), 5));
     }
 
     #[test]

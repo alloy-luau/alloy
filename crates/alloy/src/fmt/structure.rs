@@ -204,8 +204,9 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
             _ if member => {}
 
             _ => match text {
-                // `x is function` names a type; nothing opens.
-                "function" if i > 0 && toks[i - 1].text(src) == "is" => {}
+                // `x is function` and `x is not function` name a type;
+                // nothing opens.
+                "function" if alloy_syntax::contextual::tested_type_at(src, toks, i) => {}
 
                 "function" if signature_only(src, toks, i, &stack, &lines) => {}
 

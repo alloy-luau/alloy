@@ -172,7 +172,7 @@ impl<'s> Scan<'s> {
             for (j, &at) in nest.iter().enumerate().take(e).skip(i + 1) {
                 let text = self.t(j);
 
-                if matches!(self.prev(j), "." | ":") {
+                if matches!(self.prev(j), "." | ":") || self.generated_at(j) {
                     continue;
                 }
 
@@ -228,26 +228,16 @@ impl<'s> Scan<'s> {
     /// `if a then if b then ... end end` is `if a and b then ... end`.
     fn collapsible_if(&self, out: &mut Vec<Lint>) {
         for i in 0..self.toks.len() {
-            let Some(IfParts {
-                then,
-                elseifs,
-                else_at: None,
-                end,
-            }) = self.if_parts(i)
-            else {
-                continue;
-            };
-
-            if !elseifs.is_empty() || !self.at(then + 1, "if") {
-                continue;
-            }
-
             // An `if` that is itself the only statement of another `if`
             // belongs to that one's chain. Reporting it too gives one
             // warning per level and one rewrite per pass.
-            if self.prev(i) == "then" && self.at(end + 1, "end") {
+            if self.chain_link(i).is_none() || self.chain_parent(i) {
                 continue;
             }
+
+            let Some(IfParts { then, end, .. }) = self.if_parts(i) else {
+                continue;
+            };
 
             // The whole chain, however deep: every condition joins with
             // `and`, and the innermost body becomes the new body.
@@ -256,34 +246,20 @@ impl<'s> Scan<'s> {
             let mut last_end = end;
             let mut deepest = i;
 
-            while self.at(last_then + 1, "if") {
-                let j = last_then + 1;
+            while let Some(j) = self.chain_link(deepest) {
                 let Some(IfParts {
                     then: inner_then,
-                    elseifs: inner_elseifs,
-                    else_at: None,
                     end: inner_end,
+                    ..
                 }) = self.if_parts(j)
                 else {
                     break;
                 };
 
-                if !inner_elseifs.is_empty()
-                    || inner_end + 1 != last_end
-                    || self.comment_between(last_then, j)
-                    || self.comment_between(inner_end, last_end)
-                {
-                    break;
-                }
-
                 conds.push(self.guarded(j + 1, inner_then));
                 deepest = j;
                 last_then = inner_then;
                 last_end = inner_end;
-            }
-
-            if conds.len() < 2 {
-                continue;
             }
 
             let joined = conds.join(" and ");
@@ -306,32 +282,51 @@ impl<'s> Scan<'s> {
         }
     }
 
-    /// Whether an `if` is part of a chain `collapsible_if` reports: it
-    /// is the only statement of the `if` above it, or the `if` below it
-    /// is its only statement.
-    fn in_collapsible_chain(&self, i: usize) -> bool {
-        let Some(IfParts {
-            then,
-            elseifs,
-            else_at: None,
-            end,
-        }) = self.if_parts(i)
-        else {
+    /// The `if` that joins the `if` at `i` as `if a and b`: the only
+    /// statement of its body, with no `else` or `elseif` on either and
+    /// no comment around it. A condition that binds a name joins
+    /// nothing, since `if a and const x = f()` does not parse.
+    fn chain_link(&self, i: usize) -> Option<usize> {
+        let outer = self.if_parts(i)?;
+        let j = outer.then + 1;
+
+        if !outer.elseifs.is_empty() || outer.else_at.is_some() || !self.at(j, "if") {
+            return None;
+        }
+
+        let inner = self.if_parts(j)?;
+        let binds = |a: usize, b: usize| (a..b).any(|k| matches!(self.t(k), "local" | "const"));
+
+        (inner.elseifs.is_empty()
+            && inner.else_at.is_none()
+            && inner.end + 1 == outer.end
+            && !self.comment_between(outer.then, j)
+            && !self.comment_between(inner.end, outer.end)
+            && !binds(i + 1, outer.then)
+            && !binds(j + 1, inner.then))
+        .then_some(j)
+    }
+
+    /// Whether the `if` at `i` joins the `if` above it. That one's `end`
+    /// follows the inner `end`.
+    fn chain_parent(&self, i: usize) -> bool {
+        if self.prev(i) != "then" {
+            return false;
+        }
+
+        let Some(end) = self.st.ends[i] else {
             return false;
         };
 
-        if !elseifs.is_empty() {
-            return false;
-        }
+        (0..i)
+            .rev()
+            .find(|&p| self.st.ends[p] == Some(end + 1))
+            .is_some_and(|p| self.chain_link(p) == Some(i))
+    }
 
-        if self.prev(i) == "then" && self.at(end + 1, "end") {
-            return true;
-        }
-
-        self.at(then + 1, "if")
-            && self
-                .if_parts(then + 1)
-                .is_some_and(|p| p.else_at.is_none() && p.elseifs.is_empty() && p.end + 1 == end)
+    /// Whether an `if` is part of a chain `collapsible_if` reports.
+    fn in_collapsible_chain(&self, i: usize) -> bool {
+        self.chain_link(i).is_some() || self.chain_parent(i)
     }
 
     /// `else if ... end end` is `elseif ... end`.
@@ -471,7 +466,7 @@ impl<'s> Scan<'s> {
             let value = self.slice(q + 3, close).trim();
             // On an Array the shorter form is the method, and
             // `manual_push` would report the plain call next.
-            let (message, fix) = if self.array_names().contains(&table) {
+            let (message, fix) = if p == i + 5 && self.reads_array(i + 4) {
                 (
                     format!(
                         "`table.insert({table}, #{table} + 1, v)` appends; `{table}` is an Array, so `{table}:push(v)` is the form"
@@ -701,6 +696,71 @@ mod tests {
         assert_eq!(
             fixed(src),
             "local function f(a, b, c)\n    if a and b and c then\n        return 1\n    end\n    return 0\nend\n"
+        );
+    }
+
+    /// An ingot wraps a tag in a helper function. That block is not the
+    /// author's, so it adds no depth: the author wrote three levels here.
+    #[test]
+    fn a_block_an_ingot_wrote_adds_no_depth() {
+        let src = "local function f(a)\n    return __w(function()\n        for i = 1, a do\n            if i > 1 then\n                print(i)\n            end\n        end\n    end)\nend\n";
+        let at = src.find("__w(").unwrap() as u32;
+        let run = |generated: Vec<(u32, u32)>| {
+            let options = crate::EmitOptions {
+                thresholds: Thresholds {
+                    max_nesting: 3,
+                    cognitive_complexity: 3,
+                    ..Thresholds::default()
+                },
+                generated,
+                ..Default::default()
+            };
+            let lints: Vec<crate::Lint> = crate::compile_with(src, &options)
+                .unwrap()
+                .lints
+                .into_iter()
+                .filter(|l| !UNUSED.contains(&l.name))
+                .collect();
+
+            names_of(&lints)
+        };
+        assert_eq!(
+            run(Vec::new()),
+            vec!["cognitive_complexity", "deep_nesting"]
+        );
+        assert_eq!(run(vec![(at, at + 14)]), Vec::<&str>::new());
+    }
+
+    /// A condition that binds a name joins no `and`: the lint offered
+    /// `if ready and const found = find() then`, which does not parse.
+    /// A chain stops at such a link, and the links above it still join.
+    #[test]
+    fn a_binding_condition_joins_no_chain() {
+        for inner in ["const found = find()", "local found = find()"] {
+            let src = format!(
+                "local function f(ready, find)\n    if ready then\n        if {inner} then\n            return found\n        end\n    end\n    return nil\nend\n"
+            );
+            assert_eq!(names(&src), Vec::<&str>::new(), "{inner}");
+        }
+        assert_eq!(
+            names("if const x = f() then\n    if x > 1 then\n        print(x)\n    end\nend\n"),
+            Vec::<&str>::new()
+        );
+        let src = "local function f(a, b, find)\n    if a then\n        if b then\n            if const x = find() then\n                return x\n            end\n        end\n    end\n    return nil\nend\n";
+        assert_eq!(
+            fixed(src),
+            "local function f(a, b, find)\n    if a and b then\n        if const x = find() then\n            return x\n        end\n    end\n    return nil\nend\n"
+        );
+        // The binding `if` then nests past the limit on its own.
+        assert_eq!(
+            names_with(
+                "local function f(ready, find)\n    if ready then\n        if const found = find() then\n            return found\n        end\n    end\n    return nil\nend\n",
+                Thresholds {
+                    max_nesting: 2,
+                    ..Thresholds::default()
+                }
+            ),
+            vec!["deep_nesting"]
         );
     }
 

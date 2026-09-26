@@ -229,10 +229,22 @@ impl<'a> Parser<'a> {
             }
 
             "typeof" if self.text_at(1) == "(" => {
+                let start = self.pos;
                 self.bump();
                 self.bump();
                 self.expr()?;
                 self.expect(")")?;
+
+                if (start..self.pos).any(|i| {
+                    self.toks[i].text(self.src) == "import"
+                        && self
+                            .toks
+                            .get(i + 1)
+                            .is_some_and(|t| t.text(self.src) == "(")
+                }) {
+                    self.type_edits
+                        .push(TypeEdit::TypeOf(TokSpan::new(start, self.pos)));
+                }
 
                 Ok(())
             }

@@ -51,6 +51,46 @@ fn a_project_builds_into_its_out_tree() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// With `out` equal to `in`, the second build read the first one's
+/// `a.luau` as a plain source and reported that two files build it.
+/// The build now refuses the folder with a message, before it writes.
+#[test]
+fn a_build_refuses_out_equal_to_in() {
+    let dir = temp_project("in-place");
+    fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"src\"\n",
+    )
+    .unwrap();
+    fs::write(dir.join("src/a.aly"), "return 1\n").unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let err = alloy::build::run_project(&dir, &config).unwrap_err();
+    assert!(
+        err.to_string()
+            .starts_with("[build] out is the folder in names, `src`"),
+        "{err}"
+    );
+    assert!(!dir.join("src/a.luau").exists());
+
+    // A folder under `in` still builds, and the walk skips it.
+    fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"src/out\"\n",
+    )
+    .unwrap();
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+
+    for _ in 0..2 {
+        let report = alloy::build::run_project(&dir, &config).unwrap();
+        assert!(report.diagnostics.is_empty(), "{report:?}");
+    }
+
+    assert!(dir.join("src/out/a.luau").exists());
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /*
 The build skips the write when the output already holds the bytes the
 compile produced, so rojo does not resync. `written` counted every
@@ -295,17 +335,15 @@ fn one_ambient_name_declared_twice_is_an_error() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// `[emit] erase_type_imports` drops the `require` of a line that binds
-/// types alone. The build never read the key, so no shape was blanked;
-/// and only `import type { }` was blanked, not a `{ type X }` list.
+/// The build drops the `require` of a line that binds types alone, as
+/// `import type { }`, a `{ type X }` list, or a name the module exports
+/// as a type alone. The require ran the module, and two modules that
+/// name each other's types looped. `[emit] erase_type_imports` turned
+/// this on; the key still parses, does nothing, and draws a note.
 #[test]
-fn erase_type_imports_drops_a_type_only_require() {
+fn a_type_only_import_drops_its_require() {
     let dir = temp_project("erase");
-    fs::write(
-        dir.join("alloy.toml"),
-        "[emit]\nerase_type_imports = true\n",
-    )
-    .unwrap();
+    fs::write(dir.join("alloy.toml"), "[emit]\nwait_timeout = 5\n").unwrap();
     fs::write(dir.join("src/types.aly"), "export type Meters = number\n").unwrap();
     fs::write(
         dir.join("src/util.aly"),
@@ -351,15 +389,43 @@ fn erase_type_imports_drops_a_type_only_require() {
     assert!(mixed.contains("local scale = "), "{mixed}");
     assert!(mixed.contains("type Feet = "), "{mixed}");
 
-    // Off by default: the require stays in every shape.
-    let plain = Config {
-        build: Build::default(),
-        emit: Emit::default(),
-        ..config
-    };
-    alloy::build::run(&dir, &plain.build, &plain.emit).unwrap();
-    let out = fs::read_to_string(dir.join("build/spec.luau")).unwrap();
-    assert!(out.contains("require(\"./types\")"), "{out}");
+    // Two modules that name each other's types load.
+    fs::write(
+        dir.join("src/a.aly"),
+        "import type { B } from \"./b\"\n\nexport struct A as\n    b: B?\nend\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/b.aly"),
+        "import type { A } from \"./a\"\n\nexport struct B as\n    a: A?\nend\n",
+    )
+    .unwrap();
+    let report = alloy::build::run(&dir, &config.build, &config.emit).unwrap();
+    assert!(report.is_clean(), "{report:?}");
+
+    // The runtime require shares the first line with the import, and
+    // stays.
+    for (name, other) in [("a", "b"), ("b", "a")] {
+        let out = fs::read_to_string(dir.join(format!("build/{name}.luau"))).unwrap();
+        assert!(
+            !out.contains(&format!("require(\"./{other}\")")),
+            "{name}: {out}"
+        );
+        assert!(out.starts_with("local __alloy = require("), "{name}: {out}");
+    }
+
+    // The old key parses and says it does nothing.
+    let old = Config::parse(
+        "[emit]\nerase_type_imports = true\n",
+        &dir.join("alloy.toml"),
+    )
+    .unwrap();
+    assert_eq!(
+        old.deprecations(),
+        [
+            "`[emit] erase_type_imports` does nothing now: a type-only import never runs its `require`. Remove the key"
+        ]
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }
@@ -1068,6 +1134,68 @@ relay(nil)
             (
                 12,
                 "`Own.Inner.Ping` goes from the client; the server cannot fire it"
+            ),
+        ]
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/*
+A barrel that passes a module of remotes on whole, `import * as Remotes`
+then `export { Remotes }`, lost the remotes. The server fired a remote
+that goes from the client, and nothing reported it. An `await` in a
+plain handler of one reported that it needs an async context.
+*/
+#[test]
+fn a_remote_through_a_star_barrel_keeps_its_side() {
+    let dir = temp_project("remote-star-barrel");
+    fs::write(dir.join("alloy.toml"), "[build]\nout = \"dist\"\n").unwrap();
+    fs::write(
+        dir.join("src/rem.aly"),
+        "export remote Up(n: number) from client\nexport remote function Buy(id: string): boolean from client\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/index.aly"),
+        "import * as Remotes from \"./rem\"\nexport { Remotes }\n",
+    )
+    .unwrap();
+    let src = "import { Remotes } from \"./index\"
+import * as Idx from \"./index\"
+async function load(id: string): boolean
+    return id ~= \"\"
+end
+Remotes.Up.fire(1)
+Idx.Remotes.Up.fire(2)
+Remotes.Buy.on(function(player, id)
+    return await load(id)
+end)
+";
+    fs::write(dir.join("src/a.server.aly"), src).unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run(&dir, &config.build, &config.emit).unwrap();
+    let got: Vec<(usize, &str)> = report
+        .diagnostics
+        .iter()
+        .map(|(_, d)| {
+            let line = src[..d.start as usize].matches('\n').count() + 1;
+
+            (line, d.message.as_str())
+        })
+        .collect();
+
+    assert_eq!(
+        got,
+        [
+            (
+                6,
+                "`Remotes.Up` goes from the client; the server cannot fire it"
+            ),
+            (
+                7,
+                "`Idx.Remotes.Up` goes from the client; the server cannot fire it"
             ),
         ]
     );

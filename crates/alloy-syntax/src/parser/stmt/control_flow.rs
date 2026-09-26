@@ -123,12 +123,25 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
+            let mut rest = Vec::new();
+
+            while self.eat(",") {
+                let name = self.expect_name()?;
+                let ty = if self.eat(":") {
+                    Some(self.type_()?)
+                } else {
+                    None
+                };
+                rest.push((name, ty));
+            }
+
             self.expect("=")?;
             let value = self.expr()?;
             bindings.push(CondBinding {
                 is_const,
                 pattern,
                 ty,
+                rest,
                 value,
             });
 

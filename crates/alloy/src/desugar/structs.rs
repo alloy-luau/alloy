@@ -636,6 +636,15 @@ impl<'s> Desugar<'s> {
             }
         }
 
+        // An attribute on the impl is one on its type, so it lands on
+        // the table the struct's own attributes sit on, beside them.
+        let own = self.attr_table(&i.attributes);
+
+        if own != "{}" && !foreign {
+            let std = self.std();
+            tail.push_str(&format!(" {std}.attrs({target}, {{ own = {own} }})"));
+        }
+
         // A struct's `end` line carried its tables; the impl adds after.
         if i.exported && !foreign {
             self.exports
@@ -900,7 +909,7 @@ impl<'s> Desugar<'s> {
                     }
                 }
 
-                self.expected_generic = generic_head(&ty);
+                self.expected_generic = generic_head(self.alias_value(&ty));
                 let v = self.render_to_string(dv);
                 self.expected_generic = None;
                 defaults.push(format!("if f.{fname} == nil then f.{fname} = {v} end"));
@@ -2705,6 +2714,8 @@ impl<'s> Desugar<'s> {
     /// a constructor on its own: a std container, or a generic struct or
     /// enum of this file, `Stack<number>`.
     fn generic_annotation(&self, ty: &str) -> Option<(String, String)> {
+        let ty = self.alias_value(ty);
+
         if let Some(head) = generic_head(ty) {
             return Some(head);
         }
@@ -2724,6 +2735,14 @@ impl<'s> Desugar<'s> {
         self.generic_types
             .contains(base)
             .then(|| (base.to_string(), args.trim().to_string()))
+    }
+
+    /// The value of a type alias of this file that `ty` names, or `ty`
+    /// itself. `type Rows = HashMap<K, V>` is a second spelling of the
+    /// map, so a binding typed `Rows` passes the map's arguments to its
+    /// constructor. One step, as `alias_head` reads an alias.
+    pub(crate) fn alias_value<'a>(&'a self, ty: &'a str) -> &'a str {
+        self.alias_values.get(ty.trim()).map_or(ty, String::as_str)
     }
 
     /// The return type's base and arguments when a `return` hands back
@@ -2895,11 +2914,18 @@ impl<'s> Desugar<'s> {
 
         let mut after = None;
 
-        if i.branches.len() == 1
-            && let Cond::Expr(e) = &i.branches[0].0
-            && let Some((name, ty)) = self.negative_test(e)
-        {
-            let text = format!("local {name} = (({name} :: any) :: {ty})");
+        let mut tests = Vec::new();
+
+        if let [(Cond::Expr(e), _)] = i.branches.as_slice() {
+            self.negative_tests(e, &mut tests);
+        }
+
+        if !tests.is_empty() {
+            let text = tests
+                .iter()
+                .map(|(name, ty)| format!("local {name} = (({name} :: any) :: {ty})"))
+                .collect::<Vec<_>>()
+                .join(" ");
 
             match &i.else_block {
                 Some(b) => blocks.push((b.span.start, format!("{text} "))),
@@ -2937,6 +2963,22 @@ impl<'s> Desugar<'s> {
             }
 
             _ => {}
+        }
+    }
+
+    /// The `x is not T` tests an `or` chain holds, as (name, type). Each
+    /// one holds where the whole chain is false: `a or b or c` reaches `c`
+    /// only when `a` and `b` are both false.
+    pub(crate) fn negative_tests(&self, e: &Expr, out: &mut Vec<(String, String)>) {
+        match e {
+            Expr::Paren { inner, .. } => self.negative_tests(inner, out),
+
+            Expr::Binary { op, lhs, rhs, .. } if self.text_of(*op) == "or" => {
+                self.negative_tests(lhs, out);
+                self.negative_tests(rhs, out);
+            }
+
+            _ => out.extend(self.negative_test(e)),
         }
     }
 
@@ -3010,7 +3052,12 @@ impl<'s> Desugar<'s> {
 
             tests
         };
-        let negative = |c: &Expr| self.negative_test(c).into_iter().collect::<Vec<_>>();
+        let negative = |c: &Expr| {
+            let mut tests = Vec::new();
+            self.negative_tests(c, &mut tests);
+
+            tests
+        };
 
         match e {
             Expr::Binary { op, lhs, rhs, .. } => match self.text_of(*op) {
@@ -4515,6 +4562,23 @@ mod tests {
         }
     }
 
+    /// A type alias of the file is a second spelling of its value, so a
+    /// binding and a return typed by the alias pass the value's arguments.
+    #[test]
+    fn a_constructor_under_an_alias_takes_the_alias_arguments() {
+        let src = "type Rows = HashMap<number, { number }>\nconst rows: Rows = HashMap.new()\nlocal function make(): Rows\n    return HashMap.new()\nend\nprint(rows, make())\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert_eq!(
+            out.check
+                .matches("HashMap.new<<number, { number }>>()")
+                .count(),
+            2,
+            "{}",
+            out.check
+        );
+    }
+
     /// `is` reads through a type alias, and the branch it opens has to
     /// agree. `type B = Box` narrowed nothing, so a field read under
     /// `if x is B` reported on `unknown` inside a branch that holds.
@@ -4532,6 +4596,29 @@ mod tests {
         ] {
             assert!(out.check.contains(want), "{want}\n{}", out.check);
         }
+    }
+
+    /// `a or b or c` reaches `c` only when `a` and `b` are false, so each
+    /// `x is not T` in an `or` chain narrows every later operand, the else
+    /// value, and the code after a guard. Only the operand right after the
+    /// test took the cast, and `v.b` in `v is not P or v.a or v.b` reported.
+    #[test]
+    fn an_or_chain_narrows_every_later_operand() {
+        let src = "struct P as\n    a: number\n    b: number\nend\n\nlocal function one(v: unknown): boolean\n    return v is not P or v.a ~= 1 or v.b ~= 2\nend\n\nlocal function two(p: unknown, q: unknown): number\n    if p is not P or q is not P then\n        return 0\n    end\n\n    return p.a + q.b\nend\n\nprint(one, two)\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert_eq!(
+            out.check.matches("((v :: any) :: P).").count(),
+            2,
+            "{}",
+            out.check
+        );
+        assert!(
+            out.check
+                .contains("local p = ((p :: any) :: P) local q = ((q :: any) :: P)"),
+            "{}",
+            out.check
+        );
     }
 
     /// `import { Box as B }` binds the type as `B`, and `if v is B` gave

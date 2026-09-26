@@ -361,16 +361,52 @@ pub fn std_require_for(tree: &Tree, rel: &Path) -> Option<String> {
 
 /// The require string for `@alias/rest`: the alias names a folder on
 /// disk, the tree says where that folder lands, and the rest of the way
-/// down becomes instance names.
-pub fn resolve_alias(tree: &Tree, alias: &str, rest: &str) -> Option<String> {
+/// down becomes instance names. `from` is the file the require starts
+/// from.
+///
+/// A script in a folder that Roblox copies runs from its copy, so the
+/// `@game/...` place of the module is the template, a second module
+/// with its own state. From a file of the same mount, a relative path
+/// finds the copy the script runs in. The instance path of the copy
+/// holds the player's name, so no other file has a path to it.
+pub fn resolve_alias(tree: &Tree, from: &Path, alias: &str, rest: &str) -> Option<String> {
     let (_, dir) = tree.aliases.iter().find(|(a, _)| a == alias)?;
     let joined = normalize(&dir.join(rest.trim_start_matches('/')));
-    let place = place_of(tree, &joined)?;
+    let place = format!("@game/{}", place_of(tree, &joined)?.join("/"));
+    let same_mount = tree
+        .holder(from)
+        .zip(tree.holder(&joined))
+        .is_some_and(|((a, _), (b, _))| std::ptr::eq(a, b));
 
-    Some(format!("@game/{}", place.join("/")))
+    if same_mount && in_copied_folder(&place) {
+        return Some(crate::build::relative_require(from, &joined));
+    }
+
+    Some(place)
 }
 
-/// A path with `.` and `..` folded, no file system access.
+/// Whether a `@game/...` require names a place in a folder that Roblox
+/// copies for each player or character. A script there runs from its
+/// copy, so a require of the place loads a second module.
+pub fn in_copied_folder(require: &str) -> bool {
+    let Some(place) = require.strip_prefix("@game/") else {
+        return false;
+    };
+    let names: Vec<&str> = place.split('/').collect();
+
+    matches!(
+        names.as_slice(),
+        [
+            "StarterPlayer",
+            "StarterPlayerScripts" | "StarterCharacterScripts",
+            ..
+        ] | ["StarterGui" | "StarterPack", ..]
+    )
+}
+
+/// A path with `.` and `..` folded, no file system access. A `..` with
+/// no folder before it stays: `../Lib/build` is a mount above the root,
+/// and `Lib/build` would name another folder.
 fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
 
@@ -378,9 +414,15 @@ fn normalize(path: &Path) -> PathBuf {
         match c {
             Component::CurDir => {}
 
-            Component::ParentDir => {
-                out.pop();
-            }
+            Component::ParentDir => match out.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+
+                _ => out.push(".."),
+            },
 
             other => out.push(other),
         }
@@ -409,7 +451,7 @@ pub fn rewrite_requires(tree: &Tree, source: &Path, text: &str) -> String {
             Some(p) => {
                 let (alias, tail) = p.split_once('/').unwrap_or((p, ""));
 
-                resolve_alias(tree, alias, tail)
+                resolve_alias(tree, &crate::build::module_base(source), alias, tail)
             }
 
             None => cross_mount(tree, source, &crate::build::module_base(source), path),
@@ -467,11 +509,21 @@ fn cross_mount(tree: &Tree, source: &Path, from: &Path, path: &str) -> Option<St
 /// `source`, with the path its `require` writes: see `cross_mount`. The
 /// check artifact writes that path, as the ship does: luau-lsp reads a
 /// relative path in a file the sourcemap holds as a place in the tree,
-/// where two mounts are no siblings.
+/// where two mounts are no siblings. An alias into a folder that Roblox
+/// copies takes its path here too: see `resolve_alias`.
 pub fn mount_requires(tree: &Tree, source: &Path, text: &str) -> Vec<(String, String)> {
     crate::modules::import_specs(text)
         .into_iter()
-        .filter_map(|spec| cross_mount(tree, source, source, &spec).map(|place| (spec, place)))
+        .filter_map(|spec| {
+            let place = match spec.strip_prefix('@').and_then(|p| p.split_once('/')) {
+                Some((alias, tail)) => resolve_alias(tree, source, alias, tail)
+                    .filter(|p| !p.starts_with("@game/") || in_copied_folder(p))?,
+
+                None => cross_mount(tree, source, source, &spec)?,
+            };
+
+            Some((spec, place))
+        })
         .collect()
 }
 
@@ -679,10 +731,12 @@ pub(crate) fn dir_node(root: &Path, dir: &Path, name: &str) -> std::io::Result<M
 }
 
 /// The sourcemap of the tree: the instance tree, each script with the
-/// path of its source, relative to `root`.
-pub fn sourcemap(tree: &Tree, root: &Path) -> std::io::Result<Value> {
+/// path of its source, relative to `root`. A mount that `mirror` holds
+/// is read there: the flux mirror holds the output of a project an
+/// import leads into, and the disk has none until a build.
+pub fn sourcemap(tree: &Tree, root: &Path, mirror: Option<&Path>) -> std::io::Result<Value> {
     if let Some(project) = &tree.project {
-        return project.sourcemap(root, &tree.runtime, &tree.out);
+        return project.sourcemap(root, mirror, &tree.runtime, &tree.out);
     }
 
     let mut game = node("game", "DataModel", None);
@@ -734,11 +788,12 @@ pub fn sourcemap(tree: &Tree, root: &Path) -> std::io::Result<Value> {
     };
 
     for m in &tree.mounts {
-        let path = root.join(&m.disk);
+        let read = mirror.filter(|d| d.join(&m.disk).exists()).unwrap_or(root);
+        let path = read.join(&m.disk);
         let name = m.place.last().cloned().unwrap_or_default();
 
         let leaf = if path.is_dir() {
-            dir_node(root, &path, &name)?
+            dir_node(read, &path, &name)?
         } else if path.is_file() {
             let fname = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
             let mut n = node(
@@ -779,12 +834,13 @@ pub fn sourcemap(tree: &Tree, root: &Path) -> std::io::Result<Value> {
 /// into a mirror. A tree that mounts a folder writes it, as `alloy
 /// build` does, so a file added since the last build has its place.
 /// Any other root reads the file the last build or Rojo left there.
-/// The language server and `alloy flux` both start from this text.
-pub fn luau_sourcemap(root: &Path, config: &Config) -> Option<String> {
+/// The language server and `alloy flux` both start from this text;
+/// `mirror` is the one `sourcemap` reads.
+pub fn luau_sourcemap(root: &Path, config: &Config, mirror: Option<&Path>) -> Option<String> {
     let tree = Tree::load(root, config);
 
     if !tree.mounts.is_empty() {
-        let map = sourcemap(&tree, root).ok()?;
+        let map = sourcemap(&tree, root, mirror).ok()?;
 
         return Some(serde_json::to_string_pretty(&map).ok()? + "\n");
     }
@@ -929,7 +985,7 @@ pub fn files(tree: &Tree, config: &Config, root: &Path) -> std::io::Result<Vec<(
     if config.project.sourcemap {
         out.push((
             PathBuf::from("sourcemap.json"),
-            pretty(&sourcemap(tree, root)?),
+            pretty(&sourcemap(tree, root, None)?),
         ));
     }
 
@@ -973,6 +1029,36 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
         let config = Config::parse(MOUNTS, Path::new("alloy.toml")).unwrap();
 
         Tree::load(Path::new("/does-not-exist"), &config)
+    }
+
+    /// A mount above the root keeps its `..`. `normalize` dropped it, so
+    /// a require into `../Lib/build` met no mount and kept its disk path.
+    #[test]
+    fn a_mount_above_the_root_holds_its_files() {
+        let config = Config::parse(
+            &format!("{MOUNTS}lib = [\"../Lib/build\", \"@game/ReplicatedStorage/Lib\"]\n"),
+            Path::new("alloy.toml"),
+        )
+        .unwrap();
+        let t = Tree::load(Path::new("/does-not-exist"), &config);
+
+        assert_eq!(
+            normalize(Path::new("src/../../Lib/x")),
+            Path::new("../Lib/x")
+        );
+        assert_eq!(normalize(Path::new("/a/../../b")), Path::new("/b"));
+        assert_eq!(
+            rewrite_requires(
+                &t,
+                Path::new("src/server/main.server.aly"),
+                "require('../../../Lib/build/lib')"
+            ),
+            "require('@game/ReplicatedStorage/Lib/lib')"
+        );
+        assert_eq!(
+            instance_path(&t, Path::new("../Lib/build/lib.luau")).unwrap(),
+            vec!["ReplicatedStorage", "Lib", "lib"]
+        );
     }
 
     #[test]
@@ -1022,8 +1108,55 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
         );
         // A data path under an alias keeps the module name.
         assert_eq!(
-            resolve_alias(&t, "shared", "data/config.json").unwrap(),
+            resolve_alias(&t, Path::new(""), "shared", "data/config.json").unwrap(),
             "@game/ReplicatedStorage/Shared/data/config"
+        );
+    }
+
+    /// A LocalScript runs from the copy of StarterPlayerScripts in the
+    /// player, so the `@game/...` place of a client module is a second
+    /// module. Its own mount reaches the copy by a relative path, and
+    /// the compile reports a require from another mount.
+    #[test]
+    fn an_alias_into_a_copied_folder_takes_the_copy() {
+        let config = Config::parse(
+            &format!("{MOUNTS}client = [\"src/client\", \"@game/StarterPlayer/StarterPlayerScripts/Client\"]\n"),
+            Path::new("alloy.toml"),
+        )
+        .unwrap();
+        let t = Tree::load(Path::new("/does-not-exist"), &config);
+        let text = "import { a } from '@client/state'\nimport { b } from '@shared/util'\n";
+
+        assert_eq!(
+            mount_requires(&t, Path::new("src/client/ui/hud.aly"), text),
+            [("@client/state".to_string(), "../state".to_string())]
+        );
+        assert_eq!(
+            rewrite_requires(
+                &t,
+                Path::new("src/client/main.client.aly"),
+                "require('@client/state')"
+            ),
+            "require('./state')"
+        );
+
+        let place = "@game/StarterPlayer/StarterPlayerScripts/Client/state";
+        let requires = mount_requires(&t, Path::new("src/shared/util.aly"), text);
+        assert_eq!(requires, [("@client/state".to_string(), place.to_string())]);
+
+        let options = crate::EmitOptions {
+            mount_requires: requires,
+            ..Default::default()
+        };
+        let out = crate::compile_with(text, &options).unwrap();
+        let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+        assert!(
+            messages[0].starts_with("\"@client/state\" is in a folder that Roblox copies"),
+            "{messages:?}"
+        );
+        assert_eq!(
+            out.diagnostics[0].start as usize,
+            text.find("'@client").unwrap()
         );
     }
 
@@ -1097,7 +1230,7 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
         write(&dir, "Packages/jecs.luau", "");
 
         let config = Config::parse(MOUNTS, Path::new("alloy.toml")).unwrap();
-        let map = sourcemap(&Tree::load(&dir, &config), &dir).unwrap();
+        let map = sourcemap(&Tree::load(&dir, &config), &dir, None).unwrap();
         let services = map["children"].as_array().unwrap();
         let sss = services
             .iter()

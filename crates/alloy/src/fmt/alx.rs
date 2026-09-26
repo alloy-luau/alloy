@@ -56,80 +56,99 @@ fn format_alx_inner(src: &str, options: &FmtConfig, whole: bool) -> Result<Strin
     // cannot read: the file keeps its text and the run says why, with
     // the position the same error carries under `alloy check`.
     // A `<style>` element holds CSS, which an ingot reads, not markup:
-    // `{` there opens a rule and `--x` names a property. The spans are
-    // found with its text blanked, and a span that holds one keeps its
-    // text as written.
-    let masked = blank_styles(src);
+    // `{` there opens a rule and `--x` names a property. The span scan
+    // reads its text blanked, and a span that holds one keeps its text
+    // as written.
+    let masked = luaux::compile::blank_styles(src);
     let spans =
-        luaux::compile::markup_spans(&masked).map_err(|e| unparsed(src, e.offset, &e.message))?;
+        luaux::compile::markup_spans(src).map_err(|e| unparsed(src, e.offset, &e.message))?;
 
     if spans.is_empty() {
         return code_fmt(src, options);
     }
 
-    let mut code = String::with_capacity(src.len());
-    let mut printed: Vec<Vec<Line>> = Vec::new();
-    let mut last = 0;
+    // The indent of the line each span lands on, which the markup lines
+    // take on top of their own. It is known only after the code formats,
+    // and a span that breaks can move its line, so the print runs again
+    // until each span keeps its indent. Two rounds settle a file; the
+    // third is for a span that the second round broke.
+    let mut bases = vec![0; spans.len()];
 
-    for (n, (a, b)) in spans.iter().enumerate() {
-        code.push_str(&src[last..*a]);
+    for round in 0..3 {
+        let mut code = String::with_capacity(src.len());
+        let mut printed: Vec<Vec<Line>> = Vec::new();
+        let mut last = 0;
 
-        if masked[*a..*b] != src[*a..*b] {
-            let lines = as_written(src, *a, *b);
-            let width = match lines.len() {
-                1 => lines[0].1.chars().count(),
+        for (n, (a, b)) in spans.iter().enumerate() {
+            code.push_str(&src[last..*a]);
 
-                _ => options.column_width + 1,
+            if masked[*a..*b] != src[*a..*b] {
+                let lines = as_written(src, *a, *b);
+                let width = match lines.len() {
+                    1 => lines[0].1.chars().count(),
+
+                    _ => options.column_width + 1,
+                };
+                code.push_str(&placeholder(n, width));
+                printed.push(lines);
+                last = *b;
+
+                continue;
+            }
+
+            let (node, _) = luaux::markup::parse_node(src, *a)
+                .map_err(|e| unparsed(src, e.offset, &e.message))?;
+            let at_base = FmtConfig {
+                column_width: options.column_width.saturating_sub(bases[n]),
+                ..options.clone()
+            };
+            let lines = print_node(src, &node, &at_base, 0);
+            let width = if lines.len() == 1 && !parenthesized_block(src, *a, *b) {
+                lines[0].1.chars().count()
+            } else {
+                options.column_width + 1
             };
             code.push_str(&placeholder(n, width));
             printed.push(lines);
             last = *b;
-
-            continue;
         }
 
-        let (node, _) =
-            luaux::markup::parse_node(src, *a).map_err(|e| unparsed(src, e.offset, &e.message))?;
-        let lines = print_node(src, &node, options, 0);
-        let width = if lines.len() == 1 && !parenthesized_block(src, *a, *b) {
-            lines[0].1.chars().count()
-        } else {
-            options.column_width + 1
-        };
-        code.push_str(&placeholder(n, width));
-        printed.push(lines);
-        last = *b;
+        code.push_str(&src[last..]);
+        let formatted = code_fmt(&code, options)?;
+        let landed = placeholder_bases(&formatted, spans.len(), options);
+
+        if landed == bases || round == 2 {
+            return Ok(substitute(&formatted, &printed, options));
+        }
+
+        bases = landed;
     }
 
-    code.push_str(&src[last..]);
-    let formatted = code_fmt(&code, options)?;
-    Ok(substitute(&formatted, &printed, options))
+    unreachable!("the last round returns")
 }
 
-/// The source with the text of each `<style>` element blanked to
-/// spaces, byte for byte, so every offset holds.
-fn blank_styles(src: &str) -> String {
-    let mut out = src.to_string();
-    let mut from = 0;
+/// The indent, in columns, of the line each placeholder stands on.
+fn placeholder_bases(formatted: &str, count: usize, options: &FmtConfig) -> Vec<usize> {
+    let mut out = vec![0; count];
 
-    while let Some(open) = src[from..].find("<style") {
-        let open = from + open;
-        let Some(body) = src[open..].find('>').map(|i| open + i + 1) else {
-            break;
-        };
-        let Some(close) = src[body..].find("</style>").map(|i| body + i) else {
-            break;
-        };
-        let blank: String = src[body..close]
+    for line in formatted.lines() {
+        let base: usize = line
             .chars()
-            .map(|c| match c {
-                '\n' => "\n".to_string(),
+            .take_while(|c| c.is_whitespace())
+            .map(|c| if c == '\t' { indent_width(options) } else { 1 })
+            .sum();
+        let mut rest = line;
 
-                c => " ".repeat(c.len_utf8()),
-            })
-            .collect();
-        out.replace_range(body..close, &blank);
-        from = close;
+        while let Some(at) = rest.find(PLACEHOLDER) {
+            let tail = &rest[at + PLACEHOLDER.len()..];
+            let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
+
+            if let Some(slot) = digits.parse::<usize>().ok().and_then(|n| out.get_mut(n)) {
+                *slot = base;
+            }
+
+            rest = &tail[digits.len()..];
+        }
     }
 
     out
@@ -210,10 +229,15 @@ fn substitute(formatted: &str, printed: &[Vec<Line>], options: &FmtConfig) -> St
             let lines = &printed[n];
 
             for (k, (level, text)) in lines.iter().enumerate() {
+                // A blank line of a hole's body stays empty: an indent
+                // there is trailing whitespace.
                 if k > 0 {
                     out.push('\n');
-                    out.push_str(&base);
-                    out.push_str(&indent(options, *level));
+
+                    if !text.is_empty() {
+                        out.push_str(&base);
+                        out.push_str(&indent(options, *level));
+                    }
                 }
 
                 out.push_str(text);
@@ -339,7 +363,13 @@ fn print_tag(
             }
         })
         .collect();
-    let kids = print_children(src, children, options, start, end);
+    // A child prints at level 0 and lands one indent in, so it fits in
+    // the width less that indent.
+    let inside = FmtConfig {
+        column_width: options.column_width.saturating_sub(indent_width(options)),
+        ..options.clone()
+    };
+    let kids = print_children(src, children, &inside, start, end);
     let self_closing =
         children.is_empty() && !src[start..end].trim_end().ends_with(&format!("</{name}>"));
     let close_text = if self_closing {
@@ -791,6 +821,25 @@ mod tests {
         );
     }
 
+    /// Text deep in a page wrapped at 108 columns. A child printed with
+    /// the width of its parent, and the markup with no room for the
+    /// indent of the line it lands on, so neither indent counted.
+    #[test]
+    fn deep_text_wraps_inside_the_column() {
+        let words = "One two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen.";
+        let src = format!(
+            "local function Note()\n  return (\n    <Frame>\n      <Frame>\n        <Frame>\n          <TextLabel>\n            {words}\n          </TextLabel>\n        </Frame>\n      </Frame>\n    </Frame>\n  )\nend\n"
+        );
+        let out = fmt(&src);
+
+        assert!(out.lines().all(|l| l.chars().count() <= 100), "{out}");
+        assert!(
+            out.contains("fifteen\n            sixteen seventeen."),
+            "{out}"
+        );
+        assert_eq!(fmt(&out), out);
+    }
+
     #[test]
     fn children_go_on_their_own_lines() {
         let src = "return (\n  <Frame>\n    <UICorner />\n    <TextLabel>{a}</TextLabel>\n  </Frame>\n)\n";
@@ -884,6 +933,14 @@ mod tests {
     #[test]
     fn a_multi_line_hole_keeps_its_lines() {
         let src = "return (\n  <TextButton\n    Activated={function()\n      go()\n    end}\n  >\n    {name} x{count}\n  </TextButton>\n)\n";
+        assert_eq!(fmt(src), src);
+    }
+
+    /// A blank line in the body of a hole stays empty. fmt wrote the
+    /// indent of the tag on it.
+    #[test]
+    fn a_blank_line_in_a_hole_takes_no_indent() {
+        let src = "return (\n  <Frame\n    Size={function()\n      const w = 1\n\n      return w\n    end}\n  />\n)\n";
         assert_eq!(fmt(src), src);
     }
 

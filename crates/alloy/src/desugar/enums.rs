@@ -2660,9 +2660,37 @@ impl<'s> Desugar<'s> {
                 }
             };
 
+            // `if const a, b = f()`: each name after the first takes the
+            // next value, as `local a, b = f()` does. The test reads the
+            // first alone.
+            let mut rest_names = String::new();
+            let mut rest_decl = String::new();
+
+            for (n, t) in &b.rest {
+                let name = match *negated {
+                    true => self.text_of(*n).to_string(),
+
+                    false => {
+                        self.bump_temp();
+                        let temp = format!("_c{}", self.temp_next);
+                        binds.push((*n, temp.clone(), *t));
+
+                        temp
+                    }
+                };
+                let t = match (*negated, t) {
+                    (true, Some(t)) => format!(": {}", self.text_of(*t)),
+
+                    _ => String::new(),
+                };
+                rest_names.push_str(&format!(", {name}"));
+                rest_decl.push_str(&format!(", {name}{t}"));
+            }
+
             // A later binding runs only when the earlier ones are truthy.
             // The test this binding adds is the last one in `prior`.
             let earlier = &prior[..prior.len() - 1];
+            let guard = (!earlier.is_empty()).then(|| earlier.join(" and "));
             let decl = self.render_side(|d| {
                 d.generate(anchor, "local ");
 
@@ -2675,16 +2703,28 @@ impl<'s> Desugar<'s> {
                     None => d.generate(anchor, &head),
                 }
 
-                d.generate(anchor, &format!("{ty} = "));
+                match (guard, rest_names.is_empty()) {
+                    (None, _) => {
+                        d.generate(anchor, &format!("{ty}{rest_decl} = "));
+                        d.r.append(value);
+                    }
 
-                if !earlier.is_empty() {
-                    d.generate(anchor, &format!("if {} then ", earlier.join(" and ")));
-                }
+                    (Some(g), true) => {
+                        d.generate(anchor, &format!("{ty} = if {g} then "));
+                        d.r.append(value);
+                        d.generate(anchor, " else nil");
+                    }
 
-                d.r.append(value);
-
-                if !earlier.is_empty() {
-                    d.generate(anchor, " else nil");
+                    // An `if` expression keeps one value, so the names
+                    // take the values in a statement.
+                    (Some(g), false) => {
+                        d.generate(
+                            anchor,
+                            &format!("{ty}{rest_decl} if {g} then {head}{rest_names} = "),
+                        );
+                        d.r.append(value);
+                        d.generate(anchor, " end");
+                    }
                 }
             });
             decls.push(decl);
@@ -3023,6 +3063,25 @@ impl<'s> Desugar<'s> {
 
 #[cfg(test)]
 mod tests {
+    /// `if const a, b = f()` did not parse. It binds each name to the
+    /// next value of `f()`, as `local a, b = f()` does, and tests the
+    /// first. A later binding of a chain takes the values in a
+    /// statement, since an `if` expression keeps one.
+    #[test]
+    fn a_condition_binds_a_list_of_names() {
+        let src = "local function f(): (string?, string?)\n    return 'a', 'b'\nend\nlocal function g(t: string?)\n    if const a, b = f() then\n        print(a, b)\n    end\n    if not const c, d = f() then\n        return\n    end\n    if const s = t; const e, g2 = f() then\n        print(s, c, d, e, g2)\n    end\nend\ng(nil)\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+        for want in [
+            "local _c1, _c2 = f() if _c1 then local a, b = _c1, _c2",
+            "local c, d = f() if not (c) then",
+            "local _c2, _c3 if _c1 then _c2, _c3 = f() end if _c1 and _c2 then local s, e, g2 = _c1, _c2, _c3",
+        ] {
+            assert!(out.ship.contains(want), "{want}\n{}", out.ship);
+        }
+    }
+
     /// `enum E as end` wrote `type E = `, which is not Luau. The body
     /// wants a variant, and the report says so.
     #[test]
@@ -3502,10 +3561,7 @@ mod tests {
         let own = "enum Opt as\n    Some(number)\n    Nil\nend\nlocal o = Opt.Some(1)\nprint(Opt.or_else(o, 5))\n";
         let got = messages(own);
         assert_eq!(got.len(), 1, "{got:?}");
-        assert_eq!(
-            got[0],
-            "`Opt` has no variant `or_else`; its variants are `Some` and `Nil`"
-        );
+        assert_eq!(got[0], "`Opt` has no method `or_else`");
     }
 
     /// `Reached.Walkd` on an imported enum gave the checker's "Key
@@ -3550,9 +3606,23 @@ mod tests {
         let out = crate::compile_with(src, &options).expect("compiles");
         let got: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
 
+        assert_eq!(got, ["`Mode` has no method `hii`; did you mean `hi`?"]);
+    }
+
+    /// `State.is_redy(s)` said "`State` has no variant `is_redy`" and
+    /// listed the variants. A lower-case member is a method, so the
+    /// report names the method and the nearest one, or lists them.
+    #[test]
+    fn a_misspelt_enum_method_names_the_methods() {
+        let src = "enum State as\n    Empty\n    Ripe(number)\nend\nimpl State as\n    function is_ready(self): boolean\n        return $matches(self, Ripe(_))\n    end\n    function grow(self): State\n        return self\n    end\nend\nprint(State.is_redy(State.Empty), State.harvest, State.Rip)\n";
+
         assert_eq!(
-            got,
-            ["`Mode` has no variant `hii`; its variants are `On` and `Off`"]
+            messages(src),
+            [
+                "`State` has no method `is_redy`; did you mean `is_ready`?",
+                "`State` has no method `harvest`; its methods are `grow` and `is_ready`",
+                "`State` has no variant `Rip`; its variants are `Empty` and `Ripe`",
+            ]
         );
     }
 

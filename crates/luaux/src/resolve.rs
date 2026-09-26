@@ -63,6 +63,15 @@ impl Resolver {
         written: &str,
         offset: usize,
     ) -> Result<String, EmitError> {
+        // React takes `ref` and `key` on every host element and hands
+        // neither to the instance. A table factory declares no such
+        // props, so there they stay unknown names.
+        if self.config.backend == crate::config::BackendKind::Element
+            && matches!(written, "ref" | "key")
+        {
+            return Ok(written.to_string());
+        }
+
         let canonical = self
             .config
             .resolve_property(class, written)

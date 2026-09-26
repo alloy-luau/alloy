@@ -239,8 +239,47 @@ fn compile_inner(
 
 /// The byte spans of every markup region, outermost only. Alloy patch: the
 /// caller blanks them to collect bindings with its own parser.
+///
+/// A `<style>` element holds CSS, which an ingot reads, not markup: `{`
+/// there opens a rule and `--x` names a property. The scan reads the
+/// source with that text blanked, so the spans are the ones the build
+/// finds after the ingot took the element out.
 pub fn markup_spans(source: &str) -> Result<Vec<(usize, usize)>, CompileError> {
-    luaux_spans(source)
+    luaux_spans(&blank_styles(source))
+}
+
+/// The source with the text of each `<style>` element blanked to spaces,
+/// byte for byte, so every offset holds. A source with no `<style>` comes
+/// back as it is.
+pub fn blank_styles(src: &str) -> std::borrow::Cow<'_, str> {
+    if !src.contains("<style") {
+        return std::borrow::Cow::Borrowed(src);
+    }
+
+    let mut out = src.to_string();
+    let mut from = 0;
+
+    while let Some(open) = src[from..].find("<style") {
+        let open = from + open;
+        let Some(body) = src[open..].find('>').map(|i| open + i + 1) else {
+            break;
+        };
+        let Some(close) = src[body..].find("</style>").map(|i| body + i) else {
+            break;
+        };
+        let blank: String = src[body..close]
+            .chars()
+            .map(|c| match c {
+                '\n' => "\n".to_string(),
+
+                c => " ".repeat(c.len_utf8()),
+            })
+            .collect();
+        out.replace_range(body..close, &blank);
+        from = close;
+    }
+
+    std::borrow::Cow::Owned(out)
 }
 
 #[doc(hidden)]
@@ -571,7 +610,7 @@ fn compile_children(
                 if level != LintLevel::Off {
                     let spans = luaux_spans(expression).unwrap_or_default();
 
-                    if lint::has_unwrapped_luaux(expression, &spans) {
+                    if lint::has_static_conditional_luaux(expression, &spans) {
                         let warning = lint::static_conditional_child(
                             span.start,
                             expression.len(),
@@ -705,6 +744,16 @@ mod tests {
         );
     }
 
+    /// The arm before `default` ends in markup, so the scan sees a region,
+    /// not a token, before the word.
+    #[test]
+    fn a_default_arm_takes_markup() {
+        assert_eq!(
+            build("return match n with\n  case 1 then\n    <Frame/>\n  default\n    <Frame/>\nend"),
+            "return match n with\n  case 1 then\n    create(\"Frame\")({})\n  default\n    create(\"Frame\")({})\nend"
+        );
+    }
+
     #[test]
     fn emits_attributes() {
         assert_eq!(
@@ -768,7 +817,7 @@ mod tests {
     fn a_text_attribute_and_text_children_conflict() {
         for source in [
             r#"local e = <TextLabel Text="A">B</TextLabel>"#,
-            "local e = <TextLabel Text={tostring(n)}>{label}</TextLabel>",
+            r#"local e = <TextLabel Text="A">B {n}</TextLabel>"#,
         ] {
             let error = try_build(source).expect_err(source);
 
@@ -778,6 +827,21 @@ mod tests {
                 source[source.find("Text=").unwrap()..source.find('>').unwrap()].trim_end(),
             );
         }
+    }
+
+    /// A `Text` attribute sets the text, so a `{ }` beside it is a child,
+    /// with element children or without. Silk and Enamel lower a classed
+    /// child to one.
+    #[test]
+    fn a_hole_beside_a_text_attribute_is_a_child() {
+        assert_eq!(
+            build(r#"local e = <TextButton Text="">{f()}</TextButton>"#),
+            "local e = create(\"TextButton\")({ Text = \"\", f() })"
+        );
+        assert_eq!(
+            build(r#"local e = <TextButton Text=""><UICorner />{f()}</TextButton>"#),
+            "local e = create(\"TextButton\")({ Text = \"\", create(\"UICorner\")({}), f() })"
+        );
     }
 
     #[test]
@@ -1877,6 +1941,30 @@ mod tests {
             assert_eq!(
                 build("local e = <TextButton Activated={fire}>Fire</TextButton>"),
                 "local e = React.createElement(\"TextButton\", { [React.Event.Activated] = fire, Text = \"Fire\" })"
+            );
+        }
+
+        /// React takes `ref` and `key` on every host element. The class has
+        /// no such members, and the check refused them. The one-table
+        /// arrangement declares no such props, so it still refuses them.
+        #[test]
+        fn a_host_element_takes_ref_and_key() {
+            assert_eq!(
+                build("local e = <Frame ref={f} key=\"a\" Size={s}/>"),
+                "local e = React.createElement(\"Frame\", { ref = f, key = \"a\", Size = s })"
+            );
+
+            let table = compile_configured(
+                &format!("{BINDING}local e = <Frame ref={{f}}/>"),
+                &crate::backend::Table,
+                Config::parse("[factory]\nbackend = \"table\"\ncreate = \"React.create\"\n")
+                    .expect("config"),
+            );
+            assert!(
+                table
+                    .as_ref()
+                    .is_err_and(|e| e.message == "Frame has no property or event named ref"),
+                "{table:?}"
             );
         }
 

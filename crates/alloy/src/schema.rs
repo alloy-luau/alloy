@@ -343,11 +343,10 @@ pub const TABLES: &[Table] = &[
                 STR,
                 "The string emitted code passes to `require` for the runtime. Unset means a relative path to the `alloy.luau` the build writes, or the runtime's instance path when the tree holds the file.",
             ),
-            key(
+            unset(
                 "erase_type_imports",
                 BOOL,
-                "false",
-                "Blank `import type` lines in the output so they add no runtime dependency. The output is then untyped for anyone who analyzes it directly.",
+                "Deprecated, and does nothing. A type-only import never runs its `require`, so remove the key.",
             ),
         ],
         open: None,
@@ -875,8 +874,8 @@ pub const TABLES: &[Table] = &[
             ),
             unset(
                 "interpolate",
-                Ty::Choice(&["plain", "compute"]),
-                "How `{expr}` in text lowers: `plain` inserts the value, `compute` wraps it.",
+                Ty::Choice(&["wrap", "plain"]),
+                "How `{expr}` in text lowers: `wrap` wraps it so a reactive library re-runs it (through `compute` when set), `plain` inserts the value.",
             ),
             unset(
                 "merge",
@@ -1224,6 +1223,7 @@ mod tests {
         let mut config = Config::default();
         config.emit.wait_timeout = Some(5.0);
         config.emit.std_require = Some("@alloy".into());
+        config.emit.erase_type_imports = Some(false);
         config.flux.luau_lsp = Some("luau-lsp".into());
         config.project.file = Some("default.project.json".into());
         config.project.runtime = Some("@game/ReplicatedStorage/Alloy".into());

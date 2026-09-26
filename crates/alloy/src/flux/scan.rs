@@ -1,6 +1,7 @@
 //! The token scanner the Flux lints share: one file's tokens, its
 //! block structure, and the small questions every lint asks of them.
 
+use alloy_syntax::contextual::binop_priority;
 use alloy_syntax::lexer::{Tok, TokKind};
 
 use crate::fmt::structure::Structure;
@@ -18,6 +19,12 @@ pub(crate) struct Scan<'s> {
     /// The functions the imported modules declare, keyed the way this
     /// file calls them. See `crate::modules::import_callables`.
     pub(crate) callables: &'s [(String, super::Callable)],
+    /// The byte ranges an ingot's transform wrote. See
+    /// `EmitOptions::generated`.
+    pub(crate) generated: &'s [(u32, u32)],
+    /// The token of each `:` of a ternary. See
+    /// `fmt::colons::ternary_colons`.
+    pub(crate) ternary_colons: &'s [usize],
 }
 
 pub(crate) const KEYWORDS: &[&str] = &[
@@ -94,7 +101,28 @@ impl<'s> Scan<'s> {
             st,
             privates: &[],
             callables: &[],
+            generated: &[],
+            ternary_colons: &[],
         }
+    }
+
+    /// The same scan, with the `:` of each ternary.
+    pub(crate) fn with_ternary_colons(mut self, colons: &'s [usize]) -> Self {
+        self.ternary_colons = colons;
+        self
+    }
+
+    /// The same scan, with the byte ranges an ingot wrote.
+    pub(crate) fn with_generated(mut self, generated: &'s [(u32, u32)]) -> Self {
+        self.generated = generated;
+        self
+    }
+
+    /// Whether an ingot wrote token `i`, not the author.
+    pub(crate) fn generated_at(&self, i: usize) -> bool {
+        let at = self.start(i);
+
+        self.generated.iter().any(|&(a, b)| a <= at && at < b)
     }
 
     /// The same scan, with the private fields of the imported structs.
@@ -193,17 +221,6 @@ impl<'s> Scan<'s> {
                 step.depth_before.saturating_sub(step.closes) < level
             })
             .unwrap_or(self.toks.len())
-    }
-
-    /// Whether a `local` or a `const` of the name at `n`, declared after
-    /// it, holds the name at `j` in its block. The name at `j` then reads
-    /// that binding, not the one at `n`.
-    pub(crate) fn shadowed(&self, n: usize, j: usize) -> bool {
-        (n + 1..j).any(|d| {
-            self.t(d) == self.t(n)
-                && matches!(self.prev(d), "local" | "const")
-                && j < self.scope_end(d)
-        })
     }
 
     /// The declaration that the name at `at` reads: the last `local`,
@@ -350,6 +367,18 @@ impl<'s> Scan<'s> {
         Some(j)
     }
 
+    /// Whether the token at `j` goes on with the right operand of an
+    /// `and` before it: an operator that binds tighter, such as `>`, `+`,
+    /// `..`, `??` or `!=`, or a type suffix, such as `::` or `is`.
+    pub(crate) fn binds_tighter_than_and(&self, j: usize) -> bool {
+        let t = self.t(j);
+
+        // `and` binds at 2 and `or` at 1: see `binop_priority`.
+        binop_priority(t).is_some_and(|(left, _)| left > 2)
+            || matches!((t, self.t(j + 1)), ("?", "?") | ("!", "="))
+            || matches!(t, "::" | "is" | "satisfies" | "as")
+    }
+
     /// The content of a plain string literal at `i`, without its quotes.
     pub(crate) fn string_content(&self, i: usize) -> Option<&'s str> {
         let text = self.t(i);
@@ -402,18 +431,6 @@ impl<'s> Scan<'s> {
         } else {
             (start as u32, end as u32)
         }
-    }
-
-    /// The source between the previous token and this one: whitespace
-    /// and comments.
-    pub(crate) fn gap_before(&self, i: usize) -> &'s str {
-        let from = if i == 0 { 0 } else { self.end(i - 1) as usize };
-        let to = self
-            .toks
-            .get(i)
-            .map_or(self.src.len(), |t| t.start as usize);
-
-        &self.src[from..to]
     }
 
     /// Whether a comment sits between token `a` and token `b`.
@@ -616,6 +633,10 @@ impl<'s> Scan<'s> {
         // do not.
         let mut open_ifs = 0usize;
         let mut else_branch = false;
+        // The conditions of those `if` expressions still before their
+        // `then`. A `;` there joins two bindings, as in
+        // `if const a = x; const b = a.y then`.
+        let mut heads = 0usize;
 
         while j < self.toks.len() {
             let text = self.t(j);
@@ -627,6 +648,7 @@ impl<'s> Scan<'s> {
 
                 if text == "if" && !self.is_statement_if(j) {
                     open_ifs += 1;
+                    heads += 1;
                 } else if open_ifs > 0 && matches!(text, "else" | "elseif") {
                     // The `else` or `elseif` of the expression, not of a
                     // block: it ends no statement, and the branch below
@@ -634,14 +656,18 @@ impl<'s> Scan<'s> {
                     if text == "else" {
                         open_ifs -= 1;
                         else_branch = true;
+                    } else {
+                        heads += 1;
                     }
 
                     j += 1;
 
                     continue;
+                } else if text == "then" {
+                    heads = heads.saturating_sub(1);
                 }
 
-                if CLOSERS.contains(&text) || text == ";" {
+                if CLOSERS.contains(&text) || (text == ";" && heads == 0) {
                     return j;
                 }
 
@@ -674,7 +700,13 @@ impl<'s> Scan<'s> {
                             | ":"
                             | "??"
                             | "."
-                    ) || matches!(text, "." | ":" | "?." | "?:")
+                    ) || matches!(text, "." | ":" | "?." | "?:" | "?" | "(" | "[" | "{")
+                        // No statement opens with a binary operator, so
+                        // `return a` over `+ b` is one `return a + b`.
+                        || BINARY_OPS.contains(&text)
+                        // The `then` of an `if` expression goes on with
+                        // it, as its `else` and `elseif` do above.
+                        || (open_ifs > 0 && text == "then")
                         || ((open_ifs > 0 || else_branch) && matches!(prev, "then" | "else"));
 
                     if !continues {
@@ -727,18 +759,14 @@ impl<'s> Scan<'s> {
 
     /// For each token, how many block openers enclose it: `function`,
     /// `if`, loops, `match`, `do`. A function's own body starts at one.
+    /// A block an ingot wrote around the author's code adds no level.
     pub(crate) fn nesting(&self) -> Vec<usize> {
         let mut nest = vec![0usize; self.toks.len()];
 
         for (i, e) in self.st.ends.iter().enumerate() {
             let Some(e) = e else { continue };
 
-            if !matches!(
-                self.t(i),
-                "function" | "if" | "for" | "while" | "repeat" | "do" | "match"
-            ) || matches!(self.prev(i), "." | ":")
-                || (self.at(i, "if") && !self.is_statement_if(i))
-            {
+            if !self.opens_scope(i) || self.generated_at(i) {
                 continue;
             }
 
@@ -748,6 +776,28 @@ impl<'s> Scan<'s> {
         }
 
         nest
+    }
+
+    /// Whether token `i` opens a block of statements: `function`, a
+    /// statement `if`, a loop, `match`, or `do`.
+    pub(crate) fn opens_scope(&self, i: usize) -> bool {
+        matches!(
+            self.t(i),
+            "function" | "if" | "for" | "while" | "repeat" | "do" | "match"
+        ) && !matches!(self.prev(i), "." | ":")
+            && !(self.at(i, "if") && !self.is_statement_if(i))
+    }
+
+    /// The opener of the innermost block of statements that encloses
+    /// token `j`.
+    pub(crate) fn enclosing_scope(&self, j: usize) -> Option<usize> {
+        self.st
+            .ends
+            .iter()
+            .enumerate()
+            .filter(|(i, e)| e.is_some_and(|e| *i < j && j < e) && self.opens_scope(*i))
+            .map(|(i, _)| i)
+            .max()
     }
 
     /// Whether a namespace body encloses token `j`.

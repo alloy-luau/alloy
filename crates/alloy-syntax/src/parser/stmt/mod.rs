@@ -30,7 +30,7 @@ impl<'a> Parser<'a> {
         let start = self.pos;
         let mut stmts = Vec::new();
 
-        while !self.at_end() && !self.at_block_end() {
+        while !self.at_end() && !self.at_block_end() && !self.closes_group() {
             let terminator = if self.at("return") {
                 Some("return")
             } else if self.at("break") {
@@ -162,6 +162,26 @@ impl<'a> Parser<'a> {
             stmts,
             span: TokSpan::new(start, self.pos),
         })
+    }
+
+    /*
+    Reports if the cursor stands on the bracket that closes the group
+    around this block: `end)` after a callback, or a `)` that opens a
+    line. The callback misses an `end`, since an inner block took it.
+    The block ends here, and `expect_end` names the block with no `end`.
+    Without the stop the `)` failed as a statement, and the recovery
+    reported three more errors.
+
+    A stray `)` after a call, `print(a))`, stays a statement error.
+    */
+    fn closes_group(&self) -> bool {
+        self.groups > 0
+            && matches!(self.text(), ")" | "]" | "}")
+            && (self.newline_before_pos()
+                || self
+                    .pos
+                    .checked_sub(1)
+                    .is_some_and(|i| self.toks[i].text(self.src) == "end"))
     }
 
     /// The trailing expression of a value block, `try do ... x end`. It
@@ -935,6 +955,17 @@ impl<'a> Parser<'a> {
 
             "namespace" if self.namespace_follows() => {
                 return self.namespace_decl(start, attrs, exported);
+            }
+
+            // `@allow(naming_convention) attribute Tagged on struct`.
+            "attribute" if self.name_at(1) => {
+                let mut stmt = self.attribute_decl(start, exported)?;
+
+                if let Stmt::Attribute(a) = &mut stmt {
+                    a.attributes = attrs;
+                }
+
+                return Ok(stmt);
             }
 
             // `attribute X on type` declares one, so a type alias takes

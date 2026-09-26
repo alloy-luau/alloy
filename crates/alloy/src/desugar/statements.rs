@@ -1926,23 +1926,7 @@ impl<'s> Desugar<'s> {
             // has nothing to attach to: a diagnostic, and the text goes
             // so the output stays Luau.
             Stmt::Local(l) if !l.attrs.is_empty() => {
-                let mut cfg = None;
-
-                for a in &l.attrs {
-                    let name = a.name.map(|n| self.text_of(n)).unwrap_or("").to_string();
-
-                    if name == "cfg" {
-                        match self.cfg_condition(&a.args) {
-                            Ok(cond) => cfg = Some(cond),
-
-                            Err(message) => self.diagnose(a.span, &message),
-                        }
-                    }
-
-                    // The target check runs in `check_attrs`, over every
-                    // declaration at once.
-                    self.blank_lines(self.byte_start(a.span), self.byte_end(a.span));
-                }
+                let cfg = self.local_cfg(l);
 
                 // The copy starts where the last attribute ends, so the
                 // newline between it and the keyword survives.
@@ -1953,37 +1937,10 @@ impl<'s> Desugar<'s> {
                     .max()
                     .unwrap_or(0);
 
-                // The value is read only when the condition holds; the
-                // binding keeps the value's type, so the code that uses
-                // it reads as before. `typeof` sees the value, it does
-                // not run it.
-                if let Some(cond) = cfg {
-                    let plain = l.names.len() == 1
-                        && l.values.len() == 1
-                        && !self.text_of(l.names[0].name).starts_with(['{', '[']);
-
-                    if plain {
-                        let value = &l.values[0];
-                        let vs = self.byte_start(value.span());
-                        let ve = self.byte_end(value.span());
-                        // The copy in `typeof` sits on one line: each
-                        // line of the value loses its indent.
-                        let shape = self
-                            .render_to_string(value)
-                            .lines()
-                            .map(str::trim)
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        self.copy(after_attrs, vs);
-                        self.generate(vs, &format!("(if {cond} then "));
-                        self.expr(value);
-                        self.generate(ve, &format!(" else nil) :: typeof({shape})"));
-                        self.copy(ve, self.byte_end(l.span));
-
-                        return;
-                    }
-
-                    self.diagnose(l.span, "`@cfg` goes on a local with one name and one value");
+                if let Some(cond) = cfg
+                    && self.cfg_guarded_local(l, &cond, after_attrs)
+                {
+                    return;
                 }
 
                 if local_needs_rewrite(l) {
@@ -2609,7 +2566,8 @@ impl<'s> Desugar<'s> {
         let mut decls: Vec<(Vec<TypedName>, String)> = Vec::new();
 
         for (b, v) in l.names.iter().zip(&l.values) {
-            self.expected_generic = b.ty.and_then(|t| generic_head(self.text_of(t)));
+            self.expected_generic =
+                b.ty.and_then(|t| generic_head(self.alias_value(self.text_of(t))));
             let value = self.render_to_string(v);
             self.expected_generic = None;
             let ty =
@@ -2764,14 +2722,33 @@ impl<'s> Desugar<'s> {
         let open_end = self.toks[span.start as usize].end;
         let close = self.toks[span.end as usize - 1];
         let mut cursor = open_end;
+        // `Parent` goes after every other field, as `alloy.init` does for
+        // the expression form: an Instance then enters the tree with its
+        // properties set. Its value still runs in its own place, into a
+        // temp, so the order of the values holds.
+        let parent_at = fields
+            .iter()
+            .position(
+                |f| matches!(f, TableField::Named { name, .. } if self.text_of(*name) == "Parent"),
+            )
+            .filter(|i| i + 1 < fields.len());
+        let mut parent_temp = None;
 
-        for field in fields {
+        for (i, field) in fields.iter().enumerate() {
             let (fs, fe) = self.field_bytes(field);
             // The gap holds the newlines; the comma becomes a space since
             // the fields are statements now.
             self.copy_gap_without_commas(cursor, fs);
 
             match field {
+                TableField::Named { value, .. } if parent_at == Some(i) => {
+                    self.new_stmt_next += 1;
+                    let temp = format!("_parent{}", self.new_stmt_next);
+                    self.generate(fs, &format!("local {temp} = "));
+                    self.expr(value);
+                    parent_temp = Some(temp);
+                }
+
                 TableField::Named { name, value } => {
                     let f = self.text_of(*name).to_string();
                     self.generate(fs, &format!("{binding}.{f} = "));
@@ -2795,7 +2772,10 @@ impl<'s> Desugar<'s> {
         }
 
         self.copy_gap_without_commas(cursor, close.start);
-        let _ = close;
+
+        if let Some(temp) = parent_temp {
+            self.generate(close.start, &format!("{binding}.Parent = {temp}"));
+        }
     }
 
     /// Copies a gap, turning each comma into a space so newlines survive.

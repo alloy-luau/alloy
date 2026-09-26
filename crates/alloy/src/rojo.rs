@@ -261,9 +261,16 @@ impl ProjectFile {
     }
 
     /// The sourcemap of the tree: every instance, with the source path
-    /// of each script, relative to `root`.
-    pub fn sourcemap(&self, root: &Path, runtime: &[String], out: &Path) -> std::io::Result<Value> {
-        let mut game = self.map_node(root, "game", &self.tree)?;
+    /// of each script, relative to `root`. A `$path` that `mirror` holds
+    /// is read there, as `project::sourcemap` reads a mount.
+    pub fn sourcemap(
+        &self,
+        root: &Path,
+        mirror: Option<&Path>,
+        runtime: &[String],
+        out: &Path,
+    ) -> std::io::Result<Value> {
+        let mut game = self.map_node(root, mirror, "game", &self.tree)?;
         game.insert("name".into(), Value::String("game".into()));
 
         if game.get("className").and_then(Value::as_str) == Some("Folder") {
@@ -290,18 +297,23 @@ impl ProjectFile {
     fn map_node(
         &self,
         root: &Path,
+        mirror: Option<&Path>,
         name: &str,
         node: &Map<String, Value>,
     ) -> std::io::Result<Map<String, Value>> {
         let disk = disk_path(node);
+        let read = disk
+            .as_ref()
+            .and_then(|d| mirror.filter(|m| m.join(d).exists()))
+            .unwrap_or(root);
         let mut out = match &disk {
-            Some(d) if root.join(d).is_dir() => {
-                crate::project::dir_node(root, &root.join(d), name)?
+            Some(d) if read.join(d).is_dir() => {
+                crate::project::dir_node(read, &read.join(d), name)?
             }
 
             // A path that names a script file is a script even before
             // the build writes it: `build/alloy.luau` on a first run.
-            Some(d) if root.join(d).is_file() || names_a_script(d) => {
+            Some(d) if read.join(d).is_file() || names_a_script(d) => {
                 let file = d.to_string_lossy().replace('\\', "/");
                 let class = crate::project::script_class(&file);
                 let mut m = crate::project::node(name, class, Some(file));
@@ -321,7 +333,7 @@ impl ProjectFile {
         }
 
         for (child_name, child) in children(node) {
-            let mapped = Value::Object(self.map_node(root, child_name, child)?);
+            let mapped = Value::Object(self.map_node(root, mirror, child_name, child)?);
             let list = out["children"]
                 .as_array_mut()
                 .expect("children is an array");
@@ -567,6 +579,7 @@ mod tests {
         let map = project()
             .sourcemap(
                 &dir,
+                None,
                 &["ReplicatedStorage".to_string(), "Alloy".to_string()],
                 Path::new("build"),
             )

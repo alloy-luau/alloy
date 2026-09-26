@@ -816,6 +816,9 @@ fn class_forms_all_parse() {
     round_trip(
         "class M\n\tfunction __init(self)\n\tend\n\tfunction __tostring(self)\n\t\treturn \"m\"\n\tend\nend\n",
     );
+    // A field default, as a struct field takes one. The parse failed, so
+    // the report that a class does not compile yet was lost.
+    round_trip("class C\n\tbelt: number = 8\n\tpublic name = \"c\"\nend\n");
 }
 
 /// `class` and `open` stay ordinary names outside a declaration.

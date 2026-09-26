@@ -86,7 +86,7 @@ impl<'a> Parser<'a> {
         let reports = self.diagnostics.len();
         let open = self.bump();
         let (scrutinees, aliases) = self.match_head()?;
-        self.expect("with")?;
+        self.match_with(open)?;
         let mut arms = Vec::new();
         let mut default = None;
         // A `case` counts though its arm is dropped: a head the lenient
@@ -126,7 +126,7 @@ impl<'a> Parser<'a> {
                 self.check_alias_binds(&aliases, &patterns)?;
                 // A broken head, one the author is still typing, keeps no
                 // arm: the emit reads an arm up to its `then`.
-                if !self.arm_then()? {
+                if !self.arm_then(reports)? {
                     continue;
                 }
 
@@ -149,6 +149,7 @@ impl<'a> Parser<'a> {
                 }
 
                 self.bump();
+                self.default_word(reports)?;
                 default = Some(self.arm_block()?);
 
                 continue;
@@ -428,10 +429,23 @@ impl<'a> Parser<'a> {
         Ok(true)
     }
 
-    /// The `then` after an arm's patterns. `=>` there is Rust's arm.
-    fn arm_then(&mut self) -> Result<bool, ParseError> {
+    /// The `then` after an arm's patterns. `=>` there is Rust's arm. A
+    /// lenient parse reports it once per match, reads it as `then`, and
+    /// reads on, so the other arms and the `end` report nothing.
+    /// `reports` is the count of reports when the match began.
+    fn arm_then(&mut self, reports: usize) -> Result<bool, ParseError> {
         if self.at("=>") {
-            return Err(self.err(RUST_ARM));
+            if !self.lenient {
+                return Err(self.err(RUST_ARM));
+            }
+
+            if !self.reported_since(reports, RUST_ARM) {
+                self.report(RUST_ARM);
+            }
+
+            self.bump();
+
+            return Ok(true);
         }
 
         // A half-typed guard, `case n wh`, is the editor's everyday text.
@@ -478,6 +492,80 @@ impl<'a> Parser<'a> {
         }
 
         self.expect("then").map(|_| true)
+    }
+
+    /// Whether the match that began at `reports` reported `message`.
+    fn reported_since(&self, reports: usize, message: &str) -> bool {
+        self.diagnostics[reports.min(self.diagnostics.len())..]
+            .iter()
+            .any(|d| d.message == message)
+    }
+
+    /// The `with` that ends a match head. A lenient parse that finds an
+    /// arm or a new line in its place reports once and reads the arms.
+    /// Without it the match failed whole, and each arm reported again.
+    fn match_with(&mut self, open: usize) -> Result<(), ParseError> {
+        if self.eat("with") {
+            return Ok(());
+        }
+
+        if !self.lenient || !(self.arm_ends() || self.newline_before_pos()) {
+            return self.expect("with").map(|_| ());
+        }
+
+        let from = self.toks[open].start as usize;
+        let to = self.toks[self.pos - 1].end as usize;
+        let head = &self.src[from..to];
+        self.report_at(
+            from,
+            &format!("a `match` head ends in `with`: `{head} with`"),
+        );
+
+        Ok(())
+    }
+
+    /// `default then v` and `default => v` write the word of a `case`
+    /// arm, and `default` takes none. A lenient parse reports it once,
+    /// drops the word, and reads the value. `=>` after a `case` arm that
+    /// wrote it already reported is no second report.
+    fn default_word(&mut self, reports: usize) -> Result<(), ParseError> {
+        let word = self.text();
+
+        if !matches!(word, "then" | "=>") {
+            return Ok(());
+        }
+
+        if word == "=>" && self.lenient && self.reported_since(reports, RUST_ARM) {
+            self.bump();
+
+            return Ok(());
+        }
+
+        // The fix repeats the value when it fits on the line.
+        let value = match self.newline_after(0) || self.pos + 1 >= self.toks.len() {
+            true => "...",
+
+            false => {
+                let from = self.toks[self.pos + 1].start as usize;
+                let line = self.src[from..].split('\n').next().unwrap_or("").trim();
+
+                match line.len() {
+                    1..=40 => line,
+
+                    _ => "...",
+                }
+            }
+        };
+        let message = format!("`default` takes no `{word}`: write `default {value}`");
+
+        if !self.lenient {
+            return Err(self.err(&message));
+        }
+
+        self.report(&message);
+        self.bump();
+
+        Ok(())
     }
 
     /// The value of an expression arm, read as a value position: a line
@@ -662,7 +750,7 @@ impl<'a> Parser<'a> {
         let reports = self.diagnostics.len();
         let open = self.bump();
         let (scrutinees, aliases) = self.match_head()?;
-        self.expect("with")?;
+        self.match_with(open)?;
         let mut arms = Vec::new();
         let mut default = None;
         // A `case` counts though its arm is dropped: a head the lenient
@@ -702,7 +790,7 @@ impl<'a> Parser<'a> {
                 self.check_alias_binds(&aliases, &patterns)?;
                 // A broken head, one the author is still typing, keeps no
                 // arm: the emit reads an arm up to its `then`.
-                if !self.arm_then()? {
+                if !self.arm_then(reports)? {
                     continue;
                 }
 
@@ -725,6 +813,7 @@ impl<'a> Parser<'a> {
                 }
 
                 self.bump();
+                self.default_word(reports)?;
                 default = Some(Box::new(self.arm_value()?));
 
                 continue;

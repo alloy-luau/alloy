@@ -35,7 +35,7 @@
 //! # The requests the host sends
 //!
 //! ```jsonc
-//! {"op": "init", "api": 1, "root": "/project", "options": {...}, "lints": {...}, "fmt": {...}, "ingots": ["enamel"]}
+//! {"op": "init", "api": 1, "root": "/project", "options": {...}, "lints": {...}, "fmt": {...}, "alx": {...}, "ingots": ["enamel"]}
 //! {"op": "transform", "path": "src/a.aly", "kind": "aly", "source": "..."}   // reply {"ok": true, "edits": [[4, 20, "new"]]}
 //! {"op": "output", "path": "...", "kind": "aly", "source": "..."}            // the ship Luau; reply {"ok": true, "edits": [...]}
 //! {"op": "lint", ...}      // reply {"ok": true, "findings": [{"span": [2, 9], "lint": "x", "message": "..."}]}
@@ -483,6 +483,11 @@ pub struct Settings {
     /// constructs out in the style the project asked for.
     #[serde(default)]
     pub fmt: Value,
+    /// The `[alx]` table of the project: the markup factory and its
+    /// names. It comes from `alloy.toml` or `.config.aly` alike, so an
+    /// ingot never reads the config file itself.
+    #[serde(default)]
+    pub alx: Value,
     /// The project root, absolute. Resolve files against it and never
     /// against the working directory: the compiler runs in the project
     /// and the language server runs wherever the editor started it.
@@ -834,6 +839,22 @@ mod tests {
             value(r#"{"op":"transform","path":"a.aly","source":"hi"}"#),
             serde_json::json!({ "ok": true, "edits": [[0, 2, "HI"]] })
         );
+    }
+
+    /// The host sends the `[alx]` table at init, so an ingot reads the
+    /// markup factory from `.config.aly` as it does from `alloy.toml`.
+    #[test]
+    fn init_carries_the_markup_settings() {
+        let request: Request = serde_json::from_str(
+            r#"{"op":"init","api":1,"alx":{"factory":{"backend":"table","create":"vide.create"}}}"#,
+        )
+        .unwrap();
+
+        let Request::Init { settings, .. } = request else {
+            panic!("an init request");
+        };
+
+        assert_eq!(settings.alx["factory"]["backend"], "table");
     }
 
     #[test]

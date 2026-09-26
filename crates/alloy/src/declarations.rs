@@ -16,10 +16,16 @@ pub struct Declaration {
 }
 
 /// The comment block right above a byte offset, as Markdown: the `--`
-/// or `---` lines that end on the line before, with attribute lines
-/// between them and the declaration skipped. A blank line ends the block.
+/// or `---` lines that end on the line before, or a `--[[ ]]` block that
+/// closes there. Attribute lines between the comment and the declaration
+/// are skipped. A blank line ends the block.
 pub fn doc_before(src: &str, offset: usize) -> Option<String> {
     let before = &src[..offset.min(src.len())];
+
+    if let Some(doc) = block_doc(before) {
+        return Some(doc);
+    }
+
     let mut lines: Vec<&str> = Vec::new();
     let mut iter = before.lines().rev();
 
@@ -52,6 +58,68 @@ pub fn doc_before(src: &str, offset: usize) -> Option<String> {
     lines.reverse();
 
     Some(lines.join("\n").trim().to_string())
+}
+
+/// The text of a block comment that closes on the line above the last
+/// line of `before`: `--[[ ... ]]` or `--[=[ ... ]=]`, with its opener at
+/// the start of a line. The common indent of its lines is removed.
+fn block_doc(before: &str) -> Option<String> {
+    // The declaration's own line, then any attribute lines, are not it.
+    let mut above = &before[..before.rfind('\n')?];
+
+    loop {
+        let from = above.rfind('\n').map_or(0, |n| n + 1);
+        let line = above[from..].trim();
+
+        if !line.starts_with('@') {
+            above = &above[..from + above[from..].trim_end().len()];
+
+            break;
+        }
+
+        above = &above[..from.checked_sub(1)?];
+    }
+
+    let body = above.strip_suffix(']')?;
+    let level = body.len() - body.trim_end_matches('=').len();
+    let body = body.trim_end_matches('=').strip_suffix(']')?;
+    let open = format!("--[{}[", "=".repeat(level));
+    let at = body.rfind(&open)?;
+    let inner = &body[at + open.len()..];
+
+    // Code ends in `]]` too, as in `t[a[1]]`. A comment's first close is
+    // its own, and a doc opens its line.
+    if inner.contains(&format!("]{}]", "=".repeat(level)))
+        || !body[..at]
+            .rsplit('\n')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+    {
+        return None;
+    }
+
+    let lines: Vec<&str> = inner.lines().collect();
+    let indent = lines
+        .iter()
+        .skip(1)
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    let doc: Vec<&str> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| match i {
+            0 => l.trim(),
+
+            _ => l.get(indent..).unwrap_or_else(|| l.trim_start()),
+        })
+        .collect();
+    let doc = doc.join("\n").trim().to_string();
+
+    (!doc.is_empty()).then_some(doc)
 }
 
 /// One `.d.aly` inside the merged definitions file: the file, and the
@@ -971,6 +1039,93 @@ fn member_signature(
     Some(format!("    {visibility} {head}"))
 }
 
+/// Whether the byte at `offset` sits in the body of an `if` or an
+/// `elseif` that tests `path` for a value: `if player.Character then`,
+/// `if path ~= nil then`, or such a test joined to others by `and`. No
+/// assignment to `path` may stand between the test and the byte. The
+/// checker narrows the field there, and its hover of the field does not.
+pub fn tested_at(src: &str, path: &str, offset: usize) -> bool {
+    use crate::desugar::{Child, expr_children, stmt_children};
+    use alloy_syntax::ast::{Block, Cond};
+    use alloy_syntax::lexer::Tok;
+
+    fn bytes(toks: &[Tok], span: TokSpan) -> Option<(usize, usize)> {
+        let first = toks.get(span.start as usize)?;
+        let last = toks.get((span.end as usize).checked_sub(1)?)?;
+
+        Some((first.start as usize, last.end as usize))
+    }
+
+    fn walk(src: &str, toks: &[Tok], child: Child, path: &str, offset: usize) -> bool {
+        let block = match child {
+            Child::Block(b) => b,
+
+            Child::Function(f) => &f.block,
+
+            Child::Expr(e) => {
+                return expr_children(e)
+                    .into_iter()
+                    .any(|c| walk(src, toks, c, path, offset));
+            }
+        };
+
+        block
+            .stmts
+            .iter()
+            .any(|s| tests(src, toks, s, path, offset) || in_children(src, toks, s, path, offset))
+    }
+
+    fn in_children(src: &str, toks: &[Tok], s: &Stmt, path: &str, offset: usize) -> bool {
+        stmt_children(s)
+            .into_iter()
+            .any(|c| walk(src, toks, c, path, offset))
+    }
+
+    fn tests(src: &str, toks: &[Tok], s: &Stmt, path: &str, offset: usize) -> bool {
+        let Stmt::If(i) = s else {
+            return false;
+        };
+
+        i.branches.iter().any(|(cond, body): &(Cond, Block)| {
+            let Cond::Expr(e) = cond else {
+                return false;
+            };
+            let (Some((from, to)), Some((start, end))) =
+                (bytes(toks, e.span()), bytes(toks, body.span))
+            else {
+                return false;
+            };
+
+            if !(to <= start && start <= offset && offset <= end) {
+                return false;
+            }
+
+            let proved = src[from..to].split(" and ").any(|part| {
+                let part = part.split_whitespace().collect::<Vec<_>>().join(" ");
+
+                part == path || part == format!("{path} ~= nil") || part == format!("nil ~= {path}")
+            });
+            let assigned = src[to..offset]
+                .match_indices(&format!("{path} ="))
+                .any(|(k, _)| !src[to + k + path.len() + 2..].starts_with('='));
+
+            proved && !assigned
+        })
+    }
+
+    let Ok(parsed) = alloy_syntax::parse_lenient(src, crate::fmt::parse_options()) else {
+        return false;
+    };
+
+    walk(
+        src,
+        &parsed.lexed.toks,
+        Child::Block(&parsed.chunk.block),
+        path,
+        offset,
+    )
+}
+
 /// The type a top-level `local` or `const` binding holds: the
 /// annotation it wrote, or the type its literal value writes. A file
 /// that reaches the name from somewhere else reads it from here.
@@ -1709,6 +1864,24 @@ pub fn bindings(src: &str) -> Vec<Binding> {
 mod binding_tests {
     use super::*;
 
+    /// A field reads as tested in the body of the `if` that tested it,
+    /// in no `else`, after no assignment, and outside the `if` not at
+    /// all. A closure body counts, since the test holds there too.
+    #[test]
+    fn a_field_is_tested_in_the_body_of_its_if() {
+        let src = "local function a()\n    if p.C then\n        print(p.C)\n    else\n        print(p.C)\n    end\n    if m and m.P ~= nil then\n        f(function() print(m.P) end)\n    end\n    if p.C then\n        p.C = nil\n        print(p.C)\n    end\n    print(p.C)\nend\n";
+        let at = |needle: &str, nth: usize| {
+            src.match_indices(needle).nth(nth).expect("the needle").0 + needle.len() - 1
+        };
+
+        assert!(tested_at(src, "p.C", at("print(p.C", 0)));
+        assert!(!tested_at(src, "p.C", at("print(p.C", 1)), "the else");
+        assert!(tested_at(src, "m.P", at("print(m.P", 0)), "a closure");
+        assert!(!tested_at(src, "p.C", at("print(p.C", 2)), "an assignment");
+        assert!(!tested_at(src, "p.C", at("print(p.C", 3)), "after the if");
+        assert!(!tested_at(src, "m.P", at("print(p.C", 0)), "another field");
+    }
+
     fn prefix_of(src: &str, name: &str) -> Option<String> {
         bindings(src)
             .into_iter()
@@ -1753,6 +1926,25 @@ mod binding_tests {
         let b = bindings(src);
         assert_eq!(b[0].doc.as_deref(), Some("Adds one."));
         assert_eq!(b[1].doc, None);
+    }
+
+    /// A `--[[ ]]` block that closes on the line above is a doc too, at
+    /// any bracket level, with attributes between. Code that ends in
+    /// `]]` and a block after code on its line are not.
+    #[test]
+    fn a_block_comment_above_is_a_doc() {
+        let doc = |src: &str| doc_before(src, src.rfind("local").unwrap());
+        assert_eq!(
+            doc("--[[\n  Two lines,\n    one indented.\n]]\nlocal x = 1\n").as_deref(),
+            Some("Two lines,\n  one indented.")
+        );
+        assert_eq!(
+            doc("--[==[ One line. ]==]\n@inline\nlocal x = 1\n").as_deref(),
+            Some("One line.")
+        );
+        assert_eq!(doc("--[[ a ]]\nprint(t[a[1]])\nlocal x = 1\n"), None);
+        assert_eq!(doc("print(1) --[[ a ]]\nlocal x = 1\n"), None);
+        assert_eq!(doc("--[[ a ]]\n\nlocal x = 1\n"), None);
     }
 
     #[test]

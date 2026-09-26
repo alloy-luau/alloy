@@ -473,7 +473,6 @@ fn run_inner(
             .std_require
             .clone()
             .unwrap_or_else(|| "@alloy".to_string()),
-        erase_type_imports: emit.erase_type_imports,
         thresholds: config.flux.thresholds(),
         naming: config.lint.naming.clone(),
         test_runner: config.test.lest,
@@ -497,6 +496,16 @@ fn run_inner(
     // A project whose `out` (or spec folder) sits under `in` would read
     // its own output back as a source on the next run.
     let written = written_dirs(root, config);
+
+    // A folder under `in` is skipped whole. `in` itself is the folder
+    // the walk reads, so its outputs would come back as plain sources,
+    // `a.luau` beside `a.aly`, and the second build would collide.
+    if normalize_path(&out) == normalize_path(&input) {
+        return Err(std::io::Error::other(format!(
+            "[build] out is the folder in names, `{}`. The build writes each `.luau` beside its source, and the next build reads it as a source. Set out to another folder, such as \"build\"",
+            build.input.to_string_lossy().replace('\\', "/")
+        )));
+    }
 
     if input.is_dir() && normalize_path(&out).starts_with(normalize_path(&input)) {
         report
@@ -700,6 +709,8 @@ fn run_inner(
             .push((Config::file_of(&ingots.root), p.to_string()));
     }
 
+    let type_cuts = type_cycle_cuts(&input, &sources);
+
     for path in sources {
         let rel = path.strip_prefix(&input).unwrap_or(&path).to_path_buf();
 
@@ -755,6 +766,7 @@ fn run_inner(
             file_name: rel.to_string_lossy().into_owned(),
             module_rel: build.out.join(&rel_out).to_string_lossy().into_owned(),
             mount_requires,
+            type_cuts: type_cuts.get(&path).cloned().unwrap_or_default(),
             mount_side: crate::project::place_side(&tree, &source_rel),
             definitions: rel.to_string_lossy().ends_with(".d.aly"),
             std_require,
@@ -839,6 +851,7 @@ fn run_inner(
                 out_file: &absolute(&target),
                 input: &absolute(&input),
                 root,
+                tree: Some(&tree),
             },
             &compiled.imports,
             &compiled.data_refs,
@@ -847,17 +860,11 @@ fn run_inner(
         );
 
         if !outside.rewrites.is_empty() {
-            let map = |text: &str| {
-                crate::project::map_requires(text, |p| {
-                    outside
-                        .rewrites
-                        .iter()
-                        .find(|(spec, _)| spec == p)
-                        .map(|(_, to)| to.clone())
-                })
-            };
-            compiled.ship = map(&compiled.ship);
-            compiled.check = map(&compiled.check);
+            let top = deps.stack.len() == 1;
+            compiled.ship =
+                crate::project::map_requires(&compiled.ship, |p| outside.require_of(p, true));
+            compiled.check =
+                crate::project::map_requires(&compiled.check, |p| outside.require_of(p, top));
         }
 
         for d in &compiled.diagnostics {
@@ -1227,17 +1234,46 @@ pub struct Site<'a> {
     pub input: &'a Path,
     /// The project root, for the paths a message shows.
     pub root: &'a Path,
+    /// The tree of the project, when the run reads one: a mount of the
+    /// other project's output gives the require its place.
+    pub tree: Option<&'a crate::project::Tree>,
 }
 
 /// What the imports of one source that leave `in` came to.
 #[derive(Default)]
 pub struct Outside {
-    /// The require path each spec becomes in the output.
+    /// The require path each spec becomes in the output: the path on
+    /// disk from the output file.
     pub rewrites: Vec<(String, String)>,
+    /// The `@game/...` place of each spec whose output a mount of this
+    /// project holds. Roblox climbs instances, and luau-lsp reads the
+    /// relative require of a placed script the same way, so the disk
+    /// path finds nothing there.
+    pub places: Vec<(String, String)>,
     /// The specs of data files another project holds; the build of this
     /// project leaves them to that one.
     pub data: Vec<String>,
     pub problems: Vec<crate::modules::ImportProblem>,
+}
+
+impl Outside {
+    /// The require one spec that leaves `in` becomes: the place a mount
+    /// gives, else the path on disk. `placed` is false for the check
+    /// artifact of a project an import leads into, which sits outside
+    /// the sourcemap and keeps the disk path.
+    pub fn require_of(&self, spec: &str, placed: bool) -> Option<String> {
+        let find = |list: &[(String, String)]| {
+            list.iter()
+                .find(|(s, _)| s == spec)
+                .map(|(_, to)| to.clone())
+        };
+
+        match placed {
+            true => find(&self.places).or_else(|| find(&self.rewrites)),
+
+            false => find(&self.rewrites),
+        }
+    }
 }
 
 impl Deps {
@@ -1346,6 +1382,20 @@ impl Deps {
                 key.to_string(),
                 relative(from_dir, &dep_out.with_extension("")),
             ));
+
+            // The output from the root, `lib/build/lib.luau` inside it or
+            // `../Lib/build/lib.luau` beside it.
+            let shown = relative(&absolute(site.root), &dep_out);
+            let from_root = Path::new(&shown);
+            let from_root = from_root.strip_prefix(".").unwrap_or(from_root);
+
+            if let Some(place) = site
+                .tree
+                .and_then(|t| crate::project::instance_path(t, from_root))
+            {
+                out.places
+                    .push((key.to_string(), format!("@game/{}", place.join("/"))));
+            }
         }
 
         out
@@ -1500,6 +1550,7 @@ pub fn file_outside(
             out_file: &out_file,
             input: &input,
             root: &root,
+            tree: None,
         },
         imports,
         data_refs,
@@ -1789,14 +1840,104 @@ fn resolve_import(from: &Path, path: &str, sources: &[PathBuf]) -> Option<PathBu
     None
 }
 
+/// The `import type` lines that close a cycle of requires, by source.
+/// The ship artifact drops an `import type`, so the cycle runs nowhere,
+/// but the check artifact requires the module for its types, and
+/// luau-lsp gives no types to the module it reaches second. Each cut
+/// leaves the graph before the next edge is read, so a cycle loses one
+/// edge. A cycle with a value import on every edge is `circular_import`.
+pub fn type_cycle_cuts(input: &Path, sources: &[PathBuf]) -> HashMap<PathBuf, Vec<String>> {
+    let rels: Vec<PathBuf> = sources
+        .iter()
+        .map(|p| p.strip_prefix(input).unwrap_or(p).to_path_buf())
+        .collect();
+    // Each edge with its specs, and whether each of its lines is an
+    // `import type { }`.
+    let mut edges: Vec<(usize, usize, Vec<String>, bool)> = Vec::new();
+
+    for (i, path) in sources.iter().enumerate() {
+        let Ok(src) = std::fs::read_to_string(path) else {
+            continue;
+        };
+
+        for s in alloy_syntax::scan::import_statements(&src) {
+            let Some(to) = resolve_import(&rels[i], &s.spec, &rels)
+                .and_then(|t| rels.iter().position(|r| *r == t))
+            else {
+                continue;
+            };
+            let words: Vec<&str> = s.text.split_whitespace().take(3).collect();
+            let typed = matches!(words[..], ["import", "type", open] if open.starts_with('{'));
+
+            match edges.iter_mut().find(|e| (e.0, e.1) == (i, to)) {
+                Some(e) => {
+                    e.2.push(s.spec);
+                    e.3 &= typed;
+                }
+
+                None => edges.push((i, to, vec![s.spec], typed)),
+            }
+        }
+    }
+
+    let mut live = vec![true; edges.len()];
+    let mut cuts: HashMap<PathBuf, Vec<String>> = HashMap::new();
+
+    for k in 0..edges.len() {
+        let (from, to, specs, typed) = &edges[k];
+
+        if !typed {
+            continue;
+        }
+
+        live[k] = false;
+        let mut seen = vec![false; sources.len()];
+        let mut stack = vec![*to];
+        let mut back = false;
+
+        while let Some(n) = stack.pop() {
+            if n == *from {
+                back = true;
+
+                break;
+            }
+
+            if std::mem::replace(&mut seen[n], true) {
+                continue;
+            }
+
+            stack.extend(
+                edges
+                    .iter()
+                    .zip(&live)
+                    .filter(|(e, on)| **on && e.0 == n)
+                    .map(|(e, _)| e.1),
+            );
+        }
+
+        match back {
+            true => cuts
+                .entry(sources[*from].clone())
+                .or_default()
+                .extend(specs.iter().cloned()),
+
+            false => live[k] = true,
+        }
+    }
+
+    cuts
+}
+
 /// `circular_import`: an import that leads back to the file it sits in.
-/// Each file on the cycle reports the import that starts it.
+/// Each file on the cycle reports the import that starts it. An import
+/// the ship artifact drops, such as `import type`, runs nothing, so it
+/// closes no cycle.
 fn circular_imports(imports: &[(PathBuf, Vec<crate::ImportRef>)]) -> Vec<(PathBuf, Lint)> {
     let sources: Vec<PathBuf> = imports.iter().map(|(p, _)| p.clone()).collect();
     let mut edges: Vec<(usize, &crate::ImportRef, usize)> = Vec::new();
 
     for (i, (from, list)) in imports.iter().enumerate() {
-        for im in list {
+        for im in list.iter().filter(|im| im.runs) {
             if let Some(to) = resolve_import(from, &im.path, &sources)
                 && let Some(j) = sources.iter().position(|s| *s == to)
             {
@@ -2035,6 +2176,7 @@ mod tests {
             start: 0,
             end: 1,
             path: path.to_string(),
+            runs: true,
         };
         let imports = vec![
             (PathBuf::from("a.aly"), vec![im("./b")]),
@@ -2054,6 +2196,25 @@ mod tests {
             vec![im("./data.json"), im("./data.luau")],
         )];
         assert!(circular_imports(&data).is_empty());
+    }
+
+    /// `import type` requires nothing in the ship artifact, so it closes
+    /// no cycle. The value import back still counts.
+    #[test]
+    fn a_type_import_closes_no_cycle() {
+        let refs = |src: &str| crate::compile(src).unwrap().imports;
+        let a = refs("import type { B } from './b'\n\nexport struct A as\n    b: B?\nend\n");
+        let b = refs(
+            "import { A } from './a'\n\nexport function make(): A\n    return A.new({})\nend\n",
+        );
+        assert!(!a[0].runs, "{a:?}");
+        assert!(b[0].runs, "{b:?}");
+        // The build drops a test, and an import in it with it.
+        let t = refs("@test\nfunction t(): ()\n    import { A } from './a'\n    print(A)\nend\n");
+        assert!(!t[0].runs, "{t:?}");
+
+        let imports = vec![(PathBuf::from("a.aly"), a), (PathBuf::from("b.aly"), b)];
+        assert!(circular_imports(&imports).is_empty());
     }
 
     #[test]

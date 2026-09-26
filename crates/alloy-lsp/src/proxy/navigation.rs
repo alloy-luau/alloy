@@ -19,7 +19,7 @@ impl Server {
             return false;
         };
 
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
         let Some(doc) = st.docs.get(uri) else {
             return false;
@@ -130,7 +130,7 @@ impl Server {
             return false;
         };
         let field = {
-            let st = self.state.lock().expect("state");
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let spot = st.docs.get(uri).and_then(|doc| {
                 markup::hover_spot(&doc.source, offset_of(&doc.source, line, character)?)
             });
@@ -193,7 +193,7 @@ impl Server {
             return false;
         }
 
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
         let Some(doc) = st.docs.get(uri) else {
             return false;
@@ -328,7 +328,7 @@ impl Server {
             return false;
         };
 
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
         let Some(doc) = st.docs.get(uri) else {
             return false;
@@ -430,7 +430,7 @@ impl Server {
             return false;
         };
 
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
         let Some(doc) = st.docs.get(uri) else {
             return false;
@@ -1793,15 +1793,17 @@ impl State {
     /// text, so the child's edit of the declaration lands on the byte
     /// the header came from and rewrites whatever stands there.
     ///
-    /// The pass runs beside the child's own edits and never alone: an
-    /// answer with no edit names no field, and one place by itself would
-    /// rename half of one.
+    /// The request's new name counts when the child's answer keeps no
+    /// edit: every use may sit where the child reads generated text, a
+    /// constructor key or the field list, and the declaration then has
+    /// the same walk as its references.
     pub(crate) fn mend_field_rename(
         &self,
         uri: &str,
         line: u32,
         character: u32,
         child: &Value,
+        asked: Option<&str>,
         result: &mut Value,
     ) {
         let changes = result.pointer("/changes").and_then(Value::as_object);
@@ -1811,6 +1813,7 @@ impl State {
             .filter_map(Value::as_array)
             .flatten()
             .find_map(|e| e.get("newText").and_then(Value::as_str))
+            .or(asked)
             .map(str::to_string)
         else {
             return;

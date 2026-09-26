@@ -88,15 +88,18 @@ pub fn static_conditional_child(
     }
 }
 
-/// Whether LuauX in this expression sits outside every function literal.
+/// Whether LuauX in this expression sits outside every function literal, with
+/// a condition outside every function literal too.
 ///
 /// Such LuauX is constructed exactly once, so a condition around it looks live but
 /// is not — the `static_conditional_child` lint (PLAN.md §11.1). LuauX *inside* a
 /// function is fine: the library re-runs it, which is how reactive children
 /// work, and it covers the idiomatic `items:map(function() return <Row/> end)`.
+/// Alloy patch: LuauX with no condition, `{[<A/>, <B/>]}`, is fixed, and being
+/// built once is all it needs.
 ///
 /// Works on the pre-compilation source, where LuauX is still `<...>`.
-pub fn has_unwrapped_luaux(expression: &str, luaux_spans: &[(usize, usize)]) -> bool {
+pub fn has_static_conditional_luaux(expression: &str, luaux_spans: &[(usize, usize)]) -> bool {
     if luaux_spans.is_empty() {
         return false;
     }
@@ -110,10 +113,23 @@ pub fn has_unwrapped_luaux(expression: &str, luaux_spans: &[(usize, usize)]) -> 
     let mut function_depth = 0i32;
     let mut block_depth = 0i32;
     let mut inside: Vec<(usize, i32)> = Vec::new();
+    let mut conditional = false;
 
     for token in &tokens {
         if token.is_trivia() {
             continue;
+        }
+
+        // A word in the text of a tag is no condition.
+        let in_markup = luaux_spans
+            .iter()
+            .any(|(start, end)| *start <= token.start && token.start < *end);
+
+        if function_depth == 0
+            && !in_markup
+            && matches!(token.text(expression), "if" | "and" | "or")
+        {
+            conditional = true;
         }
 
         match token.text(expression) {
@@ -136,15 +152,16 @@ pub fn has_unwrapped_luaux(expression: &str, luaux_spans: &[(usize, usize)]) -> 
         inside.push((token.start, function_depth));
     }
 
-    luaux_spans.iter().any(|(start, _)| {
-        let depth = inside
-            .iter()
-            .rev()
-            .find(|(offset, _)| offset <= start)
-            .map(|(_, depth)| *depth)
-            .unwrap_or(0);
-        depth == 0
-    })
+    conditional
+        && luaux_spans.iter().any(|(start, _)| {
+            let depth = inside
+                .iter()
+                .rev()
+                .find(|(offset, _)| offset <= start)
+                .map(|(_, depth)| *depth)
+                .unwrap_or(0);
+            depth == 0
+        })
 }
 
 fn is_nil_literal(expression: &Expr) -> bool {
@@ -188,14 +205,23 @@ mod tests {
 
     fn unwrapped(expression: &str) -> bool {
         let spans = crate::compile::luaux_spans_for_test(expression);
-        has_unwrapped_luaux(expression, &spans)
+        has_static_conditional_luaux(expression, &spans)
     }
 
     #[test]
     fn flags_luaux_outside_any_function() {
         assert!(unwrapped("cond() and <X/> or nil"));
-        assert!(unwrapped("<X/>"));
         assert!(unwrapped("if cond then <X/> else nil"));
+        assert!(unwrapped("[cond and <X/>, <Y/>]"));
+    }
+
+    /// LuauX with no condition is fixed, so being built once is right.
+    #[test]
+    fn accepts_luaux_with_no_condition() {
+        assert!(!unwrapped("<X/>"));
+        assert!(!unwrapped("[<X/>, <Y/>]"));
+        assert!(!unwrapped("{ <X/>, <Y/> }"));
+        assert!(!unwrapped("[<X>if and or</X>]"));
     }
 
     #[test]

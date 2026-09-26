@@ -810,6 +810,31 @@ pub(crate) fn keep_annotation(value: &str, doc: &Doc, line: u32, character: u32)
     Some(format!("{fence}\n{head}: {annotation}\n```{tail}"))
 }
 
+/// A field inside the `if` that tested it: `player.Character` in the
+/// body of `if player.Character then`. The child prints the type the
+/// class declares, `R15Character?`, and the checker reads the value
+/// there as `R15Character`. The hover drops the `?`.
+pub(crate) fn narrowed_field(value: &str, doc: &Doc, line: u32, character: u32) -> Option<String> {
+    let Caret { offset, start, end } = Caret::at(&doc.source, line, character)?;
+    let (fence, rest) = value
+        .split_once('\n')
+        .filter(|(f, _)| f.starts_with("```"))?;
+    let (ty, tail) = rest.split_once("\n```")?;
+    let narrowed = ty.strip_suffix('?').filter(|t| !t.contains(['\n', ':']))?;
+    // The path the field ends: `player.Character`, `a.b.c`.
+    let holder = doc.source[..start].strip_suffix('.')?;
+    let from = holder
+        .rfind(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+        .map_or(0, |i| i + 1);
+    let source = alloy::luaux::resolve::blank_luaux_regions(
+        &doc.source,
+        &crate::markup::regions(&doc.source),
+    );
+
+    alloy::declarations::tested_at(&source, &doc.source[from..end], offset)
+        .then(|| format!("{fence}\n{narrowed}\n```{tail}"))
+}
+
 /// The type text after the `name:` nearest before `at`: up to a `,`, a
 /// `)`, an `=`, or the line's end at bracket depth zero. The result
 /// carries the declaration's offset. A use never comes before its
@@ -1904,6 +1929,12 @@ pub(crate) fn name_method_receiver(value: &str, doc: &Doc, line: u32) -> Option<
         // `function Bag:is_empty(self: any)`: the head has the type.
         (true, "any") => recv.to_string(),
 
+        // `function CropKind.describe(CropKind)`: the copy of a trait's
+        // default method carries its receiver's type and no name.
+        (true, d) if d == recv && first == d && trait_of_method(doc, name).is_some() => {
+            recv.to_string()
+        }
+
         (true, _) => return None,
 
         // `function v:upper(string)`: the parameter carries it.
@@ -2540,9 +2571,47 @@ pub(crate) fn close_item_packs(value: &mut Value, empty: &HashSet<String>) {
     }
 }
 
+/// A completion detail is a type alone. The shape fold names both
+/// halves of a mixed enum, the unit variants and the ones with a
+/// payload, so a field reads `State | State` in the list while the
+/// hover, which dedupes the type after its `: `, reads `State`.
+pub(crate) fn dedupe_item_details(value: &mut Value) {
+    match value {
+        Value::Array(items) => items.iter_mut().for_each(dedupe_item_details),
+
+        Value::Object(map) => {
+            if let Some(Value::String(detail)) = map.get_mut("detail") {
+                *detail = alloy::shapes::dedupe_type(detail);
+            }
+
+            if let Some(items) = map.get_mut("items") {
+                dedupe_item_details(items);
+            }
+        }
+
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `State | State` in a completion detail reads `State`, inside a
+    /// table type too. A list under `items` takes the same pass.
+    #[test]
+    fn a_completion_detail_drops_a_repeated_member() {
+        let mut list = json!({ "items": [
+            { "label": "cur", "detail": "State | State" },
+            { "label": "slots", "detail": "{State | State}" },
+            { "label": "n", "detail": "number | string" },
+        ] });
+        dedupe_item_details(&mut list);
+
+        assert_eq!(list["items"][0]["detail"], "State");
+        assert_eq!(list["items"][1]["detail"], "{State}");
+        assert_eq!(list["items"][2]["detail"], "number | string");
+    }
 
     fn doc_of(src: &str) -> Doc {
         Doc::new(

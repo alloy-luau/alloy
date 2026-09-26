@@ -80,9 +80,12 @@ impl<'s> Scan<'s> {
         for i in 0..self.toks.len() {
             let word = self.t(i);
 
+            // A `@cfg` statement runs on one side of the build alone, so
+            // the rest of the block runs on the other.
             if !matches!(word, "return" | "break" | "continue")
                 || !self.statement_start(i)
                 || matches!(self.prev(i), "." | ":")
+                || self.cfg_gated(i)
             {
                 continue;
             }
@@ -596,8 +599,9 @@ impl<'s> Scan<'s> {
             }
 
             // `a.b!` asserts a field, whose type the annotations of the
-            // file do not name. Only a bound name reads here.
-            if matches!(self.prev(i - 1), "." | ":" | "?." | "?:") {
+            // file do not name, and `a->b!` a child found by name. Only a
+            // bound name reads here.
+            if matches!(self.prev(i - 1), "." | ":" | "?." | "?:" | "->") {
                 continue;
             }
 
@@ -883,23 +887,15 @@ mod tests {
             panic!("the source does not lex");
         };
 
-        crate::lint::run(
-            src,
-            &parsed.lexed.toks,
-            &parsed.chunk,
-            false,
-            &crate::lint::Thresholds::default(),
-            &[],
-            &[],
-        )
-        .into_iter()
-        .filter(|l| {
-            !matches!(
-                l.name,
-                "unused_variable" | "unused_function" | "redundant_as" | "prefer_const"
-            )
-        })
-        .collect()
+        crate::lint::run(src, &parsed.lexed.toks, &parsed.chunk, &Default::default())
+            .into_iter()
+            .filter(|l| {
+                !matches!(
+                    l.name,
+                    "unused_variable" | "unused_function" | "redundant_as" | "prefer_const"
+                )
+            })
+            .collect()
     }
 
     fn fixed(src: &str) -> String {
@@ -943,6 +939,12 @@ mod tests {
         );
         assert_eq!(
             names("local function f(p: Part)\n    print(p.Parent!.Name)\nend\n"),
+            Vec::<&str>::new()
+        );
+        // The name after `->` is a child's name, never the local of
+        // that name.
+        assert_eq!(
+            names("local folder: { number } = {}\nprint(#folder)\nprint(script.Parent->folder!)\n"),
             Vec::<&str>::new()
         );
         // A name nothing annotates says nothing either way.
@@ -990,6 +992,18 @@ mod tests {
         );
     }
 
+    /// A `@cfg` return runs on one side of the build, so the rest of the
+    /// block runs on the other. The lint read the line past it as dead.
+    #[test]
+    fn code_after_a_cfg_jump_stays_clean() {
+        for jump in ["return true", "break"] {
+            let src = format!(
+                "local function f(): boolean\n    while true do\n        @cfg(server)\n        {jump}\n\n        return false\n    end\nend\n"
+            );
+            assert_eq!(names(&src), Vec::<&str>::new(), "{src}");
+        }
+    }
+
     /// A `return` whose value spans several lines is one statement, so
     /// no line of it is code after the jump. The broken form of a long
     /// `if` expression is the shape `alloy fmt` writes.
@@ -1001,7 +1015,55 @@ mod tests {
         let table_and_call = "local function g(a: number)\n    return {\n        value = a,\n        name = tostring(\n            a\n        ),\n    }\nend\n";
         assert_eq!(names(table_and_call), Vec::<&str>::new());
 
+        // A line that opens with an operator, an access or a bracket goes
+        // on with the value above it.
+        for rest in [
+            "a\n        + b\n        + c",
+            "a\n        and b",
+            "a\n        .. b",
+            "a\n        == b",
+            "a\n        ?? b",
+            "t\n        .x",
+            "t\n        [1]",
+        ] {
+            let src = format!(
+                "local function k(a: any, b: any, c: any, t: any)\n    return {rest}\nend\n"
+            );
+            assert_eq!(names(&src), Vec::<&str>::new(), "{src}");
+        }
+
+        // A `;` in the condition of an `if` expression joins two
+        // bindings of one `if`.
+        assert_eq!(
+            names(
+                "local function m(t: { x: { y: string }? }?): string\n    return if const s = t; const x = s.x then x.y else ''\nend\n"
+            ),
+            Vec::<&str>::new()
+        );
+
+        // A line that opens with the `then`, `elseif` or `else` of an
+        // `if` expression goes on with it.
+        for rest in [
+            "if const s = t; const x = s.x\n        then x.y\n        else ''",
+            "if t\n        then 'a'\n        elseif t.x\n        then 'b'\n        else ''",
+        ] {
+            let src = format!(
+                "local function m(t: {{ x: {{ y: string }}? }}?): string\n    return {rest}\nend\n"
+            );
+            assert_eq!(names(&src), Vec::<&str>::new(), "{src}");
+        }
+
         // A real statement after the jump still fires.
+        assert_eq!(
+            names("local function j(a: number)\n    return a\n    print(a)\nend\n"),
+            vec!["unreachable_code"]
+        );
+        assert_eq!(
+            names(
+                "local function i(a: number)\n    return if a > 1 then a else 0; print(a)\nend\n"
+            ),
+            vec!["unreachable_code"]
+        );
         assert_eq!(
             names(
                 "local function h(n: number): string\n    return if n == 1 then\n        \"one\"\n        else\n        \"other\"\n    print(n)\nend\n"
@@ -1272,6 +1334,36 @@ mod tests {
         );
     }
 
+    /// The `:` of a ternary read as a method call, `a():b()`, so the
+    /// function after it was never called. A method keeps no local of
+    /// its name alive.
+    #[test]
+    fn a_call_after_the_colon_of_a_ternary_reads_the_function() {
+        let unused = |src: &str| -> Vec<&'static str> {
+            crate::compile(src)
+                .unwrap()
+                .lints
+                .iter()
+                .map(|l| l.name)
+                .filter(|n| n.starts_with("unused_"))
+                .collect()
+        };
+        let fns = "local function a(): number\n    return 1\nend\nlocal function b(): number\n    return 2\nend\n";
+
+        assert_eq!(
+            unused(&format!(
+                "{fns}export function f(c: boolean): number\n    return c ? a() : b()\nend\n"
+            )),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            unused(&format!(
+                "{fns}export function f(t: any): number\n    return a() + t:b()\nend\n"
+            )),
+            vec!["unused_function"]
+        );
+    }
+
     #[test]
     fn a_function_nothing_calls_fires() {
         let unused = |src: &str| -> Vec<&'static str> {
@@ -1358,19 +1450,15 @@ mod tests {
         else {
             panic!("the source does not lex");
         };
-        let hits: Vec<String> = crate::lint::run(
-            src,
-            &parsed.lexed.toks,
-            &parsed.chunk,
-            false,
-            &crate::lint::Thresholds::default(),
-            &privates,
-            &[],
-        )
-        .into_iter()
-        .filter(|l| l.name == "private_access")
-        .map(|l| l.message)
-        .collect();
+        let options = crate::EmitOptions {
+            import_privates: privates,
+            ..Default::default()
+        };
+        let hits: Vec<String> = crate::lint::run(src, &parsed.lexed.toks, &parsed.chunk, &options)
+            .into_iter()
+            .filter(|l| l.name == "private_access")
+            .map(|l| l.message)
+            .collect();
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert!(
             hits[0].contains("`secret` is private to `Item`"),
@@ -1400,9 +1488,54 @@ mod tests {
         let src = "struct Profile as\n    private coins: number\nend\n\nimpl Profile as\n    public function earn(self, n: number)\n        self.coins += n\n    end\nend\n\ntype Raw = { coins: number }\n\nlocal function load(raw: Raw, p: Profile)\n    p:earn(raw.coins)\nend\n\nreturn load\n";
         assert_eq!(names(src), Vec::<&str>::new());
 
-        // A receiver the file does not type still fires.
+        // A receiver the file does not type proves nothing.
         let bare = "struct Profile as\n    private coins: number\nend\n\nlocal p = make()\nprint(p.coins)\n";
-        assert_eq!(names(bare), vec!["private_access"]);
+        assert_eq!(names(bare), Vec::<&str>::new());
+
+        // The struct's own name reaches a private static.
+        let own = "struct Profile as\n    x: number\nend\n\nimpl Profile as\n    private function load(): number\n        return 1\n    end\nend\n\nprint(Profile.load())\n";
+        assert_eq!(names(own), vec!["private_access"]);
+    }
+
+    /// The project lists the private members of every struct. The lint
+    /// matched a member by its name alone, so `task.spawn` fired for a
+    /// private `spawn`, and `:Start()` on a value of another type for a
+    /// private `Start`.
+    #[test]
+    fn private_access_stays_quiet_on_a_receiver_of_another_type() {
+        let privates = vec![(
+            "Provider".to_string(),
+            vec!["spawn".to_string(), "Start".to_string()],
+        )];
+        let run = |src: &str| -> Vec<String> {
+            let Ok(parsed) =
+                alloy_syntax::parse_lenient(src, alloy_syntax::parser::ParseOptions::default())
+            else {
+                panic!("the source does not lex");
+            };
+            let options = crate::EmitOptions {
+                import_privates: privates.clone(),
+                ..Default::default()
+            };
+            crate::lint::run(src, &parsed.lexed.toks, &parsed.chunk, &options)
+                .into_iter()
+                .filter(|l| l.name == "private_access")
+                .map(|l| l.message)
+                .collect()
+        };
+        assert_eq!(
+            run("task.spawn(print, 'hi')\nnew Forge():Start()\nlocal f = make()\nf:Start()\n"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            run("local p: Provider = make()\np:spawn()\n"),
+            vec!["`spawn` is private to `Provider`; only its impl reaches it"]
+        );
+
+        // One file: a public field of one struct is not the private
+        // field of another struct with the same name.
+        let src = "struct A as\n    x: number\nend\n\nstruct B as\n    private x: number\nend\n\nlocal a = new A { x = 1 }\nprint(a.x)\n";
+        assert_eq!(names(src), Vec::<&str>::new());
     }
 
     /// `impl Zoo.Lion` is the struct's own impl: the owner of a private
@@ -1563,13 +1696,14 @@ mod tests {
             [1]
         );
         // A `local` in one branch does not reach the other: the write
-        // in the `else` keeps the outer `q` a local.
+        // in the `else` keeps the outer `q` a local, and the inner `q`,
+        // which nothing writes, takes `const`.
         assert_eq!(
             lines(
                 "local q = 1\nif q then\n    local q = 2\n    print(q)\nelse\n    q = 3\nend\nprint(q)\n",
                 "prefer_const"
             ),
-            Vec::<usize>::new()
+            [3]
         );
     }
 
@@ -1595,6 +1729,34 @@ mod tests {
                 "const_mutation"
             ),
             [2, 3]
+        );
+    }
+
+    /// A `const` reaches only its own block. `const_mutation` read any
+    /// later name of its text, so a write through a `local` or a
+    /// parameter of that name in another function fired.
+    #[test]
+    fn a_const_does_not_reach_a_name_in_another_function() {
+        let lines = |src: &str, lint: &str| -> Vec<usize> {
+            crate::compile(src)
+                .unwrap()
+                .lints
+                .into_iter()
+                .filter(|l| l.name == lint)
+                .map(|l| src[..l.start as usize].matches('\n').count() + 1)
+                .collect()
+        };
+        let src = "local function read(): number\n    const held = { x = 1 }\n    held.x = 2\n    return held.x\nend\nlocal function write(): ()\n    local held = { x = 1 }\n    held.x = 3\n    print(held)\nend\nlocal function take(held: { x: number }): ()\n    held.x = 4\nend\nprint(read, write, take)\n";
+        assert_eq!(lines(src, "const_mutation"), [3]);
+        // The write in `write` keeps that `held` a `local`, and reaches no other.
+        assert_eq!(lines(src, "prefer_const"), Vec::<usize>::new());
+        // A top-level const reaches into a function that has no binding of the name.
+        assert_eq!(
+            lines(
+                "const T = { n = 0 }\nlocal function bump(): ()\n    T.n += 1\nend\nprint(bump)\n",
+                "const_mutation"
+            ),
+            [3]
         );
     }
 
@@ -1631,6 +1793,17 @@ mod tests {
                 "namespace A as\n    function name()\n        return 1\n    end\nend\n\nfunction name()\n    return 2\nend\n"
             ),
             Vec::<&str>::new()
+        );
+        // A local function in a method's body is local to that body. It
+        // read as a second body of the method of its name.
+        let local = "struct C as\n    n: number = 0\nend\nimpl C as\n    function run(self)\n        local function bump()\n            self:bump()\n        end\n        bump()\n    end\n    function bump(self)\n        self.n += 1\n    end\nend\nprint(C)\n";
+        assert_eq!(names(local), Vec::<&str>::new());
+        // Two bodies in one function body still fire.
+        assert_eq!(
+            names(
+                "local function outer()\n    local function f()\n        return 1\n    end\n    local function f()\n        return 2\n    end\n    return f()\nend\nprint(outer())\n"
+            ),
+            vec!["duplicate_function"]
         );
     }
 

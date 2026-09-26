@@ -1031,7 +1031,7 @@ fn a_field_rename_reaches_the_constructor_and_the_declaration() {
             ],
         },
     });
-    st.mend_field_rename(uri, 12, 13, &Value::Null, &mut result);
+    st.mend_field_rename(uri, 12, 13, &Value::Null, None, &mut result);
 
     let edits: Vec<(u64, u64)> = result["changes"][uri]
         .as_array()
@@ -1049,6 +1049,44 @@ fn a_field_rename_reaches_the_constructor_and_the_declaration() {
     // the read. `Other`'s key of the same name stays, and so does the
     // `end` the child pointed at.
     assert_eq!(edits, [(1, 4), (8, 22), (12, 13)], "{result}");
+}
+
+/// A rename from a field's declaration gave no edit when every use sat
+/// in a constructor key or in `$assert_eq`: the child's answer kept no
+/// edit to read the new name from. The request's new name serves, and
+/// the rename reaches the sites its references list.
+#[test]
+fn a_field_rename_with_no_child_edit_takes_the_request_name() {
+    const SRC: &str = concat!(
+        "struct Profile\n",
+        "    money: number = 0\n",
+        "end\n",
+        "\n",
+        "local p = new Profile { money = 1 }\n",
+        "$assert_eq(p.money, 1)\n",
+    );
+    let (st, uri) = super::support::one_file(SRC);
+    let mut result = json!({ "changes": { uri: [] } });
+    st.mend_field_rename(uri, 1, 5, &Value::Null, Some("coins"), &mut result);
+
+    let edits: Vec<(u64, u64, &str)> = result["changes"][uri]
+        .as_array()
+        .expect("edits")
+        .iter()
+        .map(|e| {
+            (
+                e["range"]["start"]["line"].as_u64().expect("line"),
+                e["range"]["start"]["character"].as_u64().expect("column"),
+                e["newText"].as_str().unwrap_or_default(),
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        edits,
+        [(1, 4, "coins"), (4, 24, "coins"), (5, 13, "coins")],
+        "{result}"
+    );
 }
 
 /// A field's rename reaches a parameter pattern of its struct: the
@@ -1073,7 +1111,7 @@ fn a_field_rename_reaches_a_parameter_pattern() {
             ],
         },
     });
-    st.mend_field_rename(uri, 2, 4, &Value::Null, &mut result);
+    st.mend_field_rename(uri, 2, 4, &Value::Null, None, &mut result);
 
     let edits: Vec<(u64, u64, String)> = result["changes"][uri]
         .as_array()
@@ -3152,7 +3190,7 @@ fn a_field_read_the_checker_typed_reaches_its_struct() {
     let mut result = json!({ "changes": {
         "file:///c.aly": [{ "range": read, "newText": "cost" }],
     } });
-    st.mend_field_rename("file:///c.aly", 2, 11, &child, &mut result);
+    st.mend_field_rename("file:///c.aly", 2, 11, &child, None, &mut result);
 
     assert_eq!(
         result["changes"]["file:///a.aly"],

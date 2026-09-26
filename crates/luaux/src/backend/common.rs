@@ -517,6 +517,21 @@ pub(super) fn plan_text(
         return Ok(TextPlan::default());
     }
 
+    // Alloy patch: a `Text` attribute sets the text, so a `{ }` beside it
+    // can only be a child. Silk and Enamel lower a classed child to one.
+    // Text between the tags still conflicts, and the props report that.
+    let text_attribute = element.attributes.iter().any(|attribute| match attribute {
+        Attribute::Named { name, .. } => context.sets_text(class, name),
+        Attribute::Inferred { expression, .. } => {
+            infer_name(expression).is_some_and(|name| context.sets_text(class, name))
+        }
+        Attribute::Spread { .. } => false,
+    });
+
+    if text_attribute && !has_text_literal {
+        return Ok(TextPlan::default());
+    }
+
     // `<TextButton>{label}<UICorner/></TextButton>` is genuinely ambiguous: the
     // expression could be the button's text or another child, and nothing here
     // can tell. Emitting a guess produces code that fails inside Vide at

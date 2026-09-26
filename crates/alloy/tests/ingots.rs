@@ -105,6 +105,19 @@ fn the_transform_maps_and_the_hooks_run() {
     );
 }
 
+/// A compile that fails points into the author's text. The transform
+/// makes the line longer, so an offset into its text is past the tag.
+#[test]
+fn a_failed_compile_points_into_the_source() {
+    let ingots = load("");
+    let src = "local a = $shout(\"hi\")\nlocal e = <Frame></Framex>\n";
+    let error = alloy::compile_file("a.alx", src, &Default::default(), None, Some(&ingots))
+        .err()
+        .expect("the tags do not match");
+
+    assert_eq!(error.offset, src.find("</Framex").unwrap(), "{error:?}");
+}
+
 #[test]
 fn options_and_lint_levels_reach_the_ingot() {
     let ingots = load("[ingot.shout]\nword = \"yell\"\n\n[lint]\nallow = [\"shout\"]\n");

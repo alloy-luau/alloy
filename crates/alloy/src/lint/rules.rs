@@ -9,7 +9,7 @@ use alloy_syntax::lexer::{Tok, TokKind};
 
 use crate::fmt::structure;
 
-use super::{Fix, Lint, Thresholds};
+use super::{Fix, Lint};
 
 /// The lints about the directives themselves: an
 /// `--@alloy-expect-error` with no reason after it.
@@ -95,16 +95,55 @@ pub fn const_reassignments(
     block: &alloy_syntax::ast::Block,
     namespace_consts: &[String],
 ) -> Vec<(u32, u32, String)> {
+    walk_bindings(src, toks, block, namespace_consts).out
+}
+
+/// `export local count = 0`, then `count += 1` inside a function. The
+/// module returns its exports as a table it builds when it loads, and an
+/// import copies each value, so the write never reaches an importer. A
+/// write at the top level runs before the return, and stays quiet.
+fn stale_exports(src: &str, toks: &[Tok], block: &alloy_syntax::ast::Block) -> Vec<Lint> {
+    walk_bindings(src, toks, block, &[]).stale
+}
+
+fn walk_bindings<'a>(
+    src: &'a str,
+    toks: &'a [Tok],
+    block: &alloy_syntax::ast::Block,
+    namespace_consts: &'a [String],
+) -> ConstWalk<'a> {
+    let text = |span: alloy_syntax::ast::TokSpan| span.text(src, toks).to_string();
+    let mut exported = Vec::new();
+
+    for s in &block.stmts {
+        match s {
+            Stmt::Local(l) if l.exported => exported.extend(
+                crate::desugar::statements::local_names(l)
+                    .into_iter()
+                    .map(text),
+            ),
+
+            Stmt::ExportList(e) if e.from.is_none() => {
+                exported.extend(e.specs.iter().map(|spec| text(spec.name)))
+            }
+
+            _ => {}
+        }
+    }
+
     let mut walk = ConstWalk {
         src,
         toks,
         scopes: Vec::new(),
         namespace_consts,
+        exported,
+        deferred: 0,
         out: Vec::new(),
+        stale: Vec::new(),
     };
     walk.block(block);
 
-    walk.out
+    walk
 }
 
 /// The scopes of one `const_reassignments` walk: each name a block
@@ -114,7 +153,15 @@ struct ConstWalk<'a> {
     toks: &'a [Tok],
     scopes: Vec<Vec<(String, bool)>>,
     namespace_consts: &'a [String],
+    /// The names the module exports: `export local x` and the names of
+    /// an `export { }` list.
+    exported: Vec<String>,
+    /// How many function bodies hold the statement the walk reads. A
+    /// statement in one runs after the module has loaded.
+    deferred: usize,
     out: Vec<(u32, u32, String)>,
+    /// The `stale_export` hits.
+    stale: Vec<Lint>,
 }
 
 impl ConstWalk<'_> {
@@ -140,6 +187,18 @@ impl ConstWalk<'_> {
             .is_some_and(|(_, c)| *c)
     }
 
+    /// Whether `name` reads a top-level binding that the module exports
+    /// by value: not a `const`, and not a nearer binding of the name.
+    fn is_exported(&self, name: &str) -> bool {
+        self.exported.iter().any(|n| n == name)
+            && !self.is_const(name)
+            && self
+                .scopes
+                .iter()
+                .rposition(|scope| scope.iter().any(|(n, _)| n == name))
+                == Some(0)
+    }
+
     fn block(&mut self, b: &alloy_syntax::ast::Block) {
         self.scopes.push(Vec::new());
 
@@ -151,6 +210,7 @@ impl ConstWalk<'_> {
     }
 
     fn function(&mut self, body: &alloy_syntax::ast::FunctionBody) {
+        self.deferred += 1;
         self.scopes.push(Vec::new());
 
         for p in body.params.iter().filter(|p| !p.is_vararg) {
@@ -170,6 +230,7 @@ impl ConstWalk<'_> {
         }
 
         self.scopes.pop();
+        self.deferred -= 1;
     }
 
     fn children(&mut self, children: Vec<crate::desugar::Child<'_>>) {
@@ -250,6 +311,14 @@ impl ConstWalk<'_> {
             // A macro body is source for another place.
             Stmt::Macro(_) => {}
 
+            // `after 3 do ... end` runs its block once the module has
+            // loaded, as a function body does.
+            Stmt::After(_) => {
+                self.deferred += 1;
+                self.children(crate::desugar::stmt_children(s.under_default()));
+                self.deferred -= 1;
+            }
+
             Stmt::Assign(a) => {
                 for t in &a.targets {
                     // `Cfg.LIMIT`: the path of a namespace `const`.
@@ -278,11 +347,23 @@ impl ConstWalk<'_> {
 
                         false => self.is_const(&path),
                     };
+                    let span = t.span();
+                    let start = self.toks[span.start as usize].start;
+                    let end = self.toks[span.end as usize - 1].end;
+
+                    if self.deferred > 0 && self.is_exported(&path) {
+                        self.stale.push(Lint {
+                            name: "stale_export",
+                            start,
+                            end,
+                            message: format!(
+                                "`{path}` is an exported `local`; importers keep the value they read when they loaded, so they never see this write. Export a function that returns it, or hold it in a table that stays `local` and write its field: `export local state = {{ {path} = ... }}`, then `state.{path} = ...`"
+                            ),
+                            fix: None,
+                        });
+                    }
 
                     if reassigned {
-                        let span = t.span();
-                        let start = self.toks[span.start as usize].start;
-                        let end = self.toks[span.end as usize - 1].end;
                         let message = format!(
                             "`{path}` is a `const`; its value is set once and a reassignment is an error"
                         );
@@ -540,18 +621,12 @@ fn game_alias(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Lint> {
     out
 }
 
-pub fn run(
-    src: &str,
-    toks: &[Tok],
-    chunk: &Chunk,
-    definitions: bool,
-    thresholds: &Thresholds,
-    import_privates: &[(String, Vec<String>)],
-    import_callables: &[(String, crate::flux::Callable)],
-) -> Vec<Lint> {
+/// The lints of one file. The options give the complexity limits, the
+/// indexes of the imported modules, and the text an ingot wrote.
+pub fn run(src: &str, toks: &[Tok], chunk: &Chunk, options: &crate::EmitOptions) -> Vec<Lint> {
     let mut lints = Vec::new();
 
-    if definitions {
+    if options.definitions {
         return lints;
     }
 
@@ -559,6 +634,7 @@ pub fn run(
     lints.extend(redundant_as(src, toks, chunk));
     lints.extend(deprecated_namespaces(src, toks, chunk));
     lints.extend(game_alias(src, toks, chunk));
+    lints.extend(stale_exports(src, toks, &chunk.block));
 
     let text = |i: usize| toks[i].text(src);
     let st = structure(src, toks);
@@ -595,8 +671,10 @@ pub fn run(
 
     for (i, t) in toks.iter().enumerate() {
         // A `type function` takes types, which Luau lets no one annotate.
+        // `x is function` names a type and declares nothing.
         if t.text(src) != "function"
             || matches!(i.checked_sub(1).map(text), Some("." | ":" | "type"))
+            || alloy_syntax::contextual::tested_type_at(src, toks, i)
         {
             continue;
         }
@@ -1243,12 +1321,16 @@ pub fn run(
         }
     }
 
+    let privates = options.privates();
+    let ternary_colons = crate::fmt::colons::ternary_colons(src, toks, chunk);
     let scan = crate::flux::scan::Scan::new(src, toks, &st)
-        .with_privates(import_privates)
-        .with_callables(import_callables);
+        .with_ternary_colons(&ternary_colons)
+        .with_privates(&privates)
+        .with_callables(&options.import_callables)
+        .with_generated(&options.generated);
     lints.extend(crate::flux::run(&scan));
     lints.extend(crate::flux::correctness::run(&scan));
-    lints.extend(crate::flux::complexity::run(&scan, thresholds));
+    lints.extend(crate::flux::complexity::run(&scan, &options.thresholds));
     lints.extend(crate::flux::roblox::run(&scan));
     lints.sort_by_key(|l| l.start);
     lints

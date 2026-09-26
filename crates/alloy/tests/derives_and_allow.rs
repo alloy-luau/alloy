@@ -128,6 +128,41 @@ fn allow_quiets_a_lint_over_what_it_sits_on() {
     );
 }
 
+/// An attribute declaration is an item, so `@allow` goes on it. The
+/// parser read `@allow` and then asked for a function.
+#[test]
+fn allow_quiets_a_lint_over_an_attribute_declaration() {
+    let lints =
+        |src: &str| -> Vec<&'static str> { compile(src).lints.iter().map(|l| l.name).collect() };
+    let decl = "export attribute Tagged on struct\n";
+
+    assert!(lints(decl).contains(&"naming_convention"));
+
+    let allowed = format!("@allow(naming_convention)\n{decl}");
+    let out = compile(&allowed);
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    assert!(!lints(&allowed).contains(&"naming_convention"));
+    assert!(
+        out.ship
+            .contains("local Tagged = __alloy.attribute(\"Tagged\""),
+        "{}",
+        out.ship
+    );
+    assert_eq!(out.ship.lines().count(), allowed.lines().count());
+
+    // The name list still checks, and an attribute that takes no
+    // attribute declaration reports.
+    let got = messages(&format!("@allow(naming_conventoin)\n{decl}"));
+    assert!(
+        got[0].contains("did you mean `naming_convention`"),
+        "{got:?}"
+    );
+    assert_eq!(
+        messages(&format!("@sealed\n{decl}")),
+        ["the attribute `sealed` has no meaning on an attribute; it goes on `struct` and `enum`"]
+    );
+}
+
 #[test]
 fn luau_attribute_list_takes_luau_attributes_alone() {
     let ok = compile(

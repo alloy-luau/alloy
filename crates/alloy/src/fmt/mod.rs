@@ -333,6 +333,10 @@ fn format_tokens(src: &str, options: &FmtConfig) -> Result<String, String> {
         at_line: Vec::new(),
         hole: Vec::new(),
         held: Vec::new(),
+        chains: Vec::new(),
+        held_chain: Vec::new(),
+        conds: Vec::new(),
+        cond_line: Vec::new(),
     };
     f.rewrite_tokens();
     f.sort_requires();
@@ -342,6 +346,10 @@ fn format_tokens(src: &str, options: &FmtConfig) -> Result<String, String> {
     f.forced = vec![false; f.items.len()];
     f.at_line = vec![0; f.items.len()];
     f.hole = f.holes();
+    f.read_chains(
+        &colons::binary_chains(src, &toks, &chunk),
+        &colons::if_conditions(src, &toks, &chunk),
+    );
     f.measure_lines();
 
     // An `if` expression and a `match` are no bracket group, so the
@@ -353,6 +361,7 @@ fn format_tokens(src: &str, options: &FmtConfig) -> Result<String, String> {
         let tree = f.tree();
         let hard = f.hard_breaks(&tree);
         f.held = f.held_items(&hard);
+        f.held_chain = f.held_chains(&hard);
         f.render_nodes(&tree, &hard, 0);
         f.flush();
 
@@ -362,8 +371,9 @@ fn format_tokens(src: &str, options: &FmtConfig) -> Result<String, String> {
 
         let broke_ifs = f.force_long_expr_ifs();
         let broke_matches = f.force_long_matches();
+        let broke_chains = f.force_long_chains();
 
-        if !broke_ifs && !broke_matches {
+        if !broke_ifs && !broke_matches && !broke_chains {
             break;
         }
 
@@ -462,7 +472,38 @@ fn items_of(src: &str, toks: &[Tok], comments: &[(u32, u32)]) -> Vec<Item> {
         prev_end = b;
     }
 
+    mark_names(&mut out);
     merge_operators(out)
+}
+
+/// `on` is a keyword only in `attribute Name on ...`, and `read` and
+/// `write` only before a field of a table type, never before a `(`.
+/// Anywhere else each is a name, as in `if on() then`, so the layout and
+/// the spacing read it as one.
+fn mark_names(items: &mut [Item]) {
+    let mut attribute_line = false;
+
+    for i in 0..items.len() {
+        if items[i].newlines_before > 0 {
+            attribute_line = false;
+        }
+
+        if items[i].is_comment() {
+            continue;
+        }
+
+        match items[i].text.as_str() {
+            "attribute" => attribute_line = true,
+
+            "on" => items[i].name_here |= !attribute_line,
+
+            "read" | "write" => {
+                items[i].name_here |= items.get(i + 1).is_some_and(|n| n.is("("));
+            }
+
+            _ => {}
+        }
+    }
 }
 
 /// The lexer emits `?`, `<`, and `>` one character at a time. The
@@ -539,6 +580,26 @@ struct Formatter<'s> {
     /// bracket group among them keeps its line, so a long `if` breaks at
     /// its keywords first.
     held: Vec<bool>,
+    /// The binary chains the layout may break, outer before inner.
+    chains: Vec<Chain>,
+    /// The items of a chain that has not broken yet. As in `held`, a
+    /// group among them keeps its line, so a long chain breaks at its
+    /// operators first.
+    held_chain: Vec<bool>,
+    /// The `if` or `elseif` and the `then` of each `if` condition.
+    conds: Vec<(usize, usize)>,
+    /// The items that open a line of an `if` condition that spans lines.
+    /// Each line sits one level under the `if`, with no step for the
+    /// operator it opens with.
+    cond_line: Vec<bool>,
+}
+
+/// A binary chain by item; see `colons::Chain`.
+struct Chain {
+    first: usize,
+    last: usize,
+    ops: Vec<usize>,
+    then: Option<usize>,
 }
 
 /// Openers of bracket groups, as token text.
@@ -559,7 +620,7 @@ fn closer_of(open: &str) -> &'static str {
     }
 }
 
-mod colons;
+pub(crate) mod colons;
 mod layout;
 mod rewrite;
 mod spacing;
@@ -574,6 +635,90 @@ impl<'s> Formatter<'s> {
     fn measure_lines(&mut self) {
         self.depths = self.block_depths();
         self.generic = self.generic_brackets();
+        self.split_conditions();
+    }
+
+    /// The chains and the `if` conditions the tree names by byte, as
+    /// items. A chain whose last operand is a table breaks the table
+    /// instead: `x = options or {` then the fields.
+    fn read_chains(&mut self, chains: &[colons::Chain], conds: &[(usize, usize)]) {
+        let at: std::collections::HashMap<usize, usize> = (0..self.items.len())
+            .filter(|&i| !self.items[i].is_comment() && self.items[i].start != usize::MAX)
+            .map(|i| (self.items[i].start, i))
+            .collect();
+        let item = |byte: &usize| at.get(byte).copied();
+
+        self.chains = chains
+            .iter()
+            .filter_map(|c| {
+                let chain = Chain {
+                    first: item(&c.first)?,
+                    last: item(&c.last)?,
+                    ops: c.ops.iter().map(item).collect::<Option<Vec<_>>>()?,
+                    then: match c.then {
+                        Some(t) => Some(item(&t)?),
+
+                        None => None,
+                    },
+                };
+                let table_tail = self.items[chain.last].is("}")
+                    && self.opener_of(chain.last).is_some_and(|o| {
+                        chain.ops.last().and_then(|&op| self.next_code(op)) == Some(o)
+                    });
+
+                (!table_tail).then_some(chain)
+            })
+            .collect();
+        self.conds = conds
+            .iter()
+            .filter_map(|(k, t)| Some((item(k)?, item(t)?)))
+            .collect();
+    }
+
+    /// Marks each line of an `if` condition that spans lines, and puts a
+    /// `then` that opens a line back under its `if`. The layout of a
+    /// split condition is StyLua's: `if`, each line one level in, `then`.
+    fn split_conditions(&mut self) {
+        self.cond_line = vec![false; self.items.len()];
+
+        for &(kw, then) in &self.conds {
+            let mut depth = 0i32;
+            let mut lines = Vec::new();
+
+            for k in kw + 1..then {
+                let t = &self.items[k];
+
+                if t.is_comment() {
+                    continue;
+                }
+
+                if closes(&t.text) {
+                    depth -= 1;
+                }
+
+                if depth == 0 && t.newlines_before > 0 {
+                    lines.push(k);
+                }
+
+                if opens(&t.text) {
+                    depth += 1;
+                }
+            }
+
+            let then_opens = self.items[then].newlines_before > 0;
+
+            if lines.is_empty() && !then_opens {
+                continue;
+            }
+
+            for k in lines {
+                self.cond_line[k] = true;
+            }
+
+            if then_opens {
+                self.depths[then] = self.depths[then].saturating_sub(1);
+            }
+        }
     }
 
     fn prev_code(&self, i: usize) -> Option<usize> {
@@ -1041,6 +1186,57 @@ mod tests {
         assert_eq!(fmt(short), short);
     }
 
+    /// In a callback body, a group that stayed on one line kept a `)` or
+    /// a `}` on the line the source gave it. `return (` hugged the call
+    /// and the `)` stood alone below `end)`. The closer follows the
+    /// group now, as it does outside a callback.
+    #[test]
+    fn a_closer_in_a_callback_follows_its_group() {
+        let src = "task.spawn(function()\n  return (\n    f(function()\n      return 1\n    end)\n  )\nend)\n";
+        let want = "task.spawn(function()\n  return (f(function()\n    return 1\n  end))\nend)\n";
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want);
+
+        let table =
+            "task.spawn(function()\n  local t = {\n    a = 1,\n    b = 2\n  }\n  print(t)\nend)\n";
+        assert_eq!(
+            fmt(table),
+            "task.spawn(function()\n  local t = { a = 1, b = 2 }\n  print(t)\nend)\n"
+        );
+    }
+
+    /// A long ternary broke the arguments of the call in its last
+    /// branch. It breaks at its `?` and its `:`, one branch a line.
+    #[test]
+    fn a_long_ternary_breaks_at_its_operators() {
+        let branches = "is_the_base\n    ? piece('base_piece_name', 0).column\n    : piece('middle_piece_name', variant).column";
+        let src = format!(
+            "local function f(): number\n  return {}\nend\n",
+            branches.replace("\n    ", " ")
+        );
+        let want = format!("local function f(): number\n  return {branches}\nend\n");
+        assert_eq!(fmt(&src), want);
+        assert_eq!(fmt(&want), want);
+
+        // One that fits keeps its line.
+        let short = "local x = flag ? 1 : 2\n";
+        assert_eq!(fmt(short), short);
+    }
+
+    /// The `;` between two bindings ended the scan of the `if`, so it
+    /// found no `then` and the index `ITEMS[s.item]` broke instead.
+    #[test]
+    fn a_long_if_expression_with_bindings_breaks_at_its_keywords() {
+        let head = "if const s = stack_of_the_player_that_holds_it; const def = ITEMS[s.item]";
+        let src =
+            format!("local function f(): string\n  return {head} then def.name else ''\nend\n");
+        let want = format!(
+            "local function f(): string\n  return {head}\n    then def.name\n    else ''\nend\n"
+        );
+        assert_eq!(fmt(&src), want);
+        assert_eq!(fmt(&want), want);
+    }
+
     /// The `)` of a call in a branch ended the `if` expression, so the
     /// `else` of a broken `local` or `const` fell to column 0. A closer
     /// now ends only an `if` that opened inside its group. A hand-broken
@@ -1204,6 +1400,101 @@ mod tests {
         let long = "local t = { alpha = 111111111111, beta = 222222222222, gamma = 333333333333, delta = 444444444444, epsilon = 5555 }\n";
         let want = "local t = {\n  alpha = 111111111111,\n  beta = 222222222222,\n  gamma = 333333333333,\n  delta = 444444444444,\n  epsilon = 5555,\n}\n";
         assert_eq!(fmt(long), want);
+    }
+
+    /// The width check counted the source's spaces and one more after
+    /// each comma. A 99-column call broke under a 100-column width, and
+    /// the second run broke it in a different shape. The check now
+    /// counts the spaces the render writes.
+    #[test]
+    fn a_group_measures_the_spaces_it_renders() {
+        let head = "local function f(p: { plots: { PlotSave } })\n";
+        let fits = format!(
+            "{head}  table.insert(p.plots, new PlotSave {{ slot = 1, state = CropState.Growing(CropKind.Carrot, 0.5) }})\nend\n"
+        );
+        assert_eq!(fits.lines().nth(1).unwrap().chars().count(), 99);
+        assert_eq!(fmt(&fits), fits);
+        // Tight source spacing gives the same result.
+        assert_eq!(fmt(&fits.replace(", ", ",")), fits);
+
+        // Two columns more break the call once, and the output holds.
+        let long = fits.replace("0.5", "0.525");
+        let want = format!(
+            "{head}  table.insert(\n    p.plots,\n    new PlotSave {{ slot = 1, state = CropState.Growing(CropKind.Carrot, 0.525) }}\n  )\nend\n"
+        );
+        assert_eq!(fmt(&long), want);
+        assert_eq!(fmt(&want), want);
+
+        // A magic trailing comma keeps the table open, and the call
+        // around it stays on its line.
+        let hug = format!(
+            "{head}  table.insert(p.plots, new PlotSave {{\n    slot = 1,\n    state = CropState.Growing(CropKind.Carrot, 0.5),\n  }})\nend\n"
+        );
+        assert_eq!(fmt(&hug), hug);
+    }
+
+    /// The width check stopped at the closer of the group, so `: Part`
+    /// after a parameter list ran past the column. It now counts the
+    /// line up to the next place the line can break.
+    #[test]
+    fn a_group_counts_the_text_after_its_closer() {
+        let src = "local function part(name: string, size: Vector3, position: Vector3, color: Rgb, parent: Instance): Part\nend\n";
+        let want = "local function part(\n  name: string,\n  size: Vector3,\n  position: Vector3,\n  color: Rgb,\n  parent: Instance\n): Part\nend\n";
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want);
+    }
+
+    /// An index that breaks takes no trailing comma: `t[k,]` does not
+    /// parse. The child index `w->[k]` and the index after an assert,
+    /// `t![k]`, take none either.
+    #[test]
+    fn a_broken_index_takes_no_trailing_comma() {
+        let key = "a_very_long_key_name_that_runs_on_and_on_and_on_past_the_column_width_of_the_whole_file";
+
+        for (head, tail) in [
+            ("local event = (instance :: any)[", "] :: unknown"),
+            ("local j = w->Map->[", "]"),
+            ("local k = map![", "]"),
+        ] {
+            let src = format!("{head}{key}{tail}\n");
+            let want = format!("{head}\n  {key}\n{tail}\n");
+            assert_eq!(fmt(&src), want);
+            assert_eq!(fmt(&want), want);
+        }
+    }
+
+    /// A comma inside type arguments split the parameter list around
+    /// them, as `Result<any,` and `string>` on two lines. The second run
+    /// then read `<` as a comparison. The comma now stays inside.
+    #[test]
+    fn a_broken_group_keeps_its_type_arguments_whole() {
+        let src = "local function report(player: Player, result: Result<any, string>, success: string, extra: number, more: number)\nend\n";
+        let want = "local function report(\n  player: Player,\n  result: Result<any, string>,\n  success: string,\n  extra: number,\n  more: number\n)\nend\n";
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want);
+
+        // Explicit type arguments that break keep their tight brackets.
+        let src = "local damaged = Signal.new<<Player, number, string, boolean, Instance, Vector3, CFrame, Color3, Vector2>>()\n";
+        let want = "local damaged = Signal.new<<\n  Player,\n  number,\n  string,\n  boolean,\n  Instance,\n  Vector3,\n  CFrame,\n  Color3,\n  Vector2\n>>()\n";
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want);
+    }
+
+    /// A header whose group broke put a newline before its `do`, or
+    /// before the next line of a trait signature. The layout read a
+    /// second block there, and the second run indented every line after
+    /// it one level more.
+    #[test]
+    fn a_broken_header_opens_one_block() {
+        let src = "for name, r in Attributes.fields(struct_type_with_a_long_name, range_with_a_long_name, more_args, extra) do\n  print(name, r)\nend\nprint(1)\n";
+        let want = "for name, r in Attributes.fields(\n  struct_type_with_a_long_name,\n  range_with_a_long_name,\n  more_args,\n  extra\n) do\n  print(name, r)\nend\nprint(1)\n";
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want);
+
+        let src = "trait Codec\n  function decode(self, raw_input_string: string, options: DecodeOptions, fallback: SaveData): SaveData\nend\nprint(1)\n";
+        let want = "trait Codec\n  function decode(\n    self,\n    raw_input_string: string,\n    options: DecodeOptions,\n    fallback: SaveData\n  ): SaveData\nend\nprint(1)\n";
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want);
     }
 
     /// A service import keeps the form the reader wrote, and the
@@ -1689,6 +1980,185 @@ mod tests {
         assert_eq!(
             format_with("struct P as\n  x: number\n  name: string\nend\n", &o).unwrap(),
             "struct P\n  x:    number\n  name: string\nend\n"
+        );
+    }
+
+    /// `src` formats to `want`, and `want` formats to itself.
+    fn stable(src: &str, want: &str) {
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want);
+    }
+
+    /// A header too long for one line breaks its parameters, and the
+    /// `as` then sits lines below `attribute`. fmt read no body there,
+    /// so its second run moved the `requires` clauses to column 0.
+    #[test]
+    fn a_split_attribute_header_keeps_its_clauses_indented() {
+        stable(
+            "export attribute options(first_parameter: string, second_parameter: string = 'default', third: number = 0) on struct as\n  requires field instance\nend\n",
+            "export attribute options(\n  first_parameter: string,\n  second_parameter: string = 'default',\n  third: number = 0\n) on struct as\n  requires field instance\nend\n",
+        );
+    }
+
+    /// `function` after `is not` names a type, as after `is`. fmt read
+    /// it as a function, and every later line took one more indent.
+    #[test]
+    fn a_type_test_for_function_opens_no_block() {
+        for test in ["is function", "is not function"] {
+            let want = format!(
+                "export function plain(value: unknown): boolean\n  if value {test} then\n    return true\n  end\n\n  return false\nend\n\nexport function after(): number\n  return 1\nend\n"
+            );
+            stable(&want, &want);
+        }
+    }
+
+    /// A child lookup by expression and the indexer of a table type key
+    /// a value, as `t[k]` does, so their brackets stay tight. The spacing
+    /// of an array literal wrote `part->[ name ]` and `{ read [ number ]: string }`.
+    #[test]
+    fn a_child_lookup_and_a_type_indexer_keep_tight_brackets() {
+        stable(
+            "local c = part->[name]\nlocal w = part=>[name]\nlocal v = map![name]\ntype R = { read [number]: string, write [string]: number }\n",
+            "local c = part->[name]\nlocal w = part=>[name]\nlocal v = map![name]\ntype R = { read [number]: string, write [string]: number }\n",
+        );
+        stable("local xs = [1, 2]\n", "local xs = [ 1, 2 ]\n");
+    }
+
+    /// A return type is no place to break. Past the column, fmt broke a
+    /// `{ T }` or `(A, B)` return type and kept the parameters on the
+    /// line; it breaks the parameters first, as before `Result<A, B>`.
+    #[test]
+    fn a_long_header_breaks_its_parameters_before_its_return_type() {
+        let params = "start: number, stop: number, step: number, extra: number, more: number";
+        let broken = "(\n  start: number,\n  stop: number,\n  step: number,\n  extra: number,\n  more: number\n)";
+
+        for ret in ["{ number }", "(number, number?)", "{ [string]: number }?"] {
+            stable(
+                &format!("export function walk({params}): {ret}\n  return nil\nend\n"),
+                &format!("export function walk{broken}: {ret}\n  return nil\nend\n"),
+            );
+        }
+
+        // A short header keeps its line.
+        stable(
+            "local function f(a: number): { number }\n  return { a }\nend\n",
+            "local function f(a: number): { number }\n  return { a }\nend\n",
+        );
+    }
+
+    /// A lone table argument hugs its parentheses. fmt wrote `copy(`,
+    /// then `{` on a line of its own and the fields one level deeper:
+    /// three lines of brackets for one argument.
+    #[test]
+    fn a_lone_table_argument_hugs_its_parentheses() {
+        let fields = "first_long_key_name = 1, second_long_key_name = 2, third_long_key_name = 3, fourth = 4";
+        let hugged = "  local t = copy({\n    first_long_key_name = 1,\n    second_long_key_name = 2,\n    third_long_key_name = 3,\n    fourth = 4,\n  })\n";
+
+        for call in [
+            format!("copy({{ {fields} }})"),
+            format!("copy {{ {fields} }}"),
+        ] {
+            stable(
+                &format!("do\n  local t = {call}\nend\n"),
+                &format!("do\n{hugged}end\n"),
+            );
+        }
+
+        // A parameter typed by a table hugs the same way, and the return
+        // type after the parentheses counts toward the line.
+        stable(
+            "export function NewCard(props: { label: string, width: number, height: number, on_click: () -> () }): Instance\nend\n",
+            "export function NewCard(props: {\n  label: string,\n  width: number,\n  height: number,\n  on_click: () -> (),\n}): Instance\nend\n",
+        );
+
+        // One parenthesized value hugs too.
+        stable(
+            "list:push((first_long_argument_name_here + second_long_argument_name_here + third_long_one + fourth_one_x))\n",
+            "list:push((\n  first_long_argument_name_here + second_long_argument_name_here + third_long_one + fourth_one_x\n))\n",
+        );
+
+        // A table that fits stays on the line, and a second argument
+        // breaks the list as before.
+        stable("copy({ a = 1 })\n", "copy({ a = 1 })\n");
+        stable(
+            &format!("copy({{ {fields} }}, second_argument_here)\n"),
+            &format!("copy(\n  {{ {fields} }},\n  second_argument_here\n)\n"),
+        );
+    }
+
+    /// Each line of a split `if` condition sits one level under the
+    /// `if`, and `then` goes back under the `if`. fmt put each `or` line
+    /// one level deeper than the first operand, and `then` one level in.
+    #[test]
+    fn a_split_if_condition_indents_once_and_then_closes_it() {
+        let want = "do\n  if\n    head is not table\n    or head.format ~= 1\n    or head.parts is not number\n  then\n    return false\n  elseif\n    a\n    or b\n  then\n    return true\n  end\nend\n";
+        stable(
+            "do\n  if\n      head is not table\n        or head.format ~= 1\n     or head.parts is not number\n    then\n    return false\n  elseif\n  a\n  or b\n  then\n    return true\n  end\nend\n",
+            want,
+        );
+
+        // A split that starts on the `if` line takes the same steps.
+        stable(
+            "if a\nor b\nthen\n  print(1)\nend\n",
+            "if a\n  or b\nthen\n  print(1)\nend\n",
+        );
+    }
+
+    /// A long chain of binary operators breaks before its operators, at
+    /// the lowest precedence it holds. fmt broke the arguments of the
+    /// last call and left `* 3` after its closing parenthesis.
+    #[test]
+    fn a_long_chain_breaks_at_its_operators() {
+        stable(
+            "function terms(x: number): number\n  return math.noise(x * 0.0035, 1) * 46 + math.noise(x * 0.018, 2) * 12 + math.noise(x * 0.07, 3) * 3\nend\n",
+            "function terms(x: number): number\n  return math.noise(x * 0.0035, 1) * 46\n    + math.noise(x * 0.018, 2) * 12\n    + math.noise(x * 0.07, 3) * 3\nend\n",
+        );
+
+        // The condition of an `if` takes a line of its own first, and
+        // breaks at its operators only when that line is too long too.
+        stable(
+            "if some_function_call(a, b, c) == other_function_call(a, b, c, 'with a long string argument here') then\n  print(1)\nend\n",
+            "if\n  some_function_call(a, b, c) == other_function_call(a, b, c, 'with a long string argument here')\nthen\n  print(1)\nend\n",
+        );
+        stable(
+            "if first_long_name == 'first' or second_long_name == 'second' or third_long_name == 'third' or a == b or c == d then\n  print(1)\nend\n",
+            "if\n  first_long_name == 'first'\n  or second_long_name == 'second'\n  or third_long_name == 'third'\n  or a == b\n  or c == d\nthen\n  print(1)\nend\n",
+        );
+
+        // A last operand that is a table breaks inside, and a trailing
+        // comment runs past the column without a break.
+        let tail = "local opts = options_from_somewhere or { alpha = 1, beta = 2, gamma = 3, delta = 4, epsilon = 5, zeta = 6 }\n";
+        stable(
+            tail,
+            "local opts = options_from_somewhere or {\n  alpha = 1,\n  beta = 2,\n  gamma = 3,\n  delta = 4,\n  epsilon = 5,\n  zeta = 6,\n}\n",
+        );
+        let noted = "print(a == 'first_long_name' or b == 'second_long_name') -- a note that runs on past the column\n";
+        stable(noted, noted);
+    }
+
+    /// `on` is a keyword only in `attribute Name on ...`. fmt spaced a
+    /// call of a local named `on` as `on ()`.
+    #[test]
+    fn a_call_of_a_local_named_on_stays_tight() {
+        stable(
+            "local x = if on() then on[1] else 2\n",
+            "local x = if on() then on[1] else 2\n",
+        );
+        stable("attribute tag on function\n", "attribute tag on function\n");
+    }
+
+    /// A blank line after the first statement of a callback stays. fmt
+    /// read `mode(x)` after `function()` as the end of a header and
+    /// dropped the blank line under it.
+    #[test]
+    fn a_blank_line_after_a_call_in_a_callback_stays() {
+        let src = "event:Connect(function()\n  mode(read_mode())\n\n  print(1)\nend)\n";
+        stable(src, src);
+
+        // The blank line right under a header still goes.
+        stable(
+            "local function f<T>(x: T)\n\n  print(x)\nend\nlocal g = function()\n\n  print(1)\nend\n",
+            "local function f<T>(x: T)\n  print(x)\nend\nlocal g = function()\n  print(1)\nend\n",
         );
     }
 

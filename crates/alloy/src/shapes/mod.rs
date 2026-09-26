@@ -800,7 +800,11 @@ pub fn fold(text: &str, known: &Known) -> String {
     fold_rig_characters(&mut out);
     fold_interfaces(&mut out, known);
     fold_bound_records(&mut out, known);
+    // Before the parentheses fold: `(Player & { ... }) | Player` keeps
+    // `(Player)` once the table goes, and that fold drops the pair.
+    fold_refinement_tables(&mut out);
     fold_name_parens(&mut out);
+    fold_call_values(&mut out);
     fold_signalish(&mut out);
     fold_array_alias(&mut out);
     fold_narrowed_primitives(&mut out);
@@ -827,6 +831,8 @@ pub fn fold(text: &str, known: &Known) -> String {
     drop_free_clauses(&mut out);
     // The two arms of a cut Result read alike once the clause goes.
     fold_repeated_members(&mut out);
+    // A union that folded to one member keeps its parentheses.
+    fold_name_parens(&mut out);
 
     // `local p: Pair<number>` of `struct Pair<A, B = string>`: the
     // print names the arguments the source wrote, and the type carries
@@ -1076,7 +1082,7 @@ fn fold_repeated_members(text: &mut String) {
 }
 
 /// The type text with every union's repeated members dropped.
-fn dedupe_type(text: &str) -> String {
+pub fn dedupe_type(text: &str) -> String {
     let parts = split_union(text);
 
     if parts.len() > 1 {
@@ -1273,6 +1279,122 @@ fn fold_negated_members(text: &mut String) {
             None => return,
         }
     }
+}
+
+/// `__call_value<() -> (T...)>` is the std type function that reads the
+/// first value a call returns; `Result.pcall` uses it. It is no name a
+/// reader wrote, so it reads as the pack's name: `Result<T, string>`.
+fn fold_call_values(text: &mut String) {
+    const OPEN: &str = "__call_value<() -> ";
+
+    while let Some(at) = text.find(OPEN) {
+        let inner = at + OPEN.len();
+        // The `>` of `->` closes nothing, so count the angles by hand.
+        let mut depth = 1usize;
+        let mut end = None;
+        let bytes = text.as_bytes();
+
+        for i in inner..bytes.len() {
+            match bytes[i] {
+                b'<' => depth += 1,
+
+                b'>' if bytes[i - 1] != b'-' => {
+                    depth -= 1;
+
+                    if depth == 0 {
+                        end = Some(i);
+
+                        break;
+                    }
+                }
+
+                _ => {}
+            }
+        }
+
+        let Some(end) = end else {
+            return;
+        };
+        let body = text[inner..end].trim();
+        let body = body
+            .strip_prefix('(')
+            .and_then(|b| b.strip_suffix(')'))
+            .unwrap_or(body);
+        let name = body.strip_suffix("...").unwrap_or(body).to_string();
+
+        text.replace_range(at..=end, &name);
+    }
+}
+
+/// `Player & { read Character: ~(false?) }` is how the checker writes a
+/// value after `if player.Character then`: a table whose fields hold
+/// negations alone. The `else` branch gets `{ read Character: false? }`.
+/// Alloy cannot write either, and the value is still a `Player`. The
+/// table goes with its `&`, and the union that held the refined
+/// `Player` beside the plain one then folds to one `Player`.
+fn fold_refinement_tables(text: &mut String) {
+    let mut from = 0;
+
+    while let Some(i) = text[from..].find('{') {
+        let open = from + i;
+        let Some(len) = group_len(&text[open..], '{', '}') else {
+            return;
+        };
+        let end = open + len;
+
+        // A record of real fields may hold a refined one inside it.
+        if !refines(&text[open + 1..end - 1]) {
+            from = open + 1;
+
+            continue;
+        }
+
+        let before = text[..open].trim_end();
+
+        if let Some(head) = before.strip_suffix('&') {
+            let start = head.trim_end().len();
+            text.replace_range(start..end, "");
+            from = start;
+
+            continue;
+        }
+
+        match text[end..].trim_start().strip_prefix('&') {
+            Some(rest) => {
+                let keep = text.len() - rest.trim_start().len();
+                text.replace_range(open..keep, "");
+                from = open;
+            }
+
+            // A table that stands alone is the whole type.
+            None => from = end,
+        }
+    }
+}
+
+/// Whether the fields of a table each hold a refinement: a negation,
+/// `~nil` or `~(false?)`; a `read` field of `false?` or `nil`, which a
+/// failed test proves; or a table of such fields.
+fn refines(fields: &str) -> bool {
+    let parts: Vec<&str> = split_list(fields)
+        .into_iter()
+        .filter(|p| !p.is_empty())
+        .collect();
+
+    !parts.is_empty()
+        && parts.iter().all(|p| {
+            let Some(at) = label_end(p) else {
+                return false;
+            };
+            let ty = p[at..].trim();
+
+            ty.starts_with('~')
+                || p.starts_with("read ") && matches!(ty, "false?" | "nil")
+                || ty
+                    .strip_prefix('{')
+                    .and_then(|t| t.strip_suffix('}'))
+                    .is_some_and(refines)
+        })
 }
 
 /// The parts of a comma separated list at depth zero.
@@ -1598,7 +1720,9 @@ fn intersection_len(text: &str) -> Option<usize> {
 }
 
 /// `(Slot)?` is `Slot?`: the parentheses held an intersection that now
-/// reads as one name.
+/// reads as one name. So is `(Slot) | nil`, and `((T))` is `(T)`: a
+/// union that folds to one member keeps the group of the union and the
+/// group of the member.
 fn fold_name_parens(text: &mut String) {
     let mut from = 0;
 
@@ -1609,6 +1733,16 @@ fn fold_name_parens(text: &mut String) {
             break;
         };
         let inner = text[open + 1..open + len - 1].to_string();
+
+        // The group holds one group and nothing else. The inner group
+        // reads again at the same place, since it may hold one name.
+        if inner.starts_with('(') && group_len(&inner, '(', ')') == Some(inner.len()) {
+            text.replace_range(open..open + len, &inner);
+            from = open;
+
+            continue;
+        }
+
         // One named type, its arguments included. A union, an
         // intersection, an arrow, or a list needs the parentheses.
         let plain = inner.chars().next().is_some_and(char::is_alphabetic)
@@ -1627,8 +1761,15 @@ fn fold_name_parens(text: &mut String) {
         let annotated = text[..open].ends_with(": ")
             && !outside_angles(&inner, ':')
             && !text[open + len..].trim_start().starts_with("->");
+        // A member of a union or an intersection that is one name, as
+        // `(R15Character) | nil`. A name binds tighter than `|` and `&`.
+        let before = text[..open].trim_end();
+        let after = text[open + len..].trim_start();
+        let member = (before.ends_with(['|', '&']) || after.starts_with(['|', '&']))
+            && !outside_angles(&inner, ':')
+            && !outside_angles(&inner, ' ');
 
-        if plain && (suffix || annotated) {
+        if plain && (suffix || annotated || member) {
             text.replace_range(open..open + len, &inner);
             from = open + inner.len();
 
@@ -2435,10 +2576,74 @@ mod tests {
         let known = Known::default();
 
         assert_eq!(fold("intersect<T, ~nil>", &known), "T");
-        assert_eq!(fold("(a & ~nil) | { }", &known), "(a) | {}");
+        assert_eq!(fold("(a & ~nil) | { }", &known), "a | {}");
         assert_eq!(fold("Item & ~nil", &known), "Item");
         assert_eq!(fold("intersect<A, ~nil>[]", &known), "A[]");
         assert_eq!(fold("intersect<Item, Named>", &known), "Item & Named");
+    }
+
+    /// `if player.Character then` refines `player` to a `Player` whose
+    /// `Character` is not false or nil. The hover printed the table the
+    /// checker writes for that, in a union with the plain `Player`. A
+    /// union that holds `T` and `T & { refinement }` is `T`.
+    #[test]
+    fn a_field_refinement_reads_as_the_type_it_refines() {
+        let known = Known::default();
+        let refined = "Player & {\n    read Character: ~(false?)\n}";
+
+        // The declaration, as the child prints it.
+        assert_eq!(
+            fold(
+                &format!("```luau\nlocal player: ({refined}) | Player\n```"),
+                &known
+            ),
+            "```luau\nlocal player: Player\n```"
+        );
+        // Two refinements, one per test, fold the same way.
+        assert_eq!(
+            fold(
+                &format!(
+                    "local player: ({refined}) | (Player & {{\n    read Character: ~nil\n}}) | Player"
+                ),
+                &known
+            ),
+            "local player: Player"
+        );
+        // A use inside the branch holds the refined member alone.
+        assert_eq!(
+            fold(&format!("local player: {refined}"), &known),
+            "local player: Player"
+        );
+        // A refinement of a field of the field, and one written first.
+        assert_eq!(
+            fold(
+                "local m: (({ read Parent: ~nil } & Model) | Model | Model)?",
+                &known
+            ),
+            "local m: Model?"
+        );
+        assert_eq!(
+            fold(
+                "local p: Part & { read Parent: { read Parent: ~(false?) } }",
+                &known
+            ),
+            "local p: Part"
+        );
+        // The `else` branch proves the field false or nil.
+        assert_eq!(
+            fold(
+                "local m: ((Model & {\n    read Parent: false?\n}) | (Model & {\n    read Parent: ~(false?)\n}) | Model)?",
+                &known
+            ),
+            "local m: Model?"
+        );
+        // A record with a real field keeps it, and a negation the source
+        // wrote as the whole type stays.
+        assert_eq!(
+            fold("local r: Part & { Size: number }", &known),
+            "local r: Part & { Size: number }"
+        );
+        assert_eq!(fold("local v: ~nil", &known), "local v: ~nil");
     }
 
     fn known() -> Known {
@@ -2679,6 +2884,49 @@ mod tests {
         // Any other model keeps its shape.
         let other = "local m: Model & { Root: Part? }";
         assert_eq!(fold(other, &Known::default()), other);
+    }
+
+    /// A narrowed branch prints one type as a union of copies. Each copy
+    /// folds to one name and the union to one member, and no pair of
+    /// parentheses stays around it.
+    /// `Result.pcall` returns `Result<__call_value<() -> T...>, string>`;
+    /// the type function is no name a reader wrote.
+    #[test]
+    fn a_call_value_reads_as_its_pack() {
+        let mut text =
+            "function Result.pcall<T...>(f: (...any) -> (T...), ...: any): Result<__call_value<() -> (T...)>, string>"
+                .to_string();
+        fold_call_values(&mut text);
+        assert_eq!(
+            text,
+            "function Result.pcall<T...>(f: (...any) -> (T...), ...: any): Result<T, string>"
+        );
+
+        let mut nested = "Result<__call_value<() -> (Map<K, V>)>, string>".to_string();
+        fold_call_values(&mut nested);
+        assert_eq!(nested, "Result<Map<K, V>, string>");
+    }
+
+    #[test]
+    fn a_folded_union_keeps_no_parentheses() {
+        let rig = "(Model & {\n    HumanoidRootPart: Part?,\n    UpperTorso: MeshPart?\n})";
+        let three = format!("```luau\nlocal model: ({rig} | {rig} | {rig})?\n```");
+        assert_eq!(
+            fold(&three, &Known::default()),
+            "```luau\nlocal model: R15Character?\n```"
+        );
+
+        for (text, want) in [
+            ("local a: ((Part))?", "local a: Part?"),
+            ("local a: ((Part) | (Model))?", "local a: (Part | Model)?"),
+            ("local a: (Part) & (Model)", "local a: Part & Model"),
+            // A parameter list and a group that holds more keep theirs.
+            ("local f: (Part) -> ()", "local f: (Part) -> ()"),
+            ("local f: ((Part) -> ())?", "local f: ((Part) -> ())?"),
+            ("local u: (Part | Model)?", "local u: (Part | Model)?"),
+        ] {
+            assert_eq!(fold(text, &Known::default()), want, "{text}");
+        }
     }
 
     #[test]

@@ -1053,7 +1053,7 @@ impl Server {
     /// Publishes the Alloy diagnostics and the mapped child diagnostics
     /// of one source document.
     pub(crate) fn publish(&self, uri: &str) {
-        let mut st = self.state.lock().expect("state");
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
         if !st.docs.contains_key(uri) {
             return;
@@ -1112,7 +1112,12 @@ impl Server {
     /// file's own URI. Every pass republishes all three files, empty
     /// where nothing is wrong, so a renamed alias clears its report.
     pub(crate) fn publish_alias_problems(&self) {
-        let root = self.state.lock().expect("state").root.clone();
+        let root = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .root
+            .clone();
         let Some(root) = root else {
             return;
         };
@@ -2725,8 +2730,19 @@ impl State {
             .next()
             .map_or(at, |c| at + c.len_utf8());
 
+        // The target of an assignment, `t.n = 5` or `t.n += 1`, is no
+        // value to read: the child writes `extracted = 5`.
+        let target = alloy_syntax::lexer::lex(&doc.source).is_ok_and(|lexed| {
+            lexed
+                .toks
+                .iter()
+                .position(|t| t.start as usize == start && t.end as usize == end)
+                .is_some_and(|i| assignment_target(&lexed.toks, &doc.source, i))
+        });
+
         !branch
             && !key
+            && !target
             && !method
             && !nil_safe
             && !super::completion::in_constructor_braces(&doc.source, past)
@@ -2959,6 +2975,52 @@ fn edit_count(edit: &Value) -> usize {
     lists.filter_map(Value::as_array).map(Vec::len).sum()
 }
 
+/// Whether the name at token `i` sits in the targets of an assignment
+/// or of a compound one: `t` and `n` in `t.n = 5`, `a` in `a, b = 1, 2`.
+/// Each `.name` and `[index]` after the name belongs to its target. A
+/// name inside the index, `i` in `t[i] = 5`, is a value.
+fn assignment_target(toks: &[alloy_syntax::lexer::Tok], src: &str, i: usize) -> bool {
+    use alloy_syntax::lexer::TokKind;
+
+    const ASSIGN: [&str; 9] = ["=", "+=", "-=", "*=", "/=", "//=", "%=", "^=", "..="];
+    let text = |j: usize| toks.get(j).map_or("", |t| t.text(src));
+    let ident = |j: usize| toks.get(j).is_some_and(|t| t.kind == TokKind::Ident);
+    let target_end = |mut j: usize| {
+        loop {
+            if toks.get(j).is_some_and(|t| t.kind == TokKind::Dot) && ident(j + 1) {
+                j += 2;
+            } else if text(j) == "[" {
+                let mut depth = 0;
+
+                while j < toks.len() {
+                    match text(j) {
+                        "[" => depth += 1,
+
+                        "]" => depth -= 1,
+
+                        _ => {}
+                    }
+
+                    j += 1;
+
+                    if depth == 0 {
+                        break;
+                    }
+                }
+            } else {
+                return j;
+            }
+        }
+    };
+    let mut j = target_end(i + 1);
+
+    while text(j) == "," && ident(j + 1) {
+        j = target_end(j + 2);
+    }
+
+    ASSIGN.contains(&text(j))
+}
+
 /*
 Whether "Inline variable" keeps what the code does, for the declaration
 of `name` on the line that starts at byte `from`.
@@ -2969,6 +3031,10 @@ body, or after a later call that it ran before. So a literal and a
 plain name inline anywhere. Other values inline only when they read
 names, fields, and operators, and when one use at most reads them,
 outside any loop or function that starts after the declaration.
+
+The value also reads its names and fields at the use. An assignment to
+one of them before the use, `a = 10` or `t.n = 5`, changes what the use
+reads, so the action goes.
 */
 fn inline_keeps_behaviour(src: &str, from: usize, name: &str) -> bool {
     use alloy_syntax::lexer::TokKind;
@@ -3050,46 +3116,65 @@ fn inline_keeps_behaviour(src: &str, from: usize, name: &str) -> bool {
     }
 
     let value = eq + 1..end;
+    // A literal or a name reads the same at any use, loop or not.
+    let single = value.len() == 1;
 
-    if value.len() == 1 {
-        return matches!(
+    if single
+        && !matches!(
             toks[value.start].kind,
             TokKind::Number | TokKind::Str { .. } | TokKind::InterpStr | TokKind::Ident
-        );
+        )
+    {
+        return false;
     }
 
-    let pure = value.clone().all(|i| {
-        let call = i > value.start && ends_a_value(i - 1);
+    let member = |i: usize| i > 0 && matches!(toks[i - 1].kind, TokKind::Dot | TokKind::Colon);
+    let reads = |fields: bool| -> HashSet<&str> {
+        value
+            .clone()
+            .filter(|&i| toks[i].kind == TokKind::Ident && member(i) == fields)
+            .map(text)
+            .filter(|t| !WORDS.contains(t))
+            .collect()
+    };
+    let (names, fields) = (reads(false), reads(true));
 
-        match toks[i].kind {
-            TokKind::Ident => !matches!(
-                text(i),
-                "function" | "await" | "new" | "match" | "do" | "end" | "try"
-            ),
+    let pure = single
+        || value.clone().all(|i| {
+            let call = i > value.start && ends_a_value(i - 1);
 
-            TokKind::Number | TokKind::InterpMid | TokKind::InterpTail | TokKind::RParen => true,
+            match toks[i].kind {
+                TokKind::Ident => !matches!(
+                    text(i),
+                    "function" | "await" | "new" | "match" | "do" | "end" | "try"
+                ),
 
-            TokKind::Str { .. } | TokKind::InterpStr | TokKind::InterpHead | TokKind::LParen => {
-                !call
+                TokKind::Number | TokKind::InterpMid | TokKind::InterpTail | TokKind::RParen => {
+                    true
+                }
+
+                TokKind::Str { .. }
+                | TokKind::InterpStr
+                | TokKind::InterpHead
+                | TokKind::LParen => !call,
+
+                TokKind::Dot => toks.get(i + 1).is_some_and(|t| t.kind == TokKind::Ident),
+
+                TokKind::Colon => false,
+
+                // A table constructor and its `[key]`. A `[` after a value
+                // is an index, which can run `__index`.
+                TokKind::Symbol => match text(i) {
+                    "{" => !call,
+
+                    "[" => i > value.start && matches!(text(i - 1), "{" | "," | ";"),
+
+                    "}" | "]" | "," | ";" | "=" => true,
+
+                    t => OPERATORS.contains(&t),
+                },
             }
-
-            TokKind::Dot => toks.get(i + 1).is_some_and(|t| t.kind == TokKind::Ident),
-
-            TokKind::Colon => false,
-
-            // A table constructor and its `[key]`. A `[` after a value
-            // is an index, which can run `__index`.
-            TokKind::Symbol => match text(i) {
-                "{" => !call,
-
-                "[" => i > value.start && matches!(text(i - 1), "{" | "," | ";"),
-
-                "}" | "]" | "," | ";" | "=" => true,
-
-                t => OPERATORS.contains(&t),
-            },
-        }
-    });
+        });
 
     if !pure {
         return false;
@@ -3105,16 +3190,54 @@ fn inline_keeps_behaviour(src: &str, from: usize, name: &str) -> bool {
         IfValue,
     }
 
+    // Whether the name or the field at `i` is the target of an
+    // assignment, of a compound one, or of a new `local`. A key of a
+    // table constructor is none.
+    let assigned = |i: usize, in_table: bool| {
+        let before = if i > 0 { text(i - 1) } else { "" };
+
+        if before == "{" || (in_table && matches!(before, "," | ";")) {
+            return false;
+        }
+
+        (matches!(before, "local" | "function") && !member(i)) || assignment_target(toks, src, i)
+    };
+
     let mut open: Vec<Open> = Vec::new();
+    let mut brackets: Vec<&str> = Vec::new();
     let mut loop_head = false;
     let mut uses = 0;
+    let mut last_use = None;
+    let mut first_write = None;
+    let mut use_again = false;
+    let mut write_again = false;
 
     for i in end..toks.len() {
+        match text(i) {
+            t @ ("(" | "[" | "{") => brackets.push(t),
+
+            ")" | "]" | "}" => {
+                brackets.pop();
+            }
+
+            _ => {}
+        }
+
         if toks[i].kind != TokKind::Ident {
             continue;
         }
 
         let before = if i > 0 { text(i - 1) } else { "" };
+        let read = match member(i) {
+            true => fields.contains(text(i)),
+
+            false => names.contains(text(i)),
+        };
+
+        if read && assigned(i, brackets.last() == Some(&"{")) {
+            first_write.get_or_insert(i);
+            write_again |= open.contains(&Open::Again);
+        }
 
         match text(i) {
             "function" | "repeat" => open.push(Open::Again),
@@ -3161,18 +3284,25 @@ fn inline_keeps_behaviour(src: &str, from: usize, name: &str) -> bool {
             "case" | "default" if open.is_empty() && lines[i] > lines[i - 1] => break,
 
             word if word == name && !matches!(before, "." | ":") => {
-                if open.contains(&Open::Again) {
+                let again = open.contains(&Open::Again);
+
+                if again && !single {
                     return false;
                 }
 
                 uses += 1;
+                last_use = Some(i);
+                use_again |= again;
             }
 
             _ => {}
         }
     }
 
-    uses <= 1
+    // A write in a loop reaches a use in a loop on the next turn.
+    let moved = first_write.zip(last_use).is_some_and(|(w, u)| w < u);
+
+    !moved && !(write_again && use_again) && (single || uses <= 1)
 }
 
 /// The edits that double the `<` at `at` and the `>` that closes it:

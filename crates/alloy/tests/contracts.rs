@@ -118,6 +118,33 @@ fn a_wrong_shape_names_what_the_file_wrote() {
     );
 }
 
+/// A parameter's name is no part of the type, so `_y` meets `y`. The
+/// count and the types still count.
+#[test]
+fn a_shape_compares_the_types_and_not_the_names() {
+    let src = |params: &str| {
+        format!(
+            "attribute pass on struct as\n    requires function run(self, x: number, f: (number) -> (), t: {{ a: number, b: string }})\nend\n\n@pass\nstruct OnlyX as\n    n: number\nend\n\nimpl OnlyX as\n    function run{params}: ()\n    end\nend\n\nprint(OnlyX)\n"
+        )
+    };
+    clean(&src(
+        "(self, _x: number, _f: (number)->(), _t: { a: number, b: string })",
+    ));
+
+    for wrong in [
+        "(self, x: string, f: (number) -> (), t: { a: number, b: string })",
+        "(self, x: number, f: (number) -> ())",
+        "(self, x: number, f: (string) -> (), t: { a: number, b: string })",
+    ] {
+        assert_eq!(
+            one(&src(wrong)),
+            format!(
+                "`@pass` requires `run(self, x: number, f: (number) -> (), t: {{ a: number, b: string }})`; `OnlyX` declares `run{wrong}`"
+            )
+        );
+    }
+}
+
 /// A clause with no shape asks for the member alone.
 #[test]
 fn a_clause_without_a_shape_takes_any_signature() {
@@ -240,6 +267,114 @@ fn a_contract_reads_the_struct_and_its_impls_together() {
         "@service\nstruct S as\n    x: number\nend\n\n",
         "impl S as\n    public function Start(self): ()\n    end\nend\n\nprint(S)\n"
     ));
+}
+
+/// `export default struct` declares a struct like any other, so its
+/// contract holds, and the name the contract asks for keeps its case.
+#[test]
+fn a_contract_holds_under_export_default() {
+    let decl = "attribute starts on struct as\n    requires function Start(self)\nend\n\n";
+    let missing = format!("{decl}@starts\nexport default struct Door\n    x: number\nend\n");
+    assert_eq!(
+        one(&missing),
+        "`@starts` requires a function `Start(self)`; `Door` declares none"
+    );
+
+    let met = format!(
+        "{decl}@starts\nexport default struct Door\n    x: number\nend\n\nimpl Door\n    function Start(self): ()\n        print(self.x)\n    end\nend\n"
+    );
+    let out = compile(&met);
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    assert!(
+        out.lints.iter().all(|l| l.name != "naming_convention"),
+        "{:?}",
+        out.lints
+    );
+}
+
+/// A struct inside a function has members too. The contract read the
+/// file's declarations alone and found none.
+#[test]
+fn a_contract_reads_a_struct_inside_a_function() {
+    let decl = "attribute has_x on struct, impl as\n    requires field x\n    requires function run(self)\nend\n\n";
+    clean(&format!(
+        "{decl}function make(): ()\n    @has_x\n    struct Inner as\n        x: number\n    end\n\n    impl Inner as\n        function run(self): ()\n            print(self.x)\n        end\n    end\n\n    print(Inner.new({{ x = 1 }}))\nend\n\nmake()\n"
+    ));
+    assert_eq!(
+        one(&format!(
+            "{decl}function make(): ()\n    @has_x\n    struct Inner as\n        y: number\n    end\n\n    impl Inner as\n        function run(self): ()\n            print(self.y)\n        end\n    end\n\n    print(Inner.new({{ y = 1 }}))\nend\n\nmake()\n"
+        )),
+        "`@has_x` requires a field `x`; `Inner` declares none"
+    );
+}
+
+/// The walk never went into a namespace member, so a contract in a
+/// function body there went unchecked. Each nesting reads its own
+/// structs and impls: a function, an impl method, a nested function,
+/// a nested namespace.
+#[test]
+fn a_contract_reads_a_struct_inside_a_namespace_member() {
+    let decl = "attribute starts on struct, impl as\n    requires function Start(self)\nend\n\n";
+    let local = |name: &str, start: &str| {
+        format!(
+            "        struct {name} as\n            x: number\n        end\n\n        @starts\n        impl {name} as\n{start}        end\n\n        print({name}.new({{ x = 1 }}))\n"
+        )
+    };
+    let src = |start: &str| {
+        format!(
+            "{decl}namespace Group as\n    public function e(): ()\n{}    end\n\n    struct Host as\n        y: number\n    end\n\n    impl Host as\n        function make(self): ()\n{}            print(self.y)\n        end\n    end\n\n    public function deep(): ()\n        local function inner(): ()\n{}        end\n\n        inner()\n    end\n\n    namespace Inner as\n        public function f(): ()\n{}        end\n    end\nend\n\nprint(Group.e, Group.deep, Group.Inner.f, Group.Host.new({{ y = 1 }}))\n",
+            local("E", start),
+            local("InMethod", start),
+            local("InNested", start),
+            local("InInner", start),
+        )
+    };
+
+    clean(&src(
+        "            function Start(self): ()\n                print(self.x)\n            end\n",
+    ));
+    assert_eq!(
+        messages(&src("")),
+        ["E", "InMethod", "InNested", "InInner"]
+            .map(|n| format!("`@starts` requires a function `Start(self)`; `{n}` declares none"))
+    );
+}
+
+/// A member of a namespace renders as `Probe_B`, and the report on the
+/// `impl` named it so. It names the path, as the report on the struct
+/// and a StructError do.
+#[test]
+fn a_contract_names_a_namespace_member_by_its_path() {
+    let src = "attribute probe on struct, impl as\n    requires function Start(self)\nend\n\nnamespace Probe as\n    @probe\n    public struct B as\n        x: number\n    end\n\n    @probe\n    impl B as\n    end\nend\n\nprint(Probe.B.new({ x = 1 }))\n";
+    assert_eq!(
+        messages(src),
+        ["`@probe` requires a function `Start(self)`; `Probe.B` declares none"; 2]
+    );
+
+    // The tables keep the rendered name, so the method gap of the
+    // struct finds its impl.
+    let gaps = compile(src).contract_gaps;
+    assert_eq!(gaps.len(), 2, "{gaps:?}");
+
+    for gap in gaps {
+        assert!(
+            src[..gap.insert_at as usize].ends_with("impl B as\n    "),
+            "{}",
+            &src[..gap.insert_at as usize]
+        );
+    }
+}
+
+/// A syntax error in an impl made the parser close it early, and the
+/// contract reported that the impl declares none of its methods. The
+/// syntax error comes alone.
+#[test]
+fn a_syntax_error_draws_no_contract_report() {
+    let src = "attribute starts on struct as\n    requires function Start(self)\nend\n\n@starts\nstruct Counter as\n    n: number\nend\n\nimpl Counter as\n    function add(self, name: string): ()\n        if const stem n = string.match(name, 'x') then\n            print(stem)\n        end\n    end\n\n    function Start(self): ()\n    end\nend\n\nprint(Counter)\n";
+    let got = messages(src);
+    assert!(!got.is_empty());
+    assert!(!got.iter().any(|m| m.contains("declares none")), "{got:?}");
+    assert!(compile(src).contract_gaps.is_empty());
 }
 
 /// The contract is a check: the emit is what it was.

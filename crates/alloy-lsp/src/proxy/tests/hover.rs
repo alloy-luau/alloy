@@ -106,6 +106,40 @@ pub(crate) fn a_bound_reads_where_the_source_wrote_it() {
         "export function cheapest<T: Priced>(a: T, b: T): T"
     );
 }
+/// The copy of a trait's default method printed its receiver with no
+/// name, `CropKind.describe(CropKind)`, where a method the `impl` writes
+/// reads `self: CropKind`. The copy reads the same way.
+#[test]
+fn a_trait_default_copy_names_its_receiver() {
+    let src = concat!(
+        "enum CropKind\n",
+        "    Wheat\n",
+        "end\n",
+        "trait Describe\n",
+        "    function label(self): string\n",
+        "    function describe(self): string\n",
+        "        return self:label()\n",
+        "    end\n",
+        "end\n",
+        "impl Describe for CropKind\n",
+        "    function label(self): string\n",
+        "        return \"w\"\n",
+        "    end\n",
+        "end\n",
+        "print(CropKind.describe(CropKind.Wheat))\n",
+    );
+
+    assert_eq!(
+        hover_of(src, 14, 17, "function CropKind.describe(CropKind): string"),
+        "function CropKind.describe(self: CropKind): string"
+    );
+    // A plain function of the type keeps its print.
+    assert_eq!(
+        hover_of(src, 14, 17, "function CropKind.make(CropKind): string"),
+        "function CropKind.make(CropKind): string"
+    );
+}
+
 /// A bound reaches a local through the cast the check artifact writes.
 /// The artifact puts `(T & Ord)` on the array's element and on the read
 /// of one, so the trait's record prints twice, and the two assignments
@@ -1197,9 +1231,9 @@ fn the_arrow_setting_reaches_the_return_hint_alone() {
 
 /*
 `$dbg(Point.new(1))`: the emit writes the argument as a string for the
-message and as code after it. A caret inside the inner call maps to
-the string, where the child sees no call to help with; the code copy
-is where it answers. A call outside an intrinsic maps to code already.
+message and as code after it. The string holds no call for the child
+to help with; the code copy is where it answers. A call outside an
+intrinsic maps to code already.
 */
 #[test]
 fn a_call_inside_an_intrinsic_argument_maps_to_its_code_copy() {
@@ -1217,6 +1251,39 @@ fn a_call_inside_an_intrinsic_argument_maps_to_its_code_copy() {
     // The intrinsic's own list, and a call outside one.
     assert_eq!(home(10, 16), None);
     assert_eq!(home(11, 26), None);
+}
+
+/// Signature help right after the `(` of `E.plain(E.A)` inside
+/// `$assert_eq` gave nothing: the caret sat on the base `E` of the
+/// argument, where the child answers no signature. Outside an
+/// intrinsic the caret moves to the `.`; inside one it moves the same.
+#[test]
+fn a_caret_before_a_variant_inside_an_intrinsic_moves_to_its_dot() {
+    let src = "enum E\n    A\nend\n\nimpl E\n    function plain(self): string\n        return \"p\"\n    end\nend\n\nprint(E.plain(E.A))\n$assert_eq(E.plain(E.A), \"p\")\n";
+    let state = super::support::files(&[("file:///s.aly", src)]);
+    let server = Server::new(
+        Box::new(std::io::sink()),
+        Box::new(std::io::sink()),
+        Vec::new(),
+        None,
+    );
+    *server.state.lock().expect("state") = state;
+    let home = |line: u32, character: u32| {
+        let message = json!({ "params": {
+            "textDocument": { "uri": "file:///s.aly" },
+            "position": { "line": line, "character": character },
+        } });
+        let shadow = server.state.lock().expect("state").docs["file:///s.aly"]
+            .shadow
+            .clone();
+        let (l, c) = server.signature_home("file:///s.aly", &message)?;
+        let text = shadow.lines().nth(l as usize)?.to_string();
+
+        Some(text[..c as usize].to_string())
+    };
+
+    assert!(home(10, 14).expect("print").ends_with("E.plain(E"));
+    assert!(home(11, 19).expect("assert_eq").ends_with("E.plain(E"));
 }
 
 /*
@@ -2310,6 +2377,57 @@ fn a_namespace_struct_value_hovers_by_its_name() {
     );
 }
 
+/// `local first = boxes[1]` with `boxes: { Box }` hovered as `Crate`, a
+/// struct of the same fields, and a `for` variable over the list as
+/// `t1`. The element type the annotation writes names both. A class by
+/// hand is no struct, so the shape of its instance names none.
+#[test]
+fn an_element_of_a_list_hovers_by_the_type_its_annotation_writes() {
+    const SRC: &str = concat!(
+        "local Box = {}\n",
+        "Box.__index = Box\n",
+        "export type Box = typeof(setmetatable({} :: { n: number }, Box))\n",
+        "function Box.new(): Box\n",
+        "  return setmetatable({ n = 1 }, Box)\n",
+        "end\n",
+        "struct Crate\n",
+        "  n: number\n",
+        "end\n",
+        "local boxes: { Box } = { Box.new() }\n",
+        "local first = boxes[1]\n",
+        "for _, b in ipairs(boxes) do\n",
+        "  print(b.n)\n",
+        "end\n",
+        "print(first, new Crate { n = 1 })\n",
+    );
+    let (st, uri) = one_file(SRC);
+    let doc = st.docs.get(uri).expect("doc");
+    let printed =
+        "t2 where t1 = {\n    new: () -> t2\n} ; t2 = { @metatable t1,\n{\n    n: number\n} }";
+    let local = |name: &str, line: u32, character: u32| {
+        let value = format!("```alloy\nlocal {name}: {printed}\n```");
+
+        crate::proxy::hover::name_solver_local(&st, &value, doc, line, character)
+    };
+
+    assert_eq!(
+        local("first", 10, 7).as_deref(),
+        Some("```alloy\nlocal first: Box\n```")
+    );
+    assert_eq!(
+        local("b", 11, 7).as_deref(),
+        Some("```alloy\nlocal b: Box\n```")
+    );
+    assert_eq!(
+        local("b", 12, 9).as_deref(),
+        Some("```alloy\nlocal b: Box\n```")
+    );
+    assert_eq!(
+        name_solver_struct(&format!("```alloy\nlocal x: {printed}\n```"), doc, &[]),
+        None
+    );
+}
+
 /// A remote of `net` sends `{ Stack }`, and only `net` imports `Stack`.
 /// The client reaches the struct through `net`: the hover names it, and
 /// `s.` offers no `new`. An enum field of a struct binds its own
@@ -2835,4 +2953,177 @@ fn a_method_hover_binds_the_receiver_arguments() {
     );
     // Off a call there is no receiver to bind.
     assert_eq!(bind_hover_receiver(printed, doc, 10, 6), None);
+}
+
+/// `import { twice as t2 } from "./index"`, where the barrel sends on
+/// the macro of `./mac`: the hover on `$t2` gave nothing. The barrel's
+/// list keyed the macro without its sigil. It reads the macro's
+/// declaration, as `$twice` does.
+#[test]
+fn a_macro_through_a_barrel_hovers_by_its_declaration() {
+    use super::documents::Recorder;
+
+    let dir = std::env::temp_dir().join(format!("alloy-barrel-macro-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n",
+    )
+    .expect("alloy.toml");
+    let src = "import { twice as t2 } from \"./index\"\nprint($t2(3))\n";
+    let sources = [
+        (
+            "mac",
+            "-- Doubles a value.\nexport macro twice(x)\n    x * 2\nend\n",
+        ),
+        ("index", "export { twice } from \"./mac\"\n"),
+        ("use", src),
+    ];
+    let mut state = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        ..State::default()
+    };
+
+    for (name, source) in sources {
+        let path = dir.join(format!("src/{name}.aly"));
+        std::fs::write(&path, source).expect("source");
+        let uri = path_to_uri(&path);
+        let (options, jsx) = state.options_for(&uri);
+        state
+            .docs
+            .insert(uri, Doc::new(source.to_string(), 1, &options, &jsx, None));
+    }
+
+    let uri = path_to_uri(&dir.join("src/use.aly"));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let server = Server::new(
+        Box::new(std::io::sink()),
+        Box::new(Recorder(Arc::clone(&log))),
+        Vec::new(),
+        None,
+    );
+    *server.state.lock().expect("state") = state;
+    let (line, character) = position_of(src, src.find("t2(3)").unwrap() + 1);
+    let message = json!({ "params": {
+        "textDocument": { "uri": uri },
+        "position": { "line": line, "character": character },
+    } });
+    let answered = server.declaration_hover(&uri, &message, &json!(1));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(answered);
+
+    let sent = String::from_utf8_lossy(&log.lock().expect("the log")).into_owned();
+    assert!(sent.contains("macro twice(x)"), "{sent}");
+}
+
+/// `{if ok then "a" else "b"}` in markup: the hover on `if` printed the
+/// cast the property takes, `number | string | { read getValue: ... }`.
+/// A copy of the shadow with the cast blanked answers the type of the
+/// `if`, and every byte keeps its place.
+#[test]
+fn a_keyword_in_a_markup_value_reads_the_value_uncast() {
+    let shadow = "return React.createElement(\"TextLabel\", { Text = (__alloy.prop :: (string | number) -> (string | number))(if ok then \"a\" else \"b\") })\n";
+    let plain = super::super::hover::uncast_props(shadow);
+
+    assert_eq!(plain.len(), shadow.len());
+    assert!(plain.contains("(__alloy.prop "), "{plain}");
+    assert!(!plain.contains("::"), "{plain}");
+    assert!(plain.contains(")(if ok then \"a\" else \"b\")"), "{plain}");
+}
+
+/// A barrel binds `Remotes` with `import * as` and sends it on. The
+/// hover on `Remotes.Plant` printed the remote's runtime table, where
+/// `R.Plant` under a star import reads the declaration. Both reads
+/// through the barrel give the declaration too.
+#[test]
+fn a_remote_through_a_barrel_hovers_by_its_declaration() {
+    use super::documents::Recorder;
+
+    let dir = std::env::temp_dir().join(format!("alloy-barrel-remote-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n",
+    )
+    .expect("alloy.toml");
+    let src = "import { Remotes } from \"./index\"\nimport * as Idx from \"./index\"\nRemotes.Plant.fire(1)\nIdx.Remotes.Plant.fire(2)\n";
+    let sources = [
+        ("Remotes", "export remote Plant(slot: number) from client\n"),
+        (
+            "index",
+            "import * as Remotes from \"./Remotes\"\nexport { Remotes }\n",
+        ),
+        ("use", src),
+    ];
+    let mut state = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        ..State::default()
+    };
+
+    for (name, source) in sources {
+        let path = dir.join(format!("src/{name}.aly"));
+        std::fs::write(&path, source).expect("source");
+        let uri = path_to_uri(&path);
+        let (options, jsx) = state.options_for(&uri);
+        state
+            .docs
+            .insert(uri, Doc::new(source.to_string(), 1, &options, &jsx, None));
+    }
+
+    let uri = path_to_uri(&dir.join("src/use.aly"));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let server = Server::new(
+        Box::new(std::io::sink()),
+        Box::new(Recorder(Arc::clone(&log))),
+        Vec::new(),
+        None,
+    );
+    *server.state.lock().expect("state") = state;
+    let hover = |needle: &str| {
+        let (line, character) = position_of(src, src.find(needle).unwrap());
+        let message = json!({ "params": {
+            "textDocument": { "uri": uri },
+            "position": { "line": line, "character": character },
+        } });
+        log.lock().expect("the log").clear();
+        let answered = server.source_binding_hover(&uri, &message, &json!(1));
+
+        answered.then(|| String::from_utf8_lossy(&log.lock().expect("the log")).into_owned())
+    };
+    let named = hover("Plant.fire(1)");
+    let pathed = hover("Plant.fire(2)");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(named.is_some_and(|s| s.contains("remote Plant(slot: number) from client")));
+    assert!(pathed.is_some_and(|s| s.contains("remote Plant(slot: number) from client")));
+}
+
+/// `player.Character` inside `if player.Character then` read the
+/// optional type the class declares. The checker reads the value there
+/// as not nil, so the hover drops the `?`. Outside the `if` and in the
+/// `else`, the `?` stays.
+#[test]
+fn a_tested_field_hovers_without_its_optional() {
+    let src = "local function a()\n    if player.Character then\n        print(player.Character)\n    else\n        print(player.Character)\n    end\n    print(player.Character)\nend\n";
+    let (st, uri) = one_file(src);
+    let doc = st.docs.get(uri).expect("doc");
+    let child = "```alloy\nR15Character?\n```";
+
+    assert_eq!(
+        narrowed_field(child, doc, 2, 24).as_deref(),
+        Some("```alloy\nR15Character\n```")
+    );
+    assert_eq!(narrowed_field(child, doc, 4, 24), None);
+    assert_eq!(narrowed_field(child, doc, 6, 20), None);
+    // The receiver is a value of its own, and a declaration is no field.
+    assert_eq!(narrowed_field(child, doc, 2, 14), None);
+    assert_eq!(
+        narrowed_field("```alloy\nlocal x: R15Character?\n```", doc, 2, 24),
+        None
+    );
 }

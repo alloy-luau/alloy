@@ -97,6 +97,17 @@ describe("Result", function()
 		expect(tostring(bad._1)).toContain("split")
 	end)
 
+	it("pcall takes a function that returns nothing", function()
+		local ran = false
+		local function mark(): ()
+			ran = true
+		end
+		local r: alloy.Result<nil, string> = Result.pcall(mark)
+		expect(r:is_ok()).toBe(true)
+		expect(r:ok()).toBeNil()
+		expect(ran).toBe(true)
+	end)
+
 	it("try_block wraps a plain value and passes a Result through", function()
 		expect(alloy.try_block(function()
 			return 4

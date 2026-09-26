@@ -401,10 +401,16 @@ fn a_star_import_folds_a_namespace_type() {
 /// `import type { A }` of a namespace writes one alias per member. A
 /// namespace is no type of its own: the module exports `A_Shape`, so
 /// `type A = _m1.A` names nothing. A plain type in the same list keeps
-/// its own alias.
+/// its own alias. The ship artifact drops the line, so the check
+/// artifact holds the aliases.
 #[test]
 fn a_type_only_import_writes_the_namespace_aliases() {
     let dir = temp_project("type-only-namespace");
+    fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nout = \"out\"\nartifact = \"check\"\n",
+    )
+    .unwrap();
     fs::write(
         dir.join("src/decl.aly"),
         "export namespace A as\n    struct Shape as\n        n: number\n    end\n    namespace B as\n        struct Deep as\n            m: number\n        end\n    end\nend\n\nexport type Meters = number\n",
@@ -959,7 +965,8 @@ fn a_struct_pattern_covers_its_shape() {
 /// shipped into the `.luau` and `build` called it a success.
 #[test]
 fn a_class_reports_once_and_leaves_no_text() {
-    let src = "class Critter\n    public hp: number\n    function heal(self) end\nend\n";
+    // A field default parses too, so it keeps the one report.
+    let src = "class Critter\n    public hp: number\n    belt: number = 8\n    function heal(self) end\nend\n";
     let (ship, check, messages) = compile(src);
 
     assert_eq!(

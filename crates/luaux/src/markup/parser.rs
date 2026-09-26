@@ -635,6 +635,39 @@ mod tests {
             .collect()
     }
 
+    /// Markup inside a hole is markup, so its text may hold what Luau
+    /// reads as a string, a comment or a long bracket. The brace matcher
+    /// read it as Luau, and `Don't` opened a string that never closed.
+    #[test]
+    fn a_hole_skips_the_markup_inside_it() {
+        for text in [
+            "Don't stop",
+            "say \"hi",
+            "a `tick",
+            "-- no comment",
+            "[[ no string",
+            "Don't {count} left",
+            "a {'}'} b",
+        ] {
+            let hole = format!("on and <TextLabel Text=\"{{\">{text}</TextLabel>");
+            let src = format!("<Frame>{{{hole}}}</Frame>");
+            let element = element(&src);
+
+            assert_eq!(
+                summary(&element.children),
+                [format!("expr:{hole}")],
+                "{src}"
+            );
+        }
+
+        // Luau in the hole still reads as Luau: the `}` in the string and
+        // the one in the comment close nothing.
+        let src = "<Frame>{f('}', \"<\") -- }\n}</Frame>";
+        let element = element(src);
+
+        assert_eq!(summary(&element.children), ["expr:f('}', \"<\") -- }"]);
+    }
+
     #[test]
     fn parses_self_closing_element() {
         let element = element("<Frame/>");

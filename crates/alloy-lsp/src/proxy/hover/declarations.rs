@@ -10,7 +10,7 @@ impl Server {
             return false;
         };
 
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
         let Some(doc) = st.docs.get(uri) else {
             return false;
@@ -167,7 +167,7 @@ impl Server {
             return false;
         };
 
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
         let Some(doc) = st.docs.get(uri) else {
             return false;

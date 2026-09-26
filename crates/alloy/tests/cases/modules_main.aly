@@ -10,7 +10,7 @@ import { add, total, MAX_STACK as CAP } from "./inventory"
 -- emits: local _m = require("./inventory") local add = _m.add type Inventory = _m.Inventory
 import { add as add_item, type Inventory } from "./inventory"
 
--- A type-only import. `erase_type_imports` blanks it in the ship artifact.
+-- A type-only import. The ship artifact blanks it.
 import type { Item } from "./inventory"
 
 -- A bare name takes the module's `export default`, under any name.

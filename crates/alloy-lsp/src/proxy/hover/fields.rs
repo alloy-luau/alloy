@@ -13,7 +13,7 @@ impl Server {
             return false;
         };
 
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
         let Some(doc) = st.docs.get(uri) else {
             return false;
@@ -748,8 +748,10 @@ pub(crate) fn used_field_hover(st: &State, doc: &Doc, start: usize, end: usize) 
 /// A local whose hover prints a solver variable, `local b: t2 where t1 =
 /// ...`, names nothing a reader wrote. The checker prints a type that
 /// holds an imported struct that way. The binding's first value says
-/// what it holds: the type its `new` constructs, or the declared type of
-/// the field it reads.
+/// what it holds: the type its `new` constructs, the declared type of
+/// the field it reads, or the element type the annotation of the list
+/// it indexes writes. A `for` variable reads the element type of the
+/// list it walks.
 pub(crate) fn name_solver_local(
     st: &State,
     value: &str,
@@ -779,16 +781,26 @@ pub(crate) fn name_solver_local(
     let line_end = doc.source[end..]
         .find('\n')
         .map_or(doc.source.len(), |i| end + i);
-    let (line_start, declared) = context::declared_at(&doc.source, line_end, word)?;
-    let context::Declared::Init(init) = declared else {
-        return None;
-    };
-    let named = match init.strip_prefix("new ") {
-        Some(after) => super::restyle::constructed_type(doc, after)?,
+    let declared = context::declared_at(&doc.source, line_end, word);
+    let named = match loop_element(&doc.source, line_end, word) {
+        // The nearer binder of the name is the one the caret reads.
+        Some((at, element)) if declared.as_ref().is_none_or(|(d, _)| *d < at) => element,
 
-        None => read_field_type(st, doc, line_start, &init)
-            .or_else(|| plain_table_alias(doc, &init))
-            .or_else(|| class_instance(doc, &init, body))?,
+        _ => {
+            let (line_start, declared) = declared?;
+            let context::Declared::Init(init) = declared else {
+                return None;
+            };
+
+            match init.strip_prefix("new ") {
+                Some(after) => super::restyle::constructed_type(doc, after)?,
+
+                None => read_field_type(st, doc, line_start, &init)
+                    .or_else(|| indexed_element(doc, line_start, &init))
+                    .or_else(|| plain_table_alias(doc, &init))
+                    .or_else(|| class_instance(doc, &init, body))?,
+            }
+        }
     };
     let named = match printed.ends_with('?') && !named.ends_with('?') {
         true => format!("{named}?"),
@@ -797,6 +809,54 @@ pub(crate) fn name_solver_local(
     };
 
     Some(format!("{fence}\n{head}: {named}\n```{tail}"))
+}
+
+/// `boxes[1]`, where the declaration of `boxes` writes `{ Box }`: the
+/// element type the annotation names.
+fn indexed_element(doc: &Doc, line_start: usize, init: &str) -> Option<String> {
+    let (list, index) = init.split_once('[')?;
+    let index = index.strip_suffix(']')?;
+
+    if !is_ident(list) || index.contains(['[', ']']) {
+        return None;
+    }
+
+    annotated_element(&doc.source, line_start, list)
+}
+
+/// The element type the annotation of `list` writes, above `offset`.
+fn annotated_element(src: &str, offset: usize, list: &str) -> Option<String> {
+    match context::declared(src, offset, list)? {
+        context::Declared::Annotation(t) => element_of(&t),
+
+        context::Declared::Init(_) => None,
+    }
+}
+
+/// `for _, p in plots do`, the nearest one above `offset` that binds
+/// `name` as its value: the byte its line starts at, and the element
+/// type the annotation of `plots` writes. `ipairs(plots)` and
+/// `pairs(plots)` read the same list.
+fn loop_element(src: &str, offset: usize, name: &str) -> Option<(usize, String)> {
+    let head = &src[..offset.min(src.len())];
+
+    head.lines().rev().find_map(|line| {
+        let start = line.as_ptr() as usize - head.as_ptr() as usize;
+        let rest = line.trim_start().strip_prefix("for ")?;
+        let (names, rest) = rest.split_once(" in ")?;
+        let list = rest.trim_end().strip_suffix("do")?.trim();
+        let list = ["ipairs(", "pairs("]
+            .iter()
+            .find_map(|w| list.strip_prefix(w)?.strip_suffix(')'))
+            .unwrap_or(list)
+            .trim();
+
+        if names.split(',').nth(1).map(str::trim) != Some(name) {
+            return None;
+        }
+
+        Some((start, annotated_element(src, start, list)?))
+    })
 }
 
 /// `local alias = Provider`, where `Provider` is a plain table of this
@@ -892,6 +952,14 @@ pub(crate) fn name_solver_struct(
     // `{ @metatable t1,\n{ x: number } }`: the record after the comma.
     let struct_named = |meta: usize| {
         let comma = meta + printed[meta..].find(',')? + 1;
+
+        if !struct_metatable(
+            printed,
+            printed[meta + "@metatable ".len()..comma - 1].trim(),
+        ) {
+            return None;
+        }
+
         let open = comma + printed[comma..].find(|c: char| !c.is_whitespace())?;
 
         if !printed[open..].starts_with('{') {
@@ -984,6 +1052,40 @@ pub(crate) fn name_solver_struct(
     })
 }
 
+/// Whether the metatable `var` binds in a print can be a struct's. A
+/// struct's `new` takes its fields as one record, `new: (f: { x:
+/// number }) -> t2`. A class by hand, `Box.new()`, may hold a record of
+/// the same fields, and it is no struct.
+fn struct_metatable(printed: &str, var: &str) -> bool {
+    let Some(open) = [format!("where {var} = {{"), format!("; {var} = {{")]
+        .iter()
+        .find_map(|b| printed.find(b.as_str()).map(|i| i + b.len() - 1))
+    else {
+        return true;
+    };
+    let Some(len) = super::restyle::group_len(&printed[open..], '{', '}') else {
+        return true;
+    };
+    let table = &printed[open..open + len];
+
+    match table.find("new: (") {
+        Some(at) => {
+            let params = table[at + "new: (".len()..].trim_start();
+
+            params.starts_with('{')
+                || params
+                    .split_once(':')
+                    .is_some_and(|(n, t)| is_ident(n) && t.trim_start().starts_with('{'))
+        }
+
+        None => true,
+    }
+}
+
+fn is_ident(text: &str) -> bool {
+    !text.is_empty() && text.chars().all(|c| c.is_alphanumeric() || c == '_')
+}
+
 /// The declared type of the field a chain reads, `save?.inventory.slots`
 /// on the line that starts at `line_start`. A `?.` makes it optional.
 fn read_field_type(st: &State, doc: &Doc, line_start: usize, chain: &str) -> Option<String> {
@@ -1022,7 +1124,7 @@ impl Server {
         }
 
         let (line, character) = position_of_message(message)?;
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let doc = st.docs.get(uri)?;
         let Caret { offset, .. } = Caret::at(&doc.source, line, character)?;
         let (at, _) = literal_key(&doc.source, offset)?;

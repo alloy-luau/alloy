@@ -246,6 +246,7 @@ impl<'a> Parser<'a> {
         };
 
         Ok(Stmt::Attribute(AttributeDecl {
+            attributes: Vec::new(),
             exported,
             name,
             params,

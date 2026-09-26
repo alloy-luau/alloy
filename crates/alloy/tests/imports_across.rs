@@ -82,6 +82,32 @@ fn a_build_requires_the_output_of_the_other_project() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// `export { } from` requires its module as an import does, so it
+/// builds the other project and requires its output. It wrote the
+/// source path, which no build writes, and built nothing.
+#[test]
+fn a_re_export_builds_the_other_project() {
+    let dir = workspace("re-export", &["main", "shared"]);
+    fs::write(dir.join("shared/src/util.aly"), UTIL).unwrap();
+    fs::write(
+        dir.join("main/src/barrel.aly"),
+        "export { double } from \"../../shared/src/util\"\n",
+    )
+    .unwrap();
+
+    let report = build(&dir.join("main"));
+
+    assert!(report.is_clean(), "{:?}", messages(&report));
+    let out = fs::read_to_string(dir.join("main/build/barrel.luau")).unwrap();
+    assert!(
+        out.contains("require(\"../../shared/build/util\")"),
+        "{out}"
+    );
+    assert!(dir.join("shared/build/util.luau").is_file());
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_chain_of_three_builds_from_the_end() {
     let dir = workspace("chain", &["a", "b", "c"]);
@@ -285,6 +311,109 @@ fn flux_sees_the_other_project_and_types_the_import() {
     assert_eq!(
         errors,
         vec!["3:16 Expected this to be 'number', but got 'string'".to_string()]
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A mount of the other project's output gives the require its place.
+/// Roblox climbs instances, so the disk path failed there, and luau-lsp
+/// read it the same way in the check artifact. The mount may sit beside
+/// the root, `../shared/build`, or inside it.
+#[test]
+fn a_mounted_dependency_takes_its_place() {
+    let dir = workspace("mounted", &["main", "shared"]);
+    fs::write(dir.join("shared/src/util.aly"), UTIL).unwrap();
+    fs::create_dir_all(dir.join("main/src/server")).unwrap();
+    fs::write(
+        dir.join("main/src/server/main.server.aly"),
+        "import { double } from \"../../../shared/src/util\"\n\nprint(double(21))\n",
+    )
+    .unwrap();
+    let place = "require(\"@game/ReplicatedStorage/Shared/util\")";
+
+    for mount in ["../shared/build", "lib/build"] {
+        if mount == "lib/build" {
+            fs::rename(dir.join("shared"), dir.join("main/lib")).unwrap();
+            fs::write(
+                dir.join("main/src/server/main.server.aly"),
+                "import { double } from \"../../lib/src/util\"\n\nprint(double(21))\n",
+            )
+            .unwrap();
+        }
+
+        fs::write(
+            dir.join("main/alloy.toml"),
+            format!(
+                "{TOML}\n[mount]\nserver = [\"src/server\", \"@game/ServerScriptService/Server\"]\nlib = [\"{mount}\", \"@game/ReplicatedStorage/Shared\"]\n"
+            ),
+        )
+        .unwrap();
+
+        let root = dir.join("main");
+        let report = build(&root);
+        assert!(report.is_clean(), "{mount}: {:?}", messages(&report));
+        let ship = fs::read_to_string(root.join("build/server/main.server.luau")).unwrap();
+        assert!(ship.contains(place), "{mount}: {ship}");
+
+        let config = Config::load(&root.join("alloy.toml")).unwrap();
+        let report = alloy::build::flux_project(&root, &config).unwrap();
+        assert!(
+            report.checks[0].check.contains(place),
+            "{mount}: {}",
+            report.checks[0].check
+        );
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// On a fresh clone the other project has no output on disk. The
+/// sourcemap read the mount there and found no module, so flux failed
+/// until a build; it reads the artifacts in the mirror now.
+#[test]
+fn flux_types_a_mounted_dependency_before_a_build() {
+    let dir = workspace("mounted-flux", &["main", "shared"]);
+    fs::write(dir.join("shared/src/util.aly"), UTIL).unwrap();
+    fs::create_dir_all(dir.join("main/src/server")).unwrap();
+    fs::write(
+        dir.join("main/src/server/main.server.aly"),
+        "import { double } from \"../../../shared/src/util\"\n\nprint(double(\"x\"))\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("main/alloy.toml"),
+        format!(
+            "{TOML}\n[mount]\nserver = [\"src/server\", \"@game/ServerScriptService/Server\"]\nlib = [\"../shared/build\", \"@game/ReplicatedStorage/Shared\"]\n"
+        ),
+    )
+    .unwrap();
+
+    let root = dir.join("main");
+    let config = Config::load(&root.join("alloy.toml")).unwrap();
+    let report = alloy::build::flux_project(&root, &config).unwrap();
+
+    assert!(report.is_clean(), "{:?}", messages(&report));
+    assert!(!dir.join("shared/build").exists(), "flux writes nothing");
+
+    if alloy::typecheck::find_luau_lsp(&config.flux).is_none() {
+        eprintln!("skipped: luau-lsp is not installed");
+
+        return;
+    }
+
+    let analysis = alloy::typecheck::analyze(&root, &config, &report.checks, &report.dep_artifacts)
+        .expect("the type check runs");
+    let errors: Vec<String> = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| d.is_error())
+        .map(|d| format!("{} {}", d.line, d.message))
+        .collect();
+
+    assert_eq!(
+        errors,
+        vec!["3 Expected this to be 'number', but got 'string'".to_string()]
     );
 
     let _ = fs::remove_dir_all(&dir);

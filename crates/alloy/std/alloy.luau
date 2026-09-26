@@ -362,9 +362,22 @@ function Result.ok(self)
 	return nil
 end
 
+-- The value of a call of `F`: the first type it returns, or nil for a
+-- function that returns nothing. A generic `T` for the value refuses a
+-- function of type `() -> ()`, since an empty pack binds no `T`.
+type function __call_value(F)
+	local head = (F :: any):returns().head
+
+	if head == nil or #head == 0 then
+		return types.singleton(nil)
+	end
+
+	return head[1]
+end
+
 --- The one bridge to throwing APIs. The traceback is captured where the
 --- error happened and stored on the Err.
-function Result.pcall<T>(f: (...any) -> T, ...: any): Result<T, string>
+function Result.pcall<T...>(f: (...any) -> T..., ...: any): Result<__call_value<() -> T...>, string>
 	local packed = table.pack(xpcall(f, function(e)
 		return { err = e, trace = debug.traceback(tostring(e), 2) }
 	end, ...))
@@ -1380,6 +1393,7 @@ export type Set<T> = typeof(setmetatable({} :: {
 	union: (self: Set<T>, other: Set<T>) -> Set<T>,
 	intersection: (self: Set<T>, other: Set<T>) -> Set<T>,
 	difference: (self: Set<T>, other: Set<T>) -> Set<T>,
+	clear: (self: Set<T>) -> (),
 	to_array: (self: Set<T>) -> Array<T>,
 	to_table: (self: Set<T>) -> { [T]: boolean },
 }, {} :: { __iter: (self: any) -> (({ [T]: boolean }, T?) -> (T, boolean), { [T]: boolean }) }))
@@ -1548,6 +1562,11 @@ end
 
 function Set.len(self)
 	return self._count
+end
+
+function Set.clear(self)
+	table.clear(self._items)
+	self._count = 0
 end
 
 -- The set ops write the new table directly. An `add` per member cost a
@@ -2896,10 +2915,17 @@ function alloy.assert_eq(where: string, left_source: string, left, right_source:
 	end
 end
 
---- The object initializer: `new X(args) { ... }` assigns each field in order.
+--- The object initializer: `new X(args) { ... }` in an expression. It
+--- assigns `Parent` after every other field, so an Instance enters the
+--- tree with its properties set. The statement form keeps that order too.
 function alloy.init<T>(object: T, fields: { [string]: any }): T
 	for k, v in pairs(fields) do
-		(object :: any)[k] = v
+		if k ~= "Parent" then
+			(object :: any)[k] = v
+		end
+	end
+	if fields.Parent ~= nil then
+		(object :: any).Parent = fields.Parent
 	end
 	return object
 end
@@ -3005,9 +3031,25 @@ function alloy.attribute(name: string, targets, params)
 	return table.freeze({ name = name, targets = targets, params = params })
 end
 
---- Attributes on a struct or enum, from its declaration.
+--- Attributes on a struct or enum, from its declaration. An impl adds
+--- its own to the ones its type holds: a struct and its impls are one
+--- type, so `Attributes.get` reads both.
 function alloy.attrs(target: any, data: any)
-	target.__attrs = data
+	local had = rawget(target, "__attrs")
+	if had == nil then
+		target.__attrs = data
+		return target
+	end
+	for part, entries in data do
+		local into = had[part]
+		if into == nil then
+			had[part] = entries
+		else
+			for key, value in entries do
+				into[key] = value
+			end
+		end
+	end
 	return target
 end
 
@@ -3022,8 +3064,10 @@ local Attributes = {}
 -- The emit stores the arguments in declaration order. One parameter
 -- reads as that value, several read as a table that names them, and
 -- none reads as `true`, the mark that the attribute is there.
+-- A target that is no table gives `false` here, from the
+-- `type(target) == "table" and ...` of each caller, and reads as none.
 local function lookup(data, attr)
-	if data == nil then
+	if not data then
 		return nil
 	end
 	local value = data[attr.name]
@@ -4040,9 +4084,8 @@ function alloy.remote(spec: any): Remote
 		})
 	end
 
-	-- Nothing the engine owns is touched until the first call. A spec
-	-- requires the module before it calls `alloy.set_testing`, so a
-	-- service lookup at load time broke every test in the file.
+	-- Nothing the engine owns is touched until the first call, so a
+	-- module that declares a remote loads where no engine runs.
 	local bound = false
 
 	local function bind()

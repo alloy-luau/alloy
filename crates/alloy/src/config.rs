@@ -952,10 +952,10 @@ pub struct Emit {
     /// default is the `@alloy` alias; the build writes the runtime next to
     /// the output as `alloy.luau`, so a `.luaurc` alias can point at it.
     pub std_require: Option<String>,
-    /// Blank `import type` lines in the output so they add no runtime
-    /// dependency. Off by default: the output is then untyped for anyone
-    /// who analyzes it directly.
-    pub erase_type_imports: bool,
+    /// Deprecated, and read by nothing. A type-only import never runs its
+    /// `require`, so the key has nothing left to turn on. It still
+    /// parses, so an old file loads, and `deprecations` names it.
+    pub erase_type_imports: Option<bool>,
 }
 
 /// The `[build]` table.
@@ -1015,7 +1015,6 @@ artifact = "ship"
 [emit]
 wait_timeout = 5
 # std_require = "@alloy"
-# erase_type_imports = false
 
 [std]
 globals = "none"
@@ -1176,6 +1175,12 @@ impl Config {
             out.push(format!(
                 "`{name}` is now `naming_convention`; write `[lint.rules] naming_convention`, and set the case of each kind of name in `[lint.naming]`"
             ));
+        }
+
+        if self.emit.erase_type_imports.is_some() {
+            out.push(
+                "`[emit] erase_type_imports` does nothing now: a type-only import never runs its `require`. Remove the key".to_string(),
+            );
         }
 
         if let Some(level) = &self.alx.lints.static_conditional_child {

@@ -71,6 +71,16 @@ pub struct Scanner<'a> {
     previous: Option<Token>,
     /// A consumed LuauX region acts as a previous token that ends an expression.
     previous_was_luaux: bool,
+    /// Alloy patch: the previous token is a `default` that follows a whole
+    /// expression. No expression goes on there, so it is the word of a
+    /// `match` arm, and a `<` after it opens LuauX.
+    previous_is_default_arm: bool,
+    /// Alloy patch: the depth of each `?` of `c ? a : b` still waiting
+    /// for its `:`.
+    ternaries: Vec<i32>,
+    /// Alloy patch: the previous token is the `:` of `c ? a : b`. That
+    /// `:` opens no type, so a `<` after it opens LuauX.
+    previous_is_ternary_colon: bool,
 }
 
 impl<'a> Scanner<'a> {
@@ -82,6 +92,9 @@ impl<'a> Scanner<'a> {
             in_type_declaration: false,
             previous: None,
             previous_was_luaux: false,
+            previous_is_default_arm: false,
+            ternaries: Vec::new(),
+            previous_is_ternary_colon: false,
         }
     }
 
@@ -124,7 +137,31 @@ impl<'a> Scanner<'a> {
             return true;
         }
 
-        if self.enters_type_context(&token, text, lookahead) {
+        // Alloy patch: `c ? <A/> : <B/>`. A closer, a separator or a
+        // statement word ends a `?` at its depth that got no `:`, such
+        // as the `?` of `x: number?`.
+        let depth = self.depth;
+        self.ternaries
+            .retain(|d| *d < depth || (*d == depth && !ends_type_expression(&token, text)));
+        let ternary_colon =
+            token.kind == TokenKind::Symbol && text == ":" && self.ternaries.last() == Some(&depth);
+
+        if ternary_colon {
+            self.ternaries.pop();
+        }
+
+        if token.kind == TokenKind::Symbol
+            && text == "?"
+            && self.type_context.is_none()
+            && (self.previous_was_luaux
+                || self
+                    .previous
+                    .is_some_and(|p| can_end_expression(&p, p.text(self.src))))
+        {
+            self.ternaries.push(depth);
+        }
+
+        if !ternary_colon && self.enters_type_context(&token, text, lookahead) {
             self.type_context = Some(self.depth);
             if text == "=" {
                 self.in_type_declaration = false;
@@ -135,8 +172,15 @@ impl<'a> Scanner<'a> {
             self.depth += 1;
         }
 
+        self.previous_is_default_arm = token.kind == TokenKind::Name
+            && text == "default"
+            && (self.previous_was_luaux
+                || self
+                    .previous
+                    .is_some_and(|p| can_end_expression(&p, p.text(self.src))));
         self.previous = Some(token);
         self.previous_was_luaux = false;
+        self.previous_is_ternary_colon = ternary_colon;
         false
     }
 
@@ -144,6 +188,7 @@ impl<'a> Scanner<'a> {
     pub fn note_luaux_region(&mut self) {
         self.previous = None;
         self.previous_was_luaux = true;
+        self.previous_is_ternary_colon = false;
     }
 
     fn opens_luaux(&self) -> bool {
@@ -155,6 +200,10 @@ impl<'a> Scanner<'a> {
         // comparison.
         if self.previous_was_luaux {
             return false;
+        }
+
+        if self.previous_is_default_arm || self.previous_is_ternary_colon {
+            return true;
         }
 
         let Some(previous) = &self.previous else {
@@ -364,6 +413,28 @@ mod tests {
     #[test]
     fn detects_after_logical_operators() {
         assert_eq!(count("local x = cond and <Frame/> or nil"), 1);
+    }
+
+    #[test]
+    fn detects_after_the_default_arm_of_a_match() {
+        assert_eq!(count("case 1 then f()\ndefault\n  <Frame/>"), 1);
+        assert_eq!(count("case 1 then x\ndefault <Frame/>"), 1);
+        // A `default` after an operator is a name, and `<` compares it.
+        assert_eq!(count("local b = a and default < 3"), 0);
+        assert_eq!(count("local b = t.default < 3"), 0);
+    }
+
+    #[test]
+    fn detects_both_arms_of_a_ternary() {
+        // Alloy patch: the `:` of `c ? a : b` opens no type.
+        assert_eq!(count("return on ? <p/> : <p/>"), 2);
+        assert_eq!(count("return on ? (<p/>) : (<p/>)"), 2);
+        assert_eq!(count("f(a ? b : <p/>, c ? <p/> : d)"), 2);
+        assert_eq!(count("return a ? b ? <p/> : <p/> : <p/>"), 3);
+        // A `?` with no `:` ends at its separator, and the `:` after it
+        // keeps its type reading.
+        assert_eq!(count("local x: number? = 1\nlocal f: <T>(T) -> T = g"), 0);
+        assert_eq!(count("function f(a: number?, b: <T>(T) -> T) end"), 0);
     }
 
     #[test]

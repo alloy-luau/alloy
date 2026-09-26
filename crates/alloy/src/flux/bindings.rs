@@ -437,13 +437,48 @@ impl<'s> Scan<'s> {
     /// The `)` of the call whose `(` is at `open`, and the arguments the
     /// call passes. A string holds no bracket, and an interpolated
     /// string opens at its head and closes at its tail, so a comma in a
-    /// hole stays inside it.
+    /// hole stays inside it. A function literal is one argument, so the
+    /// commas of its types and its body split nothing.
     fn call_args(&self, open: usize) -> Option<(usize, usize)> {
         let mut depth = 0i32;
         let mut commas = 0;
+        // The depth inside the type arguments of a call, `f<<K, V>>()`:
+        // their commas split no argument. Two `<` side by side open them
+        // and nothing else, since Luau has no shift operator. After a
+        // `::` the argument is a type, so one `<` opens them too.
+        let mut angle = 0i32;
+        let mut cast = false;
+        // The `end` of a function literal: its tokens up to there are
+        // one argument.
+        let mut skip = 0;
 
         for k in open..self.toks.len() {
             let text = self.t(k);
+
+            if k <= skip {
+                continue;
+            }
+
+            if text == "function"
+                && let Some(e) = self.st.ends[k]
+            {
+                skip = e;
+
+                continue;
+            }
+
+            if angle > 0 || (text == "<" && (cast || self.at(k + 1, "<"))) {
+                match text {
+                    "<" => angle += 1,
+
+                    ">" => angle -= 1,
+
+                    _ => {}
+                }
+
+                continue;
+            }
+
             depth += match self.toks[k].kind {
                 TokKind::InterpHead => 1,
 
@@ -464,6 +499,9 @@ impl<'s> Scan<'s> {
 
             if depth == 1 && text == "," {
                 commas += 1;
+                cast = false;
+            } else if depth == 1 && text == "::" {
+                cast = true;
             }
         }
 
@@ -658,35 +696,27 @@ impl<'s> Scan<'s> {
                 continue;
             }
 
-            // The receiver decides which struct the member belongs to.
-            // Without it, a field named `coins` on an unrelated record
-            // reads as the private `coins` of a struct nearby.
-            let base = i
+            // The receiver decides which struct the member belongs to:
+            // a name the file types as the struct, or the struct's own
+            // name for a static. The project lists the private members
+            // of every struct, so a receiver of no known type, such as
+            // `task` in `task.spawn` or `new Forge()`, proves nothing
+            // and the lint stays quiet. `self` is the impl's own value.
+            let Some(base) = i
                 .checked_sub(2)
-                .filter(|b| self.is_name(*b))
-                .map(|b| self.t(b))
-                .filter(|n| *n != "self");
-            let owner = match base.and_then(|n| self.declared_type(n)) {
-                Some(ty) => members.iter().find(|(m, o)| *m == name && *o == ty),
-
-                None => members.iter().find(|(m, _)| *m == name),
-            };
-            let Some((_, owner)) = owner else {
+                .filter(|b| self.is_name(*b) && !matches!(self.prev(*b), "." | ":" | "?." | "?:"))
+            else {
                 continue;
             };
 
-            // `Lifecycle.Start` reads a variant of the enum; it is not
-            // the private `Start` of a struct elsewhere in the file. A
-            // receiver the file gives no type and spells with a capital
-            // is a type, a namespace, or a module, so the member is
-            // that one's, unless the receiver is the owner itself.
-            if base.is_some_and(|n| {
-                n != *owner
-                    && self.declared_type(n).is_none()
-                    && n.starts_with(|c: char| c.is_ascii_uppercase())
-            }) {
+            if self.at(base, "self") {
                 continue;
             }
+
+            let ty = self.type_at(base).unwrap_or(self.t(base));
+            let Some((_, owner)) = members.iter().find(|(m, o)| *m == name && *o == ty) else {
+                continue;
+            };
 
             if self.enclosing_owner(i) == Some(*owner) {
                 continue;
@@ -841,7 +871,13 @@ impl<'s> Scan<'s> {
             }
 
             let path = self.slice(start, j);
-            let key = format!("{}.{path}", self.enclosing_path(start));
+            // A function in a block belongs to that block: a `local
+            // function bump` in the body of a method is not the method.
+            let key = format!(
+                "{}.{:?}.{path}",
+                self.enclosing_path(start),
+                self.enclosing_scope(i)
+            );
 
             match seen.iter().find(|(k, _)| *k == key) {
                 Some((_, first)) => {
@@ -864,7 +900,7 @@ impl<'s> Scan<'s> {
     }
 
     /// Whether a `@cfg` line stands right above the token.
-    fn cfg_gated(&self, i: usize) -> bool {
+    pub(super) fn cfg_gated(&self, i: usize) -> bool {
         let at = self.start(i) as usize;
         let from = self.src[..at].rfind('\n').map_or(0, |n| n + 1);
         let above = self.src[..from].trim_end();
@@ -876,9 +912,9 @@ impl<'s> Scan<'s> {
     /// or a call of a method that changes it. `const` freezes the
     /// binding alone, which the keyword does not say.
     pub(crate) fn const_mutation(&self, out: &mut Vec<Lint>) {
-        // Each const name with the token that declares it. A write above
-        // the declaration reaches another binding of the name, such as a
-        // parameter of a function higher in the file.
+        // Each const name with the token that declares it. A write reaches
+        // the const only inside its block and past any nearer binding of
+        // the name, such as a `local` in another function.
         let mut names: Vec<(&'s str, usize)> = Vec::new();
 
         for i in 0..self.toks.len() {
@@ -902,7 +938,11 @@ impl<'s> Scan<'s> {
         }
 
         for i in 0..self.toks.len() {
-            if !self.is_name(i) || !names.iter().any(|&(n, at)| n == self.t(i) && at < i) {
+            if !self.is_name(i)
+                || !names
+                    .iter()
+                    .any(|&(n, at)| n == self.t(i) && self.reads_binding(at, i))
+            {
                 continue;
             }
 
@@ -934,6 +974,13 @@ impl<'s> Scan<'s> {
                 None => {}
             }
         }
+    }
+
+    /// Whether the name at `j` reads the binding that the name at `n`
+    /// declares: `j` is in the block of `n`, and no nearer `local`,
+    /// `const` or parameter of the name holds it.
+    fn reads_binding(&self, n: usize, j: usize) -> bool {
+        n < j && j < self.scope_end(n) && self.binding_at(j).is_none_or(|d| d <= n)
     }
 
     /// How the statement at the name `i` writes into the value the name
@@ -1141,10 +1188,13 @@ impl<'s> Scan<'s> {
 
     /// Whether the name at `j` is a member of the value before it:
     /// `t.name`, or `t:name(...)`. A name after `:` that no argument
-    /// follows is a type annotation, which does read the name.
+    /// follows is a type annotation, which does read the name, and so
+    /// is the branch after the `:` of a ternary, `c ? a() : b()`.
     fn is_member(&self, j: usize) -> bool {
         match self.prev(j) {
             "." | "?." => true,
+
+            ":" if self.ternary_colons.contains(&(j - 1)) => false,
 
             ":" | "?:" => {
                 let arg = self.t(j + 1);
@@ -1350,7 +1400,7 @@ impl<'s> Scan<'s> {
                             self.t(j) == self.t(n)
                                 && !self.is_member(j)
                                 && self.value_write(j).is_some()
-                                && !self.shadowed(n, j)
+                                && self.reads_binding(n, j)
                         })
                 })
             {
@@ -1394,7 +1444,7 @@ impl<'s> Scan<'s> {
                 k += 2;
             }
 
-            if !self.assigns_at(k) || self.shadowed(n, j) {
+            if !self.assigns_at(k) || !self.reads_binding(n, j) {
                 return false;
             }
 

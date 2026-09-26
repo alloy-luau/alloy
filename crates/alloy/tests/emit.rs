@@ -242,3 +242,27 @@ fn a_definitions_file_writes_arrays_as_tables_and_names_a_std_type() {
         ]
     );
 }
+
+/// The statement form sets `Parent` after every other field, as the
+/// runtime `init` of the expression form does. The value still runs in
+/// its own place, and each line keeps its own line.
+#[test]
+fn an_initializer_sets_parent_last() {
+    let src = "local p = new Instance('Part') {\n    Parent = workspace,\n    Name = 'Box',\n}\nnew Instance('Part') {\n    Parent = p,\n    Name = 'Lid',\n}\n";
+    let out = ship(src);
+    assert!(
+        out.contains("local _parent1 = workspace \n    p.Name = 'Box' \np.Parent = _parent1"),
+        "{out}"
+    );
+    assert!(
+        out.contains("local _parent3 = p \n    _n2.Name = 'Lid' \n_n2.Parent = _parent3"),
+        "{out}"
+    );
+    assert_eq!(out.lines().count(), src.lines().count());
+
+    // A `Parent` already last stays in place, with no temp.
+    let last =
+        ship("local p = new Instance('Part') {\n    Name = 'Box',\n    Parent = workspace,\n}\n");
+    assert!(last.contains("p.Parent = workspace"), "{last}");
+    assert!(!last.contains("_parent"), "{last}");
+}

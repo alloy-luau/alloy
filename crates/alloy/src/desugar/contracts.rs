@@ -35,11 +35,13 @@ pub(crate) struct Member {
 }
 
 /// The declaration a contract is checked against: the target word the
-/// attribute names, the owner's own name, and the span the members of
-/// that declaration sit in.
+/// attribute names, the owner's name, and the span the members of that
+/// declaration sit in.
 #[derive(Clone, Copy)]
 pub(crate) struct Owner<'a> {
     pub target: &'a str,
+    /// The name the tables use: `Probe_B` for a member of `Probe`. A
+    /// report shows the path, `Probe.B`.
     pub name: &'a str,
     pub body: TokSpan,
 }
@@ -273,15 +275,9 @@ impl<'s> Desugar<'s> {
     */
     fn each_entries(&self, a: &Attr, decl: &AttrDecl, param: &str) -> Vec<String> {
         let at = decl.params.iter().position(|(p, _)| p == param);
-        let Some(arg) = at.and_then(|i| a.args.get(i)).or_else(|| a.args.first()) else {
-            return Vec::new();
-        };
-        let list = match self.table_key(arg, param) {
-            Some(inner) => inner,
-
-            None => arg,
-        };
-        let Expr::Array { items, .. } = list else {
+        let slots = self.attr_slots(a, Some(decl));
+        let Some(Expr::Array { items, .. }) = at.and_then(|i| slots.get(i).copied().flatten())
+        else {
             return Vec::new();
         };
         let mut names: Vec<String> = items.iter().filter_map(|e| self.entry_name(e)).collect();
@@ -301,18 +297,59 @@ impl<'s> Desugar<'s> {
         names
     }
 
-    /// The value one key of a table literal holds, when the argument is
-    /// the record form `{ lifecycles = [ ... ] }`.
-    pub(crate) fn table_key<'e>(&self, e: &'e Expr, key: &str) -> Option<&'e Expr> {
-        let Expr::Table { fields, .. } = e else {
+    /*
+    The argument of each parameter of one use, in declaration order, with
+    `None` where the use gives none.
+
+    A use names its arguments by position, `@options([ Init ], 10)`, or
+    by key in one table, `@options({ steps = [ Init ], priority = 10 })`.
+    The table is the record form when each of its keys names a parameter.
+    The emit, the argument check and `each` all read the slots, so the
+    runtime value and the contract agree on each form.
+    */
+    pub(crate) fn attr_slots<'e>(
+        &self,
+        a: &'e Attr,
+        decl: Option<&AttrDecl>,
+    ) -> Vec<Option<&'e Expr>> {
+        if let Some(slots) = decl.and_then(|d| self.keyed_slots(a, d)) {
+            return slots;
+        }
+
+        let params = decl.map_or(0, |d| d.params.len());
+        let mut slots: Vec<Option<&Expr>> = a.args.iter().map(Some).collect();
+        slots.resize(slots.len().max(params), None);
+
+        slots
+    }
+
+    /// The slots of a use in the record form, or `None` for a use by
+    /// position.
+    pub(crate) fn keyed_slots<'e>(
+        &self,
+        a: &'e Attr,
+        decl: &AttrDecl,
+    ) -> Option<Vec<Option<&'e Expr>>> {
+        let [Expr::Table { fields, .. }] = a.args.as_slice() else {
             return None;
         };
 
-        fields.iter().find_map(|f| match f {
-            TableField::Named { name, value } if self.text_of(*name) == key => Some(value),
+        if fields.is_empty() {
+            return None;
+        }
 
-            _ => None,
-        })
+        let mut slots = vec![None; decl.params.len()];
+
+        for f in fields {
+            let TableField::Named { name, value } = f else {
+                return None;
+            };
+            let key = self.text_of(*name);
+            let i = decl.params.iter().position(|(p, _)| p == key)?;
+            slots[i] = Some(value);
+        }
+
+        Some(slots)
     }
 
     /// The member name one entry of an `each` list carries.
@@ -355,12 +392,7 @@ impl<'s> Desugar<'s> {
         }
 
         let strings = is_string_union(&element);
-        let list = match self.table_key(arg, param) {
-            Some(inner) => inner,
-
-            None => arg,
-        };
-        let entries: Vec<&Expr> = match list {
+        let entries: Vec<&Expr> = match arg {
             Expr::Array { items, .. } => items.iter().collect(),
 
             // A single value stands for itself; a list type written with
@@ -447,6 +479,8 @@ impl<'s> Desugar<'s> {
         // member of another type that shares the name keeps the lint.
         self.contract_names.extend(found.iter().map(|m| m.at));
 
+        let shown = self.display_name(owner.name);
+
         let Some(m) = found.first() else {
             let visibility = match want.private {
                 Some(true) => "private ",
@@ -459,7 +493,7 @@ impl<'s> Desugar<'s> {
                 "`@{attr}` requires a {visibility}{} `{}`; `{}` declares none",
                 want.kind,
                 member_sketch(want),
-                owner.name
+                shown
             );
             self.diagnose(at, &message);
             self.note_gap(at, attr, owner, want);
@@ -477,7 +511,7 @@ impl<'s> Desugar<'s> {
             };
             let message = format!(
                 "`@{attr}` requires `{}` to be {asked}; `{}` declares it {has}",
-                want.member, owner.name
+                want.member, shown
             );
             self.diagnose(at, &message);
 
@@ -489,11 +523,11 @@ impl<'s> Desugar<'s> {
             return;
         }
 
-        if normalize_shape(&want.shape) != normalize_shape(&m.shape) {
+        if normalize_shape(m.kind, &want.shape) != normalize_shape(m.kind, &m.shape) {
             let message = format!(
                 "`@{attr}` requires `{}`; `{}` declares `{}`",
                 member_sketch(want),
-                owner.name,
+                shown,
                 match m.shape.is_empty() {
                     true => want.member.clone(),
 
@@ -686,13 +720,48 @@ fn signature_params(sig: &str) -> &str {
 }
 
 /// A shape with its spacing dropped, so `(self, dt: number)` and
-/// `(self,dt : number)` compare equal. The comparison is textual on
-/// purpose: a contract asks for the signature the author wrote.
-fn normalize_shape(s: &str) -> String {
-    signature_params(s)
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect()
+/// `(self,dt : number)` compare equal. A function keeps the type of
+/// each parameter and drops its name. The name is no part of the type,
+/// so `run(self, x: number, _y: number)` meets `run(self, x: number, y:
+/// number)`.
+fn normalize_shape(kind: &str, s: &str) -> String {
+    let squash = |t: &str| t.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    let params = signature_params(s);
+    let inner = params.strip_prefix('(').and_then(|p| p.strip_suffix(')'));
+
+    let (Some(inner), "function") = (inner, kind) else {
+        return squash(params);
+    };
+
+    if inner.trim().is_empty() {
+        return "()".to_string();
+    }
+    let mut types = Vec::new();
+    let mut depth = 0i32;
+    let mut from = 0;
+    let mut prev = ' ';
+
+    for (i, c) in inner.char_indices().chain([(inner.len(), ',')]) {
+        match c {
+            '(' | '{' | '[' | '<' => depth += 1,
+
+            // The `>` of `->` closes nothing.
+            '>' if prev == '-' => {}
+
+            ')' | '}' | ']' | '>' => depth -= 1,
+
+            ',' if depth == 0 => {
+                let param = &inner[from..i];
+                types.push(squash(param.split_once(':').map_or("", |(_, t)| t)));
+                from = i + 1;
+            }
+
+            _ => {}
+        }
+        prev = c;
+    }
+
+    format!("({})", types.join(","))
 }
 
 /*

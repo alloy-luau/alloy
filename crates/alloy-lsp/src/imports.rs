@@ -545,7 +545,10 @@ pub fn bound_names(src: &str) -> Vec<String> {
 }
 
 /// The line an import lands on: under the last line of the last
-/// `import`, else under the hot comments at the top.
+/// `import`, else under the hot comments at the top. A comment block
+/// that a blank line ends is the file's header, and the import goes
+/// under it too. A comment right above code is the doc of that code,
+/// and the import stays above it.
 pub fn import_insertion_line(src: &str) -> u32 {
     let last_import = import_statements(src)
         .into_iter()
@@ -553,13 +556,36 @@ pub fn import_insertion_line(src: &str) -> u32 {
         .map(|s| s.line + src[s.start..s.end].matches('\n').count() + 1)
         .max();
 
-    match last_import {
-        Some(line) => line as u32,
+    if let Some(line) = last_import {
+        return line as u32;
+    }
 
-        None => src
-            .lines()
-            .take_while(|l| l.trim_start().starts_with("--!"))
-            .count() as u32,
+    let lines: Vec<&str> = src.lines().collect();
+    let hot = lines
+        .iter()
+        .take_while(|l| l.trim_start().starts_with("--!"))
+        .count();
+    let mut end = hot;
+    let mut block = false;
+
+    // A `--[[` comment runs to the line that holds its `]]`.
+    while let Some(line) = lines.get(end).map(|l| l.trim_start()) {
+        if !block && !line.starts_with("--") {
+            break;
+        }
+
+        block = match block {
+            true => !line.contains("]]"),
+
+            false => line.starts_with("--[[") && !line.contains("]]"),
+        };
+        end += 1;
+    }
+
+    match lines.get(end).is_none_or(|l| l.trim().is_empty()) {
+        true => end as u32,
+
+        false => hot as u32,
     }
 }
 
@@ -901,15 +927,31 @@ fn map_path(path: &Path, renames: &[Rename]) -> PathBuf {
 /// relative specs re-based too. `aliases` gives the aliases a folder
 /// sees: an `@alias/...` spec keeps its alias while the target stays
 /// under the alias's folder.
+///
+/// A document may already stand at its new path: the watcher reports
+/// the delete and the create before the editor reports the rename. Its
+/// specs still read from the folder it left.
 pub fn rename_edits(
     docs: &[(String, PathBuf, String)],
     renames: &[Rename],
     aliases: &dyn Fn(&Path) -> Vec<(String, PathBuf)>,
 ) -> HashMap<String, Vec<Value>> {
     let mut out: HashMap<String, Vec<Value>> = HashMap::new();
+    let back: Vec<Rename> = renames
+        .iter()
+        .map(|r| Rename {
+            old: r.new.clone(),
+            new: r.old.clone(),
+        })
+        .collect();
 
-    for (uri, old_path, src) in docs {
-        let new_path = map_path(old_path, renames);
+    for (uri, path, src) in docs {
+        let before = map_path(path, &back);
+        let (old_path, new_path) = match before == *path {
+            true => (before, map_path(path, renames)),
+
+            false => (before, path.clone()),
+        };
         let old_dir = old_path.parent().unwrap_or(Path::new("."));
         let new_dir = new_path.parent().unwrap_or(Path::new("."));
         let Ok(lexed) = alloy_syntax::lexer::lex(src) else {
@@ -1296,6 +1338,26 @@ namespace Inner as end
         assert_eq!(import_insertion_line("--!strict\nlocal x = 1\n"), 1);
     }
 
+    /// A file with no import takes the new one under its header
+    /// comment. A comment right above code documents that code, and
+    /// the import stays above it.
+    #[test]
+    fn an_import_lands_under_the_header_comment() {
+        assert_eq!(import_insertion_line("-- Header.\n\nlocal x = 1\n"), 1);
+        assert_eq!(
+            import_insertion_line("--!strict\n-- Header.\n-- More.\n\nlocal x = 1\n"),
+            3
+        );
+        assert_eq!(
+            import_insertion_line("--[[\n  Header.\n]]\n\nlocal x = 1\n"),
+            3
+        );
+        assert_eq!(
+            import_insertion_line("--!strict\n-- Doubles.\nlocal function f() end\n"),
+            1
+        );
+    }
+
     /// The project's `quote_style` writes a generated import, and the
     /// imports the file already holds win under every style but a
     /// forced one.
@@ -1374,6 +1436,34 @@ namespace Inner as end
             "{edits:?}"
         );
         assert_eq!(edits.len(), 2);
+    }
+
+    /// The watcher reported the move first, so the state held `a2.aly`
+    /// at its new path when the rename came. Its own `./b` stayed, and
+    /// no longer named a file. The specs read from the folder it left.
+    #[test]
+    fn a_file_already_at_its_new_path_rebases_its_own_specs() {
+        let docs = vec![
+            (
+                "file:///w/src/deep/a2.aly".to_string(),
+                PathBuf::from("/w/src/deep/a2.aly"),
+                "import { B } from './b'\nexport const A = B\n".to_string(),
+            ),
+            (
+                "file:///w/src/c.aly".to_string(),
+                PathBuf::from("/w/src/c.aly"),
+                "import { A } from './a2'\n".to_string(),
+            ),
+        ];
+        let renames = vec![Rename {
+            old: PathBuf::from("/w/src/a2.aly"),
+            new: PathBuf::from("/w/src/deep/a2.aly"),
+        }];
+        let edits = rename_edits(&docs, &renames, &|_| Vec::new());
+        let text = |uri: &str| edits[uri][0]["newText"].clone();
+
+        assert_eq!(text("file:///w/src/deep/a2.aly"), "../b");
+        assert_eq!(text("file:///w/src/c.aly"), "./deep/a2");
     }
 
     /// A move of `Placement.aly` also rewrote the unrelated

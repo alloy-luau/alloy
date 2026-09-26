@@ -221,6 +221,13 @@ pub const MEMBERS: &[(&str, &[Member])] = &[
                 example: "local a = $set[1, 2]\nlocal b = $set[2, 3]\nprint(a:difference(b):len())",
             },
             Member {
+                name: "clear",
+                kind: MemberKind::Method,
+                signature: "Set:clear()",
+                doc: "Removes every member and sets the count to zero. The set itself stays, so every reference to it sees the empty set.",
+                example: "local seen = $set[1, 2, 3]\nseen:clear()\nprint(seen:len())",
+            },
+            Member {
                 name: "to_array",
                 kind: MemberKind::Method,
                 signature: "Set:to_array(): T[]",
@@ -714,7 +721,7 @@ pub const MEMBERS: &[(&str, &[Member])] = &[
                 name: "pcall",
                 kind: MemberKind::Static,
                 signature: "Result.pcall<T>(f: (...any) -> T, ...: any): Result<T, string>",
-                doc: "Calls `f` with the arguments after it: `Ok` of what it returns, or `Err` of what it threw. The value type follows `f`, and the `Err` carries the traceback in `trace`.",
+                doc: "Calls `f` with the arguments after it: `Ok` of what it returns, or `Err` of what it threw. The value type follows `f`, and the `Err` carries the traceback in `trace`. A function that returns nothing gives `Result<nil, string>`.",
                 example: "local r = Result.pcall(string.rep, \"a\", 3)\nprint(r:unwrap_or(\"\"))",
             },
             Member {

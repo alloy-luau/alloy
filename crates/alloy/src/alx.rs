@@ -71,6 +71,12 @@ pub fn compile_alx(
     // component, which `[lint.naming] component` styles.
     let mut options = options.clone();
     options.markup = crate::naming::Markup::of(src, &compiled.regions);
+    // The text an ingot wrote, as bytes of the lowered text.
+    options.generated = options
+        .generated
+        .iter()
+        .flat_map(|&(a, b)| lowering.copied_from(a, b))
+        .collect();
     // A lone `{expr}` that the markup gives as `Text` is a string or a
     // number, or a binding of one, as `Text={expr}` is. A hole that held
     // markup of its own has no copied bytes to map, and goes unchecked.
@@ -1299,6 +1305,25 @@ mod tests {
         assert!(!crate::lint::fix_applies(src, &moved));
     }
 
+    /// `on ? <On /> : <Off />` lowers to `on ? On({}) : Off({})`, and
+    /// the `:` read as the method call `On({}):Off({})`, so `Off` was
+    /// never called. The `:` of a ternary names no method.
+    #[test]
+    fn a_component_after_the_colon_of_a_ternary_is_called() {
+        let src = "import { create } from \"./util\"\n\nlocal function On()\n    return <Frame />\nend\n\nlocal function Off()\n    return <Frame />\nend\n\nreturn function(on: boolean)\n    return on ? <On /> : <Off />\nend\n";
+        let out = compile_alx(src, &EmitOptions::default(), luaux::Config::bare())
+            .expect("the markup compiles")
+            .output;
+        let unused: Vec<&str> = out
+            .lints
+            .iter()
+            .filter(|l| l.name.starts_with("unused_"))
+            .map(|l| l.message.as_str())
+            .collect();
+
+        assert!(unused.is_empty(), "{unused:?}");
+    }
+
     /// A function that returns markup, or that a tag names, is a
     /// component and takes `[lint.naming] component`, PascalCase by
     /// default. Any other function takes the function style.
@@ -1323,6 +1348,29 @@ mod tests {
                 "`main_panel` is a component, and components are PascalCase here: `MainPanel`",
                 "`FormatText` is a function, and functions are snake_case here: `format_text`",
             ]
+        );
+    }
+
+    /// A function that returns a local holding markup is a component
+    /// too. A local that holds anything else does not make one.
+    #[test]
+    fn a_component_may_return_its_markup_through_a_local() {
+        let src = "local function create(n: string): any return n end\nlocal function NameInput()\n    local box = <TextBox />\n    if box then\n        return box\n    end\n    return box\nend\nlocal function Count(): number\n    local n = 1\n    return n\nend\nreturn { NameInput = NameInput, Count = Count }\n";
+        let mut config = luaux::Config::bare();
+        config.create = "create".to_string();
+        let out = compile_alx(src, &EmitOptions::default(), config)
+            .expect("the markup compiles")
+            .output;
+        let naming: Vec<&str> = out
+            .lints
+            .iter()
+            .filter(|l| l.name == "naming_convention")
+            .map(|l| l.message.as_str())
+            .collect();
+
+        assert_eq!(
+            naming,
+            ["`Count` is a function, and functions are snake_case here: `count`"]
         );
     }
 

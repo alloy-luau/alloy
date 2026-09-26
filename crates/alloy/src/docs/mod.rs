@@ -190,7 +190,10 @@ const KIND_RULES: &[(&[&str], &str)] = &[
         &[
             "a type is written",
             "a type takes its arguments in one",
-            "is Rust's arm",
+            // The rules read the message in lower case.
+            "is rust's arm",
+            "`default` takes no",
+            "a `match` head ends in `with`",
             "a guard reads `where`",
             "a match whose arms run statements",
             "this arm gives no value",
@@ -320,6 +323,25 @@ mod tests {
     /// `alloy doc <kind>` opens a section for every kind a diagnostic
     /// prints: the ones `kind_for` names, its fallback, and the ones
     /// the type checker names.
+    /// `kind_for` reads the message in lower case, so a rule word with a
+    /// capital never matched: "is Rust's arm" fell to `AlloyError`.
+    #[test]
+    fn every_kind_rule_word_is_lower_case() {
+        for (words, kind) in super::KIND_RULES {
+            for w in *words {
+                assert_eq!(*w, w.to_ascii_lowercase(), "{kind}");
+            }
+        }
+
+        for message in [
+            "an arm reads `case Ok(v) then ...`; `=>` after a pattern is Rust's arm",
+            "`default` takes no `then`: write `default \"x\"`",
+            "a `match` head ends in `with`: `match n with`",
+        ] {
+            assert_eq!(super::kind_for(message), "SyntaxError", "{message}");
+        }
+    }
+
     #[test]
     fn every_diagnostic_kind_names_a_section() {
         let named = super::KIND_RULES

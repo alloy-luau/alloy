@@ -52,6 +52,18 @@ describe("intrinsics", function()
 		expect(alloy.init(o, { a = 1, b = "x" })).toBe(o)
 		expect(o).toEqual({ keep = true, a = 1, b = "x" })
 	end)
+
+	it("init assigns Parent after every other field", function()
+		local order = {}
+		local o = setmetatable({}, {
+			__newindex = function(_, k)
+				table.insert(order, k)
+			end,
+		})
+		alloy.init(o, { Parent = 1, Name = "a", Size = 2, Color = 3, Anchored = true })
+		expect(#order).toBe(5)
+		expect(order[5]).toBe("Parent")
+	end)
 end)
 
 describe("serde_variant", function()

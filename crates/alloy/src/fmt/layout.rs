@@ -34,15 +34,23 @@ impl<'s> Formatter<'s> {
 
         match text {
             // `attribute X on struct` closes on its own line; the `as`
-            // form opens a body of `requires` clauses.
-            "attribute" => self.line_has_after(i, "as"),
+            // form opens a body of `requires` clauses. The `as` may sit
+            // lines below, after a parameter list fmt broke.
+            "attribute" => self.header_has_after(i, "as"),
 
-            // `x is function` names a type; nothing opens.
+            // `x is function` and `x is not function` name a type;
+            // nothing opens.
             "function" => {
+                let before_not = prev
+                    .filter(|p| *p == "not")
+                    .and_then(|_| self.prev_code(self.prev_code(i)?))
+                    .map(|p| self.items[p].text.as_str());
+
                 !self.line_has_before(i, "declare")
                     && !self.line_has_before(i, "attribute")
                     && prev != Some("remote")
                     && prev != Some("is")
+                    && before_not != Some("is")
                     && self.signature.get(i) != Some(&true)
             }
 
@@ -97,10 +105,23 @@ impl<'s> Formatter<'s> {
 
     fn for_header_before(&self, i: usize) -> bool {
         let mut j = i;
+        // A newline inside a bracket group is the group's. A header whose
+        // group broke goes on past it, so its `do` opens no second block.
+        let mut depth = 0usize;
 
         while j > 0 {
             j -= 1;
             let t = &self.items[j];
+
+            if !t.is_comment() && closes(&t.text) {
+                depth += 1;
+            } else if !t.is_comment() && opens(&t.text) {
+                depth = depth.saturating_sub(1);
+            }
+
+            if depth > 0 {
+                continue;
+            }
 
             if self.is_loop_head(j) {
                 return true;
@@ -126,15 +147,33 @@ impl<'s> Formatter<'s> {
         i == 0 || self.items[i].newlines_before > 0
     }
 
-    /// Reports if `word` stands later on the line item `i` sits on.
-    pub(crate) fn line_has_after(&self, i: usize, word: &str) -> bool {
+    /// Reports if `word` stands later in the header item `i` opens. A
+    /// long header breaks its parameter list over several lines, so a
+    /// line break inside brackets does not end the header.
+    fn header_has_after(&self, i: usize, word: &str) -> bool {
+        let mut depth = 0i32;
+
         for j in i + 1..self.items.len() {
-            if self.items[j].newlines_before > 0 {
+            let it = &self.items[j];
+
+            if depth == 0 && it.newlines_before > 0 {
                 return false;
             }
 
-            if self.items[j].is(word) {
+            if it.is_comment() {
+                continue;
+            }
+
+            if depth == 0 && it.is(word) {
                 return true;
+            }
+
+            match it.text.as_str() {
+                ")" | "]" | "}" => depth -= 1,
+
+                t if t.ends_with('(') || t.ends_with('[') || t.ends_with('{') => depth += 1,
+
+                _ => {}
             }
         }
 
@@ -162,10 +201,29 @@ impl<'s> Formatter<'s> {
     /// signature; write the comment above the function instead.
     fn next_line_starts_signature(&self, i: usize) -> bool {
         let mut k = i + 1;
+        // A newline inside the parameter list is the list's, so a broken
+        // list still reads as a signature.
+        let mut depth = 0usize;
 
-        while k < self.items.len()
-            && (self.items[k].newlines_before == 0 || self.items[k].is_comment())
-        {
+        while k < self.items.len() {
+            let t = &self.items[k];
+
+            if t.is_comment() {
+                k += 1;
+
+                continue;
+            }
+
+            if depth == 0 && t.newlines_before > 0 {
+                break;
+            }
+
+            if opens(&t.text) {
+                depth += 1;
+            } else if closes(&t.text) {
+                depth = depth.saturating_sub(1);
+            }
+
             k += 1;
         }
 
@@ -459,11 +517,14 @@ impl<'s> Formatter<'s> {
 
             let mut depth = 0i32;
             let mut marks = Vec::new();
+            // `<<` is a bracket group, and a group that broke holds
+            // newlines. A plain `<` still ends at the line.
+            let group = it.is("<<");
 
             for j in i..self.items.len() {
                 let t = &self.items[j];
 
-                if (t.newlines_before > 0 && j != i)
+                if (t.newlines_before > 0 && j != i && !group)
                     || t.is("then")
                     || t.is("do")
                     || (t.is("=") && depth == 0)
@@ -506,12 +567,15 @@ impl<'s> Formatter<'s> {
     fn nodes(&self, pos: &mut usize, until: Option<&str>) -> Vec<Node> {
         let mut out = Vec::new();
         let mut block_depth = 0i32;
+        // The open `<` of type arguments. A comma inside them, as in
+        // `Result<T, E>`, separates no elements of the group.
+        let mut angle = 0usize;
 
         while *pos < self.items.len() {
             let it = &self.items[*pos];
 
             if until.is_some() && !it.is_comment() {
-                let separator = (it.is(",") || it.is(";")) && block_depth <= 0;
+                let separator = (it.is(",") || it.is(";")) && block_depth <= 0 && angle == 0;
 
                 if separator || Some(it.text.as_str()) == until {
                     return out;
@@ -522,6 +586,16 @@ impl<'s> Formatter<'s> {
                 out.push(self.group(pos));
 
                 continue;
+            }
+
+            if self.generic[*pos] {
+                match it.text.as_str() {
+                    "<" => angle += 1,
+
+                    ">" => angle = angle.saturating_sub(1),
+
+                    _ => {}
+                }
             }
 
             block_depth += self.block_delta(*pos);
@@ -621,12 +695,7 @@ impl<'s> Formatter<'s> {
                     block_depth += self.block_delta(*i);
                 }
 
-                Node::Group {
-                    open,
-                    close,
-                    elements,
-                    ..
-                } => {
+                Node::Group { open, elements, .. } => {
                     let it = &self.items[*open];
 
                     if self.forced[*open]
@@ -635,22 +704,13 @@ impl<'s> Formatter<'s> {
                         hard[*open] = true;
                     }
 
-                    for (el, sep) in elements {
+                    // The separators and the closer belong to the group, not
+                    // to the statements of a callback body around it, so a
+                    // newline before one is no break: the group breaks by
+                    // its width, as it does outside a callback. The closer
+                    // kept its line, and `(` hugged the value with `)` below.
+                    for (el, _) in elements {
                         self.mark_hard(el, hard, true, 0);
-
-                        if let Some(s) = sep
-                            && self.items[*s].newlines_before > 0
-                            && block_depth > 0
-                            && in_group
-                        {
-                            hard[*s] = true;
-                        }
-                    }
-
-                    let c = &self.items[*close];
-
-                    if c.newlines_before > 0 && in_group && block_depth > 0 {
-                        hard[*close] = true;
                     }
                 }
             }
@@ -712,10 +772,13 @@ impl<'s> Formatter<'s> {
         let (open, close) = (*open, *close);
 
         self.open_place(open, hard, extra);
+        self.at_line[open] = self.lines.len();
 
         let opener = self.items[open].text.clone();
         let closer = self.items[close].text.clone();
-        let expand = !elements.is_empty() && self.should_expand(elements, *magic_comma, hard, open);
+        let expand = !elements.is_empty()
+            && !self.hugs(open, close)
+            && self.should_expand(elements, *magic_comma, hard, open, close);
         self.line.push_str(&opener);
 
         if !expand {
@@ -730,8 +793,7 @@ impl<'s> Formatter<'s> {
             self.render_item(close, hard, extra);
         } else {
             let base = self.line_level;
-            let trailing =
-                self.options.trailing_comma && !matches!(opener.as_str(), "(" | "?(" | "<<");
+            let trailing = self.trailing_comma(open);
 
             for (k, (el, sep)) in elements.iter().enumerate() {
                 // A comment the source wrote on the separator's line
@@ -782,7 +844,36 @@ impl<'s> Formatter<'s> {
             self.flush();
             self.line_level = base;
             self.line = self.indent(base);
+            self.at_line[close] = self.lines.len();
             self.line.push_str(&closer);
+        }
+    }
+
+    /// Whether the parentheses from `open` to `close` hug what they hold:
+    /// one table, `f({ ... })`, a parameter typed by one, `(props: { ...
+    /// })`, or one parenthesized value, `push((<Frame />))`. The inner
+    /// group breaks inside them, so they take no lines of brackets of
+    /// their own.
+    fn hugs(&self, open: usize, close: usize) -> bool {
+        if !matches!(self.items[open].text.as_str(), "(" | "?(") || close <= open + 1 {
+            return false;
+        }
+
+        let inner = &self.items[close - 1];
+        let Some(inner_open) = self.opener_of(close - 1).filter(|o| *o > open) else {
+            return false;
+        };
+
+        match inner.text.as_str() {
+            "}" if !inner.is_comment() => (open + 1..inner_open).all(|k| {
+                let t = &self.items[k];
+
+                !t.is_comment() && !opens(&t.text) && !closes(&t.text) && !t.is(",") && !t.is(";")
+            }),
+
+            ")" if !inner.is_comment() => inner_open == open + 1 && self.items[inner_open].is("("),
+
+            _ => false,
         }
     }
 
@@ -794,6 +885,7 @@ impl<'s> Formatter<'s> {
         magic: bool,
         hard: &[bool],
         open: usize,
+        close: usize,
     ) -> bool {
         if self.hole[open] {
             return false;
@@ -857,45 +949,117 @@ impl<'s> Formatter<'s> {
         }
 
         // The `if` expression around the group breaks at its keywords
-        // before the group breaks, the way StyLua lays one out.
-        if self.held[open] {
+        // before the group breaks, the way StyLua lays one out, and the
+        // chain around it breaks at its operators.
+        if self.held[open] || self.held_chain[open] {
             return false;
         }
 
+        // The line already holds the opener's space, so the width starts
+        // at the opener itself.
         let mut width = self.items[open].width();
         let mut stopped = false;
-
-        if self.inner_space(open) {
-            width += 2;
-        }
-
-        for (k, (el, sep)) in elements.iter().enumerate() {
-            if k > 0 {
-                width += 1;
-            }
-
-            for n in el {
-                self.measure(n, hard, &mut width, &mut stopped);
-
-                if stopped {
-                    break;
-                }
-            }
-
-            if stopped {
-                break;
-            }
-
-            if sep.is_some() {
-                width += 1;
-            }
-        }
+        self.measure_inside(elements, close, hard, &mut width, &mut stopped);
 
         if !stopped {
-            width += 1;
+            width += self.tail_width(close, hard);
         }
 
         self.line.chars().count() + width > self.options.column_width
+    }
+
+    /// The width the line holds past the closer at `close`, up to the
+    /// next place it can break: a separator, the closer of the group
+    /// around, the opener of a group that is not empty, a comment, or a
+    /// hard break. Without it, `): Part` ran past the column.
+    fn tail_width(&self, close: usize, hard: &[bool]) -> usize {
+        let mut w = 0;
+        let mut j = close + 1;
+        // A return type, `): { number }` or `): (number, string?)`, is no
+        // place to break: the parameters break first, as they do before
+        // `): Result<A, B>`. Its groups count whole.
+        let returns_after = |close: usize| {
+            self.items[close].is(")")
+                && self.items.get(close + 1).is_some_and(|c| {
+                    (c.is(":") && self.annotation.contains(&c.start)) || c.is("->")
+                })
+        };
+        let mut returns = returns_after(close);
+
+        while j < self.items.len() {
+            let it = &self.items[j];
+
+            if hard[j] || it.is_comment() {
+                break;
+            }
+
+            let text = it.text.as_str();
+
+            // Parentheses that hug the group break with it, so the line
+            // goes on past their closer.
+            if closes(text) && self.opener_of(j).is_some_and(|o| self.hugs(o, j)) {
+                w += self.spaced_width(j);
+                returns = returns_after(j);
+                j += 1;
+
+                continue;
+            }
+
+            let closer = match text {
+                "," | ";" => self.next_code(j).filter(|n| closes(&self.items[*n].text)),
+
+                _ => closes(text).then_some(j),
+            };
+
+            // An expanded list writes a comma after its last element,
+            // so the width counts one whether the source had it or not.
+            if let Some(c) = closer {
+                let comma = matches!(self.items[c].text.as_str(), "}" | "]")
+                    && self.opener_of(c).is_some_and(|o| self.trailing_comma(o));
+
+                return w + usize::from(comma);
+            }
+
+            w += self.spaced_width(j);
+
+            if matches!(text, "," | ";") {
+                break;
+            }
+
+            if opens(text) && returns {
+                // The whole group, then the type goes on only through
+                // `?`, `|`, `&` or `->`.
+                let Some(end) = self.closer_at(j) else {
+                    break;
+                };
+                w += (j + 1..=end).map(|k| self.spaced_width(k)).sum::<usize>();
+                j = end + 1;
+
+                match self.items.get(j) {
+                    Some(n) if !hard[j] && matches!(n.text.as_str(), "?" | "|" | "&" | "->") => {
+                        continue;
+                    }
+
+                    _ => break,
+                }
+            }
+
+            if opens(text) {
+                // An empty group cannot break, so the line goes on.
+                match self.items.get(j + 1).is_some_and(|n| closes(&n.text)) {
+                    true => {
+                        w += self.spaced_width(j + 1);
+                        j += 1;
+                    }
+
+                    false => break,
+                }
+            }
+
+            j += 1;
+        }
+
+        w
     }
 
     /// The flat width of a node, up to the first hard break inside.
@@ -908,7 +1072,7 @@ impl<'s> Formatter<'s> {
                     return;
                 }
 
-                *w += self.items[*i].width() + usize::from(self.items[*i].space_before);
+                *w += self.spaced_width(*i);
             }
 
             Node::Group {
@@ -923,29 +1087,55 @@ impl<'s> Formatter<'s> {
                     return;
                 }
 
-                *w += self.items[*open].width();
-
-                for (k, (el, sep)) in elements.iter().enumerate() {
-                    if k > 0 {
-                        *w += 1;
-                    }
-
-                    for n in el {
-                        self.measure(n, hard, w, stopped);
-
-                        if *stopped {
-                            return;
-                        }
-                    }
-
-                    if sep.is_some() {
-                        *w += 1;
-                    }
-                }
-
-                *w += self.items[*close].width();
+                *w += self.spaced_width(*open);
+                self.measure_inside(elements, *close, hard, w, stopped);
             }
         }
+    }
+
+    /// The flat width of a group past its opener, up to the first hard
+    /// break inside.
+    fn measure_inside(
+        &self,
+        elements: &[(Vec<Node>, Option<usize>)],
+        close: usize,
+        hard: &[bool],
+        w: &mut usize,
+        stopped: &mut bool,
+    ) {
+        for (el, sep) in elements {
+            for n in el {
+                self.measure(n, hard, w, stopped);
+
+                if *stopped {
+                    return;
+                }
+            }
+
+            if let Some(s) = sep {
+                *w += self.spaced_width(*s);
+            }
+        }
+
+        *w += self.spaced_width(close);
+    }
+
+    /// Whether the group at `open` writes a comma after its last element
+    /// when it expands. A call, type arguments, and an index take none:
+    /// `t[k,]`, `t![k,]`, and `w->[k,]` do not parse.
+    fn trailing_comma(&self, open: usize) -> bool {
+        let opener = self.items[open].text.as_str();
+        let index = opener.ends_with('[') && self.is_index(open);
+
+        self.options.trailing_comma && !matches!(opener, "(" | "?(" | "<<") && !index
+    }
+
+    /// The width of item `i` on a flat line, with the space the render
+    /// puts before it. The source's own spacing would change the width
+    /// from one run to the next, so a second run could break a group
+    /// the first run kept on one line.
+    fn spaced_width(&self, i: usize) -> usize {
+        self.items[i].width() + usize::from(i > 0 && self.wants_space(i - 1, i))
     }
 
     /// A space inside the brackets of the group at `open`, by the options.
@@ -1016,8 +1206,9 @@ impl<'s> Formatter<'s> {
             .is_some_and(|sigil| self.items[sigil].is("$"))
     }
 
-    /// `[` that indexes, as opposed to an array literal or a type's
-    /// `{ [k]: v }`.
+    /// `[` that indexes or keys, as opposed to an array literal: `t[k]`,
+    /// `t![k]`, a child by name, `w->[k]`, and the indexer of a table
+    /// type, `{ [k]: v }` and `{ read [k]: v }`.
     fn is_index(&self, i: usize) -> bool {
         if self.items[i].is("?[") {
             return true;
@@ -1027,6 +1218,7 @@ impl<'s> Formatter<'s> {
             let t = &self.items[p];
 
             (t.is_ident() && !t.is_keyword_here())
+                || matches!(t.text.as_str(), "->" | "=>" | "!" | "read" | "write")
                 || t.is(")")
                 || t.is("]")
                 || t.is("}")
@@ -1054,7 +1246,13 @@ impl<'s> Formatter<'s> {
         let mut broke_until = 0;
 
         for i in 0..self.items.len() {
-            if i < broke_until || self.hole[i] || !self.items[i].is("if") || self.starts_block(i) {
+            // A chain around the `if` that has not broken breaks first.
+            if i < broke_until
+                || self.hole[i]
+                || self.held_chain[i]
+                || !self.items[i].is("if")
+                || self.starts_block(i)
+            {
                 continue;
             }
 
@@ -1149,6 +1347,10 @@ impl<'s> Formatter<'s> {
                         out.push(i);
                     }
 
+                    // Before the first `then`, a `;` joins two bindings,
+                    // as in `if const a = x; const b = a.y then`.
+                    ";" if out.is_empty() => {}
+
                     "," | ";" | "end" | "do" | "return" => break,
 
                     _ => {}
@@ -1179,6 +1381,93 @@ impl<'s> Formatter<'s> {
         }
 
         held
+    }
+
+    /// The items of each chain that has no hard break inside it yet. See
+    /// `held_chain`.
+    pub(crate) fn held_chains(&self, hard: &[bool]) -> Vec<bool> {
+        let mut held = vec![false; self.items.len()];
+
+        for c in &self.chains {
+            if !self.hole[c.first] && !hard[c.first + 1..=c.last].contains(&true) {
+                held[c.first..=c.last].fill(true);
+            }
+        }
+
+        held
+    }
+
+    // --- the binary chain ------------------------------------------------------------
+
+    /// Breaks every chain of binary operators the last render left on one
+    /// line past `column_width`, before each operator of the chain. True
+    /// when one broke, so the caller renders again. An `if` expression
+    /// around the chain breaks first, and a chain inside the operands
+    /// waits for the next pass, as with `force_long_expr_ifs`.
+    ///
+    /// The condition of an `if` statement first takes a line of its own,
+    /// between the `if` and the `then`. It breaks at its operators only
+    /// when that line is too long too.
+    pub(crate) fn force_long_chains(&mut self) -> bool {
+        let mut changed = false;
+        // The last item of the last chain that broke in this pass.
+        let mut broke_until = 0;
+
+        for c in 0..self.chains.len() {
+            let (first, last) = (self.chains[c].first, self.chains[c].last);
+
+            if (changed && first <= broke_until) || self.hole[first] || self.held[first] {
+                continue;
+            }
+
+            let line = self.at_line[first];
+
+            if self.at_line[last] != line
+                || self.code_width(line, last) <= self.options.column_width
+            {
+                continue;
+            }
+
+            let breaks = match self.chains[c].then {
+                Some(then) if self.items[first].newlines_before == 0 => vec![first, then],
+
+                _ => self.chains[c].ops.clone(),
+            };
+
+            if breaks.iter().any(|b| self.forced[*b]) {
+                continue;
+            }
+
+            for b in breaks {
+                self.forced[b] = true;
+                self.items[b].newlines_before = self.items[b].newlines_before.max(1);
+            }
+
+            broke_until = last;
+            changed = true;
+        }
+
+        changed
+    }
+
+    /// The width of output line `line` without the line comment that ends
+    /// it: a comment runs on past the column and breaks nothing. `from`
+    /// is an item on the line; the comment, if any, comes after it.
+    fn code_width(&self, line: usize, from: usize) -> usize {
+        let text = self.lines.get(line).map_or("", String::as_str);
+        let comment = (from + 1..self.items.len())
+            .take_while(|&k| self.at_line[k] <= line)
+            .find(|&k| self.items[k].kind == ItemKind::LineComment && self.at_line[k] == line);
+        let code = match comment {
+            Some(k) => text
+                .strip_suffix(self.items[k].text.as_str())
+                .unwrap_or(text)
+                .trim_end(),
+
+            None => text,
+        };
+
+        code.chars().count()
     }
 
     /// Whether each item sits inside an interpolation hole. The `}` that
@@ -1347,6 +1636,31 @@ impl<'s> Formatter<'s> {
         let it = &self.items[i];
 
         !it.name_here && (it.is("case") || it.is("default") || it.is("end"))
+    }
+
+    /// The closer of the group that opens at `open`.
+    fn closer_at(&self, open: usize) -> Option<usize> {
+        let mut depth = 0i32;
+
+        for j in open..self.items.len() {
+            let t = &self.items[j];
+
+            if t.is_comment() {
+                continue;
+            }
+
+            if opens(&t.text) {
+                depth += 1;
+            } else if closes(&t.text) {
+                depth -= 1;
+
+                if depth == 0 {
+                    return Some(j);
+                }
+            }
+        }
+
+        None
     }
 
     /// The opener of the group that holds item `i`, or none at the top.

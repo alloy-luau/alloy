@@ -2,9 +2,11 @@
 //! parameter, a field, or a return type, and every `:` inside a type,
 //! a generic list, a trait signature, or a type alias. `a:b()` and
 //! `a: b` lex the same, so the spacing reads the tree for the answer.
-//! The same walk finds each `if` that opens an expression.
+//! The same walk finds each `if` that opens an expression, the
+//! condition of each `if` statement, and each chain of binary operators
+//! the layout may break.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use alloy_syntax::ast::{
     Block, Chunk, ClassMember, Cond, DefaultExport, Expr, FunctionBody, Stmt, TokSpan,
@@ -46,13 +48,103 @@ pub(crate) fn expr_ifs(src: &str, toks: &[Tok], chunk: &Chunk) -> HashSet<usize>
     walk.ifs.iter().map(|&i| toks[i].start as usize).collect()
 }
 
-/// The type spans of a tree, in source order, and the token of each
-/// `if` expression.
+/// A run of binary operators of one precedence, `a * 2 + b - c`, by
+/// the byte of each token: its first and its last, and each operator
+/// between the operands. The layout breaks a long one before each
+/// operator. `then` is the `then` after it when the run is the whole
+/// condition of an `if` or an `elseif` statement.
+#[derive(Debug)]
+pub(crate) struct Chain {
+    pub first: usize,
+    pub last: usize,
+    pub ops: Vec<usize>,
+    pub then: Option<usize>,
+}
+
+/// The precedence of a binary operator, as the parser reads it. `??`
+/// spans two tokens, and `!=` reads as `~=`.
+fn precedence(op: &str) -> Option<u8> {
+    match op {
+        "??" => Some(3),
+
+        "!=" => Some(4),
+
+        _ => alloy_syntax::contextual::binop_priority(op).map(|p| p.0),
+    }
+}
+
+/// Every binary chain of the chunk, outer before inner. A chain breaks
+/// only before an operator that can open a line: a word operator, `bor`
+/// or `shl`, stays on the line of its left operand. A `-` in a value arm
+/// of a `match` opens the next value when it opens a line, so a chain
+/// with one there never breaks either.
+pub(crate) fn binary_chains(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Chain> {
+    let walk = Walk::new(src, toks, chunk);
+    let arms = super::structure::structure(src, toks).value_arm;
+    let byte = |i: usize| toks[i].start as usize;
+    let text = |i: usize| TokSpan::new(i, i + 1).text(src, toks);
+    let mut out: Vec<Chain> = walk
+        .chains
+        .into_iter()
+        .filter(|(_, ops)| {
+            ops.iter().all(|&o| {
+                let op = if text(o) == "?" { "??" } else { text(o) };
+
+                super::continues(op) && !(arms[o] && op == "-")
+            })
+        })
+        .map(|(span, ops)| Chain {
+            first: byte(span.start as usize),
+            last: byte(span.end as usize - 1),
+            ops: ops.into_iter().map(byte).collect(),
+            then: walk.conds.get(&(span.start, span.end)).map(|&t| byte(t)),
+        })
+        .collect();
+    out.sort_by_key(|c| (c.first, std::cmp::Reverse(c.last)));
+
+    out
+}
+
+/// The `if` or `elseif` and the `then` of each condition of an `if`
+/// statement, by byte.
+pub(crate) fn if_conditions(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<(usize, usize)> {
+    let walk = Walk::new(src, toks, chunk);
+
+    walk.conds
+        .iter()
+        .map(|(&(start, _), &then)| {
+            (
+                toks[start as usize - 1].start as usize,
+                toks[then].start as usize,
+            )
+        })
+        .collect()
+}
+
+/// The token of each `:` of a ternary, `c ? a : b()`. It lexes as the
+/// `:` of the method call `a:b()`, so only the tree tells them apart.
+pub(crate) fn ternary_colons(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<usize> {
+    Walk::new(src, toks, chunk)
+        .chains
+        .into_iter()
+        .flat_map(|(_, ops)| ops)
+        .filter(|&o| toks[o].text(src) == ":")
+        .collect()
+}
+
+/// The type spans of a tree, in source order, the token of each `if`
+/// expression, each binary chain with its operators, and the span of
+/// each `if` condition with its `then`.
 struct Walk<'a> {
     src: &'a str,
     toks: &'a [Tok],
     spans: Vec<TokSpan>,
     ifs: Vec<usize>,
+    chains: Vec<(TokSpan, Vec<usize>)>,
+    conds: HashMap<(u32, u32), usize>,
+    /// The operators a chain holds already, so an operand of the same
+    /// precedence opens no chain of its own.
+    in_chain: HashSet<u32>,
 }
 
 impl<'a> Walk<'a> {
@@ -62,10 +154,26 @@ impl<'a> Walk<'a> {
             toks,
             spans: Vec::new(),
             ifs: Vec::new(),
+            chains: Vec::new(),
+            conds: HashMap::new(),
+            in_chain: HashSet::new(),
         };
         walk.block(&chunk.block);
 
         walk
+    }
+
+    /// The operators of the chain under `e`, each of precedence `prec`.
+    /// A parenthesized operand is one operand.
+    fn chain_ops(&mut self, e: &Expr, prec: u8, ops: &mut Vec<usize>) {
+        if let Expr::Binary { op, lhs, rhs, .. } = e
+            && precedence(op.text(self.src, self.toks)) == Some(prec)
+        {
+            self.in_chain.insert(op.start);
+            self.chain_ops(lhs, prec, ops);
+            ops.push(op.start as usize);
+            self.chain_ops(rhs, prec, ops);
+        }
     }
 
     fn block(&mut self, b: &Block) {
@@ -133,6 +241,17 @@ impl<'a> Walk<'a> {
             Stmt::If(i) => {
                 for (c, _) in &i.branches {
                     self.cond(c);
+
+                    let span = c.span();
+
+                    if matches!(c, Cond::Expr(_))
+                        && self
+                            .toks
+                            .get(span.end as usize)
+                            .is_some_and(|t| t.text(self.src) == "then")
+                    {
+                        self.conds.insert((span.start, span.end), span.end as usize);
+                    }
                 }
             }
 
@@ -192,6 +311,30 @@ impl<'a> Walk<'a> {
 
                 for (c, _) in branches {
                     self.cond(c);
+                }
+            }
+
+            Expr::Binary { op, span, .. } if !self.in_chain.contains(&op.start) => {
+                if let Some(prec) = precedence(op.text(self.src, self.toks)) {
+                    let mut ops = Vec::new();
+                    self.chain_ops(e, prec, &mut ops);
+                    self.chains.push((*span, ops));
+                }
+            }
+
+            // `c ? a : b` is a chain of its `?` and its `:`, so a long one
+            // breaks there, one branch a line, and not inside a branch.
+            Expr::Ternary {
+                cond,
+                then_value,
+                span,
+                ..
+            } => {
+                let (q, colon) = (cond.span().end as usize, then_value.span().end as usize);
+                let text = |i: usize| TokSpan::new(i, i + 1).text(self.src, self.toks);
+
+                if text(q) == "?" && text(colon) == ":" {
+                    self.chains.push((*span, vec![q, colon]));
                 }
             }
 

@@ -26,12 +26,12 @@ pub(crate) use modules::{shadows_an_import, star_module_hover, std_import_hover}
 pub(crate) use restyle::group_len;
 pub(crate) use restyle::{
     bind_hover_receiver, close_empty_packs, close_item_packs, declared_annotation, declared_head,
-    declared_signature, drop_bound_intersections, empty_parameter_names, fold_std_shapes,
-    invents_a_type, is_byte_count, keep_annotation, lowers_a_block, member_doc,
+    declared_signature, dedupe_item_details, drop_bound_intersections, empty_parameter_names,
+    fold_std_shapes, invents_a_type, is_byte_count, keep_annotation, lowers_a_block, member_doc,
     name_by_declaration, name_method_doc, name_method_receiver, name_self_receiver,
-    name_solver_variable, name_trait_method, names_a_key, prefer_constructed_struct,
-    restates_itself, restore_struct_arguments, restyle_hover, restyle_signatures, source_type,
-    std_generic, unlocal_parameter,
+    name_solver_variable, name_trait_method, names_a_key, narrowed_field,
+    prefer_constructed_struct, restates_itself, restore_struct_arguments, restyle_hover,
+    restyle_signatures, source_type, std_generic, unlocal_parameter,
 };
 
 use super::completion::{lands_on_member, member_position, sep_of};
@@ -58,7 +58,7 @@ impl Server {
         }
 
         let (line, character) = position_of_message(message)?;
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let doc = st.docs.get(uri)?;
         let Caret { start, end, .. } = Caret::at(&doc.source, line, character)?;
         let word = &doc.source[start..end];
@@ -93,7 +93,7 @@ impl Server {
         let Some((line, character)) = position_of_message(message) else {
             return false;
         };
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let Some(doc) = st.docs.get(uri) else {
             return false;
         };
@@ -105,6 +105,47 @@ impl Server {
             .is_some_and(|(start, _, _)| super::completion::declares_params(&doc.source, start))
     }
 
+    /// Whether the caret names a std name the file does not reach: the
+    /// word under a hover, or the head of the call a signature help
+    /// sits in, as `HashMap` in `HashMap.new(`. The emit writes the name
+    /// as the runtime's either way, so the child would type it as a
+    /// global. The report and its import fix answer for it instead.
+    pub(crate) fn on_unreached_std(&self, uri: &str, message: &Value, call: bool) -> bool {
+        if !is_alloy_uri(uri) {
+            return false;
+        }
+
+        let Some((line, character)) = position_of_message(message) else {
+            return false;
+        };
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(doc) = st.docs.get(uri) else {
+            return false;
+        };
+        let Some(offset) = offset_of(&doc.source, line, character) else {
+            return false;
+        };
+        let src = &doc.source;
+        let (start, end) = match call {
+            true => {
+                let Some((_, end, _)) = super::completion::open_paren_word(src, offset) else {
+                    return false;
+                };
+                let start = src[..end]
+                    .trim_end_matches(|c: char| c.is_alphanumeric() || c == '_' || c == '.')
+                    .len();
+
+                (start, src[start..end].find('.').map_or(end, |i| start + i))
+            }
+
+            false if keywords::is_word_caret(src, offset) => keywords::word_range(src, offset),
+
+            false => return false,
+        };
+
+        unreached_std(doc, start, end)
+    }
+
     /// The shadow position of a signature-help caret inside a call in
     /// an intrinsic's argument, where the argument stands as code, or
     /// on the base of an index. `None` for any other caret.
@@ -114,13 +155,39 @@ impl Server {
         }
 
         let (line, character) = position_of_message(message)?;
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let doc = st.docs.get(uri)?;
         let shadow = doc.to_shadow(line, character);
+        // The code copy of an intrinsic's argument takes the same moves
+        // as any call: `$assert_eq(E.plain(|E.A), "p")` sits on the base
+        // of an index there too.
+        let code = intrinsic_code_home(&doc.source, &doc.shadow, line, shadow.0, character);
+        let at = code.unwrap_or(shadow);
 
-        intrinsic_code_home(&doc.source, &doc.shadow, line, shadow.0, character)
-            .or_else(|| before_call_argument(&doc.shadow, shadow))
-            .or_else(|| past_index_base(&doc.shadow, shadow))
+        before_call_argument(&doc.shadow, at)
+            .or_else(|| past_index_base(&doc.shadow, at))
+            .or(code)
+    }
+
+    /// The shadow text a hover on the `if`, `then`, `else` or `elseif`
+    /// of a value in markup reads: the shadow with the property casts
+    /// blanked. The cast types the hole as the property takes it, so
+    /// the child answers `number | string | { read getValue: ... }`,
+    /// where a plain file answers the type of the `if` itself. `None`
+    /// for any other hover.
+    pub(crate) fn prop_value_scratch(&self, uri: &str, message: &Value) -> Option<String> {
+        if !uri.ends_with(".alx") {
+            return None;
+        }
+
+        let (line, character) = position_of_message(message)?;
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let doc = st.docs.get(uri)?;
+        let caret = Caret::at(&doc.source, line, character)?;
+        let word = &doc.source[caret.start..caret.end];
+
+        (matches!(word, "if" | "then" | "else" | "elseif") && doc.shadow.contains(PROP_CAST))
+            .then(|| uncast_props(&doc.shadow))
     }
 
     /// The shadow text a member completion after a child lookup reads,
@@ -132,7 +199,7 @@ impl Server {
         }
 
         let (line, character) = position_of_message(message)?;
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let doc = st.docs.get(uri)?;
         let offset = offset_of(&doc.source, line, character)?;
         let (base, _, sep, word) = context::member_at(&doc.source, offset)?;
@@ -156,7 +223,7 @@ impl Server {
         }
 
         let (line, character) = position_of_message(message)?;
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let doc = st.docs.get(uri)?;
         let offset = offset_of(&doc.source, line, character)?;
         let line_start = doc.source[..offset].rfind('\n').map_or(0, |i| i + 1);
@@ -214,7 +281,7 @@ impl Server {
         }
 
         let (line, character) = position_of_message(message)?;
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let doc = st.docs.get(uri)?;
         let offset = offset_of(&doc.source, line, character)?;
         let start = context::child_name_start(&doc.source, offset)?;
@@ -235,7 +302,7 @@ impl Server {
         }
 
         let (line, character) = position_of_message(message)?;
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let doc = st.docs.get(uri)?;
         let offset = offset_of(&doc.source, line, character)?;
         let line_start = doc.source[..offset].rfind('\n').map_or(0, |i| i + 1);
@@ -272,7 +339,7 @@ impl Server {
         }
 
         let (line, character) = position_of_message(message)?;
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let doc = st.docs.get(uri)?;
 
         if member_position(doc, line, character).is_some() {
@@ -304,7 +371,7 @@ impl Server {
             return false;
         };
 
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
         let Some(doc) = st.docs.get(uri) else {
             return false;
@@ -428,7 +495,7 @@ impl Server {
         let Some((line, character)) = position_of_message(message) else {
             return false;
         };
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
         st.docs.get(uri).is_some_and(|doc| {
             offset_of(&doc.source, line, character).is_some_and(|at| doc.in_blanked_markup(at))
@@ -447,7 +514,7 @@ impl Server {
         let Some((line, character)) = position_of_message(message) else {
             return false;
         };
-        let st = self.state.lock().expect("state");
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let Some(doc) = st.docs.get(uri) else {
             return false;
         };
@@ -523,7 +590,6 @@ impl State {
         }
 
         let mut spot = markup::completion_spot(&doc.source, offset)?;
-        let bound = markup_bound(&doc.source);
         let load = |spec: &str| self.module_source(uri, spec);
 
         if let (markup::Spot::AttributeSlot { class, .. }, Some(as_class)) = (&mut spot, as_class) {
@@ -532,8 +598,8 @@ impl State {
 
         let props = self.ingot_props(uri);
         // A dotted tag reaches the members of the path in front of its
-        // last `.`; a bare one reaches every name of the file that holds
-        // a component.
+        // last `.`; a bare one reaches the components in scope and the
+        // names that hold one.
         let reach = match &spot {
             markup::Spot::TagSlot { prefix } => match prefix.rsplit_once('.') {
                 Some((holder, _)) => {
@@ -542,7 +608,7 @@ impl State {
                     components::members(&doc.source, &path, &load)
                 }
 
-                None => components::containers(&doc.source),
+                None => components::tag_names(&doc.source, &load),
             },
 
             _ => Vec::new(),
@@ -560,7 +626,6 @@ impl State {
 
         Some(markup::completions(
             &spot,
-            &bound,
             declared.as_deref().unwrap_or(&doc.source),
             &props,
             &reach,
@@ -1028,11 +1093,31 @@ pub(crate) fn uncast_children(shadow: &str) -> String {
     out
 }
 
+/// The head of the cast a markup value takes, `(__alloy.prop :: T)(v)`.
+const PROP_CAST: &str = "(__alloy.prop :: ";
+
+/// The shadow with the type of every property cast blanked, so the
+/// value reads `(__alloy.prop     )(v)`. The runtime's `prop` takes
+/// `any`, so the value keeps its own type. Every byte keeps its place.
+pub(crate) fn uncast_props(shadow: &str) -> String {
+    let mut out = shadow.to_string();
+
+    for (at, _) in shadow.match_indices(PROP_CAST) {
+        let Some(close) = closing_paren(shadow, at) else {
+            continue;
+        };
+        let cast = at + "(__alloy.prop".len()..close;
+        out.replace_range(cast.clone(), &" ".repeat(cast.len()));
+    }
+
+    out
+}
+
 /// Where a caret inside a call in an intrinsic's argument stands in
-/// the shadow. The intrinsic lowers to one generated text, with the
-/// argument as a string for its message and as code after it, so the
-/// map holds no position for the caret and the child sees a call in
-/// the code alone. The text from the intrinsic's `(` to the caret is
+/// the shadow. The intrinsic writes the argument as a string for its
+/// message and as code after it, and the child sees a call in the code
+/// alone. The map holds the code copy of `$assert`, `$assert_eq` and
+/// `$dbg`; for the rest, the text from the intrinsic's `(` to the caret is
 /// the key: its last match outside every string of the shadow line is
 /// the code copy. `None` when no call of the argument is open at the
 /// caret, where the intrinsic's own signature is the answer.
@@ -1114,6 +1199,29 @@ pub(crate) fn doc_binds(doc: &Doc, name: &str) -> bool {
     doc.decls.iter().any(|d| d.name == name)
         || doc.bindings.iter().any(|b| b.name == name)
         || imports::bound_names(&doc.source).iter().any(|n| n == name)
+}
+
+/// Whether the word at `start..end` is a std name the file does not
+/// reach: no import, no `[std] globals`, and no binding of its own. The
+/// name is no global there. A member after a `.`, a string, and an
+/// entry of an import list name no global either.
+pub(crate) fn unreached_std(doc: &Doc, start: usize, end: usize) -> bool {
+    let src = &doc.source;
+    let word = &src[start..end];
+    let member = src[..start].ends_with('.') && !src[..start].ends_with("..");
+    let listed = || {
+        super::navigation::import_entries(src)
+            .into_iter()
+            .chain(super::navigation::reexport_entries(src))
+            .any(|e| e.name_at.0 <= start && start < e.name_at.1)
+    };
+
+    alloy::std_names::is_std_name(word)
+        && !member
+        && !context::in_string(src, start)
+        && !super::completion::StdReach::of(doc).reaches(word)
+        && !doc_binds(doc, word)
+        && !listed()
 }
 
 /// The struct a method's `self` belongs to: the nearest `impl` above

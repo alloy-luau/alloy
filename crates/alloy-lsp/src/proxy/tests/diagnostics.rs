@@ -1741,6 +1741,27 @@ fn an_extract_stays_only_where_the_file_keeps_parsing() {
     ]))));
 }
 
+/// "Extract to local variable" on `t.n = 5` wrote `local extracted =
+/// t.n` and then `extracted = 5`, so the field kept its value. The
+/// target of an assignment or of a compound one has no extract. A value
+/// on the right, and an index inside the target, keep it.
+#[test]
+fn an_assignment_target_has_no_extract() {
+    let src = "local t = { n = 1 }\nt.n = 5\nt.n += 1\nt[t.n] = t.n + 1\nlocal a, b = 1, 2\na, t.n = b, 3\n";
+    let (st, uri) = one_file(src);
+    let action =
+        json!({ "title": "x", "kind": "refactor.extract", "data": { "type": "extractVariable" } });
+    let keeps = |l: u32, c: u32| st.keeps_child_action(&action, uri, Some(((l, c), (l, c))));
+
+    for (l, c) in [(1, 0), (1, 2), (2, 0), (2, 2), (3, 0), (5, 0), (5, 5)] {
+        assert!(!keeps(l, c), "{l}:{c}");
+    }
+
+    assert!(keeps(3, 2));
+    assert!(keeps(3, 9));
+    assert!(keeps(5, 9));
+}
+
 /// An action whose resolve carries no edit goes from the list. The
 /// child inlines a `local` or a `const` that holds a value, and a
 /// parameter, an import, or a function has none. A type and a
@@ -1838,6 +1859,43 @@ fn an_inline_that_moves_a_call_leaves_the_list() {
     assert!(keeps("sum", 5));
     assert!(!keeps("loopy", 6));
     assert!(!keeps("twice", 7));
+}
+
+/// "Inline variable" moved `a * 2` past `a = 10` and `t.n` past
+/// `t.n = 5`, so the use read the new value. A write to a name or a
+/// field the value reads, before the use, drops the action. A write
+/// after the use, or a table key of the same name, keeps it.
+#[test]
+fn an_inline_past_a_write_leaves_the_list() {
+    let src = concat!(
+        "local function f(a: number, t: { n: number }, u: { n: number })\n",
+        "    local x = a * 2\n",
+        "    a = 10\n",
+        "    local y = t.n\n",
+        "    t.n = 5\n",
+        "    local z = a\n",
+        "    a += 1\n",
+        "    local w = t.n + 1\n",
+        "    u.n, a = 1, 2\n",
+        "    local k = a + 1\n",
+        "    local v = { a = 3 }\n",
+        "    local j = a + 2\n",
+        "    print(x, y, z, w, k, v, j)\n",
+        "    a = 0\n",
+        "end\n",
+    );
+    let (st, uri) = one_file(src);
+    let inline = |name: &str| json!({ "title": format!("Inline variable '{name}'"), "kind": "refactor.inline", "data": { "type": "inlineVariable" } });
+    let keeps = |name: &str, line: u32| {
+        st.keeps_child_action(&inline(name), uri, Some(((line, 10), (line, 10))))
+    };
+
+    assert!(!keeps("x", 1));
+    assert!(!keeps("y", 3));
+    assert!(!keeps("z", 5));
+    assert!(!keeps("w", 7));
+    assert!(keeps("k", 9));
+    assert!(keeps("j", 11));
 }
 
 /// The child's "Change 'flyer' to 'Flyer'" replaced all of `t.flyer`

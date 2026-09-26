@@ -601,13 +601,9 @@ impl<'s> Scan<'s> {
                 }
             }
 
-            // The line above ends in a comment: documented.
-            let gap = self.gap_before(top);
-            let above = gap.trim_end_matches([' ', '\t']);
-            let above = above.strip_suffix('\n').unwrap_or(above);
-            let last_line = above.rsplit('\n').next().unwrap_or("");
-
-            if last_line.trim_start().starts_with("--") {
+            // A comment ends on the line above, as the hover reads it:
+            // documented.
+            if crate::declarations::doc_before(self.src, self.start(top) as usize).is_some() {
                 continue;
             }
 
@@ -900,6 +896,20 @@ mod tests {
             let bare = format!("{attr}\nexport struct E as\n    x: number\nend\n");
             assert_eq!(all(&bare), vec!["missing_doc"], "{bare}");
         }
+    }
+
+    /// A block comment right above an export documents it, as the hover
+    /// reads it.
+    #[test]
+    fn a_block_comment_documents_an_export() {
+        assert_eq!(
+            all("--[[\n  The limit.\n]]\nexport const LIMIT = 1\n"),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            all("--[=[ The limit. ]=]\n\nexport const LIMIT = 1\n"),
+            vec!["missing_doc"]
+        );
     }
 
     #[test]

@@ -1162,73 +1162,158 @@ impl Markup {
 }
 
 /// The functions of a file that return markup, by the token of their
-/// name: a `return` whose value lies in a markup region.
-fn markup_returns(toks: &[Tok], block: &Block, markup: &Markup, out: &mut HashSet<usize>) {
-    fn returns(toks: &[Tok], block: &Block, markup: &Markup) -> bool {
-        block.stmts.iter().any(|s| match s {
-            // A region inside the value: `return <Frame />`, and
-            // `return ( <Frame /> )` in parentheses too.
-            Stmt::Return(r) => r.values.iter().any(|v| {
-                let span = v.span();
-                let from = toks.get(span.start as usize).map_or(0, |t| t.start);
-                let to = toks
-                    .get((span.end as usize).saturating_sub(1))
-                    .map_or(0, |t| t.end);
+/// name: a `return` whose value lies in a markup region, or names a
+/// local of the function that holds one.
+fn markup_returns(
+    src: &str,
+    toks: &[Tok],
+    block: &Block,
+    markup: &Markup,
+    out: &mut HashSet<usize>,
+) {
+    // A region inside the value: `<Frame />`, and `( <Frame /> )` too.
+    fn holds(toks: &[Tok], v: &Expr, markup: &Markup) -> bool {
+        let span = v.span();
+        let from = toks.get(span.start as usize).map_or(0, |t| t.start);
+        let to = toks
+            .get((span.end as usize).saturating_sub(1))
+            .map_or(0, |t| t.end);
 
-                markup.regions.iter().any(|(a, _)| from <= *a && *a < to)
+        markup.regions.iter().any(|(a, _)| from <= *a && *a < to)
+    }
+
+    // The locals of a function body that hold markup,
+    // `local box = <input />`. A nested function binds for itself.
+    fn bound<'s>(
+        src: &'s str,
+        toks: &[Tok],
+        block: &Block,
+        markup: &Markup,
+        out: &mut HashSet<&'s str>,
+    ) {
+        for s in &block.stmts {
+            match s {
+                Stmt::Local(l) => {
+                    for (b, v) in l.names.iter().zip(&l.values) {
+                        if b.destructure.is_none()
+                            && !matches!(v, Expr::Function { .. })
+                            && holds(toks, v, markup)
+                        {
+                            out.insert(b.name.text(src, toks));
+                        }
+                    }
+                }
+
+                Stmt::LocalFunction(_) | Stmt::Function(_) => {}
+
+                other => {
+                    for c in stmt_children(other) {
+                        if let Child::Block(b) = c {
+                            bound(src, toks, b, markup, out);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn returns(
+        src: &str,
+        toks: &[Tok],
+        block: &Block,
+        markup: &Markup,
+        names: &HashSet<&str>,
+    ) -> bool {
+        block.stmts.iter().any(|s| match s {
+            Stmt::Return(r) => r.values.iter().any(|v| {
+                holds(toks, v, markup)
+                    || matches!(v, Expr::Name(n) if names.contains(n.text(src, toks)))
             }),
 
             // A nested function returns for itself.
             Stmt::LocalFunction(_) | Stmt::Function(_) => false,
 
             other => stmt_children(other).iter().any(|c| match c {
-                Child::Block(b) => returns(toks, b, markup),
+                Child::Block(b) => returns(src, toks, b, markup, names),
 
                 _ => false,
             }),
         })
     }
 
+    let component = |body: &Block| {
+        let mut names = HashSet::new();
+        bound(src, toks, body, markup, &mut names);
+
+        returns(src, toks, body, markup, &names)
+    };
+
     for s in &block.stmts {
         match s.under_default() {
             Stmt::LocalFunction(f) => {
-                if returns(toks, &f.body.block, markup) {
+                if component(&f.body.block) {
                     out.insert(f.name.start as usize);
                 }
 
-                markup_returns(toks, &f.body.block, markup, out);
+                markup_returns(src, toks, &f.body.block, markup, out);
             }
 
             Stmt::Function(f) => {
                 if let [name] = f.path.as_slice()
-                    && returns(toks, &f.body.block, markup)
+                    && component(&f.body.block)
                 {
                     out.insert(name.start as usize);
                 }
 
-                markup_returns(toks, &f.body.block, markup, out);
+                markup_returns(src, toks, &f.body.block, markup, out);
             }
 
             // `local Row = function(props) return <Frame /> end`.
             Stmt::Local(l) if l.names.len() == 1 && l.values.len() == 1 => {
                 if let Expr::Function { body, .. } = &l.values[0] {
-                    if returns(toks, &body.block, markup) {
+                    if component(&body.block) {
                         out.insert(l.names[0].name.start as usize);
                     }
 
-                    markup_returns(toks, &body.block, markup, out);
+                    markup_returns(src, toks, &body.block, markup, out);
                 }
             }
 
             other => {
                 for c in stmt_children(other) {
                     if let Child::Block(b) = c {
-                        markup_returns(toks, b, markup, out);
+                        markup_returns(src, toks, b, markup, out);
                     }
                 }
             }
         }
     }
+}
+
+/// The names of the components an `.alx` source declares, at any depth:
+/// the functions that return markup, as the lint reads them. `spans`
+/// holds the byte ranges of the markup in `src`. The editor passes the
+/// ranges it recovers from a file with an unfinished tag.
+pub fn components(src: &str, spans: &[(usize, usize)]) -> HashSet<String> {
+    // Blanking keeps every offset, so a span is a region of the text.
+    let text = luaux::resolve::blank_luaux_regions(src, spans);
+    let Ok(parsed) = alloy_syntax::parse_lenient(&text, crate::fmt::parse_options()) else {
+        return HashSet::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let markup = Markup {
+        regions: spans.iter().map(|&(a, b)| (a as u32, b as u32)).collect(),
+        tags: HashSet::new(),
+    };
+    let mut found = HashSet::new();
+
+    markup_returns(&text, toks, &parsed.chunk.block, &markup, &mut found);
+
+    found
+        .into_iter()
+        .filter_map(|t| toks.get(t))
+        .map(|t| t.text(&text).to_string())
+        .collect()
 }
 
 /// A binding's name, the token that declares it, and the token ranges
@@ -1346,7 +1431,7 @@ pub(crate) fn lints(
     let classes = class_tables(src, toks, &chunk.block.stmts);
 
     if !markup.regions.is_empty() {
-        markup_returns(toks, &chunk.block, markup, &mut components);
+        markup_returns(src, toks, &chunk.block, markup, &mut components);
     }
 
     for (at, d) in w.decls.iter().enumerate() {
@@ -1412,7 +1497,7 @@ pub(crate) fn lints(
             true => "never assigned again, so it is a const".to_string(),
 
             false if classes.contains(&d.tok) => {
-                "a class table, which takes the struct style".to_string()
+                "a class or module table, which takes the struct style".to_string()
             }
 
             false => format!("{article} {key}"),
@@ -1434,27 +1519,40 @@ pub(crate) fn lints(
 }
 
 /// The name token of each top-level local that holds a class or a
-/// module table: the file writes `X.__index = X` or a colon method
-/// `function X:m()` on it. Such a name reads as a type, `Timer.new()`,
-/// so it takes the struct style. A plain data table stays a variable.
+/// module table: the file writes `X.__index = X` or a function on it,
+/// `function X.f()` or `function X:m()`. Such a name reads as a type or
+/// a module, `Timer.new()`, so it takes the struct style. A plain data
+/// table stays a variable.
+///
+/// `X.f = function` also writes a callback into a data table, so it
+/// counts only on a local that starts as `{}`.
 fn class_tables(src: &str, toks: &[Tok], stmts: &[Stmt]) -> HashSet<usize> {
     let text = |span: TokSpan| span.text(src, toks);
     let mut owners: HashSet<&str> = HashSet::new();
+    let mut filled: HashSet<&str> = HashSet::new();
 
     for stmt in stmts {
         match stmt.under_default() {
             Stmt::Assign(a) => {
-                if let ([Expr::Index { object, key, .. }], [Expr::Name(v)]) =
+                if let ([Expr::Index { object, key, .. }], [value]) =
                     (a.targets.as_slice(), a.values.as_slice())
                     && let (Expr::Name(o), IndexKey::Field(k)) = (object.as_ref(), key)
-                    && text(*k) == "__index"
-                    && text(*o) == text(*v)
                 {
-                    owners.insert(text(*o));
+                    match value {
+                        Expr::Name(v) if text(*k) == "__index" && text(*o) == text(*v) => {
+                            owners.insert(text(*o));
+                        }
+
+                        Expr::Function { .. } => {
+                            filled.insert(text(*o));
+                        }
+
+                        _ => {}
+                    }
                 }
             }
 
-            Stmt::Function(f) if f.is_method && f.path.len() == 2 => {
+            Stmt::Function(f) if f.path.len() >= 2 => {
                 owners.insert(text(f.path[0]));
             }
 
@@ -1467,8 +1565,10 @@ fn class_tables(src: &str, toks: &[Tok], stmts: &[Stmt]) -> HashSet<usize> {
         .filter_map(|stmt| match stmt.under_default() {
             Stmt::Local(l) if l.names.len() == 1 && l.names[0].destructure.is_none() => {
                 let name = l.names[0].name;
+                let empty = matches!(l.values.as_slice(), [Expr::Table { fields, .. }] if fields.is_empty());
+                let class = owners.contains(text(name)) || (empty && filled.contains(text(name)));
 
-                owners.contains(text(name)).then_some(name.start as usize)
+                class.then_some(name.start as usize)
             }
 
             _ => None,
@@ -1548,6 +1648,18 @@ pub fn lints_after_consts(src: &str, consts: &[Fix], naming: &Naming) -> Vec<Lin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A function that returns markup, itself or through a local, is a
+    /// component. A function or a value that holds none is not.
+    #[test]
+    fn the_components_of_a_source_return_markup() {
+        let src = "local MAX = 3\nlocal function helper() return 1 end\nlocal function Card() return <Frame /> end\nlocal function Box()\n    local b = <Frame />\n    return b\nend\nexport function App() return (\n    <Card />\n) end\n";
+        let spans = luaux::compile::markup_spans(src).expect("the markup reads");
+        let mut names: Vec<String> = components(src, &spans).into_iter().collect();
+        names.sort();
+
+        assert_eq!(names, ["App", "Box", "Card"]);
+    }
 
     #[test]
     fn a_style_reads_the_case_and_one_letter_fits_what_it_can() {
@@ -1937,6 +2049,17 @@ mod tests {
         assert_eq!(fixed(class), class);
         let module = "local Shop = {}\nfunction Shop:open() end\nreturn Shop\n";
         assert_eq!(fixed(module), module);
+        // The usual Luau module: a function written on the table, with
+        // a dot or as an assigned value.
+        let helpers = "local Helpers = {}\nfunction Helpers.double(x: number): number\n    return x * 2\nend\nHelpers.half = function(x: number): number\n    return x / 2\nend\nreturn Helpers\n";
+        assert_eq!(fixed(helpers), helpers);
+        let assigned = "local Util = {}\nUtil.run = function() end\nreturn Util\n";
+        assert_eq!(fixed(assigned), assigned);
+        // A callback written into a data table keeps the variable style.
+        assert_eq!(
+            fixed("local Hooks = { on = print }\nHooks.on = function() end\nprint(Hooks)\n"),
+            "local hooks = { on = print }\nhooks.on = function() end\nprint(hooks)\n"
+        );
 
         let lower = "local timer = {}\ntimer.__index = timer\nreturn timer\n";
         let lints: Vec<Lint> = crate::compile(lower)
@@ -1947,7 +2070,7 @@ mod tests {
             .collect();
         assert_eq!(
             lints[0].message,
-            "`timer` is a class table, which takes the struct style, and structs are PascalCase here: `Timer`"
+            "`timer` is a class or module table, which takes the struct style, and structs are PascalCase here: `Timer`"
         );
         assert_eq!(
             fixed(lower),

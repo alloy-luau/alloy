@@ -145,6 +145,14 @@ impl<'a> Lexed<'a> {
             .rev()
             .find(|&k| matches!(self.text(k), "const" | "local"))?
             + 1;
+
+        // No name stands between the word and its `=`: `const = { ... }`
+        // in `lint.naming` is a key named `const`, and `local =` is half
+        // typed.
+        if name >= eq {
+            return None;
+        }
+
         let one_line = !self.src[self.toks.get(name)?.end as usize..self.toks[eq].start as usize]
             .contains('\n');
 
@@ -1086,6 +1094,42 @@ mod tests {
             place("export const build: { out: string } = {\n    o|\n}\n"),
             key(&["build"], "o")
         );
+    }
+
+    /// `local =` or `const =`, half typed, binds no name. The span
+    /// between the name and the `=` ran backwards and panicked.
+    #[test]
+    fn a_half_typed_binding_is_no_config() {
+        assert_eq!(place("local = {\n    |\n}\n"), None);
+        assert_eq!(place("export const = { | }\n"), None);
+        assert!(check(&schema(), "local = {\n    build = 1,\n}\n").len() < 100);
+    }
+
+    /// `const = { ... }` names a naming key. The reader took `const` for
+    /// the keyword and cut a byte range that runs backward, which
+    /// panicked and took the server down.
+    #[test]
+    fn a_key_named_const_is_a_key() {
+        let src = "export default {\n  lint = {\n    naming = {\n      const = { 'PascalCase' },\n    },\n  },\n}\n";
+
+        assert!(check(&schema(), src).is_empty());
+        assert!(at(&src.replace("'PascalCase'", "|")).is_some());
+    }
+
+    /// `interpolate` takes the values the compiler reads: `wrap` and
+    /// `plain`. The schema listed `plain` and `compute`, so the default
+    /// of the table form reported as wrong.
+    #[test]
+    fn interpolate_takes_wrap_and_plain() {
+        let config = |value: &str| {
+            format!(
+                "export default {{\n  alx = {{ factory = {{ backend = 'table', create = 'vide.create', interpolate = '{value}' }} }},\n}}\n"
+            )
+        };
+
+        assert!(check(&schema(), &config("wrap")).is_empty());
+        assert!(check(&schema(), &config("plain")).is_empty());
+        assert!(!check(&schema(), &config("compute")).is_empty());
     }
 
     #[test]

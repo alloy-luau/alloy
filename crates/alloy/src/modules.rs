@@ -823,11 +823,40 @@ pub fn alias_problems(root: &Path, config: &Config) -> Vec<AliasProblem> {
 /// The alias table of a project, each alias to an absolute folder: the
 /// aliases the tree carries, which come from `.config.luau` or
 /// `.luaurc`, and from the `[mount]` table when that is the tree.
+///
+/// Each mount also sits under its place, `game/ReplicatedStorage/Lib`,
+/// so `resolve` reads an instance path. No alias holds a `/`, so the
+/// two kinds of entry never meet.
 pub fn aliases(root: &Path, tree: &crate::project::Tree) -> Vec<(String, PathBuf)> {
+    let places = tree.mounts.iter().map(|m| {
+        (
+            format!("game/{}", m.place.join("/")),
+            normalize(&root.join(&m.disk)),
+        )
+    });
+
     tree.aliases
         .iter()
         .map(|(a, p)| (a.clone(), normalize(&root.join(p))))
+        .chain(places)
         .collect()
+}
+
+/// The path on disk of an instance path, `game/ReplicatedStorage/Lib/x`
+/// with the `@` gone: the mount with the longest place ahead of it, and
+/// the rest of the path under the mount's folder.
+fn place_on_disk(rest: &str, aliases: &[(String, PathBuf)]) -> Option<PathBuf> {
+    aliases
+        .iter()
+        .filter(|(a, _)| a.starts_with("game/"))
+        .filter_map(|(a, dir)| {
+            let tail = rest.strip_prefix(a.as_str())?;
+
+            (tail.is_empty() || tail.starts_with('/'))
+                .then(|| (a.len(), dir.join(tail.trim_start_matches('/'))))
+        })
+        .max_by_key(|(len, _)| *len)
+        .map(|(_, path)| path)
 }
 
 /// The file an import spec names from a source file: `./x`, `../x`,
@@ -844,9 +873,13 @@ pub fn resolve(spec: &str, from: &Path, aliases: &[(String, PathBuf)]) -> Option
         from.parent()?.join(tail)
     } else if let Some(rest) = spec.strip_prefix('@') {
         let (alias, tail) = rest.split_once('/').unwrap_or((rest, ""));
-        let (_, dir) = aliases.iter().find(|(a, _)| a == alias)?;
 
-        dir.join(tail)
+        match aliases.iter().find(|(a, _)| a == alias) {
+            Some((_, dir)) => dir.join(tail),
+
+            // `@game/...` is an instance path: a mount holds it.
+            None => place_on_disk(rest, aliases)?,
+        }
     } else if spec.starts_with("./") || spec.starts_with("../") {
         from.parent()?.join(spec)
     } else {
@@ -998,6 +1031,19 @@ fn module_types(path: &Path, aliases: &[(String, PathBuf)], depth: u8) -> Vec<St
 
     if let Some(entry) = returned_type(&source, &out) {
         out.push(entry);
+    }
+
+    // Luau keeps types and values apart, so a module may export a type
+    // and a value by one name: Vide's `source`. The type is no type
+    // alone when the table the module returns holds the name.
+    if out.iter().any(|e| type_only(e))
+        && let Some(keys) = returned_keys_at(path, aliases, depth)
+    {
+        for entry in out.iter_mut() {
+            if type_only(entry) && keys.iter().any(|k| k == type_head(entry)) {
+                entry.pop();
+            }
+        }
     }
 
     if depth == 0 {
@@ -1365,7 +1411,9 @@ as: its own, the ones a barrel passes on from another module, and its
 `export default` declaration once more as `default`.
 
 A namespace member reads under its path, `Geo.Vec`, so a barrel that
-passes `Geo` on as `G` passes `G.Vec` too.
+passes `Geo` on as `G` passes `G.Vec` too. A module that a barrel
+passes on whole, `import * as Leaf` then `export { Leaf }`, reads the
+same way: `Leaf.Vec`.
 */
 fn sent_decls<T: Clone>(
     path: &Path,
@@ -1386,7 +1434,24 @@ fn sent_decls<T: Clone>(
         return out;
     }
 
-    for (name, exported, spec) in reexports(text) {
+    let (named, stars) = passes(text);
+
+    for (exported, spec) in stars {
+        let Some(target) = resolve(&spec, path, aliases).filter(|t| t != path) else {
+            continue;
+        };
+        let Ok(inner) = module_text(&target) else {
+            continue;
+        };
+
+        for (decl, payload) in sent_decls(&target, &inner, aliases, read, depth - 1) {
+            if decl != "default" {
+                out.push((format!("{exported}.{decl}"), payload));
+            }
+        }
+    }
+
+    for (name, exported, spec) in named {
         let Some(target) = resolve(&spec, path, aliases).filter(|t| t != path) else {
             continue;
         };
@@ -1396,10 +1461,17 @@ fn sent_decls<T: Clone>(
         let members = format!("{name}.");
 
         for (decl, payload) in sent_decls(&target, &inner, aliases, read, depth - 1) {
+            // A macro and an attribute are keyed by their sigil.
+            let sigil = decl
+                .strip_prefix(['$', '@'])
+                .filter(|bare| *bare == name)
+                .map(|_| &decl[..1]);
             let renamed = match decl.strip_prefix(&members) {
                 Some(rest) => format!("{exported}.{rest}"),
 
                 None if decl == name => exported.clone(),
+
+                None if let Some(sigil) = sigil => format!("{sigil}{exported}"),
 
                 None => continue,
             };
@@ -2990,6 +3062,52 @@ pub fn returned_keys(source: &str) -> Option<Vec<String>> {
     }
 }
 
+/// `returned_keys` of the module at `path`, through the modules that
+/// return what they require, `local m = require("./src")` then
+/// `return m`, `depth` steps deep.
+fn returned_keys_at(path: &Path, aliases: &[(String, PathBuf)], depth: u8) -> Option<Vec<String>> {
+    let source = module_text(path).ok()?;
+
+    if let Some(keys) = returned_keys(&source) {
+        return Some(keys);
+    }
+
+    let target = resolve(&returned_require(&source)?, path, aliases).filter(|t| t != path)?;
+
+    returned_keys_at(&target, aliases, depth.checked_sub(1)?)
+}
+
+/// The spec of a module that a source requires and returns as it is.
+fn returned_require(source: &str) -> Option<String> {
+    use alloy_syntax::ast::{Expr, Stmt};
+
+    let parsed = alloy_syntax::parse_lenient(source, Default::default()).ok()?;
+    let toks = &parsed.lexed.toks;
+    let text = |span: TokSpan| span.text(source, toks);
+    let stmts = &parsed.chunk.block.stmts;
+    let Some(Stmt::Return(r)) = stmts.last() else {
+        return None;
+    };
+    let [Expr::Name(n)] = r.values.as_slice() else {
+        return None;
+    };
+
+    stmts.iter().rev().find_map(|s| match s {
+        Stmt::Local(l) if l.names.len() == 1 && text(l.names[0].name) == text(*n) => {
+            let call = text(l.values.first()?.span());
+            let spec = call.strip_prefix("require(")?.strip_suffix(')')?.trim();
+
+            Some(
+                spec.strip_prefix(['"', '\''])?
+                    .strip_suffix(['"', '\''])?
+                    .to_string(),
+            )
+        }
+
+        _ => None,
+    })
+}
+
 /// The named keys of a table literal. A spread copies keys the reader
 /// cannot see here, so a table with one is out of reach.
 fn table_keys(
@@ -4357,10 +4475,7 @@ mod tests {
         let out = crate::compile_with(src, &options).expect("compile");
         let got: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
 
-        assert_eq!(
-            got,
-            ["`M` has no variant `hii`; its variants are `On` and `Off`"]
-        );
+        assert_eq!(got, ["`M` has no method `hii`; did you mean `hi`?"]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

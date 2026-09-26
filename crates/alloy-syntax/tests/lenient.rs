@@ -979,6 +979,44 @@ fn an_arm_of_the_wrong_form_reports_once() {
     assert_eq!((errors, diagnostics), (0, 0));
 }
 
+/// Three arm spellings from other languages failed the whole match, and
+/// each arm after the first reported once more. `default then "x"` said
+/// "expected a name, found `then`". Rust's `=>` arms gave five reports,
+/// and a head with no `with` cascaded too. Each is one report now, with
+/// the fix, and the match still parses.
+#[test]
+fn a_foreign_arm_spelling_reports_once() {
+    for (src, message) in [
+        (
+            "local v = match n with\n    case 0 then \"none\"\n    default then \"some\"\nend\nprint(v)\n",
+            "`default` takes no `then`: write `default \"some\"`",
+        ),
+        (
+            "match n with\n    case 0 then print(0)\n    default then print(1)\nend\n",
+            "`default` takes no `then`: write `default print(1)`",
+        ),
+        (
+            "local v = match n with\n    case 0 => \"none\"\n    case 1 => \"one\"\n    default => \"some\"\nend\nprint(v)\n",
+            "an arm reads `case Ok(v) then ...`; `=>` after a pattern is Rust's arm",
+        ),
+        (
+            "local v = match n\n    case 0 then \"none\"\n    default \"some\"\nend\nprint(v)\n",
+            "a `match` head ends in `with`: `match n with`",
+        ),
+        (
+            "match n\n    case 0 then print(0)\nend\n",
+            "a `match` head ends in `with`: `match n with`",
+        ),
+    ] {
+        let lexed = lexer::lex(src).unwrap();
+        let (_, diagnostics) = parser::parse_lenient(src, &lexed.toks, ParseOptions::default());
+        assert_eq!(diagnostics.len(), 1, "{src:?}: {diagnostics:?}");
+        assert_eq!(diagnostics[0].message, message, "{src:?}");
+        assert_eq!(lenient(src), (0, 1), "{src:?}");
+        assert!(parser::parse(src, &lexed.toks).is_err(), "{src:?}");
+    }
+}
+
 /// `!=` drew its own report and then "unexpected `end`". The lenient
 /// parse reads it as `~=`, so the typo is the one report. A strict parse
 /// still refuses it.
@@ -1056,6 +1094,21 @@ fn a_missing_end_names_the_block_the_indent_leaves_open() {
         (
             "local function tick(dt: number)\n    if dt > 1 then\n        print(\"slow\")\n    for i = 1, 3 do\n        print(i)\n    end\nend\n\nlocal function other()\n    print(2)\nend\n",
             "`if` on line 2 needs an `end`",
+        ),
+        // A callback in call arguments: the `end)` closed the `if`, and
+        // the `)` failed as a statement. Four errors named `function(`,
+        // the `)`, and the end of the file.
+        (
+            "game:GetService(\"RunService\").Heartbeat:Connect(function(dt)\n  if dt > 1 then\n  print(dt)\nend)\nprint(\"after\")\n",
+            "`if` on line 2 needs an `end`",
+        ),
+        (
+            "local t = { f = function()\n  if true then\n  print(1)\nend }\nprint(t)\n",
+            "`if` on line 2 needs an `end`",
+        ),
+        (
+            "task.spawn(function(a)\n  print(a)\n)\nprint(1)\n",
+            "`function` on line 1 needs an `end`",
         ),
     ] {
         let (_, count) = lenient(src);

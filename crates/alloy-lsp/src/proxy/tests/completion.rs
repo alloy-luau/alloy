@@ -868,6 +868,27 @@ pub(crate) fn an_arm_binding_joins_the_childs_list() {
     assert_eq!(labels, ["radius"]);
 }
 
+/// A member list names what the value has. `t.` inside an arm offered
+/// the arm's `radius` as a member.
+#[test]
+fn a_member_list_takes_no_case_binding() {
+    let src = concat!(
+        "enum Shape as\n",
+        "    Circle(number)\n",
+        "    Dot\n",
+        "end\n",
+        "local t = { a = 1 }\n",
+        "local z = match Shape.Dot with\n",
+        "    case Circle(radius) then t.a\n",
+        "    default 0\n",
+        "end\n",
+    );
+    let (st, uri) = one_file(src);
+    let child = json!([{ "label": "a" }]);
+
+    assert!(st.value_scope(uri, 6, 31, &child).is_empty());
+}
+
 /// An imported attribute joins the list. Its hover opens with
 /// `@slow(...)`, not `export`, so the scope took it for private.
 #[test]
@@ -2769,6 +2790,39 @@ fn a_name_read_as_a_member_takes_the_value_import() {
     );
 }
 
+/// "Unknown type 'Box'" on a class module offered the default import
+/// as a preferred fix next to the type import. A default import binds
+/// the value alone, so the report stayed. A type report offers the type
+/// import alone. With no import in the file, the import goes under the
+/// file's header comment.
+#[test]
+fn a_type_report_offers_no_default_import() {
+    let st = files(&[
+        (
+            "file:///Box.aly",
+            "local Box = {}\nBox.__index = Box\nexport type Box = typeof(setmetatable({} :: { n: number }, Box))\nfunction Box.new(): Box\n    return setmetatable({ n = 1 }, Box)\nend\nreturn Box\n",
+        ),
+        (
+            "file:///use.aly",
+            "-- Holds the boxes.\n\nlocal boxes: { Box } = {}\nprint(boxes)\n",
+        ),
+    ]);
+    let report = json!({
+        "message": "TypeError: Unknown type 'Box'",
+        "range": { "start": { "line": 2, "character": 15 }, "end": { "line": 2, "character": 18 } },
+    });
+    let actions = st.import_actions("file:///use.aly", &[report]);
+
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    assert_eq!(
+        actions[0]["edit"]["changes"]["file:///use.aly"][0],
+        json!({
+            "range": { "start": { "line": 1, "character": 0 }, "end": { "line": 1, "character": 0 } },
+            "newText": "import { type Box } from './Box'\n",
+        })
+    );
+}
+
 /// `Frost.new()` on a class module offered `import { type Frost }` next
 /// to the default import, and the child put its raw `require` first.
 /// The type import binds no value, so the file then reported "imported
@@ -4249,4 +4303,103 @@ fn a_new_call_shows_the_constructor() {
         json!("function V.new(x: number, y: number): V")
     );
     assert_eq!(help["activeParameter"], json!(1));
+}
+
+/// The modules the markup tests import: a component, a module of
+/// components, and a module of plain functions.
+fn markup_modules(ui: &str) -> State {
+    files(&[
+        ("file:///src/ui.alx", ui),
+        (
+            "file:///src/badge.alx",
+            "export function Badge()\n  return <TextLabel />\nend\n",
+        ),
+        (
+            "file:///src/kit.alx",
+            "export function Panel()\n  return <Frame />\nend\n",
+        ),
+        (
+            "file:///src/util.aly",
+            "export function helper(): number\n  return 1\nend\n",
+        ),
+    ])
+}
+
+/// The labels at the `|` of `ui`, other than the Roblox classes.
+fn tag_slot_names(ui: &str) -> Vec<String> {
+    let at = ui.find('|').expect("a caret");
+    let ui = ui.replacen('|', "", 1);
+    let st = markup_modules(&ui);
+    let items = st
+        .markup_completion("file:///src/ui.alx", at, None)
+        .expect("the markup answers");
+
+    assert!(
+        items.iter().any(|i| i["detail"] == "Roblox class"),
+        "the classes stay: {items:?}"
+    );
+
+    let mut names: Vec<String> = items
+        .iter()
+        .filter(|i| i["detail"] != "Roblox class")
+        .filter_map(|i| i["label"].as_str().map(str::to_string))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Ctrl+Space after `<` offered every import, every uppercase local,
+/// and, in a file with the unfinished tag, the attribute names of the
+/// other tags. The list now holds the classes and the components in
+/// scope alone: a function that returns markup, an import of one, and a
+/// module that declares one.
+#[test]
+fn a_tag_slot_offers_the_components_alone() {
+    let head = "import { Badge } from './badge'\nimport * as Kit from './kit'\nimport * as Util from './util'\nimport { helper } from './util'\n\nlocal MAX = 3\nlocal Players = game:GetService('Players')\n\nlocal function format(n: number): string\n  return tostring(n) .. tostring(helper()) .. tostring(MAX) .. tostring(Players)\nend\n\nfunction Card(props: { title: string })\n  return <Frame />\nend\n\n";
+    let want = ["App", "Badge", "Card", "Kit"];
+
+    // A child of an element, in a file whose tag is unfinished.
+    assert_eq!(
+        tag_slot_names(&format!(
+            "{head}export function App()\n  return <Frame Name=\"root\" Size={{UDim2.new()}}>\n    <|\n  </Frame>\nend\n"
+        )),
+        want
+    );
+
+    // A child of a fragment.
+    assert_eq!(
+        tag_slot_names(&format!(
+            "{head}export function App()\n  return <>\n    <|\n  </>\nend\n"
+        )),
+        want
+    );
+
+    // Inside `<>`, where the name of a tag goes.
+    assert_eq!(
+        tag_slot_names(&format!(
+            "{head}export function App()\n  return <Frame>\n    <|>\n  </Frame>\nend\n"
+        )),
+        want
+    );
+
+    // The part of the name typed so far narrows the same list.
+    assert_eq!(
+        tag_slot_names(&format!(
+            "{head}export function App()\n  return <Frame>\n    <Ca|\n  </Frame>\nend\n"
+        )),
+        ["Card"]
+    );
+}
+
+/// `</` takes the name of the element it closes, and nothing else.
+#[test]
+fn a_closing_tag_offers_the_open_element_alone() {
+    let ui = "export function App()\n  return <Frame>\n    <TextLabel />\n    </\nend\n";
+    let st = markup_modules(ui);
+    let items = st
+        .markup_completion("file:///src/ui.alx", ui.find("</\n").unwrap() + 2, None)
+        .expect("the markup answers");
+
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0]["label"], "Frame");
 }

@@ -71,6 +71,10 @@ pub struct EmitOptions {
     /// `@game/...` place its `require` writes. See
     /// `crate::project::mount_requires`.
     pub mount_requires: Vec<(String, String)>,
+    /// The spec of each `import type` that closes a cycle of requires in
+    /// the check artifact. Its names type as `any` there, and it
+    /// requires nothing. See `crate::build::type_cycle_cuts`.
+    pub type_cuts: Vec<String>,
     /// The side the file's place in the game gives it, for a name with
     /// no `.server` or `.client`. See `crate::project::place_side`.
     pub mount_side: Option<crate::directives::Side>,
@@ -82,10 +86,6 @@ pub struct EmitOptions {
     pub ship_std_require: Option<String>,
     /// A `.d.aly`: declarations only, no runtime tables, no std require.
     pub definitions: bool,
-    /// Blank `import type` lines in the ship artifact, so a type-only
-    /// import creates no runtime dependency. Off by default, because the
-    /// output is then untyped for anyone who analyzes it directly.
-    pub erase_type_imports: bool,
     /// Macros visible to an expansion, as source: a nested compile of a
     /// macro body sees the macros of the file it came from.
     pub macros: Vec<MacroSource>,
@@ -121,6 +121,10 @@ pub struct EmitOptions {
     pub foreign_privates: Vec<(String, Vec<String>)>,
     /// The limits of the complexity lints.
     pub thresholds: crate::lint::Thresholds,
+    /// The byte ranges of the compiled text that an ingot's transform
+    /// wrote. A block that opens there adds no depth to the complexity
+    /// lints, since the author did not write it.
+    pub generated: Vec<(u32, u32)>,
     /// Render the test artifact: a `@test` function stays in the output
     /// as a local, unregistered, for `alloy test` to call by name.
     pub tests: bool,
@@ -417,11 +421,11 @@ impl Default for EmitOptions {
             file_name: "<input>".to_string(),
             module_rel: String::new(),
             mount_requires: Vec::new(),
+            type_cuts: Vec::new(),
             mount_side: None,
             std_require: "@alloy".to_string(),
             ship_std_require: None,
             definitions: false,
-            erase_type_imports: false,
             macros: Vec::new(),
             shapes: Vec::new(),
             wire_scopes: Vec::new(),
@@ -431,6 +435,7 @@ impl Default for EmitOptions {
             foreign_impls: Vec::new(),
             foreign_privates: Vec::new(),
             thresholds: crate::lint::Thresholds::default(),
+            generated: Vec::new(),
             tests: false,
             test_runner: true,
             import_types: Vec::new(),
@@ -468,6 +473,9 @@ pub struct Rendered {
     pub lints: Vec<Lint>,
     /// Output byte ranges to blank in the ship artifact.
     pub ship_blanks: Vec<(u32, u32)>,
+    /// The source byte ranges of those blanks: a type-only import, a
+    /// test.
+    pub ship_dropped: Vec<(u32, u32)>,
     /// Whether the file required the std.
     pub uses_std: bool,
     /// Whether the file declares an extension on a foreign type, so the
@@ -579,6 +587,8 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
             toks[tildes.start as usize].start,
             u32::MAX - toks[operand.end as usize - 1].end,
         ),
+
+        TypeEdit::TypeOf(span) => (toks[span.start as usize].start, 0),
     });
 
     let (std_imports, std_namespaces, std_aliases) = std_imports(src, toks, chunk);
@@ -675,6 +685,8 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         type_members: HashMap::new(),
         renames: Vec::new(),
         ship_blanks: Vec::new(),
+        top_imports: Vec::new(),
+        head_requires: Vec::new(),
         structs: HashSet::new(),
         hoisted: Vec::new(),
         hoisted_fns: Vec::new(),
@@ -723,6 +735,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         not_constructible: HashMap::new(),
         mapped_used: Vec::new(),
         uses_neg: false,
+        uses_module_value: false,
         namespaces: HashMap::new(),
         member_names: HashMap::new(),
         ns_stack: Vec::new(),
@@ -837,11 +850,15 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     let mut prefix_len = 0u32;
 
     if d.uses_std && !options.definitions {
-        let line = format!(
-            "local __alloy = require({}) ",
-            luau_string(&options.std_require)
-        );
+        let line = runtime_prologue(options);
         prefix_len = line.len() as u32;
+        d.generate(insert_at, &line);
+    }
+
+    // After `set_testing`, so a module an import in a test names loads
+    // under the test flag too.
+    if !d.head_requires.is_empty() {
+        let line = d.head_requires.concat();
         d.generate(insert_at, &line);
     }
 
@@ -854,6 +871,10 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
             insert_at,
             "type function __neg(t) local function each(u) if u:is(\"union\") or u:is(\"intersection\") then for _, c in u:components() do each(c) end else types.negationof(u) end end each(t) return types.negationof(t) end ",
         );
+    }
+
+    if d.uses_module_value {
+        d.generate(insert_at, MODULE_VALUE);
     }
 
     for kind in d.mapped_used.clone() {
@@ -883,8 +904,12 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     // The export return follows the last statement; a blanked test at
     // the end of the file must not take it along.
     let return_start = d.return_at.map(|at| d.r.out_len() + at);
+    // The prologue anchors on the first statement, so a blanked import
+    // there must not take the runtime require along.
+    let body_start = d.r.out_len();
     d.r.append(side);
 
+    d.drop_test_only_imports();
     let blanks = d.ship_blanks.clone();
     let (text, map) = d.r.finish();
 
@@ -906,7 +931,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
 
         let start = map.chunk_start(i);
 
-        if return_start.is_some_and(|r| start >= r) {
+        if start < body_start || return_start.is_some_and(|r| start >= r) {
             continue;
         }
 
@@ -924,6 +949,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         diagnostics: d.diagnostics,
         lints: d.lints,
         ship_blanks: out_blanks,
+        ship_dropped: blanks,
         uses_std: d.uses_std,
         ext_used: d.ext_hit,
         tests: d.test_names,
@@ -1152,6 +1178,31 @@ pub(crate) fn import_names(i: &alloy_syntax::ast::Import) -> Vec<TokSpan> {
             specs.iter().map(|s| s.alias.unwrap_or(s.name)).collect()
         }
     }
+}
+
+/*
+The value `import(...)` gives, as `import Name from` reads it: the
+`export default` of an Alloy module, or the whole value of a module that
+exports no default. The export table carries the default under
+`default`, so a table with that key reads as one. The type follows the
+value, so `import<<T>>` names the value and not the table.
+*/
+const MODULE_VALUE: &str = "type function __module_value_of(t) if t:is(\"table\") then local d = t:readproperty(types.singleton(\"default\")) if d then return d end end return t end local function __module_value<T>(m: T): __module_value_of<T> if type(m) == \"table\" and rawget(m :: any, \"default\") ~= nil then return (m :: any).default end return m :: any end ";
+
+/// The line that binds the runtime, on the first line of code. A spec
+/// marks the run before the module's own code, so `@cfg(test)` holds
+/// while the module loads too.
+pub(crate) fn runtime_prologue(options: &EmitOptions) -> String {
+    let testing = match options.tests {
+        true => "__alloy.set_testing(true) ",
+
+        false => "",
+    };
+
+    format!(
+        "local __alloy = require({}) {testing}",
+        luau_string(&options.std_require)
+    )
 }
 
 /// The byte offset of the line that holds the first token: every
@@ -1407,6 +1458,12 @@ struct Desugar<'s> {
     renames: Vec<HashMap<String, String>>,
     /// Source ranges whose output the ship artifact blanks: type-only imports.
     ship_blanks: Vec<(u32, u32)>,
+    /// The source range of each top-level import and the names it binds.
+    /// One that only tests read leaves the ship artifact with them.
+    top_imports: Vec<(u32, u32, Vec<String>)>,
+    /// `local _m1 = require(...) ` for each import below the top level
+    /// of a spec, to write on the first line. See `require_text`.
+    head_requires: Vec<String>,
     /// Declared struct names, for pattern tests and `is`.
     structs: HashSet<String>,
     /// The type parameters of a struct or an enum as the source writes
@@ -1508,6 +1565,9 @@ struct Desugar<'s> {
     mapped_used: Vec<&'static str>,
     /// A `~T` in the file: the first line declares `__neg`.
     uses_neg: bool,
+    /// An `import(...)` of a module that may export a default: the first
+    /// line declares `__module_value`. See `MODULE_VALUE`.
+    uses_module_value: bool,
     /// Expansions so far, for the unique names of a body's locals.
     macro_serial: u32,
     /// True while a macro call that stands alone as a statement
@@ -2906,6 +2966,10 @@ impl<'s> Desugar<'s> {
             TypeEdit::Negation { tildes, operand } => {
                 self.byte_start(*tildes) >= start && self.byte_end(*operand) <= end
             }
+
+            TypeEdit::TypeOf(span) => {
+                self.byte_start(*span) >= start && self.byte_end(*span) <= end
+            }
         });
 
         let edit = match edit {
@@ -2984,6 +3048,24 @@ impl<'s> Desugar<'s> {
                 self.copy(os, oe);
                 self.generate(oe, ">");
                 self.copy(oe, end);
+
+                return;
+            }
+
+            // Only the calls change, so the rest of the `typeof` keeps
+            // its bytes and its lines.
+            Some(TypeEdit::TypeOf(span)) => {
+                let base = self.byte_start(span);
+                let text = self.text_of(span).to_string();
+                let mut at = start;
+
+                for (s, e, require) in self.typeof_imports(&text) {
+                    self.r.copy(at, base + s);
+                    self.generate(base + s, &require);
+                    at = base + e;
+                }
+
+                self.copy(at, end);
 
                 return;
             }
@@ -3080,6 +3162,8 @@ impl<'s> Desugar<'s> {
                     TypeEdit::Negation { tildes, operand } => {
                         (self.byte_start(*tildes), self.byte_end(*operand))
                     }
+
+                    TypeEdit::TypeOf(span) => (self.byte_start(*span), self.byte_end(*span)),
                 };
 
                 (s >= start && x <= end).then_some(s)
@@ -3484,18 +3568,47 @@ impl<'s> Desugar<'s> {
     /// Hoists a module require into a local of its own, `_m1`, so its
     /// type is the module's and a type alias through it resolves.
     fn hoist_import(&mut self, path: &str, anchor: u32) -> String {
+        if self.require_at_head() {
+            return self.require_text(path);
+        }
+
+        let name = self.next_import_temp();
+        self.hoists.push(Hoist::Fresh {
+            name: name.clone(),
+            value: HoistValue::Text(format!("require({path})")),
+            anchor,
+        });
+
+        name
+    }
+
+    fn next_import_temp(&mut self) -> String {
         self.import_next += 1;
 
         while self.taken_temps.contains(&self.import_next) {
             self.import_next += 1;
         }
 
-        let name = format!("_m{}", self.import_next);
-        self.hoists.push(Hoist::Fresh {
-            name: name.clone(),
-            value: HoistValue::Text(format!("require({path})")),
-            anchor,
-        });
+        format!("_m{}", self.import_next)
+    }
+
+    /// Whether an import here requires its module on the first line. A
+    /// spec runs under lest, and its native backend resolves a `require`
+    /// only while the spec loads. An import in a test runs later.
+    fn require_at_head(&self) -> bool {
+        self.options.tests && !self.at_top_level()
+    }
+
+    /// `require(path)`, or the temp that the first line of a spec binds
+    /// to it. See `require_at_head`.
+    pub(crate) fn require_text(&mut self, path: &str) -> String {
+        if !self.require_at_head() {
+            return format!("require({path})");
+        }
+
+        let name = self.next_import_temp();
+        self.head_requires
+            .push(format!("local {name} = require({path}) "));
 
         name
     }

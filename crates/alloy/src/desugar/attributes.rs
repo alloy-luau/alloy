@@ -1,7 +1,7 @@
 //! Attribute checks, cfg, and the prescan that gathers names other
 //! phases route through.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use alloy_syntax::ast::{
     Attr, AttributeDecl, Block, CallArgs, Expr, FunctionBody, ImportKind, IndexKey, Stmt, TokSpan,
@@ -9,7 +9,7 @@ use alloy_syntax::ast::{
 
 use crate::roblox_classes::{DATATYPES, INSTANCE_CLASSES};
 
-use super::contracts::{Owner, is_list_type};
+use super::contracts::{Member, Owner, is_list_type};
 use super::types::{literal_kind, literal_type, strip_bounds};
 use super::*;
 
@@ -69,6 +69,7 @@ pub(crate) fn builtin_attr_targets(name: &str) -> Option<&'static [&'static str]
             "type",
             "field",
             "variant",
+            "attribute",
         ],
 
         _ => return None,
@@ -177,15 +178,23 @@ impl<'s> Desugar<'s> {
     /// `expr`; this pass sees them all.
     pub(crate) fn scan_static_checks(&mut self, block: &Block) {
         for stmt in &block.stmts {
-            self.check_stmt_attrs(stmt);
-            self.check_children_of(stmt_children(stmt));
+            self.check_stmt(stmt);
         }
+    }
+
+    /// One statement and everything under it. A namespace member goes
+    /// through here too, so a function body in a namespace reads its
+    /// own structs and impls as a top-level one does.
+    fn check_stmt(&mut self, stmt: &Stmt) {
+        self.check_stmt_attrs(stmt);
+        self.check_children_of(stmt_children(stmt));
     }
 
     /// The attributes of one declaration, against the target each one
     /// takes.
     pub(crate) fn check_stmt_attrs(&mut self, stmt: &Stmt) {
-        match stmt {
+        // `export default struct S` carries its attributes on `S`.
+        match stmt.under_default() {
             Stmt::Function(f) => self.check_attrs(&f.attrs, "function"),
 
             Stmt::LocalFunction(f) => self.check_attrs(&f.attrs, "function"),
@@ -207,12 +216,13 @@ impl<'s> Desugar<'s> {
             Stmt::Struct(st) => {
                 self.check_attrs(&st.attributes, "struct");
                 let name = self.text_of(st.name).to_string();
-                let members = self.type_members_of(&self.decl_name(st.name));
+                let key = self.decl_name(st.name);
+                let members = self.type_members_of(&key);
                 self.check_contracts(
                     &st.attributes,
                     Owner {
                         target: "struct",
-                        name: &name,
+                        name: &key,
                         body: st.span,
                     },
                     &members,
@@ -232,8 +242,8 @@ impl<'s> Desugar<'s> {
 
             Stmt::Enum(e) => {
                 self.check_attrs(&e.attributes, "enum");
-                let name = self.text_of(e.name).to_string();
-                let members = self.type_members_of(&self.decl_name(e.name));
+                let name = self.decl_name(e.name);
+                let members = self.type_members_of(&name);
                 self.check_contracts(
                     &e.attributes,
                     Owner {
@@ -276,7 +286,7 @@ impl<'s> Desugar<'s> {
                 });
 
                 for m in &ns.members {
-                    self.check_stmt_attrs(&m.stmt);
+                    self.check_stmt(&m.stmt);
                 }
 
                 self.ns_stack.pop();
@@ -314,8 +324,8 @@ impl<'s> Desugar<'s> {
 
             Stmt::Interface(i) => {
                 self.check_attrs(&i.attributes, "interface");
-                let name = self.text_of(i.name).to_string();
-                let members = self.type_members_of(&self.decl_name(i.name));
+                let name = self.decl_name(i.name);
+                let members = self.type_members_of(&name);
                 self.check_contracts(
                     &i.attributes,
                     Owner {
@@ -344,7 +354,10 @@ impl<'s> Desugar<'s> {
                 );
             }
 
-            Stmt::Attribute(a) => self.check_attribute_decl(a),
+            Stmt::Attribute(a) => {
+                self.check_attrs(&a.attributes, "attribute");
+                self.check_attribute_decl(a);
+            }
 
             _ => {}
         }
@@ -822,18 +835,29 @@ impl<'s> Desugar<'s> {
 
     /// The arguments a use of an attribute carries, as Luau. A parameter
     /// the use leaves out takes the default its declaration writes.
-    // ponytail: a default is its source text; an Alloy literal, `[1]`,
-    // needs the renderer.
     pub(crate) fn attr_args(&mut self, a: &Attr, name: &str) -> Vec<String> {
-        let mut args: Vec<String> = a.args.iter().map(|e| self.render_to_string(e)).collect();
-        let defaults = self
-            .attr_decl_of(name)
+        let decl = self.attr_decl_of(name).cloned();
+        let defaults = decl
+            .as_ref()
             .map(|d| d.defaults.clone())
             .unwrap_or_default();
+        let at = self.byte_start(a.span);
+        let mut args = Vec::new();
 
-        for default in defaults.iter().skip(args.len()) {
-            let Some(default) = default else { break };
-            args.push(default.clone());
+        for (i, slot) in self.attr_slots(a, decl.as_ref()).into_iter().enumerate() {
+            let default = defaults.get(i).cloned().flatten();
+
+            args.push(match (slot, default) {
+                (Some(e), _) => self.render_to_string(e),
+
+                // The default is source text, and may come from another
+                // file, so it compiles on its own: `[]` is Alloy, not
+                // Luau.
+                (None, Some(d)) => self.compile_fragment(&format!("return {d}"), at, true),
+
+                // The argument check reports the missing argument.
+                (None, None) => "nil".to_string(),
+            });
         }
 
         args
@@ -966,6 +990,22 @@ impl<'s> Desugar<'s> {
             return;
         };
         let params = decl.params.as_slice();
+        let keyed = self.keyed_slots(a, decl);
+        let slots = self.attr_slots(a, Some(decl));
+
+        // The record form names each parameter by key, so each one
+        // without a default needs its key.
+        if keyed.is_some() {
+            for (((pname, _), slot), default) in params.iter().zip(&slots).zip(&decl.defaults) {
+                if slot.is_none() && default.is_none() {
+                    let message = format!(
+                        "the attribute `{name}` needs `{pname}`; the table gives no such key"
+                    );
+                    self.diagnose(a.span, &message);
+                }
+            }
+        }
+
         // The arguments are positional, so a default makes its parameter
         // optional only when every parameter after it has one too.
         let required = decl
@@ -974,7 +1014,7 @@ impl<'s> Desugar<'s> {
             .rposition(Option::is_none)
             .map_or(0, |i| i + 1);
 
-        if a.args.len() > params.len() || a.args.len() < required {
+        if keyed.is_none() && (a.args.len() > params.len() || a.args.len() < required) {
             let count = if required == params.len() {
                 format!(
                     "{} argument{}",
@@ -995,8 +1035,10 @@ impl<'s> Desugar<'s> {
 
         let params: Vec<(String, Option<String>)> = params.to_vec();
 
-        for (arg, (pname, ty)) in a.args.iter().zip(&params) {
-            let Some(want) = ty.as_deref() else { continue };
+        for (arg, (pname, ty)) in slots.iter().zip(&params) {
+            let (Some(arg), Some(want)) = (arg, ty.as_deref()) else {
+                continue;
+            };
 
             // A list parameter carries entries, and the element type
             // says what each one takes.
@@ -1036,10 +1078,67 @@ impl<'s> Desugar<'s> {
                     self.check_children_of(expr_children(e));
                 }
 
-                Child::Block(b) => self.scan_static_checks(b),
+                Child::Block(b) => self.scan_nested_block(b),
 
-                Child::Function(f) => self.scan_static_checks(&f.block),
+                Child::Function(f) => self.scan_nested_block(&f.block),
             }
+        }
+    }
+
+    /// A block inside the file's top level. Its structs and impls are no
+    /// declarations of the file, so the prescan never read their
+    /// members. A contract in the block reads them from here, over a
+    /// type of the same name that the file declares.
+    fn scan_nested_block(&mut self, block: &Block) {
+        let mut local: HashMap<String, Vec<Member>> = HashMap::new();
+
+        for stmt in &block.stmts {
+            let (name, members) = match stmt {
+                Stmt::Struct(st) => (
+                    self.text_of(st.name).to_string(),
+                    self.field_members(&st.fields, true),
+                ),
+
+                Stmt::Interface(i) => (
+                    self.text_of(i.name).to_string(),
+                    self.field_members(&i.fields, false),
+                ),
+
+                _ => continue,
+            };
+            local.entry(name).or_default().extend(members);
+        }
+
+        // An impl adds to its struct: the one in this block, or the one
+        // the file declares.
+        for stmt in &block.stmts {
+            if let Stmt::Impl(i) = stmt {
+                let name = self.impl_target_name(i.target);
+                let members = self.impl_block_members(i);
+                local
+                    .entry(name.clone())
+                    .or_insert_with(|| self.type_members_of(&name))
+                    .extend(members);
+            }
+        }
+
+        let saved: Vec<(String, Option<Vec<Member>>)> = local
+            .into_iter()
+            .map(|(name, members)| {
+                let old = self.type_members.insert(name.clone(), members);
+
+                (name, old)
+            })
+            .collect();
+
+        self.scan_static_checks(block);
+
+        for (name, old) in saved {
+            match old {
+                Some(members) => self.type_members.insert(name, members),
+
+                None => self.type_members.remove(&name),
+            };
         }
     }
 
@@ -1080,6 +1179,12 @@ impl<'s> Desugar<'s> {
         let Some(ename) = self.dotted_name(object) else {
             return;
         };
+
+        // In a namespace, a bare name reads the member first. The enum
+        // of the file with that name is another type.
+        if self.ns_member_name(&ename).is_some() {
+            return;
+        }
         let Some(variants) = self.enum_decls.get(&ename) else {
             return;
         };
@@ -1124,11 +1229,77 @@ impl<'s> Desugar<'s> {
             return;
         }
 
-        let names: Vec<&str> = variants.iter().map(|(v, _)| v.as_str()).collect();
-        let message = format!(
-            "`{ename}` has no variant `{member}`; its variants are {}",
-            list_names(&names)
-        );
+        // A variant starts with a capital. A lower-case member is a
+        // method the author misspelt, so the report lists the methods.
+        let message = if member.starts_with(|c: char| c.is_lowercase()) {
+            // The same sources the check above accepts: this file's
+            // impls, the import index, trait defaults, other files' impls.
+            let prefix = format!("{ename}.");
+            let defaults = self
+                .impl_traits
+                .get(&ename)
+                .into_iter()
+                .flatten()
+                .flat_map(|t| {
+                    self.traits
+                        .get(t)
+                        .or_else(|| {
+                            let imported = self.options.import_trait_defaults.iter();
+
+                            imported.filter(|(n, _)| n == t).map(|(_, d)| d).next()
+                        })
+                        .into_iter()
+                        .flatten()
+                });
+            let mut methods: Vec<&str> = self
+                .impl_methods
+                .get(&ename)
+                .into_iter()
+                .flatten()
+                .chain(defaults)
+                .map(String::as_str)
+                .chain(
+                    self.options
+                        .import_callables
+                        .iter()
+                        .filter_map(|(k, _)| k.strip_prefix(&prefix)),
+                )
+                .chain(
+                    self.options
+                        .foreign_impls
+                        .iter()
+                        .filter(|x| x.head().0 == declared)
+                        .map(|x| x.name.as_str()),
+                )
+                .collect();
+            methods.sort_unstable();
+            methods.dedup();
+            let near = methods
+                .iter()
+                .map(|m| (crate::game_import::edit_distance(m, &member), *m))
+                .filter(|(d, _)| *d <= 2 && *d < member.len())
+                .min();
+
+            match near {
+                Some((_, m)) => {
+                    format!("`{ename}` has no method `{member}`; did you mean `{m}`?")
+                }
+
+                None if methods.is_empty() => format!("`{ename}` has no method `{member}`"),
+
+                None => format!(
+                    "`{ename}` has no method `{member}`; its methods are {}",
+                    list_names(&methods)
+                ),
+            }
+        } else {
+            let names: Vec<&str> = variants.iter().map(|(v, _)| v.as_str()).collect();
+
+            format!(
+                "`{ename}` has no variant `{member}`; its variants are {}",
+                list_names(&names)
+            )
+        };
         self.diagnose(*field, &message);
     }
 
@@ -2468,6 +2639,64 @@ impl<'s> Desugar<'s> {
         self.generate(end, " end");
     }
 
+    /// The condition of the `@cfg` on a local, if it has one. The lines
+    /// of every attribute go blank. The target check runs in
+    /// `check_attrs`, over every declaration at once.
+    pub(crate) fn local_cfg(&mut self, l: &Local) -> Option<String> {
+        let mut cfg = None;
+
+        for a in &l.attrs {
+            if a.name.is_some_and(|n| self.text_of(n) == "cfg") {
+                match self.cfg_condition(&a.args) {
+                    Ok(cond) => cfg = Some(cond),
+
+                    Err(message) => self.diagnose(a.span, &message),
+                }
+            }
+
+            self.blank_lines(self.byte_start(a.span), self.byte_end(a.span));
+        }
+
+        cfg
+    }
+
+    /// A local under `@cfg`, rendered from `from`. The value is read
+    /// only when the condition holds; the binding keeps the value's
+    /// type, so the code that uses it reads as before. `typeof` sees the
+    /// value, it does not run it. A plain local and an `export` local
+    /// both come here. False, with a diagnostic, when the local binds
+    /// more than one name.
+    pub(crate) fn cfg_guarded_local(&mut self, l: &Local, cond: &str, from: u32) -> bool {
+        let plain = l.names.len() == 1
+            && l.values.len() == 1
+            && !self.text_of(l.names[0].name).starts_with(['{', '[']);
+
+        if !plain {
+            self.diagnose(l.span, "`@cfg` goes on a local with one name and one value");
+
+            return false;
+        }
+
+        let value = &l.values[0];
+        let vs = self.byte_start(value.span());
+        let ve = self.byte_end(value.span());
+        // The copy in `typeof` sits on one line: each line of the value
+        // loses its indent.
+        let shape = self
+            .render_to_string(value)
+            .lines()
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.copy(from, vs);
+        self.generate(vs, &format!("(if {cond} then "));
+        self.expr(value);
+        self.generate(ve, &format!(" else nil) :: typeof({shape})"));
+        self.copy(ve, self.byte_end(l.span));
+
+        true
+    }
+
     /// Whether a function hands its caller no value: it declares `()`
     /// as its return type, or declares none and returns nothing. An
     /// `async` function with no declared type resolves its future with
@@ -2748,6 +2977,13 @@ print(a)
         );
     }
 
+    /// In a namespace, `Mode` names the member enum, not the file's.
+    #[test]
+    fn an_enum_member_reads_the_namespace_enum_first() {
+        let src = "enum Mode as\n    Fast\nend\nnamespace N as\n    public enum Mode as\n        Other\n    end\n    public function f(): ()\n        print(Mode.Other)\n    end\nend\nprint(N.f, Mode.Fast)\n";
+        assert!(messages(src).is_empty(), "{:?}", messages(src));
+    }
+
     #[test]
     fn an_enum_method_and_the_is_test_are_not_variants() {
         let src = "enum Shape as\n    Circle(number)\nend\nimpl Shape as\n    function area(self): number\n        return 1\n    end\nend\nprint(Shape.is(1), Shape.area)\n";
@@ -2872,6 +3108,95 @@ print(a)
             messages(mixed),
             vec!["the attribute `weight` takes 1 to 2 arguments, 0 given"]
         );
+    }
+
+    /// A default is Alloy: `[]` compiles to an Array, as an argument
+    /// does, and never reaches the Luau as it is.
+    #[test]
+    fn an_attribute_default_compiles_as_an_argument_does() {
+        let src = "attribute options(steps: string[] = [], n: number = 0) on struct\n@options()\nstruct S as x: number end\nprint(S)\n";
+        assert!(messages(src).is_empty(), "{:?}", messages(src));
+        let out = crate::compile(src).unwrap();
+        assert!(
+            out.ship.contains("options = { __alloy.Array.from({}), 0 }"),
+            "{}",
+            out.ship
+        );
+        assert!(!out.ship.contains("[]"), "{}", out.ship);
+    }
+
+    /// A spec compiles with `tests` on. The default kept the
+    /// `set_testing` call of its own prologue, in a closure. It
+    /// compiles as it does in a build.
+    #[test]
+    fn an_attribute_default_in_a_spec_compiles_as_in_a_build() {
+        let src = "attribute options(steps: string[] = [], n: number = 0) on struct\n@options()\nstruct S as x: number end\nprint(S)\n";
+        let options = crate::EmitOptions {
+            tests: true,
+            ..Default::default()
+        };
+        let out = crate::compile_with(src, &options).unwrap();
+        assert!(
+            out.ship.contains("options = { __alloy.Array.from({}), 0 }"),
+            "{}",
+            out.ship
+        );
+        assert_eq!(out.ship.matches("set_testing").count(), 1, "{}", out.ship);
+    }
+
+    /// A use by key writes each value in its parameter's place, as a use
+    /// by position does, so `Attributes.get` reads the key form by key.
+    #[test]
+    fn a_keyed_use_writes_each_argument_in_its_place() {
+        let decl = "attribute options(steps: string[] = [], priority: number = 0) on struct\n";
+        let src = format!(
+            "{decl}@options({{ priority = 10, steps = [ \"Init\" ] }})\nstruct S as x: number end\nprint(S)\n"
+        );
+        assert!(messages(&src).is_empty(), "{:?}", messages(&src));
+        let ship = crate::compile(&src).unwrap().ship;
+        assert!(
+            ship.contains("options = { __alloy.Array.from({ \"Init\" }), 10 }"),
+            "{ship}"
+        );
+
+        // A key left out takes its default.
+        let src =
+            format!("{decl}@options({{ priority = 3 }})\nstruct S as x: number end\nprint(S)\n");
+        let ship = crate::compile(&src).unwrap().ship;
+        assert!(
+            ship.contains("options = { __alloy.Array.from({}), 3 }"),
+            "{ship}"
+        );
+
+        // A key the declaration needs reports when the table leaves it out.
+        let src = "attribute pair(a: number, b: number) on struct\n@pair({ b = 2 })\nstruct S as x: number end\nprint(S)\n";
+        assert_eq!(
+            messages(src),
+            vec!["the attribute `pair` needs `a`; the table gives no such key"]
+        );
+
+        // A key's value checks against its parameter's type.
+        let src = "attribute pair(a: number, b: number) on struct\n@pair({ b = 2, a = \"x\" })\nstruct S as x: number end\nprint(S)\n";
+        assert_eq!(
+            messages(src),
+            vec!["the attribute `pair` takes number for `a`, string given"]
+        );
+    }
+
+    /// An attribute on an `impl` is one on its type, so the runtime
+    /// finds it on the struct's table, beside the struct's own.
+    #[test]
+    fn an_impl_attribute_lands_on_its_struct() {
+        let src = "attribute tagged(n: number) on struct, impl\n@tagged(1)\nstruct S as x: number end\n@tagged(2)\nimpl S\nend\nprint(S)\n";
+        assert!(messages(src).is_empty(), "{:?}", messages(src));
+        let out = crate::compile(src).unwrap();
+        assert!(
+            out.ship
+                .contains("end __alloy.attrs(S, { own = { tagged = { 2 } } })"),
+            "{}",
+            out.ship
+        );
+        assert_eq!(out.ship.lines().count(), src.lines().count());
     }
 
     #[test]

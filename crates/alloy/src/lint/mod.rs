@@ -436,7 +436,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Correctness,
         default: Level::Warn,
         summary: "a statement after `return`, `break`, or `continue`",
-        detail: "Nothing runs after `return`, `break`, or `continue` in the same block, so the statement is dead. Luau rejects most of these as syntax errors; Alloy reports the rest here. Delete the code, or move the jump.",
+        detail: "Nothing runs after `return`, `break`, or `continue` in the same block, so the statement is dead. Luau rejects most of these as syntax errors; Alloy reports the rest here. Delete the code, or move the jump. A jump under `@cfg` leaves the block on one side of the build alone, so the code after it does not fire.",
     },
     LintInfo {
         name: "constant_condition",
@@ -471,7 +471,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Correctness,
         default: Level::Warn,
         summary: "a private field or method read outside its struct's impl",
-        detail: "A member marked `private` belongs to the struct's own methods. This access sits outside every `impl` of that struct, in the same file; in the editor and under `alloy flux` the type checker reports it as an error, since the public type of the struct has no such member. The lint reads names, so a plain table with a field of the same name fires it too; `--@alloy-ignore` silences that line.",
+        detail: "A member marked `private` belongs to the struct's own methods. This access sits outside every `impl` of that struct, in the same file; in the editor and under `alloy flux` the type checker reports it as an error, since the public type of the struct has no such member. The lint reads the receiver: a name the file types as the struct, with an annotation or a `new`, or the struct's own name. A receiver of another type or of no known type stays quiet, so `task.spawn` is not the private `spawn` of a struct.",
     },
     LintInfo {
         name: "duplicate_function",
@@ -492,7 +492,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Correctness,
         default: Level::Warn,
         summary: "two files that import each other",
-        detail: "A cycle of `import` lines: Luau's `require` of a module that is still loading is an error at runtime, and the first file to load decides which one fails. Move the shared part into a third module that both import. `alloy flux` reports it; a single-file lint cannot see it.",
+        detail: "A cycle of `import` lines: Luau's `require` of a module that is still loading is an error at runtime, and the first file to load decides which one fails. Move the shared part into a third module that both import. An `import type`, or an import in a test, requires nothing in the build, so it closes no cycle. `alloy flux` reports it; a single-file lint cannot see it.",
     },
     // --- suspicious ------------------------------------------------------------
     LintInfo {
@@ -508,6 +508,13 @@ pub const LINTS: &[LintInfo] = &[
         default: Level::Warn,
         summary: "a use of a namespace declared `@deprecated`",
         detail: "`@deprecated` on a `function` passes through to Luau, which reports a call to it. A namespace has no Luau form, so this lint reports the use instead. The message the attribute carries prints after the name. Inside the namespace the members read each other by their own names, and nothing fires.",
+    },
+    LintInfo {
+        name: "stale_export",
+        group: Group::Suspicious,
+        default: Level::Warn,
+        summary: "a write to an exported `local` inside a function",
+        detail: "A module returns its exports as a table built when it loads, and an import copies each value into a local of the importer. `export local count = 0` sends out the number 0, not the variable. A write at the top level runs before the module returns, so the table takes it. A write inside a function runs later and never reaches an importer, which keeps the value it read when it loaded. Export a function that returns the value, or keep the value in a table and write its fields: `export local state = { count = 0 }` and `state.count += 1`. An importer holds that table, so it reads every write. Keep the table in a `local` that no line assigns again. A `const` freezes its value by convention, so `const_mutation` reports each write into it, and `prefer_const` leaves alone a `local` whose fields change. A `local` member of a namespace stays live through accessors and draws no report.",
     },
     LintInfo {
         name: "deprecated_call",
@@ -1207,6 +1214,84 @@ mod tests {
         );
     }
 
+    /// An import copies the value an exported `local` held when the
+    /// module loaded. A write inside a function comes later and never
+    /// reaches the importer; a write at the top level does.
+    #[test]
+    fn a_write_to_an_exported_local_in_a_function_is_stale() {
+        let stale = |body: &str| {
+            let src = format!(
+                "export local count = 0\nexport local other = 0\nlocal hits = 0\nexport {{ hits }}\n\nexport function bump(): ()\n{body}\nend\n"
+            );
+            names(&src)
+                .into_iter()
+                .filter(|n| *n == "stale_export")
+                .count()
+        };
+
+        assert_eq!(stale("    count += 1"), 1);
+        assert_eq!(stale("    count = 5"), 1);
+        assert_eq!(stale("    count ??= 1"), 1);
+        assert_eq!(stale("    other, count = 1, 2"), 2);
+        assert_eq!(stale("    hits += 1"), 1);
+        assert_eq!(
+            stale("    task.defer(function()\n        count += 1\n    end)"),
+            1
+        );
+
+        // A nearer binding of the name, or a field of the value, is not
+        // the export.
+        assert_eq!(stale("    local count = 1\n    count += 1"), 0);
+        assert_eq!(
+            stale("    for count = 1, 2 do\n        count += 1\n    end"),
+            0
+        );
+
+        // The top level runs before the module returns its table.
+        let top = "export local count = 0\ncount += 1\nif count > 0 then\n    count = 2\nend\nexport local state = { count = 0 }\n\nexport function bump(): ()\n    state.count += 1\nend\n";
+        assert!(!names(top).contains(&"stale_export"), "{:?}", names(top));
+
+        let got = crate::compile(
+            "export local count = 0\n\nexport function bump(): ()\n    count += 1\nend\n",
+        )
+        .unwrap()
+        .lints;
+        let one = got
+            .iter()
+            .find(|l| l.name == "stale_export")
+            .expect("the lint");
+        assert_eq!(
+            one.message,
+            "`count` is an exported `local`; importers keep the value they read when they loaded, so they never see this write. Export a function that returns it, or hold it in a table that stays `local` and write its field: `export local state = { count = ... }`, then `state.count = ...`"
+        );
+    }
+
+    /// The shape `stale_export` names draws no lint under `strict`: a
+    /// table in an `export local` that no line assigns again, whose
+    /// fields change. A `const` there trips `const_mutation`, so the
+    /// advice cannot name one.
+    #[test]
+    fn the_shape_stale_export_names_draws_no_lint() {
+        let src = "--- The shared state.\nexport local state = { count = 0 }\n\n--- Adds one.\nexport function bump(): ()\n    state.count += 1\nend\n";
+        let strict = LintConfig::default();
+        let lints = |src: &str| -> Vec<&'static str> {
+            crate::compile(src)
+                .unwrap()
+                .lints
+                .iter()
+                .map(|l| l.name)
+                .filter(|n| level_of(&strict, n) != Level::Allow)
+                .collect()
+        };
+
+        assert!(strict.strict);
+        assert_eq!(lints(src), Vec::<&str>::new());
+        assert_eq!(
+            lints(&src.replace("export local", "export const")),
+            vec!["const_mutation"]
+        );
+    }
+
     #[test]
     fn an_unguarded_optional_parameter_is_a_lint() {
         assert_eq!(
@@ -1255,6 +1340,40 @@ mod tests {
                 "local function make(name: string, props: {}): {}\n    return props\nend\nlocal n = 1\nprint({ make(\"a\", { Text = `n: {n}` }), 1 })\n"
             ),
             Vec::<&str>::new()
+        );
+        // The commas of `<<K, V>>` split no argument.
+        assert_eq!(
+            names(
+                "local function pick<K, V>(k: K, v: V): V\n    return v\nend\nlocal function count(n: number, extra: number): number\n    return n + extra\nend\nprint(count(pick<<string, number>>(\"a\", 1), 1))\n"
+            ),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            names(
+                "local function pick<K, V>(k: K, v: V): V\n    return v\nend\nlocal function count(n: number, extra: number): number\n    return n + extra\nend\nprint(count(pick<<string, number>>(\"a\", 1), 1, 2))\n"
+            ),
+            vec!["argument_count"]
+        );
+        // A function literal is one argument: the commas of its types
+        // and its body split nothing, and a cast's type arguments too.
+        let wrap = "local function wrap(h: (number) -> Result<number, string>): (number) -> Result<number, string>\n    return h\nend\n";
+        assert_eq!(
+            names(&format!(
+                "{wrap}print(wrap(function(n: number): Result<number, string>\n    local a, b = n, 1\n    return Ok(a + b)\nend))\n"
+            )),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            names(&format!(
+                "{wrap}local h = nil\nprint(wrap(h :: (number) -> Result<number, string>))\n"
+            )),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            names(&format!(
+                "{wrap}print(wrap(function(n: number): Result<number, string>\n    return Ok(n)\nend, 2))\n"
+            )),
+            vec!["argument_count"]
         );
         // A vararg and a default make the count a range.
         assert_eq!(
@@ -1479,6 +1598,19 @@ mod tests {
             level_of(&LintConfig::default().without_strict(), "implicit_any"),
             Level::Allow
         );
+    }
+
+    /// `function` after `is` or `is not` names a type. The lint read it
+    /// as a function whose parameter list was the next call, and
+    /// reported the call's argument as a parameter with no type.
+    #[test]
+    fn a_type_test_for_function_declares_no_function() {
+        for test in ["is function", "is not function"] {
+            let src = format!(
+                "--- Hands a handler on.\nexport function hook(source: unknown, handler: () -> ()): ()\n    if source {test} then\n        print(handler)\n    end\nend\n"
+            );
+            assert_eq!(names(&src), Vec::<&str>::new(), "{test}");
+        }
     }
 
     #[test]

@@ -176,7 +176,9 @@ impl<'s> Desugar<'s> {
                 continue;
             };
             // An optional field takes the same constructor.
-            let Some(g) = super::types::generic_head(ty.trim().trim_end_matches('?')) else {
+            let Some(g) =
+                super::types::generic_head(self.alias_value(ty.trim().trim_end_matches('?')))
+            else {
                 continue;
             };
             let at = std::ptr::from_ref(value) as usize;
@@ -735,7 +737,7 @@ impl<'s> Desugar<'s> {
                 if let Some(m) = self.macro_of(&mname).cloned() {
                     let text = self.expand_macro(&m, &mname, args, *span);
                     self.generate(anchor, &text);
-                } else {
+                } else if !self.intrinsic_in_place(*name, args, *span) {
                     let text = self.intrinsic(*name, args, *span);
                     self.generate(anchor, &text);
                 }
@@ -1007,6 +1009,8 @@ impl<'s> Desugar<'s> {
             format!("typeof({x}) == \"{n}\"")
         } else if self.enums.contains_key(&n) {
             format!("{n}.is({x})")
+        } else if let Some(test) = self.variant_is(&x, &n, name) {
+            test
         } else if let Some(message) = self.no_nominal_test(&n, expr) {
             self.diagnose(name, &message);
 
@@ -1022,6 +1026,65 @@ impl<'s> Desugar<'s> {
         } else {
             format!("({test})")
         }
+    }
+
+    /// `x is E.V` as the test a match arm makes for `V`: the tag for a
+    /// variant with a payload, equality for a unit variant. A variant
+    /// holds no metatable of its own, so the metatable test was always
+    /// false. A bare `x is V` names no enum, so it reports.
+    fn variant_is(&mut self, x: &str, n: &str, name: TokSpan) -> Option<String> {
+        if let Some((e, v)) = self.enum_of_path(n) {
+            let variants = self.enums.get(&e)?;
+            let names: Vec<&str> = variants.iter().map(|(k, _)| k.as_str()).collect();
+
+            return Some(match variants.iter().find(|(k, _)| *k == v) {
+                Some((_, 0)) => {
+                    // The path renders the way a match arm renders it.
+                    // The checker refuses `==` between the enum and a
+                    // variant whose value is a number, so the check
+                    // artifact compares through `any`.
+                    let head = n.rsplit_once('.').map_or(n, |(h, _)| h);
+                    let head = self.ns_member_name(head).unwrap_or(head.to_string());
+
+                    format!("{} == {head}.{v}", self.any_cast(x))
+                }
+
+                Some(_) => format!("type({x}) == \"table\" and {x}.tag == \"{v}\""),
+
+                None => {
+                    let message = format!(
+                        "`{}` has no variant `{v}`; its variants are {}",
+                        self.display_name(&e),
+                        list_names(&names)
+                    );
+                    self.diagnose(name, &message);
+
+                    "false".to_string()
+                }
+            });
+        }
+
+        // A type of that name is the name `is` tests.
+        if n.contains('.')
+            || self.structs.contains(n)
+            || self.imported_names.contains(n)
+            || self.alias_values.contains_key(n)
+        {
+            return None;
+        }
+
+        let mut owners: Vec<&String> = self
+            .enums
+            .iter()
+            .filter(|(_, vs)| vs.iter().any(|(k, _)| k == n))
+            .map(|(e, _)| e)
+            .collect();
+        owners.sort();
+        let owner = self.display_name(owners.first()?);
+        let message = format!("`{n}` is a variant of `{owner}`; write `{owner}.{n}`");
+        self.diagnose(name, &message);
+
+        Some("false".to_string())
     }
 
     /// Why `x is T` cannot hold for this name, or `None` when it can.
@@ -1745,13 +1808,26 @@ impl<'s> Desugar<'s> {
                 links.remove(0);
             }
         }
-        // `import(...)` is `require(...)`. A string or an instance chain
-        // types itself; a dynamic path is `unknown` unless `<<T>>` says.
+        // `import(...)` is the value of the module, as `import Name from`
+        // reads it: its default, when it exports one. A string or an
+        // instance chain types itself; a dynamic path is `unknown` unless
+        // `<<T>>` says.
         if self.is_import_call(e)
             && let Some(Link::Plain(Step::Call {
                 type_args, args, ..
             })) = links.first()
         {
+            // A plain Luau module and a data file have no export table:
+            // the value is what they return.
+            let plain = match args {
+                CallArgs::Str(s) => self.is_plain_module(self.text_of(*s)),
+
+                CallArgs::Paren(list) if list.len() == 1 && matches!(list[0], Expr::String(_)) => {
+                    self.is_plain_module(self.text_of(list[0].span()))
+                }
+
+                _ => false,
+            };
             // A data path drops its extension, as in `import` statements.
             let a = match args {
                 CallArgs::Str(s) => crate::data::strip_literal(self.text_of(*s)),
@@ -1793,12 +1869,21 @@ impl<'s> Desugar<'s> {
 
                 self.lower_type(&text)
             });
+            let value = match plain {
+                true => format!("require{a}"),
+
+                false => {
+                    self.uses_module_value = true;
+
+                    format!("__module_value(require{a})")
+                }
+            };
             inner = match ty {
-                Some(t) => format!("(require{a} :: {t})"),
+                Some(t) => format!("({value} :: {t})"),
 
-                None if is_static => format!("require{a}"),
+                None if is_static => value,
 
-                None => format!("(require{a} :: unknown)"),
+                None => format!("({value} :: unknown)"),
             };
             links.remove(0);
         }
@@ -2868,6 +2953,40 @@ mod tests {
         let out = crate::compile(bad).unwrap();
         let at = out.diagnostics.first().expect("one report");
         assert_eq!(&bad[at.start as usize..at.end as usize], "Drawable");
+    }
+
+    /// `s is S.Ripe` emitted `getmetatable(s) == S.Ripe`, which compares
+    /// a metatable with a constructor and never holds. Nothing reported
+    /// it. The test is a match arm's test now: the tag for a variant
+    /// with a payload, equality for a unit variant.
+    #[test]
+    fn is_tests_an_enum_variant() {
+        let src = "enum S as\n    Empty\n    Ripe(number)\n    Gone = 7\nend\nconst s = S.Ripe(1)\nprint(s is S.Ripe, s is not S.Empty, s is S.Gone)\n";
+        assert!(messages(src).is_empty(), "{:?}", messages(src));
+
+        let out = crate::compile(src).unwrap();
+        assert!(!out.ship.contains("getmetatable(s)"), "{}", out.ship);
+        assert!(
+            out.ship.contains(
+                "print((type(s) == \"table\" and s.tag == \"Ripe\"), (not (s == S.Empty)), (s == S.Gone))"
+            ),
+            "{}",
+            out.ship
+        );
+        assert!(
+            out.check.contains("((s :: any) == S.Gone)"),
+            "{}",
+            out.check
+        );
+
+        let bad = "enum S as\n    Empty\n    Ripe(number)\nend\nconst s = S.Ripe(1)\nprint(s is Ripe, s is S.Rip)\n";
+        assert_eq!(
+            messages(bad),
+            vec![
+                "`Ripe` is a variant of `S`; write `S.Ripe`".to_string(),
+                "`S` has no variant `Rip`; its variants are `Empty` and `Ripe`".to_string(),
+            ]
+        );
     }
 
     /// `is` was the one construct that read a type alias as a type of

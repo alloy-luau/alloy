@@ -500,8 +500,23 @@ fn hover_completion_and_extensions() {
         .unwrap_or_default();
     assert!(!labels.contains(&"HashMap"), "{labels:?}");
 
-    // A std name hovers with its Alloy doc, not the raw table type.
+    // The project keeps the std out of scope, and the file does not
+    // import `HashMap`: the name is no global, so it takes no hover.
     let h = s.hover(&uri, 21, 12);
+    assert_eq!(h, "null", "HashMap: {h}");
+
+    // An imported std name hovers with its Alloy doc, not the raw table
+    // type.
+    const STD: &str = "import { HashMap } from \"@alloy/std/collections\"\nimport { Partial } from \"@alloy/std/types\"\nlocal hm = HashMap.new()\nlocal part: Partial<{ x: number }> = {}\nprint(hm, part)\n";
+    let std_file = dir.join("std.aly");
+    std::fs::write(&std_file, STD).unwrap();
+    let std_uri = format!("file://{}", std_file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": std_uri, "languageId": "alloy-luau", "version": 1, "text": STD } } }),
+    );
+    let h = s.hover(&std_uri, 2, 12);
     assert!(
         h.contains("HashMap.new()") && h.contains("get_or_insert"),
         "HashMap: {h}"
@@ -599,14 +614,17 @@ fn hover_completion_and_extensions() {
     let h = s.hover(&uri, 67, 8);
     assert!(h.contains("local items: Vec2[]"), "annotation: {h}");
 
-    // A language-level mapped type hovers with its doc, and a value of it
-    // keeps the annotation. A file's own `type Sink` wins over the
-    // built-in one, in the emit and in hover.
-    let h = s.hover(&uri, 68, 14);
+    // A std mapped type the file imports hovers with its doc, and one it
+    // does not import takes no hover. A value of it keeps the
+    // annotation. A file's own `type Sink` wins over the built-in one,
+    // in the emit and in hover.
+    let h = s.hover(&std_uri, 3, 14);
     assert!(
         h.contains("type Partial<T> = { [K in keyof T]: T[K]? }"),
         "Partial: {h}"
     );
+    let h = s.hover(&uri, 68, 14);
+    assert_eq!(h, "null", "Partial: {h}");
     let h = s.hover(&uri, 68, 7);
     assert!(h.contains("local part: Partial<Vec2>"), "part: {h}");
 

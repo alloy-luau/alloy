@@ -84,6 +84,35 @@ impl SpanMap {
         &self.chunks
     }
 
+    /// The output ranges copied from the source range `[start, end)`.
+    pub fn copied_from(&self, start: u32, end: u32) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.chunks
+            .iter()
+            .zip(&self.starts)
+            .filter_map(move |(c, &out)| match *c {
+                Chunk::Copied { src_start, src_end } if src_start < end && start < src_end => {
+                    let from = out + start.max(src_start) - src_start;
+
+                    Some((from, out + end.min(src_end) - src_start))
+                }
+
+                _ => None,
+            })
+    }
+
+    /// The output ranges of the generated text, in order.
+    pub fn generated(&self) -> Vec<(u32, u32)> {
+        self.chunks
+            .iter()
+            .zip(&self.starts)
+            .filter_map(|(c, s)| match c {
+                Chunk::Generated { len, .. } => Some((*s, s + len)),
+
+                Chunk::Copied { .. } => None,
+            })
+            .collect()
+    }
+
     /// The output length the map covers.
     pub fn out_len(&self) -> u32 {
         self.out_len
@@ -526,6 +555,28 @@ mod tests {
         assert_eq!(map.to_source(14), 12, "generated text maps to its anchor");
         assert!(map.is_generated(14));
         assert!(!map.is_generated(3));
+    }
+
+    /// A range of generated text crosses into text the next layer does
+    /// not copy, such as the `{` of a markup hole. The copied part of it
+    /// still reaches the output.
+    #[test]
+    fn a_generated_range_reaches_the_next_layer_in_its_copied_part() {
+        let src = "{w(function() return <a/> end)}";
+        let mut r = Renderer::new(src);
+        r.generate(0, "(").unwrap();
+        r.copy(1, 21);
+        r.generate(21, "a()").unwrap();
+        r.copy(25, 30);
+        let (out, lowering) = r.finish();
+
+        assert_eq!(out, "(w(function() return a() end)");
+        assert_eq!(lowering.generated(), vec![(0, 1), (21, 24)]);
+        // `{w(function() return ` in the source: the `{` has no output.
+        assert_eq!(
+            lowering.copied_from(0, 21).collect::<Vec<_>>(),
+            vec![(1, 21)]
+        );
     }
 
     #[test]

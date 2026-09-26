@@ -474,6 +474,13 @@ impl<'a> Parser<'a> {
                 false => None,
             };
 
+            // A default, `belt: number = 8`, as a struct field takes one.
+            // Without the read the class failed to parse, and the report
+            // that a class does not compile yet was lost.
+            if self.eat("=") {
+                self.expr()?;
+            }
+
             members.push(ClassMember::Field {
                 public,
                 name: field,

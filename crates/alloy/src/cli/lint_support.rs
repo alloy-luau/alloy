@@ -430,7 +430,9 @@ fn is_fixable(path: &Path, l: &Lint, config: &LintConfig, directives: &mut FileD
 
     let source = std::fs::read_to_string(path).unwrap_or_default();
 
-    if !lint::fix_applies(&source, fix) {
+    // A rewrite that breaks the parse is a lint's mistake: the run
+    // neither offers it nor counts it.
+    if !lint::fix_applies(&source, fix) || !lint::sound(&source, vec![fix]).1.is_empty() {
         return false;
     }
 
@@ -514,6 +516,9 @@ pub(crate) fn print_lints(
                     "{}",
                     p.note("fix skipped: the source moved, so this rewrite is not written")
                 );
+            } else if !lint::sound(&source, vec![fix]).1.is_empty() {
+                // The editor offers no rewrite that breaks the parse, and
+                // the report offers none either.
             } else if directives.preserves(at) {
                 eprintln!(
                     "{}",

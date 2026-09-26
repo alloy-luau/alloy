@@ -1016,6 +1016,29 @@ fn an_as_cast_is_one_report_at_every_value_position() {
     assert!(parser::parse(src, &lexed.toks).is_err());
 }
 
+/// `if ok then n else 0` as the value line of `try do`, `async do`, or a
+/// match arm read as an if-statement: each branch reported, the `if` took
+/// the block's `end`, and the rest cascaded. A macro body read it as the
+/// value already, and a value block now does too.
+#[test]
+fn an_if_expression_ends_a_value_block() {
+    for body in [
+        "local v = try do\n    local n = 1\n    if ok then n else 0\nend\n",
+        "local v = async do\n    local n = 2\n    if ok then n else 0\nend\n",
+        "local v = match k with\n    case 1 then\n        local n = 3\n        if ok then n else 0\n    default 0\nend\n",
+    ] {
+        let src = format!("{body}print(v)\n");
+        assert_eq!(lenient(&src), (0, 0), "{body}");
+
+        let lexed = lexer::lex(&src).unwrap();
+        assert!(parser::parse(&src, &lexed.toks).is_ok(), "{body}");
+    }
+
+    // An `if` that is a statement keeps its reports.
+    let src = "local v = try do\n    if ok then 1 end\n    2\nend\n";
+    assert_eq!(lenient(src).1, 1);
+}
+
 /// A block that takes an `end` left of its own indent took the `end` of
 /// a block further out. The report blamed the outer block, or a trait
 /// signature with no body; it now names the inner block.

@@ -315,6 +315,19 @@ struct Parser<'a> {
     closes: Vec<(usize, usize)>,
 }
 
+/// The lengths of the records a parse appends to. A reader that reads
+/// the same tokens a second way rewinds to them, so the tokens keep one
+/// record.
+#[derive(Clone, Copy)]
+struct Marks {
+    reports: usize,
+    type_edits: usize,
+    type_names: usize,
+    angle_calls: usize,
+    stmt_breaks: usize,
+    closes: usize,
+}
+
 impl<'a> Parser<'a> {
     // --- token access ------------------------------------------------------
 
@@ -601,6 +614,28 @@ impl<'a> Parser<'a> {
         let column = self.toks[e].start as usize - line;
 
         line > self.line_start(o) && column == self.indent_at(e) && column < self.indent_at(o)
+    }
+
+    /// The lengths of the records a parse appends to.
+    fn marks(&self) -> Marks {
+        Marks {
+            reports: self.diagnostics.len(),
+            type_edits: self.type_edits.len(),
+            type_names: self.type_names.len(),
+            angle_calls: self.angle_calls.len(),
+            stmt_breaks: self.stmt_breaks.len(),
+            closes: self.closes.len(),
+        }
+    }
+
+    /// Drops the records a parse appended after `m`.
+    fn rewind_to(&mut self, m: Marks) {
+        self.diagnostics.truncate(m.reports);
+        self.type_edits.truncate(m.type_edits);
+        self.type_names.truncate(m.type_names);
+        self.angle_calls.truncate(m.angle_calls);
+        self.stmt_breaks.truncate(m.stmt_breaks);
+        self.closes.truncate(m.closes);
     }
 
     /// The one-based column a token starts at, in bytes.

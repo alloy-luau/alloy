@@ -46,6 +46,7 @@ impl<'a> Parser<'a> {
                 self.stmt_breaks.push(stmt_start);
             }
 
+            let marks = self.marks();
             let parsed = self.stmt();
 
             // The last thing in a value block may be an expression, not
@@ -53,18 +54,38 @@ impl<'a> Parser<'a> {
             // stand in front of it, a block that ends in `end` included,
             // so the reader tries the expression wherever the statement
             // parser refuses.
+            //
+            // `if c then a else b` is an if-expression, and the lenient
+            // statement parser reads it as an if-statement: it reports
+            // each branch and recovers. A statement that had to recover
+            // is no statement here either, as in a macro body.
             let parsed = match parsed {
                 Err(e) if value_block => {
                     let after = self.pos;
                     self.pos = stmt_start;
 
-                    match self.value_tail() {
+                    match self.value_tail(marks) {
                         Some(s) => Ok(s),
 
                         None => {
                             self.pos = after;
 
                             Err(e)
+                        }
+                    }
+                }
+
+                Ok(s) if value_block && self.diagnostics.len() > marks.reports => {
+                    let after = self.pos;
+                    self.pos = stmt_start;
+
+                    match self.value_tail(marks) {
+                        Some(tail) => Ok(tail),
+
+                        None => {
+                            self.pos = after;
+
+                            Ok(s)
                         }
                     }
                 }
@@ -148,14 +169,24 @@ impl<'a> Parser<'a> {
     /// compiler sees one shape for the block's value. The expression has
     /// to be the last thing in the block; anything else is the statement
     /// error the caller already holds.
-    fn value_tail(&mut self) -> Option<Stmt> {
+    ///
+    /// `marks` are the records before the statement parse. That parse
+    /// and the probe here both read the tokens, so a tail that fits
+    /// drops both records and reads the tokens once more.
+    fn value_tail(&mut self, marks: Marks) -> Option<Stmt> {
         let start = self.pos;
-        let value = self.expr().ok()?;
-
+        let probe = self.marks();
         // The body ends at its `end`, or, as a match arm, at the next arm.
-        if !self.at_block_end() {
+        let fits = self.expr().is_ok() && self.at_block_end();
+
+        self.rewind_to(if fits { marks } else { probe });
+
+        if !fits {
             return None;
         }
+
+        self.pos = start;
+        let value = self.expr().ok()?;
 
         Some(Stmt::Return(Return {
             values: vec![value],

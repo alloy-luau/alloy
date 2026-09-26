@@ -744,6 +744,16 @@ impl Server {
                     return true;
                 }
 
+                // `{if ok then "a" else "b"}` in markup: the keyword
+                // reads the type of the `if`, not the property's.
+                if m == "textDocument/hover"
+                    && let Some(text) = self.prop_value_scratch(&uri, &message)
+                {
+                    self.forward_request_with(message, method.as_deref(), None, Some(text));
+
+                    return true;
+                }
+
                 // A key of a table literal: the child reads it as a
                 // string and answers its byte count. At the binding it
                 // prints the whole record, and the response takes the

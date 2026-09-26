@@ -169,6 +169,27 @@ impl Server {
             .or(code)
     }
 
+    /// The shadow text a hover on the `if`, `then`, `else` or `elseif`
+    /// of a value in markup reads: the shadow with the property casts
+    /// blanked. The cast types the hole as the property takes it, so
+    /// the child answers `number | string | { read getValue: ... }`,
+    /// where a plain file answers the type of the `if` itself. `None`
+    /// for any other hover.
+    pub(crate) fn prop_value_scratch(&self, uri: &str, message: &Value) -> Option<String> {
+        if !uri.ends_with(".alx") {
+            return None;
+        }
+
+        let (line, character) = position_of_message(message)?;
+        let st = self.state.lock().expect("state");
+        let doc = st.docs.get(uri)?;
+        let caret = Caret::at(&doc.source, line, character)?;
+        let word = &doc.source[caret.start..caret.end];
+
+        (matches!(word, "if" | "then" | "else" | "elseif") && doc.shadow.contains(PROP_CAST))
+            .then(|| uncast_props(&doc.shadow))
+    }
+
     /// The shadow text a member completion after a child lookup reads,
     /// `player->leaderstats?.`: the shadow with the lookups uncast.
     /// `None` for any other completion.
@@ -1069,6 +1090,26 @@ pub(crate) fn uncast_children(shadow: &str) -> String {
                 out.replace_range(cast.clone(), &" ".repeat(cast.len()));
             }
         }
+    }
+
+    out
+}
+
+/// The head of the cast a markup value takes, `(__alloy.prop :: T)(v)`.
+const PROP_CAST: &str = "(__alloy.prop :: ";
+
+/// The shadow with the type of every property cast blanked, so the
+/// value reads `(__alloy.prop     )(v)`. The runtime's `prop` takes
+/// `any`, so the value keeps its own type. Every byte keeps its place.
+pub(crate) fn uncast_props(shadow: &str) -> String {
+    let mut out = shadow.to_string();
+
+    for (at, _) in shadow.match_indices(PROP_CAST) {
+        let Some(close) = closing_paren(shadow, at) else {
+            continue;
+        };
+        let cast = at + "(__alloy.prop".len()..close;
+        out.replace_range(cast.clone(), &" ".repeat(cast.len()));
     }
 
     out

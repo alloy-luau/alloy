@@ -2984,3 +2984,18 @@ fn a_macro_through_a_barrel_hovers_by_its_declaration() {
     let sent = String::from_utf8_lossy(&log.lock().expect("the log")).into_owned();
     assert!(sent.contains("macro twice(x)"), "{sent}");
 }
+
+/// `{if ok then "a" else "b"}` in markup: the hover on `if` printed the
+/// cast the property takes, `number | string | { read getValue: ... }`.
+/// A copy of the shadow with the cast blanked answers the type of the
+/// `if`, and every byte keeps its place.
+#[test]
+fn a_keyword_in_a_markup_value_reads_the_value_uncast() {
+    let shadow = "return React.createElement(\"TextLabel\", { Text = (__alloy.prop :: (string | number) -> (string | number))(if ok then \"a\" else \"b\") })\n";
+    let plain = super::super::hover::uncast_props(shadow);
+
+    assert_eq!(plain.len(), shadow.len());
+    assert!(plain.contains("(__alloy.prop "), "{plain}");
+    assert!(!plain.contains("::"), "{plain}");
+    assert!(plain.contains(")(if ok then \"a\" else \"b\")"), "{plain}");
+}

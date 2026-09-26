@@ -437,19 +437,37 @@ impl<'s> Scan<'s> {
     /// The `)` of the call whose `(` is at `open`, and the arguments the
     /// call passes. A string holds no bracket, and an interpolated
     /// string opens at its head and closes at its tail, so a comma in a
-    /// hole stays inside it.
+    /// hole stays inside it. A function literal is one argument, so the
+    /// commas of its types and its body split nothing.
     fn call_args(&self, open: usize) -> Option<(usize, usize)> {
         let mut depth = 0i32;
         let mut commas = 0;
         // The depth inside the type arguments of a call, `f<<K, V>>()`:
         // their commas split no argument. Two `<` side by side open them
-        // and nothing else, since Luau has no shift operator.
+        // and nothing else, since Luau has no shift operator. After a
+        // `::` the argument is a type, so one `<` opens them too.
         let mut angle = 0i32;
+        let mut cast = false;
+        // The `end` of a function literal: its tokens up to there are
+        // one argument.
+        let mut skip = 0;
 
         for k in open..self.toks.len() {
             let text = self.t(k);
 
-            if angle > 0 || (text == "<" && self.at(k + 1, "<")) {
+            if k <= skip {
+                continue;
+            }
+
+            if text == "function"
+                && let Some(e) = self.st.ends[k]
+            {
+                skip = e;
+
+                continue;
+            }
+
+            if angle > 0 || (text == "<" && (cast || self.at(k + 1, "<"))) {
                 match text {
                     "<" => angle += 1,
 
@@ -481,6 +499,9 @@ impl<'s> Scan<'s> {
 
             if depth == 1 && text == "," {
                 commas += 1;
+                cast = false;
+            } else if depth == 1 && text == "::" {
+                cast = true;
             }
         }
 

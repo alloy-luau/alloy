@@ -1354,6 +1354,27 @@ mod tests {
             ),
             vec!["argument_count"]
         );
+        // A function literal is one argument: the commas of its types
+        // and its body split nothing, and a cast's type arguments too.
+        let wrap = "local function wrap(h: (number) -> Result<number, string>): (number) -> Result<number, string>\n    return h\nend\n";
+        assert_eq!(
+            names(&format!(
+                "{wrap}print(wrap(function(n: number): Result<number, string>\n    local a, b = n, 1\n    return Ok(a + b)\nend))\n"
+            )),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            names(&format!(
+                "{wrap}local h = nil\nprint(wrap(h :: (number) -> Result<number, string>))\n"
+            )),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            names(&format!(
+                "{wrap}print(wrap(function(n: number): Result<number, string>\n    return Ok(n)\nend, 2))\n"
+            )),
+            vec!["argument_count"]
+        );
         // A vararg and a default make the count a range.
         assert_eq!(
             names(

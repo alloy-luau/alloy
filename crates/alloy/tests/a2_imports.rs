@@ -120,6 +120,46 @@ fn a_reexport_names_what_the_module_lacks() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `export { default as K } from "./leaf"` of a module with no
+/// `export default` and no `return` shipped `K = _m.default`, nil at
+/// run time. The report is the one `import K from` gets, with the fix
+/// in the re-export form. A module with a default, or one that returns
+/// its value, is clean.
+#[test]
+fn a_reexport_of_a_missing_default_reports() {
+    let dir = scratch("reexport-default");
+    std::fs::write(
+        dir.join("leaf.aly"),
+        "export const helper = 1
+",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("made.aly"),
+        "export default function make(): number\n    return 2\nend\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("kept.aly"), "local K = {}\nreturn K\n").unwrap();
+    let source = "export { default as K } from \"./leaf\"\nexport { default as M } from \"./made\"\nexport { default as R } from \"./kept\"\n";
+    let barrel = dir.join("barrel.aly");
+    std::fs::write(&barrel, source).unwrap();
+
+    let problems = alloy::modules::import_problems(source, Path::new("barrel.aly"), &barrel, &[]);
+
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert_eq!(problems[0].kind, "ImportError");
+    assert_eq!(
+        problems[0].message,
+        "\"./leaf\" has no default export; write `export { helper as K } from \"./leaf\"` or add `export default` to it"
+    );
+    assert_eq!(
+        &source[problems[0].start as usize..problems[0].end as usize],
+        "default"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_plain_luau_module_is_not_checked_for_names() {
     let dir = scratch("plain");

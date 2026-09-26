@@ -2994,8 +2994,9 @@ fn assigned_keys(source: &str, name: &str) -> Vec<String> {
 
 /// The message for `import X from "./m"` where `m` has no default. It
 /// names the export the author probably meant when one carries the
-/// binding's name.
-fn no_default_message(spec: &str, local: &str, names: &[String]) -> String {
+/// binding's name. `reexport` says the line is `export { default as X }
+/// from "./m"`, and the fix it names takes that form.
+fn no_default_message(spec: &str, local: &str, names: &[String], reexport: bool) -> String {
     // The name written here when the module exports it, else the one
     // name it exports.
     let meant = names
@@ -3004,8 +3005,16 @@ fn no_default_message(spec: &str, local: &str, names: &[String]) -> String {
         .or_else(|| names.first().filter(|_| names.len() == 1));
 
     if let Some(name) = meant {
+        let fix = match (reexport, name == local) {
+            (false, _) => format!("import {{ {name} }}"),
+
+            (true, true) => format!("export {{ {name} }}"),
+
+            (true, false) => format!("export {{ {name} as {local} }}"),
+        };
+
         return format!(
-            "\"{spec}\" has no default export; write `import {{ {name} }} from \"{spec}\"` \
+            "\"{spec}\" has no default export; write `{fix} from \"{spec}\"` \
              or add `export default` to it"
         );
     }
@@ -3167,6 +3176,24 @@ pub fn import_problems(
 
             for item in &list.specs {
                 let name = text(item.name).to_string();
+
+                // `default` reads the module's `export default`. A module
+                // that returns a value skipped the check above: that
+                // value is its default.
+                if name == "default" {
+                    if !surface.has_default && !surface.names.contains(&name) {
+                        let local = text(item.alias.unwrap_or(item.name));
+                        let (a, b) = range(item.name);
+                        out.push(ImportProblem {
+                            start: a,
+                            end: b,
+                            kind: "ImportError",
+                            message: no_default_message(&spec, local, &surface.names, true),
+                        });
+                    }
+
+                    continue;
+                }
 
                 if !surface.names.contains(&name) {
                     let (a, b) = range(item.name);
@@ -3477,7 +3504,7 @@ pub fn import_problems(
                     start: a,
                     end: b,
                     kind: "ImportError",
-                    message: no_default_message(&spec, &local, &names),
+                    message: no_default_message(&spec, &local, &names, false),
                 });
             } else if bound_values.contains(&local) {
                 out.push(ImportProblem {

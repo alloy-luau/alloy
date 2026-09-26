@@ -1938,6 +1938,18 @@ mod tests {
         assert_eq!(fmt(want), want);
     }
 
+    /// `function` after `is not` names a type, as after `is`. fmt read
+    /// it as a function, and every later line took one more indent.
+    #[test]
+    fn a_type_test_for_function_opens_no_block() {
+        for test in ["is function", "is not function"] {
+            let want = format!(
+                "export function plain(value: unknown): boolean\n  if value {test} then\n    return true\n  end\n\n  return false\nend\n\nexport function after(): number\n  return 1\nend\n"
+            );
+            stable(&want, &want);
+        }
+    }
+
     /// A child lookup by expression and the indexer of a table type key
     /// a value, as `t[k]` does, so their brackets stay tight. The spacing
     /// of an array literal wrote `part->[ name ]` and `{ read [ number ]: string }`.

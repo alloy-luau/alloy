@@ -37,12 +37,19 @@ impl<'s> Formatter<'s> {
             // form opens a body of `requires` clauses.
             "attribute" => self.line_has_after(i, "as"),
 
-            // `x is function` names a type; nothing opens.
+            // `x is function` and `x is not function` name a type;
+            // nothing opens.
             "function" => {
+                let before_not = prev
+                    .filter(|p| *p == "not")
+                    .and_then(|_| self.prev_code(self.prev_code(i)?))
+                    .map(|p| self.items[p].text.as_str());
+
                 !self.line_has_before(i, "declare")
                     && !self.line_has_before(i, "attribute")
                     && prev != Some("remote")
                     && prev != Some("is")
+                    && before_not != Some("is")
                     && self.signature.get(i) != Some(&true)
             }
 

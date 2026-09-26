@@ -2725,8 +2725,19 @@ impl State {
             .next()
             .map_or(at, |c| at + c.len_utf8());
 
+        // The target of an assignment, `t.n = 5` or `t.n += 1`, is no
+        // value to read: the child writes `extracted = 5`.
+        let target = alloy_syntax::lexer::lex(&doc.source).is_ok_and(|lexed| {
+            lexed
+                .toks
+                .iter()
+                .position(|t| t.start as usize == start && t.end as usize == end)
+                .is_some_and(|i| assignment_target(&lexed.toks, &doc.source, i))
+        });
+
         !branch
             && !key
+            && !target
             && !method
             && !nil_safe
             && !super::completion::in_constructor_braces(&doc.source, past)
@@ -2959,6 +2970,52 @@ fn edit_count(edit: &Value) -> usize {
     lists.filter_map(Value::as_array).map(Vec::len).sum()
 }
 
+/// Whether the name at token `i` sits in the targets of an assignment
+/// or of a compound one: `t` and `n` in `t.n = 5`, `a` in `a, b = 1, 2`.
+/// Each `.name` and `[index]` after the name belongs to its target. A
+/// name inside the index, `i` in `t[i] = 5`, is a value.
+fn assignment_target(toks: &[alloy_syntax::lexer::Tok], src: &str, i: usize) -> bool {
+    use alloy_syntax::lexer::TokKind;
+
+    const ASSIGN: [&str; 9] = ["=", "+=", "-=", "*=", "/=", "//=", "%=", "^=", "..="];
+    let text = |j: usize| toks.get(j).map_or("", |t| t.text(src));
+    let ident = |j: usize| toks.get(j).is_some_and(|t| t.kind == TokKind::Ident);
+    let target_end = |mut j: usize| {
+        loop {
+            if toks.get(j).is_some_and(|t| t.kind == TokKind::Dot) && ident(j + 1) {
+                j += 2;
+            } else if text(j) == "[" {
+                let mut depth = 0;
+
+                while j < toks.len() {
+                    match text(j) {
+                        "[" => depth += 1,
+
+                        "]" => depth -= 1,
+
+                        _ => {}
+                    }
+
+                    j += 1;
+
+                    if depth == 0 {
+                        break;
+                    }
+                }
+            } else {
+                return j;
+            }
+        }
+    };
+    let mut j = target_end(i + 1);
+
+    while text(j) == "," && ident(j + 1) {
+        j = target_end(j + 2);
+    }
+
+    ASSIGN.contains(&text(j))
+}
+
 /*
 Whether "Inline variable" keeps what the code does, for the declaration
 of `name` on the line that starts at byte `from`.
@@ -3131,36 +3188,6 @@ fn inline_keeps_behaviour(src: &str, from: usize, name: &str) -> bool {
     // Whether the name or the field at `i` is the target of an
     // assignment, of a compound one, or of a new `local`. A key of a
     // table constructor is none.
-    const ASSIGN: [&str; 9] = ["=", "+=", "-=", "*=", "/=", "//=", "%=", "^=", "..="];
-    let target_end = |mut j: usize| {
-        loop {
-            if toks.get(j).is_some_and(|t| t.kind == TokKind::Dot)
-                && toks.get(j + 1).is_some_and(|t| t.kind == TokKind::Ident)
-            {
-                j += 2;
-            } else if j < toks.len() && text(j) == "[" {
-                let mut depth = 0;
-
-                while j < toks.len() {
-                    match text(j) {
-                        "[" => depth += 1,
-
-                        "]" => depth -= 1,
-
-                        _ => {}
-                    }
-
-                    j += 1;
-
-                    if depth == 0 {
-                        break;
-                    }
-                }
-            } else {
-                return j;
-            }
-        }
-    };
     let assigned = |i: usize, in_table: bool| {
         let before = if i > 0 { text(i - 1) } else { "" };
 
@@ -3168,21 +3195,7 @@ fn inline_keeps_behaviour(src: &str, from: usize, name: &str) -> bool {
             return false;
         }
 
-        if matches!(before, "local" | "function") && !member(i) {
-            return true;
-        }
-
-        // `a, t.n = 1, 2` lists more targets before its `=`.
-        let mut j = target_end(i + 1);
-
-        while j < toks.len()
-            && text(j) == ","
-            && toks.get(j + 1).is_some_and(|t| t.kind == TokKind::Ident)
-        {
-            j = target_end(j + 2);
-        }
-
-        j < toks.len() && ASSIGN.contains(&text(j))
+        (matches!(before, "local" | "function") && !member(i)) || assignment_target(toks, src, i)
     };
 
     let mut open: Vec<Open> = Vec::new();

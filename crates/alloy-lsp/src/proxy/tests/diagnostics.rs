@@ -1741,6 +1741,27 @@ fn an_extract_stays_only_where_the_file_keeps_parsing() {
     ]))));
 }
 
+/// "Extract to local variable" on `t.n = 5` wrote `local extracted =
+/// t.n` and then `extracted = 5`, so the field kept its value. The
+/// target of an assignment or of a compound one has no extract. A value
+/// on the right, and an index inside the target, keep it.
+#[test]
+fn an_assignment_target_has_no_extract() {
+    let src = "local t = { n = 1 }\nt.n = 5\nt.n += 1\nt[t.n] = t.n + 1\nlocal a, b = 1, 2\na, t.n = b, 3\n";
+    let (st, uri) = one_file(src);
+    let action =
+        json!({ "title": "x", "kind": "refactor.extract", "data": { "type": "extractVariable" } });
+    let keeps = |l: u32, c: u32| st.keeps_child_action(&action, uri, Some(((l, c), (l, c))));
+
+    for (l, c) in [(1, 0), (1, 2), (2, 0), (2, 2), (3, 0), (5, 0), (5, 5)] {
+        assert!(!keeps(l, c), "{l}:{c}");
+    }
+
+    assert!(keeps(3, 2));
+    assert!(keeps(3, 9));
+    assert!(keeps(5, 9));
+}
+
 /// An action whose resolve carries no edit goes from the list. The
 /// child inlines a `local` or a `const` that holds a value, and a
 /// parameter, an import, or a function has none. A type and a

@@ -38,4 +38,4 @@ local function pairs_of<T>(xs: __alloy.Array<T>): number
 end
 
 local bag = Bag({ items = __alloy.Array.from({ "a" }) })
-print(total(__alloy.Array.from({ bag })), first(__alloy.Array.from({ bag })), grow(__alloy.Array.from({ bag }), bag), pairs_of(__alloy.Array.from({ bag })))
+print(total(__alloy.Array.from({ bag })), first(__alloy.Array.from({ bag })), grow(__alloy.Array.from({ bag }), bag), pairs_of(__alloy.Array.from({ bag }))) return nil

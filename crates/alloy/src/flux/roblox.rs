@@ -373,14 +373,16 @@ impl<'s> Scan<'s> {
         false
     }
 
-    /// The `(` of `Instance.new` at `i`, when the call is one.
+    /// The `(` of `Instance.new` or `new Instance` at `i`, when the
+    /// call is one. The two build the same Instance, so a lint that reads
+    /// one reads the other, and `prefer_new` hides no report.
     fn instance_new_open(&self, i: usize) -> Option<usize> {
-        (self.at(i, "Instance")
-            && self.at(i + 1, ".")
-            && self.at(i + 2, "new")
-            && self.at(i + 3, "(")
-            && !matches!(self.prev(i), "." | ":"))
-        .then_some(i + 3)
+        let dotted = self.at(i, "Instance") && self.at(i + 1, ".") && self.at(i + 2, "new");
+        let word = self.at(i, "new") && self.at(i + 1, "Instance") && !self.at(i + 2, ".");
+        let open = if dotted { i + 3 } else { i + 2 };
+
+        ((dotted || word) && self.at(open, "(") && !matches!(self.prev(i), "." | ":"))
+            .then_some(open)
     }
 
     /// `Instance.new(class, parent)`.
@@ -401,13 +403,14 @@ impl<'s> Scan<'s> {
             }
 
             let class = self.string_content(open + 1).unwrap_or("class");
+            let call = self.slice(i, open);
             self.lint(
                 out,
                 "instance_new_parent",
                 i,
                 close,
                 format!(
-                    "`Instance.new(\"{class}\", parent)` parents the instance before its properties are set; set `Parent` last"
+                    "`{call}(\"{class}\", parent)` parents the instance before its properties are set; set `Parent` last, as `new Instance(\"{class}\") {{ Parent = parent }}` does"
                 ),
                 None,
             );
@@ -451,10 +454,7 @@ impl<'s> Scan<'s> {
         }
 
         match self.init_at(i) {
-            Some((a, _)) => {
-                self.instance_new_open(a).is_some()
-                    || (self.at(a, "new") && self.at(a + 1, "Instance"))
-            }
+            Some((a, _)) => self.instance_new_open(a).is_some(),
 
             None => false,
         }
@@ -660,9 +660,18 @@ impl<'s> Scan<'s> {
 mod tests {
     use super::super::helpers::{fixed_by, lints as lints_of, names_of};
 
-    /// The sources here bind names to show a shape, not to read them.
+    /// The sources here bind names to show a shape, not to read them,
+    /// and build with either spelling of the constructor.
     fn lints(src: &str) -> Vec<crate::Lint> {
-        lints_of(src, &["unused_variable", "redundant_as", "prefer_const"])
+        lints_of(
+            src,
+            &[
+                "unused_variable",
+                "redundant_as",
+                "prefer_const",
+                "prefer_new",
+            ],
+        )
     }
 
     fn fixed(src: &str) -> String {
@@ -846,24 +855,41 @@ mod tests {
         assert_eq!(names(param), Vec::<&str>::new());
     }
 
+    /// `new Instance(...)` emits `Instance.new(...)`, so both spellings
+    /// fire, and the `prefer_new` rewrite keeps the report.
     #[test]
     fn a_parent_argument_fires() {
+        for call in ["Instance.new", "new Instance"] {
+            let src = format!("local p = {call}(\"Part\", workspace)\n");
+            let got = lints(&src);
+            assert_eq!(names_of(&got), vec!["instance_new_parent"], "{src}");
+            assert!(
+                got[0]
+                    .message
+                    .starts_with(&format!("`{call}(\"Part\", parent)`"))
+            );
+            assert_eq!(
+                names(&format!("local p = {call}(\"Part\")\n")),
+                Vec::<&str>::new()
+            );
+        }
+
+        // `new Instance(...) { Parent = p }` sets the parent last.
         assert_eq!(
-            names("local p = Instance.new(\"Part\", workspace)\n"),
-            vec!["instance_new_parent"]
-        );
-        assert_eq!(
-            names("local p = Instance.new(\"Part\")\n"),
+            names("local p = new Instance(\"Part\") { Parent = workspace }\n"),
             Vec::<&str>::new()
         );
     }
 
     #[test]
     fn a_body_mover_fires() {
-        assert_eq!(
-            names("local bv = Instance.new(\"BodyVelocity\")\n"),
-            vec!["deprecated_body_mover"]
-        );
+        for call in ["Instance.new", "new Instance"] {
+            assert_eq!(
+                names(&format!("local bv = {call}(\"BodyVelocity\")\n")),
+                vec!["deprecated_body_mover"],
+                "{call}"
+            );
+        }
     }
 
     /// Every lint, the pedantic ones included.

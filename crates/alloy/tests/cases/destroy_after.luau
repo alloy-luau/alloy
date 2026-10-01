@@ -39,4 +39,4 @@ task.delay(1, function()
     print("still here")
 end)
 
-print(drop, part, timer)
+print(drop, part, timer) return nil

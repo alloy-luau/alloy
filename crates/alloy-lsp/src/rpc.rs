@@ -42,6 +42,41 @@ pub fn read_message(reader: &mut impl BufRead) -> io::Result<Option<Value>> {
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
+/// Folds `next` into `into` when both are `textDocument/didChange` for
+/// one document: the edits of both, in order, at the later version.
+/// Returns false, and changes nothing, for any other pair.
+pub fn merge_change(into: &mut Value, next: &Value) -> bool {
+    let change =
+        |m: &Value| m.get("method").and_then(Value::as_str) == Some("textDocument/didChange");
+    let uri = |m: &Value| m.pointer("/params/textDocument/uri").cloned();
+
+    if !change(into) || !change(next) || uri(into).is_none() || uri(into) != uri(next) {
+        return false;
+    }
+
+    let edits = next
+        .pointer("/params/contentChanges")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    if let Some(list) = into
+        .pointer_mut("/params/contentChanges")
+        .and_then(Value::as_array_mut)
+    {
+        list.extend(edits);
+    }
+
+    if let (Some(version), Some(slot)) = (
+        next.pointer("/params/textDocument/version").cloned(),
+        into.pointer_mut("/params/textDocument/version"),
+    ) {
+        *slot = version;
+    }
+
+    true
+}
+
 /// Writes one message with its header.
 pub fn write_message(writer: &mut impl Write, message: &Value) -> io::Result<()> {
     let body = serde_json::to_vec(message)?;
@@ -63,5 +98,37 @@ mod tests {
         let mut reader = BufReader::new(buf.as_slice());
         assert_eq!(read_message(&mut reader).unwrap(), Some(value));
         assert_eq!(read_message(&mut reader).unwrap(), None);
+    }
+
+    fn edit(uri: &str, version: i64, text: &str) -> Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri, "version": version },
+                "contentChanges": [{ "text": text }]
+            }
+        })
+    }
+
+    #[test]
+    fn edits_to_one_document_merge_in_order() {
+        let mut first = edit("file:///a.aly", 2, "a");
+        assert!(merge_change(&mut first, &edit("file:///a.aly", 3, "b")));
+        assert_eq!(first["params"]["textDocument"]["version"], 3);
+        assert_eq!(
+            first["params"]["contentChanges"],
+            serde_json::json!([{ "text": "a" }, { "text": "b" }])
+        );
+    }
+
+    #[test]
+    fn other_messages_do_not_merge() {
+        let mut first = edit("file:///a.aly", 2, "a");
+        let request =
+            serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "textDocument/completion" });
+        assert!(!merge_change(&mut first, &edit("file:///b.aly", 3, "b")));
+        assert!(!merge_change(&mut first, &request));
+        assert_eq!(first, edit("file:///a.aly", 2, "a"));
     }
 }

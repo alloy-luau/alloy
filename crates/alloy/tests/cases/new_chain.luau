@@ -23,4 +23,4 @@ local b = Thing.new(2).n
 local c = Thing.new(3):bump():get()
 local d = Thing.new(4):bump().n
 Thing.new(5):bump()
-print(a, b, c, d)
+print(a, b, c, d) return nil

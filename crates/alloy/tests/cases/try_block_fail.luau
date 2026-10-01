@@ -62,4 +62,4 @@ local outer = __alloy.try_block(function(__fail)
     return reader()
 end)
 
-print(plain, through, one, same, mixed, nested, guarded, outer)
+print(plain, through, one, same, mixed, nested, guarded, outer) return nil

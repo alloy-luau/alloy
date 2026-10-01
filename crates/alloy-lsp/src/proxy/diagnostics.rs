@@ -441,6 +441,34 @@ impl State {
                 && let Some(edits) = angle_call_edits(&doc.source, start)
             {
                 Some(("Write `<<...>>`".to_string(), edits))
+            } else if let Some(title) = d
+                .message
+                .strip_prefix("a `parallel` block cannot ")
+                .and_then(|m| m.rsplit_once("; move the "))
+                .map(|(_, what)| format!("Move the {what}"))
+                && let Some(moved) = alloy::desugar::parallel_move(&doc.source, d.start)
+            {
+                // The refused statement leaves the block and runs after
+                // `task.synchronize()`, on the line after the `end`.
+                let at = |byte: u32| {
+                    let (line, character) = position_of(&doc.source, byte as usize);
+
+                    json!({ "line": line, "character": character })
+                };
+
+                Some((
+                    title,
+                    json!([
+                        {
+                            "range": { "start": at(moved.insert_at), "end": at(moved.insert_at) },
+                            "newText": moved.text,
+                        },
+                        {
+                            "range": { "start": at(moved.cut.0), "end": at(moved.cut.1) },
+                            "newText": "",
+                        },
+                    ]),
+                ))
             } else if let Some(found) = self.missing_arm_fix(doc, &d.message, (start, end)) {
                 Some(found)
             } else if let Some(name) = alloy::std_names::missing_name(&d.message) {

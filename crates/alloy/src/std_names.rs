@@ -274,66 +274,131 @@ pub fn imported(source: &str) -> HashSet<String> {
     out
 }
 
+/// What `import_fixes` reads of a source: each top-level import, as
+/// its spec and the end of the last entry of a named list, the end of
+/// the last import, the quote a new line writes, and the names the
+/// std imports bind.
+struct ImportLists {
+    lists: Vec<(String, Option<u32>)>,
+    last_end: Option<u32>,
+    quote: char,
+    have: HashSet<String>,
+}
+
+impl ImportLists {
+    fn of(src: &str) -> Option<Self> {
+        use alloy_syntax::ast::{ImportKind, Stmt};
+
+        let parsed = alloy_syntax::parse_lenient(src, Default::default()).ok()?;
+        let toks = &parsed.lexed.toks;
+        let imports: Vec<&alloy_syntax::ast::Import> = parsed
+            .chunk
+            .block
+            .stmts
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::Import(i) => Some(i),
+
+                _ => None,
+            })
+            .collect();
+        let lists = imports
+            .iter()
+            .map(|i| {
+                let written = i.path.text(src, toks).trim_matches(['"', '\'']).to_string();
+                let end = match &i.kind {
+                    ImportKind::Named(specs) => specs.last().map(|last| {
+                        let end = last.alias.unwrap_or(last.name);
+
+                        toks[end.end as usize - 1].end
+                    }),
+
+                    _ => None,
+                };
+
+                (written, end)
+            })
+            .collect();
+        // The quote an import already uses, else the one most strings in
+        // the file use, which the formatter keeps to the project's
+        // style. A tie takes the formatter's default, single.
+        let quote = imports
+            .first()
+            .and_then(|i| i.path.text(src, toks).chars().next())
+            .filter(|c| *c == '\'' || *c == '"')
+            .unwrap_or_else(|| {
+                let (single, double) = toks
+                    .iter()
+                    .filter(|t| matches!(t.kind, alloy_syntax::lexer::TokKind::Str { .. }))
+                    .fold((0, 0), |(s, d), t| match src.as_bytes()[t.start as usize] {
+                        b'\'' => (s + 1, d),
+
+                        b'"' => (s, d + 1),
+
+                        _ => (s, d),
+                    });
+
+                if double > single { '"' } else { '\'' }
+            });
+
+        Some(Self {
+            lists,
+            last_end: imports.last().map(|i| toks[i.span.end as usize - 1].end),
+            quote,
+            have: imported(src),
+        })
+    }
+
+    /// The end of the named list a name joins, by the spec it imports.
+    fn list_end(&self, spec: &str) -> Option<u32> {
+        self.lists
+            .iter()
+            .find_map(|(written, end)| if written == spec { *end } else { None })
+    }
+}
+
+/*
+The last source `import_fixes` read, and what it read of it.
+
+The editor asks once per row of a list and once per inlay hint, and each
+call parsed the whole file twice. On Strata, the 177 hints of a 959-line
+file spent 150 ms there. The rows and hints of one answer read one text.
+*/
+thread_local! {
+    static LAST_LISTS: std::cell::RefCell<Option<(String, std::rc::Rc<ImportLists>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn import_lists(src: &str) -> Option<std::rc::Rc<ImportLists>> {
+    let held = LAST_LISTS.with(|last| {
+        last.borrow()
+            .as_ref()
+            .filter(|(text, _)| text == src)
+            .map(|(_, lists)| lists.clone())
+    });
+
+    if held.is_some() {
+        return held;
+    }
+
+    let lists = std::rc::Rc::new(ImportLists::of(src)?);
+    LAST_LISTS.with(|last| *last.borrow_mut() = Some((src.to_string(), lists.clone())));
+
+    Some(lists)
+}
+
 /// The rewrites that import each of `names` from its std module. A name
 /// joins the file's `import { } from` list of the facade or of its
 /// module; the rest go on new lines below the file's last import, one
 /// line per module.
 pub fn import_fixes(src: &str, names: &[&str]) -> Vec<Fix> {
-    use alloy_syntax::ast::{ImportKind, Stmt};
+    if names.is_empty() {
+        return Vec::new();
+    }
 
-    let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
+    let Some(read) = import_lists(src) else {
         return Vec::new();
     };
-    let toks = &parsed.lexed.toks;
-    let imports: Vec<&alloy_syntax::ast::Import> = parsed
-        .chunk
-        .block
-        .stmts
-        .iter()
-        .filter_map(|s| match s {
-            Stmt::Import(i) => Some(i),
-
-            _ => None,
-        })
-        .collect();
-    let have = imported(src);
-    // The list a name joins: the end of its last entry, keyed by spec.
-    let list_end = |spec: &str| {
-        imports.iter().find_map(|i| {
-            let written = i.path.text(src, toks).trim_matches(['"', '\'']);
-
-            match &i.kind {
-                ImportKind::Named(specs) if written == spec => specs.last().map(|last| {
-                    let end = last.alias.unwrap_or(last.name);
-
-                    toks[end.end as usize - 1].end
-                }),
-
-                _ => None,
-            }
-        })
-    };
-    // The quote an import already uses, else the one most strings in the
-    // file use, which the formatter keeps to the project's style. A tie
-    // takes the formatter's default, single.
-    let quote = imports
-        .first()
-        .and_then(|i| i.path.text(src, toks).chars().next())
-        .filter(|c| *c == '\'' || *c == '"')
-        .unwrap_or_else(|| {
-            let (single, double) = toks
-                .iter()
-                .filter(|t| matches!(t.kind, alloy_syntax::lexer::TokKind::Str { .. }))
-                .fold((0, 0), |(s, d), t| match src.as_bytes()[t.start as usize] {
-                    b'\'' => (s + 1, d),
-
-                    b'"' => (s, d + 1),
-
-                    _ => (s, d),
-                });
-
-            if double > single { '"' } else { '\'' }
-        });
     let mut joins: Vec<(u32, Vec<&str>)> = Vec::new();
     let mut lines: Vec<(&str, Vec<&str>)> = Vec::new();
     let mut seen: HashSet<&str> = HashSet::new();
@@ -343,13 +408,13 @@ pub fn import_fixes(src: &str, names: &[&str]) -> Vec<Fix> {
             continue;
         };
 
-        if have.contains(*name) || !seen.insert(name) {
+        if read.have.contains(*name) || !seen.insert(name) {
             continue;
         }
 
         let spec = format!("{PREFIX}/{module}");
 
-        match list_end(PREFIX).or_else(|| list_end(&spec)) {
+        match read.list_end(PREFIX).or_else(|| read.list_end(&spec)) {
             Some(at) => match joins.iter_mut().find(|(a, _)| *a == at) {
                 Some((_, list)) => list.push(name),
 
@@ -374,7 +439,7 @@ pub fn import_fixes(src: &str, names: &[&str]) -> Vec<Fix> {
         .collect();
 
     if !lines.is_empty() {
-        let q = quote;
+        let q = read.quote;
         let text: String = lines
             .iter()
             .map(|(module, list)| {
@@ -384,10 +449,7 @@ pub fn import_fixes(src: &str, names: &[&str]) -> Vec<Fix> {
                 )
             })
             .collect();
-        let at = insertion_offset(
-            src,
-            imports.last().map(|i| toks[i.span.end as usize - 1].end),
-        );
+        let at = insertion_offset(src, read.last_end);
         fixes.push(Fix::new(src, at, at, text));
     }
 

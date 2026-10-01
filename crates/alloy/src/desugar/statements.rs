@@ -85,6 +85,23 @@ pub(crate) fn pattern_binds(p: &Pattern) -> Vec<TokSpan> {
     }
 }
 
+/// The names a condition binds, `if const a, b = f()` and `while const
+/// Some(x) = next()`, in order.
+pub(crate) fn cond_binds(c: &Cond) -> Vec<TokSpan> {
+    let Cond::Local { bindings, .. } = c else {
+        return Vec::new();
+    };
+
+    bindings
+        .iter()
+        .flat_map(|b| {
+            pattern_binds(&b.pattern)
+                .into_iter()
+                .chain(b.rest.iter().map(|(n, _)| *n))
+        })
+        .collect()
+}
+
 /// The condition expressions a statement evaluates more than once, or
 /// after other statements ran: `while`, `repeat`, and every `elseif`.
 /// `g ~= nil and h ~= nil` for a chain's guards, or `None` for none.
@@ -458,6 +475,25 @@ impl<'s> Desugar<'s> {
     }
 
     pub(crate) fn stmt(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::Local(l) => {
+                for (b, v) in l.names.iter().zip(&l.values) {
+                    if let Some(ty) = b.ty {
+                        let ty = self.text_of(ty).to_string();
+                        self.note_alias_cast(&ty, v);
+                    }
+                }
+            }
+
+            Stmt::Return(r) if r.values.len() == 1 => {
+                if let Some(Some(ty)) = self.ret_types.last().cloned() {
+                    self.note_alias_cast(&ty, &r.values[0]);
+                }
+            }
+
+            _ => {}
+        }
+
         // Declarations come first so a later statement sees them.
         match stmt {
             Stmt::Local(l) => {
@@ -553,6 +589,12 @@ impl<'s> Desugar<'s> {
                 self.declare_name(r.name);
                 self.not_constructible
                     .insert(self.decl_name(r.name), "remote");
+            }
+
+            Stmt::Message(m) => {
+                self.declare_name(m.name);
+                self.not_constructible
+                    .insert(self.decl_name(m.name), "message");
             }
 
             Stmt::Attribute(a) => {
@@ -761,6 +803,12 @@ impl<'s> Desugar<'s> {
             return true;
         }
 
+        // A module past the budget of locals reads its exported values
+        // off the exports table, so every reference has to be reached.
+        if !self.table_exports.is_empty() {
+            return true;
+        }
+
         // The check artifact casts each `return` of a function written in
         // a for-in header, so the walk has to reach the loop and every
         // statement of that function.
@@ -853,6 +901,7 @@ impl<'s> Desugar<'s> {
             || self.constructs_struct(text)
             || WORD_OPS.iter().any(|w| text.contains(w))
             || self.ext_methods.iter().any(|m| text.contains(m.as_str()))
+            || self.messages.keys().any(|m| text.contains(m.as_str()))
             || self
                 .ext_statics
                 .values()
@@ -1751,6 +1800,10 @@ impl<'s> Desugar<'s> {
 
             Stmt::Remote(r) => self.remote_decl(r),
 
+            Stmt::Message(m) => self.message_decl(m),
+
+            Stmt::Parallel(p) => self.parallel_block(p),
+
             Stmt::Attribute(a) => self.attribute_decl(a),
 
             Stmt::Macro(_) => {
@@ -1943,11 +1996,12 @@ impl<'s> Desugar<'s> {
                     return;
                 }
 
-                if local_needs_rewrite(l) {
-                    self.local_stmt(l);
-                } else {
-                    self.copy(after_attrs, self.byte_end(l.span));
-                }
+                // The rest lowers as a plain local does. A copy of the
+                // text left `a ?? b` and `new T()` as written in the
+                // Luau (LANG_BUGS 133).
+                let rest = TokSpan::new(l.keyword.start as usize, l.span.end as usize);
+                self.copy(after_attrs, self.byte_start(rest));
+                self.local_rest(l, rest);
             }
 
             Stmt::Function(f) if self.params_have_attrs(&f.body) => {
@@ -1963,43 +2017,7 @@ impl<'s> Desugar<'s> {
             // A match whose arms run statements stands after `local x =`,
             // `x =`, or `return`: it becomes a statement match whose arms
             // end by writing the value there, with no closure.
-            Stmt::Local(l)
-                if l.names.len() == 1
-                    && l.values.len() == 1
-                    && l.names[0].destructure.is_none()
-                    && block_arm_match(&l.values[0]).is_some() =>
-            {
-                let m = block_arm_match(&l.values[0]).expect("matched above");
-                let name = &l.names[0];
-                let head_end = name
-                    .ty
-                    .map_or(self.byte_end(name.name), |t| self.byte_end(t));
-                let m_start = self.byte_start(m.span);
-
-                // Luau's `const` takes its value on its own line, and the
-                // arms set it below; the emit writes `local`, and the
-                // compiler's own check still refuses a later write.
-                if l.is_const {
-                    let kw = self.byte_start(l.keyword);
-                    self.copy(self.byte_start(l.span), kw);
-                    self.generate(kw, "local");
-                    self.copy(self.byte_end(l.keyword), head_end);
-                } else {
-                    self.copy(self.byte_start(l.span), head_end);
-                }
-
-                // A bare `local x` is nil until an arm sets it, so the
-                // checker reads it `T?` at the name. `never` adds nothing
-                // to the arms' union, so the hover and the hint read `T`.
-                if self.options.check && name.ty.is_none() {
-                    self.generate(head_end, " = nil :: never");
-                }
-
-                self.blank_lines(head_end, m_start);
-                let sink = format!("{} = ", self.text_of(name.name));
-                self.match_hoisted(m, &sink, " ");
-                self.declare_binding(name);
-            }
+            Stmt::Local(l) if local_block_match(l).is_some() => self.local_rest(l, l.span),
 
             Stmt::Assign(a)
                 if a.targets.len() == 1
@@ -2277,6 +2295,16 @@ impl<'s> Desugar<'s> {
                     _ => (Vec::new(), None),
                 };
                 let header = u32::from(matches!(stmt, Stmt::GenericFor(_)));
+                // A loop's names are in scope in its body alone, so a
+                // namespace member of that name does not read there
+                // (LANG_BUGS 129). The header still reads the outer one.
+                let loop_vars: Vec<&Binding> = match stmt {
+                    Stmt::NumericFor(f) => vec![&f.var],
+
+                    Stmt::GenericFor(f) => f.vars.iter().collect(),
+
+                    _ => Vec::new(),
+                };
                 self.stitch(span, &children, |d, child| match child {
                     Child::Expr(e) => {
                         let at = std::ptr::from_ref::<Expr>(e);
@@ -2300,7 +2328,14 @@ impl<'s> Desugar<'s> {
                             d.r.end_stmt();
                         }
 
+                        d.scopes.push(HashSet::new());
+
+                        for v in &loop_vars {
+                            d.declare_binding(v);
+                        }
+
                         d.block(b);
+                        d.scopes.pop();
                     }
 
                     Child::Function(b) => d.function_block(b),
@@ -2521,6 +2556,61 @@ impl<'s> Desugar<'s> {
     }
 
     // --- locals with destructuring or an initializer ----------------------
+
+    /*
+    A local from `rest` on, the span after its attributes and its
+    `export`: each form lowers as it does with neither. A match whose
+    arms run statements becomes a statement match whose arms end by
+    writing the value, with no closure.
+    */
+    pub(crate) fn local_rest(&mut self, l: &Local, rest: TokSpan) {
+        if let Some(m) = local_block_match(l) {
+            let name = &l.names[0];
+            let head_end = name
+                .ty
+                .map_or(self.byte_end(name.name), |t| self.byte_end(t));
+            let m_start = self.byte_start(m.span);
+
+            // Luau's `const` takes its value on its own line, and the
+            // arms set it below; the emit writes `local`, and the
+            // compiler's own check still refuses a later write.
+            if l.is_const {
+                let kw = self.byte_start(l.keyword);
+                self.copy(self.byte_start(rest), kw);
+                self.generate(kw, "local");
+                self.copy(self.byte_end(l.keyword), head_end);
+            } else {
+                self.copy(self.byte_start(rest), head_end);
+            }
+
+            // A bare `local x` is nil until an arm sets it, so the
+            // checker reads it `T?` at the name. `never` adds nothing
+            // to the arms' union, so the hover and the hint read `T`.
+            if self.options.check && name.ty.is_none() {
+                self.generate(head_end, " = nil :: never");
+            }
+
+            self.blank_lines(head_end, m_start);
+            let sink = format!("{} = ", self.text_of(name.name));
+            self.match_hoisted(m, &sink, " ");
+            self.declare_binding(name);
+        } else if local_needs_rewrite(l) {
+            self.local_stmt(l);
+        } else {
+            // `local m: HashMap<K, V> = HashMap.new()`: the call takes the
+            // annotation's arguments, since the solver infers none.
+            self.expected_generic = self.annotated_constructor(l);
+            let children: Vec<Child<'_>> = l.values.iter().map(Child::Expr).collect();
+            self.stitch(rest, &children, |d, child| match child {
+                Child::Expr(e) => d.expr(e),
+
+                Child::Block(b) => d.block(b),
+
+                Child::Function(b) => d.function_block(b),
+            });
+            self.expected_generic = None;
+        }
+    }
 
     /*
     `local { a, b = c }: T = t` becomes `local _1: T = t local a, c = _1.a,
@@ -3884,7 +3974,7 @@ impl<'s> Desugar<'s> {
 
     /// The annotation on `local name: T`, `const name: T`, or a
     /// parameter of that name. The first one the file writes answers.
-    fn annotation_of(&self, name: &str) -> Option<String> {
+    pub(crate) fn annotation_of(&self, name: &str) -> Option<String> {
         let text = |i: usize| self.toks.get(i).map(|t| t.text(self.src)).unwrap_or("");
 
         for i in 1..self.toks.len() {
@@ -3914,7 +4004,7 @@ impl<'s> Desugar<'s> {
 
     /// The name a `local name = ...` constructs: `new Part(...)` and
     /// `Part.new(...)` both give `Part`.
-    fn init_constructor_of(&self, name: &str) -> Option<String> {
+    pub(crate) fn init_constructor_of(&self, name: &str) -> Option<String> {
         let text = |i: usize| self.toks.get(i).map(|t| t.text(self.src)).unwrap_or("");
 
         for i in 1..self.toks.len() {
@@ -4024,6 +4114,14 @@ impl<'s> Desugar<'s> {
         let do_start = self.toks[do_tok as usize].start;
         let do_end = self.toks[do_tok as usize].end;
 
+        // The filter reads the loop's names too, so they are in scope
+        // before it renders.
+        self.scopes.push(HashSet::new());
+
+        for v in &f.vars {
+            self.declare_binding(v);
+        }
+
         // The destructure prologue comes first, so the filter can read the
         // names it binds.
         match &f.filter {
@@ -4043,12 +4141,6 @@ impl<'s> Desugar<'s> {
         }
 
         cursor = do_end;
-        self.scopes.push(HashSet::new());
-
-        for v in &f.vars {
-            self.declare_binding(v);
-        }
-
         let body_start = self.block_start_or(&f.block, cursor);
         self.copy(cursor, body_start);
         self.block(&f.block);
@@ -4083,6 +4175,16 @@ pub(crate) fn block_arm_match(e: &Expr) -> Option<&MatchExpr> {
     let block = |v: &Expr| matches!(v, Expr::Block { .. });
 
     (m.arms.iter().any(|a| block(&a.value)) || m.default.as_deref().is_some_and(block)).then_some(m)
+}
+
+/// The match whose arms run statements, when a local of one name holds
+/// one: `local x = match ... end`.
+fn local_block_match(l: &Local) -> Option<&MatchExpr> {
+    match (l.names.as_slice(), l.values.as_slice()) {
+        ([name], [v]) if name.destructure.is_none() => block_arm_match(v),
+
+        _ => None,
+    }
 }
 
 /// Whether a statement is `declare class Name ... end`, the definition
@@ -4741,7 +4843,11 @@ mod tests {
             "{}",
             out.ship
         );
-        assert!(out.ship.trim_end().ends_with("end)"), "{}", out.ship);
+        assert!(
+            out.ship.trim_end().ends_with("end) return nil"),
+            "{}",
+            out.ship
+        );
         assert_eq!(out.ship.lines().count(), src.lines().count());
 
         let src = "local ready = false\nafter 0 where ready do\n    print(1)\nend\nprint(ready)\n";
@@ -4836,7 +4942,11 @@ mod tests {
             "{}",
             out.ship
         );
-        assert!(out.ship.trim_end().ends_with("end)"), "{}", out.ship);
+        assert!(
+            out.ship.trim_end().ends_with("end) return nil"),
+            "{}",
+            out.ship
+        );
         assert_eq!(out.ship.lines().count(), src.lines().count());
 
         // Inside a plain function body, which is where the placement
@@ -4978,6 +5088,7 @@ fn declared_kind(stmt: &Stmt) -> Option<(TokSpan, &'static str)> {
         // A remote registers one channel under its name, and a macro
         // binds one template. A second of either wins in silence.
         Stmt::Remote(d) => Some((d.name, "a remote")),
+        Stmt::Message(d) => Some((d.name, "a message")),
         Stmt::Macro(d) => Some((d.name, "a macro")),
 
         _ => None,

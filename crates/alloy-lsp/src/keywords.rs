@@ -64,9 +64,13 @@ pub fn hover(source: &str, offset: usize) -> Option<(usize, usize, &'static str)
 
         // A contextual word, ex: the `new` of `local new = Instance.new`,
         // is the local it names. The child holds its type and its
-        // definition, so it answers the hover.
+        // definition, so it answers the hover. The call `import(...)` is
+        // the module import, and the shadow holds a `require` there.
         if alloy_syntax::contextual::is_contextual(word)
-            && !alloy_syntax::contextual::keyword_at_byte(source, start)
+            && let Ok(lexed) = alloy_syntax::lexer::lex(source)
+            && let Some(i) = lexed.toks.iter().position(|t| t.start as usize == start)
+            && !alloy_syntax::contextual::keyword_at(source, &lexed.toks, i)
+            && !alloy_syntax::contextual::import_call_at(source, &lexed.toks, i)
         {
             return None;
         }
@@ -88,6 +92,12 @@ pub fn hover(source: &str, offset: usize) -> Option<(usize, usize, &'static str)
             && let Some(text) = lookup(&format!("derive:{word}"))
         {
             return Some((start, end, text));
+        }
+
+        // `message Hit(p: Part) as parallel`: the word names the phase
+        // the handler runs in, not a block.
+        if word == "parallel" && before.trim_end().ends_with(" as") {
+            return Some((start, end, AS_PARALLEL));
         }
 
         return lookup(word).map(|text| (start, end, meaning(source, start, word, text)));
@@ -401,6 +411,9 @@ fn word_at(bytes: &[u8], offset: usize) -> (usize, usize) {
     (start, end)
 }
 
+/// The hover of the `parallel` in `message Name(params) as parallel`.
+const AS_PARALLEL: &str = "```alloy\nmessage Name(params) as parallel\n```\nThe handler runs in the parallel phase. `on` binds it with `BindToMessageParallel`, and the handler takes the rules of a `parallel` block. Without `as parallel`, the handler runs in the serial phase. `alloy doc message` has the rest.";
+
 fn lookup(key: &str) -> Option<&'static str> {
     alloy::docs::lookup(key)
 }
@@ -464,6 +477,7 @@ pub const WORDS: &[&str] = &[
     "local",
     "macro",
     "match",
+    "message",
     "namespace",
     "new",
     "nil",
@@ -471,6 +485,7 @@ pub const WORDS: &[&str] = &[
     "on",
     "open",
     "or",
+    "parallel",
     "private",
     "public",
     "read",
@@ -564,6 +579,20 @@ mod tests {
         assert!(hover("match x with\ncase 1 then print(1)\nend\n", 0).is_some());
         assert!(hover("const LIMIT = 5\n", 0).is_some());
         assert!(hover("export type T = number\n", 0).is_some());
+
+        // The import call is the module import. The shadow holds a
+        // `require` there, so the child has no word to answer for.
+        let import = lookup("import").expect("the entry");
+
+        for src in [
+            "local m = import(\"./m\")\n",
+            "local m = import<<unknown>>(module)\n",
+            "local m = import \"./m\"\n",
+        ] {
+            assert_eq!(hover(src, 12).map(|h| h.2), Some(import), "{src}");
+        }
+
+        assert!(hover("local import = 1\nprint(import)\n", 23).is_none());
     }
 
     /// `destroy` and `after` answer from the table, and each one used

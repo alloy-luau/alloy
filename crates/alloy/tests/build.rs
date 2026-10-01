@@ -34,7 +34,7 @@ fn a_project_builds_into_its_out_tree() {
     assert!(report.is_clean(), "{report:?}");
     assert_eq!(
         fs::read_to_string(dir.join("dist/main.luau")).unwrap(),
-        "local v = (if a == nil then 1 else a)\n"
+        "local v = (if a == nil then 1 else a) return nil\n"
     );
     assert_eq!(
         fs::read_to_string(dir.join("dist/nested/util.luau")).unwrap(),
@@ -294,6 +294,45 @@ fn two_sources_that_build_one_module_are_a_diagnostic() {
     assert_eq!(
         messages,
         ["reg.aly: src/reg.aly and src/reg.alx both build src/reg.luau; rename one"],
+        "{messages:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// `art.aly` beside the folder `art/`: Rojo makes two children named
+/// `art`, and in Strata `require("../render/art/character")` got the
+/// module and failed. The folder here holds data modules alone.
+#[test]
+fn a_module_beside_a_folder_of_its_name_is_a_diagnostic() {
+    let dir = temp_project("module-folder");
+    fs::write(dir.join("alloy.toml"), "[build]\nout = \"out\"\n").unwrap();
+    fs::create_dir_all(dir.join("src/art")).unwrap();
+    fs::write(dir.join("src/art/tiles.json"), "{ \"size\": 16 }\n").unwrap();
+    fs::write(
+        dir.join("src/art.aly"),
+        "import tiles from './art/tiles.json'\n\nreturn tiles\n",
+    )
+    .unwrap();
+    // An `init` is the module of its folder, and another name is fine.
+    fs::create_dir_all(dir.join("src/game")).unwrap();
+    fs::write(dir.join("src/game/init.aly"), "return 1\n").unwrap();
+    fs::write(dir.join("src/game/part.aly"), "return 2\n").unwrap();
+    fs::write(dir.join("src/games.aly"), "return 3\n").unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run(&dir, &config.build, &config.emit).unwrap();
+    let messages: Vec<String> = report
+        .diagnostics
+        .iter()
+        .map(|(p, d)| format!("{}: {}", p.display(), d.message))
+        .collect();
+
+    assert_eq!(
+        messages,
+        [
+            "art.aly: src/art.aly and the folder src/art both make an instance named `art` in Roblox, and a require takes only one of them. Move this file into the folder as `init`, or rename one"
+        ],
         "{messages:?}"
     );
 
@@ -1351,6 +1390,81 @@ fn a_held_shape_reads_again_when_its_import_resolves() {
     )
     .unwrap();
     assert_eq!(names(), bound("L"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/*
+A module with no exports built to Luau with no `return`. Roblox refuses
+a `require` of such a ModuleScript, and `import "./side"` requires it.
+Such a module now returns nil. A script, a module with its own `return`
+and a module with exports keep their output.
+*/
+#[test]
+fn a_module_with_no_exports_returns_nil() {
+    let dir = temp_project("module-return");
+    fs::write(dir.join("alloy.toml"), "[build]\nout = \"build\"\n").unwrap();
+
+    for (file, source) in [
+        ("side.aly", "print(\"side effect\")\n"),
+        ("nested/init.aly", "print(\"init\")\n"),
+        ("panel.alx", "print(\"alx\")\n"),
+        ("value.aly", "print(1)\nreturn 1\n"),
+        ("bare.aly", "print(1)\nreturn\n"),
+        (
+            "either.aly",
+            "if game then\n    return 1\nelse\n    return 2\nend\n",
+        ),
+        (
+            "lib.aly",
+            "export function f(): number\n    return 1\nend\n",
+        ),
+        ("main.server.aly", "import \"./side\"\nprint(1)\n"),
+        ("ui.client.aly", "print(2)\n"),
+        ("worker.server.actor.aly", "print(3)\n"),
+    ] {
+        fs::write(dir.join("src").join(file), source).unwrap();
+    }
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run(&dir, &config.build, &config.emit).unwrap();
+
+    assert!(report.is_clean(), "{report:?}");
+
+    let read = |out: &str| fs::read_to_string(dir.join("build").join(out)).unwrap();
+
+    for (out, want) in [
+        ("side.luau", "print(\"side effect\") return nil\n"),
+        ("nested/init.luau", "print(\"init\") return nil\n"),
+        ("panel.luau", "print(\"alx\") return nil\n"),
+        ("value.luau", "print(1)\nreturn 1\n"),
+        ("bare.luau", "print(1)\nreturn\n"),
+        (
+            "either.luau",
+            "if game then\n    return 1\nelse\n    return 2\nend\n",
+        ),
+        (
+            "lib.luau",
+            "local function f(): number\n    return 1\nend return { f = f }\n",
+        ),
+        ("ui.client.luau", "print(2)\n"),
+        ("worker/worker.server.luau", "print(3)\n"),
+    ] {
+        assert_eq!(read(out), want, "{out}");
+    }
+
+    let main = read("main.server.luau");
+    assert!(main.contains("require(\"./side\")"), "{main}");
+    assert!(!main.contains("return nil"), "{main}");
+
+    // The language server reads the check artifact, so it sees the
+    // same `return nil` and types the module as nil.
+    let options = alloy::EmitOptions {
+        file_name: "side.aly".to_string(),
+        ..alloy::EmitOptions::default()
+    };
+    let out = alloy::compile_with("print(\"side effect\")\n", &options).unwrap();
+    assert_eq!(out.check, "print(\"side effect\") return nil\n");
 
     let _ = fs::remove_dir_all(&dir);
 }

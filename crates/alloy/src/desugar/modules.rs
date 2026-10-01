@@ -95,6 +95,14 @@ impl<'s> Desugar<'s> {
             return None;
         }
 
+        // The build ships an actor script inside its Actor, one folder
+        // below the file, so each relative path climbs one more level.
+        // The sourcemap holds the Actor too, and luau-lsp resolves the
+        // check artifact's paths through it.
+        if crate::directives::is_actor(&self.options.file_name) {
+            return Some(format!("../{}", path.strip_prefix("./").unwrap_or(path)));
+        }
+
         let rel = std::path::Path::new(&self.options.module_rel);
 
         if !crate::build::is_init(rel) {
@@ -981,6 +989,8 @@ impl<'s> Desugar<'s> {
 
             Stmt::Remote(d) => value(values, d.name),
 
+            Stmt::Message(d) => value(values, d.name),
+
             Stmt::Namespace(d) => value(values, d.name),
 
             Stmt::Macro(d) => value(values, d.name),
@@ -1300,22 +1310,50 @@ impl<'s> Desugar<'s> {
             return;
         }
 
-        if local_needs_rewrite(l) {
-            self.local_stmt(l);
-        } else {
-            // `export const m: HashMap<K, V> = HashMap.new()`: the call
-            // takes the annotation's arguments, as for a plain local.
-            self.expected_generic = self.annotated_constructor(l);
-            let children: Vec<Child<'_>> = l.values.iter().map(Child::Expr).collect();
-            self.stitch(rest, &children, |d, child| match child {
-                Child::Expr(e) => d.expr(e),
+        if let [b] = l.names.as_slice()
+            && self.table_exports.contains(self.text_of(b.name))
+        {
+            self.table_export_local(rest, l);
 
-                Child::Block(b) => d.block(b),
-
-                Child::Function(b) => d.function_block(b),
-            });
-            self.expected_generic = None;
+            return;
         }
+
+        self.local_rest(l, rest);
+    }
+
+    /*
+    `export const X: T = v` in a module past the budget of locals:
+    `__exports.X = v`. The check artifact keeps the annotation as a cast,
+    `__exports.X = (v) :: T`, so the field takes the declared type and a
+    value of another type still reports.
+    */
+    fn table_export_local(&mut self, rest: TokSpan, l: &Local) {
+        let b = &l.names[0];
+        let value = &l.values[0];
+        let name = self.text_of(b.name).to_string();
+        let start = self.byte_start(rest);
+        let (vstart, vend) = (self.byte_start(value.span()), self.byte_end(value.span()));
+        let cast = match b.ty.filter(|_| self.options.check) {
+            Some(t) => {
+                let text = self.text_of(t).to_string();
+
+                Some(self.lower_type(&text))
+            }
+
+            None => None,
+        };
+        let open = if cast.is_some() { "(" } else { "" };
+        self.generate(start, &format!("{EXPORTS_TABLE}.{name} = {open}"));
+        self.blank_lines(start, vstart);
+        self.expected_generic = self.annotated_constructor(l);
+        self.expr(value);
+        self.expected_generic = None;
+
+        if let Some(ty) = cast {
+            self.generate(vend, &format!(") :: {ty}"));
+        }
+
+        self.copy(vend, self.byte_end(rest));
     }
 
     /// The export table, appended after the last token. The test
@@ -1332,6 +1370,18 @@ impl<'s> Desugar<'s> {
         let types_only = self.exports.is_empty();
 
         if types_only && !exports_a_type(block) {
+            // Roblox refuses a `require` of a ModuleScript that returns
+            // no value, and `import "./x"` requires the module too. So a
+            // module with no exports and no `return` of its own returns
+            // nil. A script returns no value. A macro fragment lands
+            // inside another file, so it gets no `return`.
+            let script = crate::modules::is_script(&self.options.file_name);
+            let fragment = self.options.macro_depth > 0;
+
+            if !(script || fragment || block.stmts.iter().any(chunk_returns)) {
+                self.generate(at, " return nil");
+            }
+
             return;
         }
 
@@ -1358,6 +1408,20 @@ impl<'s> Desugar<'s> {
             return;
         }
 
+        // Past the budget of locals the table already holds the moved
+        // values, and the rest join it before the return.
+        if !self.table_exports.is_empty() {
+            let rest: String = self
+                .exports
+                .iter()
+                .filter(|(k, v)| !(k == v && self.table_exports.contains(k)))
+                .map(|(k, v)| format!(" {EXPORTS_TABLE}.{k} = {v}"))
+                .collect();
+            self.generate(at, &format!("{rest} return {EXPORTS_TABLE}"));
+
+            return;
+        }
+
         let fields: Vec<String> = self
             .exports
             .iter()
@@ -1367,6 +1431,24 @@ impl<'s> Desugar<'s> {
     }
 
     // --- enums ---------------------------------------------------------------
+}
+
+/// Whether a top-level statement runs a `return` of the module chunk.
+/// A `return` in a branch counts too: a `return nil` after it adds nil
+/// to the type of the module. A function, a macro body and an `after`
+/// block return from a function of their own.
+fn chunk_returns(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Return(_) => true,
+
+        Stmt::Attributed { stmt, .. } => chunk_returns(stmt),
+
+        Stmt::Macro(_) | Stmt::After(_) => false,
+
+        _ => stmt_children(stmt)
+            .iter()
+            .any(|c| matches!(c, Child::Block(b) if b.stmts.iter().any(chunk_returns))),
+    }
 }
 
 /// The argument list a parameter list names: `<T = nil, U: Bound>`

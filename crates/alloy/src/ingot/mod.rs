@@ -369,7 +369,8 @@ impl Ingots {
         (text, problems)
     }
 
-    /// The first hover an ingot answers: `{ contents, span? }`.
+    /// The first hover an ingot answers: `{ contents, span? }`, or
+    /// `{ roblox: { class, member? }, span?, note? }`.
     pub fn hover(&self, path: &str, source: &str, offset: u32) -> Option<Value> {
         for ingot in self.with_hook(Hook::Hover, path) {
             let mut request = self.file(path, source);

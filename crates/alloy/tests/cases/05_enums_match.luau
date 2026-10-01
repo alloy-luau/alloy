@@ -96,4 +96,4 @@ do local _m1 = parsed
     elseif type(_m1) == "table" and _m1.tag == "Err" then local e = _m1._1 warn(e)
 else error("match: no arm covers this value", 2) end end
 
-print(describe, handle, is_join, hex(Color.Red), leap(2024), Msg.Join)
+print(describe, handle, is_join, hex(Color.Red), leap(2024), Msg.Join) return nil

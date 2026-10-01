@@ -363,6 +363,7 @@ fn declaration_word(line: &str) -> Option<&'static str> {
         ("struct ", "struct"),
         ("enum ", "enum"),
         ("remote ", "remote"),
+        ("message ", "message"),
         ("interface ", "interface"),
         ("type ", "type"),
         ("namespace ", "namespace"),

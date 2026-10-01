@@ -70,6 +70,7 @@ pub(crate) fn declares_a_name_at(source: &str, offset: usize) -> bool {
         "macro",
         "attribute",
         "remote",
+        "message",
         "namespace",
     ];
     let offset = offset.min(source.len());
@@ -189,6 +190,7 @@ pub(crate) fn builtin_attribute_targets(key: &str) -> &'static [&'static str] {
             "interface",
             "impl",
             "remote",
+            "message",
             "type",
             "field",
             "variant",
@@ -203,6 +205,7 @@ pub(crate) fn builtin_attribute_targets(key: &str) -> &'static [&'static str] {
             "field",
             "param",
             "remote",
+            "message",
             "interface",
             "type",
             "local",

@@ -242,6 +242,9 @@ fn instance_name(file: &str) -> Option<String> {
         .or_else(|| file.strip_suffix(".lua"))
         .or_else(|| file.strip_suffix(".json"))
         .or_else(|| file.strip_suffix(".toml"))?;
+    // `physics.server.actor.aly` is the script `physics` in the Actor
+    // `physics`.
+    let stem = stem.strip_suffix(".actor").unwrap_or(stem);
     let stem = stem
         .strip_suffix(".server")
         .or_else(|| stem.strip_suffix(".client"))
@@ -253,6 +256,37 @@ fn instance_name(file: &str) -> Option<String> {
     } else {
         Some(stem.to_string())
     }
+}
+
+/// The meta file that gives the folder of an actor script the class
+/// `Actor`. Rojo reads `className` in a folder's `init.meta.json`.
+pub const ACTOR_META: &str = "{\n  \"className\": \"Actor\"\n}\n";
+
+/// Where the build writes the output of an actor script, and the meta
+/// file beside it: `x.server.actor.luau` becomes `x/x.server.luau` and
+/// `x/init.meta.json`, so Rojo makes the Actor `x` with the Script `x`
+/// inside. `None` for any other output.
+pub fn actor_output(rel_out: &Path) -> Option<(PathBuf, PathBuf)> {
+    let file = rel_out.file_name()?.to_str()?;
+
+    if !crate::directives::is_actor(file) {
+        return None;
+    }
+
+    let name = instance_name(file)?;
+    let script = format!("{}.luau", file.strip_suffix(".actor.luau")?);
+    let dir = rel_out.with_file_name(name);
+
+    Some((dir.join(script), dir.join("init.meta.json")))
+}
+
+/// The place of a script's artifact in the output. An actor script sits
+/// inside the folder of its Actor, as the build writes it, and every
+/// other file at its own place. Its relative requires climb out of that
+/// folder, so an artifact placed anywhere else resolves them one folder
+/// too high.
+pub fn placed_output(rel_out: &Path) -> PathBuf {
+    actor_output(rel_out).map_or_else(|| rel_out.to_path_buf(), |(script, _)| script)
 }
 
 /// The instance name of the last part of a path: a script's name, or
@@ -283,6 +317,7 @@ pub(crate) fn script_class(file: &str) -> &'static str {
     // The side is the last word of the stem. `main.server.globals.luau`
     // is a module the build wrote beside a script, not a script.
     let stem = file.rsplit_once('.').map(|(s, _)| s).unwrap_or(file);
+    let stem = stem.strip_suffix(".actor").unwrap_or(stem);
 
     if stem.ends_with(".server") {
         "Script"
@@ -702,6 +737,22 @@ pub(crate) fn dir_node(root: &Path, dir: &Path, name: &str) -> std::io::Result<M
             continue;
         }
 
+        // `init.meta.json` gives the folder its class, as Rojo reads it:
+        // the Actor the build writes around an actor script. It is no
+        // module of its own.
+        if fname == "init.meta.json" {
+            if let Some(meta) = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+                && let Some(named) = meta["className"].as_str()
+                && file.is_none()
+            {
+                class = named.to_string();
+            }
+
+            continue;
+        }
+
         let rel = path
             .strip_prefix(root)
             .unwrap_or(&path)
@@ -712,6 +763,15 @@ pub(crate) fn dir_node(root: &Path, dir: &Path, name: &str) -> std::io::Result<M
             Some(n) => {
                 let mut m = node(&n, script_class(&fname), Some(rel));
                 m.insert("children".into(), json!([]));
+
+                // The build writes an actor script into an Actor of its
+                // name, so `script.Parent` is the Actor.
+                if crate::directives::is_actor(&fname) {
+                    let mut actor = node(&n, "Actor", None);
+                    actor.insert("children".into(), json!([m]));
+                    m = actor;
+                }
+
                 children.push(Value::Object(m));
             }
 
@@ -931,7 +991,11 @@ pub fn luau_script_path(path: &str) -> String {
         .or_else(|| path.strip_suffix(".json"))
         .or_else(|| path.strip_suffix(".toml"))
     {
-        format!("{b}.luau")
+        // The artifact of an actor script sits in the folder of its
+        // Actor, so the sourcemap names it there.
+        placed_output(Path::new(&format!("{b}.luau")))
+            .to_string_lossy()
+            .replace('\\', "/")
     } else {
         path.to_string()
     }
@@ -1583,6 +1647,27 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
         let config = Config::parse(MOUNTS, Path::new("alloy.toml")).unwrap();
         let mounted = files(&Tree::load(&dir, &config), &config, &dir).unwrap();
         assert_eq!(mounted[0].0, PathBuf::from("default.project.json"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A sourcemap read from a build output takes the class of a folder from
+    /// its `init.meta.json`, as Rojo does, so the folder the build writes
+    /// around an actor script is the Actor. The meta file is no module.
+    #[test]
+    fn a_sourcemap_reads_the_actor_meta_file() {
+        let dir = std::env::temp_dir().join(format!("alloy-actor-meta-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("worker")).unwrap();
+        std::fs::write(dir.join("worker/init.meta.json"), ACTOR_META).unwrap();
+        std::fs::write(dir.join("worker/worker.server.luau"), "print(1)\n").unwrap();
+
+        let node = dir_node(&dir, &dir.join("worker"), "worker").unwrap();
+
+        assert_eq!(node["className"], "Actor");
+        let children = node["children"].as_array().unwrap();
+        assert_eq!(children.len(), 1, "{children:?}");
+        assert_eq!(children[0]["className"], "Script");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

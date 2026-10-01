@@ -1,21 +1,27 @@
 //! The `impl` blocks of a file, as the hover of their own header.
 //!
-//! The target of an `impl` names a struct, and the struct has a hover
-//! of its own. On the header line the reader asks about the block in
-//! front of them: what it adds to that name, and the trait it meets.
+//! The target of an `impl` names a struct or an enum. Its own hover
+//! shows the type alone; the hover of an `impl` header shows the type
+//! with the methods of every `impl` of it, so each block keeps its
+//! methods, its trait and its doc comment here.
 
 use alloy_syntax::ast::{Stmt, TokSpan};
 
 /// One `impl` block: the header line the source wrote, the byte range
-/// that line covers, and the hover the header answers with.
+/// that line covers, and what the hover of the header reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImplBlock {
     /// The name the block targets.
     pub target: String,
+    /// `<T>` of `impl Box<T>`, or empty.
+    pub generics: String,
     /// The trait the block meets, for `impl Display for Vec2`.
     pub trait_name: Option<String>,
-    /// The hover Markdown for the header.
-    pub hover: String,
+    /// One line per method, in the order the block writes them, each
+    /// with its visibility on the left: `private function bump(self)`.
+    pub methods: Vec<String>,
+    /// The doc comment above the block.
+    pub doc: Option<String>,
     /// The byte range of the header, from `impl` to the end of the
     /// target or the trait, whichever comes last.
     pub start: usize,
@@ -71,34 +77,13 @@ fn block_of(
         .map(text)
         .unwrap_or("");
     let trait_name = i.trait_name.map(|t| text(t).to_string());
-    let head = match &trait_name {
-        Some(t) => format!("impl {t} for {target}{generics} as"),
-
-        None => format!("impl {target}{generics} as"),
-    };
-    let mut lines = vec!["```alloy".to_string(), head];
-
-    for m in &i.methods {
-        // A private method is out of reach for every reader of the
-        // hover, and completion already leaves it out.
-        if m.visibility.is_some_and(|v| text(v) == "private") {
-            continue;
-        }
-
-        if let Some(line) = crate::declarations::method_signature(src, toks, m) {
-            lines.push(format!("    {line}"));
-        }
-    }
-
-    lines.push("end".to_string());
-    lines.push("```".to_string());
-    let mut hover = lines.join("\n");
+    let methods = i
+        .methods
+        .iter()
+        .filter_map(|m| crate::declarations::method_signature(src, toks, m))
+        .collect();
     let start = toks[i.span.start as usize].start as usize;
-
-    if let Some(doc) = crate::declarations::doc_before(src, start) {
-        hover.push_str("\n\n");
-        hover.push_str(&doc);
-    }
+    let doc = crate::declarations::doc_before(src, start);
 
     // The header runs to the target, and past the trait when the block
     // names one; a caret anywhere on it asks about the block.
@@ -121,8 +106,10 @@ fn block_of(
 
     ImplBlock {
         target,
+        generics: generics.to_string(),
         trait_name,
-        hover,
+        methods,
+        doc,
         start: header,
         end,
     }
@@ -132,6 +119,8 @@ fn block_of(
 mod tests {
     use super::*;
 
+    /// A block keeps every method, a private one too, with its
+    /// visibility on the left, and the doc comment above it.
     #[test]
     fn a_header_reads_its_own_block() {
         let src = "struct Test as\n    x: number\nend\n\n--- What it adds.\nimpl Test as\n    function test()\n    end\n\n    private function hidden()\n    end\nend\n";
@@ -139,31 +128,21 @@ mod tests {
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].target, "Test");
         assert_eq!(
-            blocks[0].hover,
-            "```alloy\nimpl Test as\n    public function test()\nend\n```\n\nWhat it adds."
+            blocks[0].methods,
+            ["public function test()", "private function hidden()"]
         );
+        assert_eq!(blocks[0].doc.as_deref(), Some("What it adds."));
         let head = &src[blocks[0].start..blocks[0].end];
         assert_eq!(head, "impl Test");
     }
 
     #[test]
-    fn a_trait_block_names_the_trait_first() {
+    fn a_trait_block_names_the_trait() {
         let src = "struct Vec2 as\n    x: number\nend\n\ntrait Display as\n    function show(self): string\nend\n\nimpl Display for Vec2 as\n    function show(self): string\n        return \"v\"\n    end\nend\n";
         let blocks = impl_blocks(src);
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].trait_name.as_deref(), Some("Display"));
-        assert!(
-            blocks[0].hover.contains("impl Display for Vec2 as"),
-            "{}",
-            blocks[0].hover
-        );
-        assert!(
-            blocks[0]
-                .hover
-                .contains("    public function show(self): string"),
-            "{}",
-            blocks[0].hover
-        );
+        assert_eq!(blocks[0].methods, ["public function show(self): string"]);
     }
 
     #[test]
@@ -171,11 +150,7 @@ mod tests {
         let src = "struct Box<T> as\n    value: T\nend\n\nimpl Box<T> as\n    function get(self): T\n        return self.value\n    end\nend\n";
         let blocks = impl_blocks(src);
         assert_eq!(blocks.len(), 1);
-        assert!(
-            blocks[0].hover.contains("impl Box<T> as"),
-            "{}",
-            blocks[0].hover
-        );
+        assert_eq!(blocks[0].generics, "<T>");
         assert_eq!(&src[blocks[0].start..blocks[0].end], "impl Box<T>");
     }
 }

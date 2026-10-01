@@ -473,7 +473,25 @@ fn run_one(dir: &Path, file: &Path, args: &[String]) -> ExitCode {
 
     if let Some(offset) = value("--hover") {
         match ingots.hover(&path, &source, offset) {
-            Some(h) => println!("{}", h["contents"].as_str().unwrap_or("")),
+            Some(h) => {
+                let class = h["roblox"]["class"].as_str();
+                let member = h["roblox"]["member"].as_str();
+                let named = class.map(|c| match member {
+                    Some(m) => format!("Roblox `{c}.{m}`"),
+
+                    None => format!("Roblox `{c}`"),
+                });
+                // `contents` of a Roblox answer is the fallback for an
+                // older host, so the name stands in for it, as in the editor.
+                let lines = [
+                    named.as_deref().or(h["contents"].as_str()),
+                    h["note"].as_str(),
+                ];
+
+                for line in lines.into_iter().flatten().filter(|l| !l.is_empty()) {
+                    println!("{line}");
+                }
+            }
 
             None => eprintln!("{}", p.note("no hover")),
         }

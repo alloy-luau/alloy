@@ -92,6 +92,10 @@ pub(crate) struct State {
     /// asks for it, and a pass over the workspace compiles every file,
     /// so a fresh read for each pair costs the pass minutes.
     pub(crate) configs: std::cell::RefCell<HashMap<PathBuf, Option<Project>>>,
+    /// The import aliases a folder reads, remembered the same way. An
+    /// `@alias` spec asks for them, and the pass that finds the
+    /// importers of an edited file asks for every spec of every file.
+    pub(crate) aliases: std::cell::RefCell<HashMap<PathBuf, Vec<(String, PathBuf)>>>,
     /// The roots whose `.luaurc` the mirror already holds.
     pub(crate) luau_configs: std::cell::RefCell<HashSet<PathBuf>>,
     /// The last load of each open `.config.aly`: the source it ran, and
@@ -120,6 +124,9 @@ pub(crate) struct State {
     /// The member names those entries mark deprecated, read off the
     /// same index the first time a list has to hide one.
     pub(crate) roblox_deprecated: std::cell::RefCell<Option<Arc<HashSet<String>>>>,
+    /// The module texts and file probes the import passes have read.
+    /// The server's threads share it, and `forget_disk` clears it.
+    pub(crate) reads: Arc<alloy::modules::Reads>,
 }
 
 /// What one load of a `.config.aly` gives: the lint names that name no
@@ -146,7 +153,9 @@ impl State {
     /// workspace calls it first, so a changed `alloy.toml` or a new
     /// file reaches the next compile.
     pub(crate) fn forget_disk(&self) {
+        self.reads.clear();
         self.configs.borrow_mut().clear();
+        self.aliases.borrow_mut().clear();
         self.luau_configs.borrow_mut().clear();
         self.project.borrow_mut().take();
         self.project_shapes.borrow_mut().take();
@@ -265,6 +274,9 @@ impl State {
                 .chain(rest.map(|(_, d)| d))
                 .flat_map(|d| d.tables.iter().cloned())
                 .collect(),
+            // A package reads under the name each file imports it by, so
+            // only the document's own list holds the right names.
+            aliases: here.map(|d| d.import_aliases.clone()).unwrap_or_default(),
         }
     }
 
@@ -596,7 +608,10 @@ impl State {
             }
 
             None => {
-                self.ensure_runtime(&normalize(&dir));
+                // The shadow of an actor script sits one folder deeper,
+                // in the folder of its Actor, and `./alloy` reads there.
+                let placed = alloy::project::placed_output(&path.with_extension("luau"));
+                self.ensure_runtime(&normalize(placed.parent().unwrap_or(&dir)));
 
                 EmitOptions {
                     file_name,

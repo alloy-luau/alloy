@@ -10,4 +10,4 @@ local Math = {}
     end Math.unit = Math_unit
 
 
-print(Math.PI, Math.clamp(5, 0, 3), Math.unit(2))
+print(Math.PI, Math.clamp(5, 0, 3), Math.unit(2)) return nil

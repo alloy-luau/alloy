@@ -368,6 +368,8 @@ pub fn analyze(
 
     // Everything of the root but the sources and the output, linked, so
     // a package folder and its `.luaurc` resolve.
+    let mut linked = Vec::new();
+
     for entry in std::fs::read_dir(root)
         .map_err(|e| e.to_string())?
         .flatten()
@@ -389,6 +391,7 @@ pub fn analyze(
 
         if !skip {
             link_entry(&entry.path(), &mirror.join(&name));
+            linked.push(name);
         }
     }
 
@@ -560,9 +563,13 @@ pub fn analyze(
     }
 
     // The artifacts sit where the build would put them, so `./x` and
-    // `../alloy` resolve.
+    // `../alloy` resolve. An actor script sits in the folder of its
+    // Actor: with no sourcemap, the analyzer reads its requires, which
+    // climb out of that folder, from the file's own place.
     for f in files {
-        let Some(rel_out) = crate::build::output_for(&f.rel) else {
+        let Some(rel_out) =
+            crate::build::output_for(&f.rel).map(|o| crate::project::placed_output(&o))
+        else {
             continue;
         };
         let target = out.join(&rel_out);
@@ -572,6 +579,15 @@ pub fn analyze(
         }
 
         std::fs::write(&target, &f.check).map_err(|e| e.to_string())?;
+
+        // The meta file makes the folder the Actor, so a sourcemap read
+        // from the mirror holds the Actor, as one read from the build.
+        if let Some((_, meta)) =
+            crate::build::output_for(&f.rel).and_then(|o| crate::project::actor_output(&o))
+        {
+            std::fs::write(out.join(meta), crate::project::ACTOR_META)
+                .map_err(|e| e.to_string())?;
+        }
 
         if rel_out.to_string_lossy().ends_with(".d.luau") {
             declared.push((f.rel.clone(), f.check.clone(), f.source.clone()));
@@ -641,6 +657,20 @@ pub fn analyze(
 
     for d in &definitions {
         cmd.arg(format!("--definitions={}", d.display()));
+    }
+
+    // The analyzer checks a package that an artifact requires, and the
+    // loop below drops each report outside the output. A package with
+    // errors of its own prints thousands of them: on Strata, 15,000
+    // lines and 1.1 s of 12.5 s.
+    for name in &linked {
+        let name = Path::new(name);
+
+        if !config.build.out.starts_with(name)
+            && !placed.iter().any(|(rel, _)| rel.starts_with(name))
+        {
+            cmd.arg(format!("--ignore={}/**", name.to_string_lossy()));
+        }
     }
 
     // The sourcemap the language server gives luau-lsp. Its scripts
@@ -794,10 +824,10 @@ pub fn analyze(
         let Ok(rel_out) = path.strip_prefix(&config.build.out) else {
             continue;
         };
-        let Some(f) = files
-            .iter()
-            .find(|f| crate::build::output_for(&f.rel).as_deref() == Some(rel_out))
-        else {
+        let Some(f) = files.iter().find(|f| {
+            crate::build::output_for(&f.rel).map(|o| crate::project::placed_output(&o))
+                == Some(rel_out.to_path_buf())
+        }) else {
             continue;
         };
 
@@ -1056,6 +1086,7 @@ pub fn analyze(
             interfaces: known.interfaces.clone(),
             namespaces: known.namespaces.clone(),
             tables: known.tables.clone(),
+            aliases: Vec::new(),
         };
         d.message = friendly_type_message(&d.message, &reach, source, d.col);
 
@@ -1288,6 +1319,7 @@ pub fn known_shapes(files: &[CheckSource]) -> crate::shapes::Known {
             .iter()
             .flat_map(|f| crate::tables::plain_tables(&f.source))
             .collect(),
+        aliases: Vec::new(),
     }
 }
 

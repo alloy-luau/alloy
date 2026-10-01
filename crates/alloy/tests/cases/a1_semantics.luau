@@ -37,4 +37,4 @@ end
 local base = { x = 1, y = 2 }
 local merged = __alloy.spread( base, { z = 3 } )
 local b = Box({ value = 5 })
-print(Shape.Rect(2, 3):area(), describe, merged, b:get())
+print(Shape.Rect(2, 3):area(), describe, merged, b:get()) return nil

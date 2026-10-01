@@ -33,9 +33,9 @@ pub(crate) fn std_member_at(
     alloy::docs::member_fits(m.kind, on_type).then_some((key, m))
 }
 
-/// The std member a hover sits on, as the doc and the example the
-/// checker's type cannot carry. The source resolves the receiver where
-/// it can; otherwise the type the child printed names it.
+/// The std member a hover sits on, in the shape of any member hover.
+/// The source resolves the receiver where it can; otherwise the type
+/// the child printed names it.
 pub(crate) fn std_member_hover(
     value: &str,
     doc: &Doc,
@@ -52,7 +52,37 @@ pub(crate) fn std_member_hover(
             .find_map(|(key, _)| alloy::docs::member(key, name).map(|m| (*key, m)))
     })?;
 
-    Some(alloy::docs::member_hover(hit.0, hit.1))
+    Some(std_member_shape(hit.0, hit.1))
+}
+
+/*
+A std member the way a hover shows a member of the reader's own types:
+the type with its parameters, `HashMap<K, V>`, then the member's line,
+`function remove(self, key: K) -> V?`, then the doc and the example
+under a rule. The line comes from the std's signature, so it names the
+type's parameters and not the types of one use.
+*/
+pub(crate) fn std_member_shape(key: &str, m: &alloy::docs::Member) -> String {
+    use alloy::docs::MemberKind;
+
+    let owner = alloy::docs::type_signature(key)
+        .filter(|s| !s.contains('('))
+        .unwrap_or(key);
+    let rest = m
+        .signature
+        .strip_prefix(key)
+        .and_then(|r| r.strip_prefix(['.', ':']))
+        .unwrap_or(m.signature);
+    let line = match m.kind {
+        MemberKind::Static | MemberKind::Method => rest
+            .strip_prefix(m.name)
+            .and_then(|after| method_line(m.name, after, m.kind == MemberKind::Method, owner)),
+
+        MemberKind::Field | MemberKind::Constant => None,
+    };
+    let doc = format!("{}\n\n```alloy\n{}\n```", m.doc, m.example);
+
+    member_hover(owner, line.as_deref().unwrap_or(rest), Some(&doc))
 }
 
 /// Whether a printed type names `key` as a whole word.

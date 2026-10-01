@@ -52,7 +52,7 @@ fn a_build_requires_the_output_of_the_other_project() {
     assert!(report.is_clean(), "{:?}", messages(&report));
     assert_eq!(
         fs::read_to_string(dir.join("main/build/main.luau")).unwrap(),
-        "local _m1 = require(\"../../shared/build/util\") local double = _m1.double\n\nprint(double(21))\n"
+        "local _m1 = require(\"../../shared/build/util\") local double = _m1.double\n\nprint(double(21)) return nil\n"
     );
     // The dependency built under its own `out`, runtime and all. The
     // project's counts leave those files out, so a note carries them.

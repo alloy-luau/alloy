@@ -11,4 +11,4 @@ local __alloy = require("@alloy") local Math = {}
 local v: Math_Vec2 = { x = 1, y = 2 }
 local s: Math_Scale = 2
 
-print(v.x * s)
+print(v.x * s) return nil

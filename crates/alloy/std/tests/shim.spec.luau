@@ -2,7 +2,7 @@ local lest = require("@lest")
 local describe, it, expect = lest.describe, lest.it, lest.expect
 local shim = require("../shim")
 local alloy = require("../alloy")
--- Each chunk has its own globals on this VM, so the doubles bind here.
+-- The shim sets the doubles as globals too. The locals name them here.
 local typeof, Vector3, Color3, UDim2, Enum, Instance, task, game, workspace =
 	shim.typeof, shim.Vector3, shim.Color3, shim.UDim2, shim.Enum, shim.Instance, shim.task, shim.game, shim.workspace
 
@@ -22,6 +22,19 @@ describe("shim", function()
 		end
 		local c = a:Clone()
 		expect(c:NextNumber()).toBe(a:NextNumber())
+	end)
+
+	it("fires a BindableEvent to the handlers of its Event", function()
+		local event = Instance.new("BindableEvent")
+		local got = {}
+		local c = event.Event:Connect(function(job, text)
+			table.insert(got, `{job} {text}`)
+		end)
+		event:Fire(7, "done")
+		c:Disconnect()
+		event:Fire(8, "late")
+		expect(#got).toBe(1)
+		expect(got[1]).toBe("7 done")
 	end)
 
 	it("fills the engine globals on a plain VM", function()
@@ -89,6 +102,107 @@ describe("shim", function()
 		expect(CFrame.new(1, 2, 3, 0, 0, 0, 1) == CFrame.new(1, 2, 3)).toBe(true)
 		near(CFrame.new(0, 0, 0, 0, math.sqrt(0.5), 0, math.sqrt(0.5)).LookVector, -1, 0, 0)
 		near(Vector3.new(3, 0, 4).Unit, 0.6, 0, 0.8)
+	end)
+
+	it("measures, divides and turns a Vector2 as the engine does", function()
+		local Vector2 = shim.Vector2
+		local v = Vector2.new(3, 4)
+		expect(typeof(v.Unit)).toBe("Vector2")
+		expect(v.Unit == Vector2.new(0.6, 0.8)).toBe(true)
+		expect(v / v.Magnitude == v.Unit).toBe(true)
+		expect(12 / v == Vector2.new(4, 3)).toBe(true)
+		expect(v / Vector2.new(3, 2) == Vector2.new(1, 2)).toBe(true)
+		expect(v // 2 == Vector2.new(1, 2)).toBe(true)
+		expect(-v == Vector2.new(-3, -4)).toBe(true)
+		expect(tostring(v)).toBe("3, 4")
+		expect(v:Dot(Vector2.xAxis)).toBe(3)
+		-- The cross product of two Vector2s is a number.
+		expect(Vector2.xAxis:Cross(Vector2.yAxis)).toBe(1)
+		expect(Vector2.xAxis:Angle(Vector2.yAxis)).toBeCloseTo(math.pi / 2, 6)
+		expect(Vector2.yAxis:Angle(Vector2.xAxis, true)).toBeCloseTo(-math.pi / 2, 6)
+		expect(Vector2.yAxis:Angle(Vector2.xAxis)).toBeCloseTo(math.pi / 2, 6)
+		expect(Vector2.zero:Lerp(v, 0.5) == Vector2.new(1.5, 2)).toBe(true)
+		expect(v:FuzzyEq(Vector2.new(3, 4 + 1e-7))).toBe(true)
+		expect(v:Min(Vector2.new(5, 1)) == Vector2.new(3, 1)).toBe(true)
+		expect(v:Max(Vector2.new(5, 1), Vector2.new(0, 9)) == Vector2.new(5, 9)).toBe(true)
+		expect(Vector2.new(-1.5, 2.5):Floor() == Vector2.new(-2, 2)).toBe(true)
+		expect(Vector2.new(-1.5, 2.5):Ceil() == Vector2.new(-1, 3)).toBe(true)
+		expect(Vector2.new(-1.5, 0):Abs() == Vector2.new(1.5, 0)).toBe(true)
+		expect(Vector2.new(-1.5, 0):Sign() == Vector2.new(-1, 0)).toBe(true)
+
+		-- A Vector3 takes the same operators and methods.
+		local w = Vector3.new(2, -4, 6)
+		expect(12 / w == Vector3.new(6, -3, 2)).toBe(true)
+		expect(w // 4 == Vector3.new(0, -1, 1)).toBe(true)
+		expect(w:Abs() == Vector3.new(2, 4, 6)).toBe(true)
+		expect(w:Min(Vector3.zero) == Vector3.new(0, -4, 0)).toBe(true)
+		expect(Vector3.xAxis:Angle(Vector3.yAxis)).toBeCloseTo(math.pi / 2, 6)
+		expect(Vector3.yAxis:Angle(Vector3.xAxis, Vector3.zAxis)).toBeCloseTo(-math.pi / 2, 6)
+	end)
+
+	it("builds the sequences and the Rect that a module constant holds", function()
+		local ColorSequence, ColorSequenceKeypoint = shim.ColorSequence, shim.ColorSequenceKeypoint
+		local NumberSequence, NumberSequenceKeypoint = shim.NumberSequence, shim.NumberSequenceKeypoint
+		local Rect, Vector2 = shim.Rect, shim.Vector2
+		local white, grey = Color3.new(1, 1, 1), Color3.fromRGB(210, 210, 210)
+
+		local shade = ColorSequence.new(white, grey)
+		expect(typeof(shade)).toBe("ColorSequence")
+		expect(#shade.Keypoints).toBe(2)
+		expect(typeof(shade.Keypoints[1])).toBe("ColorSequenceKeypoint")
+		expect(shade.Keypoints[2].Time).toBe(1)
+		expect(shade.Keypoints[2].Value == grey).toBe(true)
+		local pair = { ColorSequenceKeypoint.new(0, white), ColorSequenceKeypoint.new(1, white) }
+		expect(ColorSequence.new(white) == ColorSequence.new(pair)).toBe(true)
+		expect(tostring(ColorSequence.new(white))).toBe("0 1 1 1 0 1 1 1 1 0 ")
+
+		local fade = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 1),
+			NumberSequenceKeypoint.new(0.5, 0.2, 0.1),
+			NumberSequenceKeypoint.new(1, 0),
+		})
+		expect(typeof(fade)).toBe("NumberSequence")
+		expect(fade.Keypoints[2].Value).toBe(0.2)
+		expect(fade.Keypoints[2].Envelope).toBe(0.1)
+		expect(fade.Keypoints[3].Envelope).toBe(0)
+		-- `Keypoints` is a new table on each read.
+		table.clear(fade.Keypoints)
+		expect(#fade.Keypoints).toBe(3)
+		expect(NumberSequence.new(1) == NumberSequence.new(1, 1)).toBe(true)
+		expect(NumberSequence.new(1) == NumberSequence.new(0, 1)).toBe(false)
+		expect(tostring(NumberSequence.new(0, 1))).toBe("0 0 0 1 1 0 ")
+
+		local one = NumberSequenceKeypoint.new(1, 1)
+		expect(function()
+			NumberSequence.new({ one })
+		end).toThrow("NumberSequence: requires at least 2 keypoints")
+		expect(function()
+			NumberSequence.new({ NumberSequenceKeypoint.new(0.1, 1), one })
+		end).toThrow("NumberSequence must start at time=0.0")
+		expect(function()
+			ColorSequence.new({ ColorSequenceKeypoint.new(0, white), ColorSequenceKeypoint.new(0.9, white) })
+		end).toThrow("ColorSequence must end at time=1.0")
+		expect(function()
+			NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.6, 1), NumberSequenceKeypoint.new(0.5, 1), one })
+		end).toThrow("NumberSequence: all keypoints must be ordered by time")
+
+		local box = Rect.new(0.3, 0, 0.7, 1)
+		expect(typeof(box)).toBe("Rect")
+		expect(box.Min == Vector2.new(0.3, 0)).toBe(true)
+		expect(box.Max == Vector2.new(0.7, 1)).toBe(true)
+		expect(box.Width).toBeCloseTo(0.4, 9)
+		expect(box.Height).toBe(1)
+		expect(Rect.new(Vector2.new(1, 2), Vector2.new(4, 6)) == Rect.new(1, 2, 4, 6)).toBe(true)
+		expect(Rect.new(4, 0, 1, 0).Width).toBe(-3)
+		expect(Rect.new().Max == Vector2.zero).toBe(true)
+		expect(tostring(Rect.new(1, 2, 3, 4))).toBe("1, 2, 3, 4")
+	end)
+
+	it("labels the MicroProfiler with calls that do nothing", function()
+		-- The shim puts its `debug` in the globals, as the engine has it.
+		debug.profilebegin("a label")
+		debug.profileend()
+		expect(debug.traceback).toBe(shim.debug.traceback)
 	end)
 
 	it("keeps a small instance tree", function()

@@ -74,7 +74,14 @@ impl State {
             name
         };
 
-        normalize(&self.mirror.join(rel.with_file_name(swapped)))
+        // The shadow of an actor script sits in the folder of its Actor,
+        // as the build writes it, so its requires resolve with no
+        // sourcemap too. The mirrored sourcemap names it there.
+        normalize(
+            &self
+                .mirror
+                .join(alloy::project::placed_output(&rel.with_file_name(swapped))),
+        )
     }
 
     /// The real path of a mirror path, for a plain file. An Alloy file
@@ -449,18 +456,25 @@ impl Server {
         }
     }
 
+    /*
+    Applies an edit and compiles the document again.
+
+    The edit goes on a copy of the source, and the compile runs outside
+    the state lock. On Strata the compile of one keystroke took 300 ms,
+    and a lock held for it made every answer from the child wait. Until
+    the new document takes its place, other threads read the old one,
+    whose source, shadow, and map agree with what the child holds.
+    */
     pub(crate) fn change_doc(&self, uri: &str, version: i64, changes: &[Value]) {
-        let (mut options, jsx) = self
+        let old = self
             .state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .options_for(uri);
-        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let ingots = st.ingots.clone();
+            .docs
+            .get(uri)
+            .map(|doc| (doc.source.clone(), doc.bom, export_surface(doc)));
 
-        let Some(doc) = st.docs.get_mut(uri) else {
-            drop(st);
-
+        let Some((old, mut bom, had_exports)) = old else {
             if let Some(text) = changes
                 .last()
                 .and_then(|c| c.get("text"))
@@ -472,7 +486,8 @@ impl Server {
             return;
         };
 
-        let had_impls = impl_surface(&doc.source);
+        let had_impls = impl_surface(&old);
+        let mut source = old;
 
         for change in changes {
             let text = change
@@ -480,22 +495,22 @@ impl Server {
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             let range = change.get("range").and_then(range_of);
-            doc.apply_change(range, text);
+            crate::doc::apply_edit(&mut source, &mut bom, range, text);
         }
-
-        doc.version = version;
 
         if let Some(path) = uri_to_path(uri) {
-            alloy::modules::set_open_source(&path, Some(&doc.source));
-            options = options.imports_for_file(&path, &doc.source);
+            alloy::modules::set_open_source(&path, Some(&source));
         }
 
-        let had_exports = export_surface(doc);
-        doc.compile(&options, &jsx, ingots.as_deref());
-        let fresh_exports = export_surface(doc);
+        let (options, jsx, ingots) = self.compile_options(uri, &source);
+        let mut doc = Doc::new(source, version, &options, &jsx, ingots.as_deref());
+        doc.bom = bom;
+        let fresh_exports = export_surface(&doc);
         let fresh_impls = impl_surface(&doc.source);
         let source = doc.source.clone();
         let shadow_text = doc.shadow.clone();
+
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let shadow = st.child_uri(uri);
 
         // The project's `impl` index holds this file's blocks, so the
@@ -507,6 +522,8 @@ impl Server {
         if let Some(path) = uri_to_path(uri) {
             st.write_mirror(&path, &shadow_text);
         }
+
+        st.docs.insert(uri.to_string(), doc);
 
         let message = json!({
             "jsonrpc": "2.0",
@@ -869,7 +886,7 @@ impl Server {
             // never read. A rescan that finds nothing new costs one walk.
             if stamp != Some(now) && idle {
                 stamp = Some(now);
-                self.rescan_workspace();
+                self.reading(|| self.rescan_workspace());
             }
         }
     }
@@ -921,11 +938,13 @@ impl Server {
     /// tree at once: the new files reach the mirror, the child hears
     /// that each plain module changed, and every document that imports
     /// one is sent again, or its import keeps the type it had.
+    ///
+    /// The state forgets what it read of the disk only when the pass
+    /// finds a change: `open_mirror` does it then. The first poll
+    /// always rescans, and a forget with no change made the next
+    /// keystroke read the whole project again, for about a second on
+    /// Strata on an NTFS disk.
     pub(crate) fn rescan_workspace(&self) {
-        self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .forget_disk();
         let root = self
             .state
             .lock()
@@ -957,8 +976,10 @@ impl Server {
 
         // A source the editor does not hold open, saved on disk since
         // its shadow: a dependency edited in another window. The shadow
-        // follows the disk, the way a watched change makes it.
-        let stale: Vec<(String, String)> = {
+        // follows the disk, the way a watched change makes it. The
+        // reads run outside the state lock: on a FUSE disk they took
+        // seconds, and every request waited for the lock meanwhile.
+        let held: Vec<(PathBuf, String, String)> = {
             let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
             files
@@ -967,65 +988,71 @@ impl Server {
                     let uri = path_to_uri(path);
                     let doc = st.docs.get(&uri)?;
 
-                    if st.editor_open.contains(&uri) {
-                        return None;
-                    }
-
-                    let text = std::fs::read_to_string(path).ok()?;
-
-                    (text != doc.source).then_some((uri, text))
+                    (!st.editor_open.contains(&uri))
+                        .then(|| (path.clone(), uri, doc.source.clone()))
                 })
                 .collect()
         };
+        let stale: Vec<(String, String)> = held
+            .into_iter()
+            .filter_map(|(path, uri, source)| {
+                let text = std::fs::read_to_string(path).ok()?;
+
+                (text != source).then_some((uri, text))
+            })
+            .collect();
 
         // What the mirror does not already hold, letter for letter. The
         // compare reads the text the pass writes, not the file itself:
         // the pass rewrites some files on the way in, and a compare
         // against the file reads those as changed on every tick.
-        let changed: Vec<PathBuf> = {
+        let (luaurc, mirrored): (PathBuf, Vec<(PathBuf, PathBuf)>) = {
             let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            let from_tree = tree_sourcemap(&root, config.as_ref());
 
-            plain
-                .into_iter()
-                .filter(|path| {
-                    if path.parent() == Some(root.as_path()) {
-                        match path.file_name().and_then(|n| n.to_str()) {
-                            // The mirror holds no `.config.luau`: its
-                            // `.luaurc` carries the merged
-                            // configuration, so that file is the one
-                            // an edit here has to move.
-                            Some(".config.luau") => {
-                                return std::fs::read_to_string(
-                                    st.mirror_path(&root.join(".luaurc")),
-                                )
-                                .ok()
-                                .as_deref()
-                                    != Some(mirror_luau_text(&root, config.as_ref()).as_str());
-                            }
+            (
+                st.mirror_path(&root.join(".luaurc")),
+                plain
+                    .into_iter()
+                    .map(|path| {
+                        let mirror = st.mirror_path(&path);
 
-                            // The tree writes the mirror's sourcemap,
-                            // so the file the last build left says
-                            // nothing about it.
-                            Some("sourcemap.json") if from_tree => return false,
-
-                            _ => {}
-                        }
-                    }
-
-                    let Ok(text) = std::fs::read_to_string(path) else {
-                        return true;
-                    };
-                    let want =
-                        mirror_text(path, &root, config.as_ref(), &input, out.as_deref(), text);
-
-                    std::fs::read_to_string(st.mirror_path(path))
-                        .ok()
-                        .as_deref()
-                        != Some(want.as_str())
-                })
-                .collect()
+                        (path, mirror)
+                    })
+                    .collect(),
+            )
         };
+        let from_tree = tree_sourcemap(&root, config.as_ref());
+        let changed: Vec<PathBuf> = mirrored
+            .into_iter()
+            .filter(|(path, mirror)| {
+                if path.parent() == Some(root.as_path()) {
+                    match path.file_name().and_then(|n| n.to_str()) {
+                        // The mirror holds no `.config.luau`: its
+                        // `.luaurc` carries the merged configuration,
+                        // so that file is the one an edit here has to
+                        // move.
+                        Some(".config.luau") => {
+                            return std::fs::read_to_string(&luaurc).ok().as_deref()
+                                != Some(mirror_luau_text(&root, config.as_ref()).as_str());
+                        }
+
+                        // The tree writes the mirror's sourcemap, so the
+                        // file the last build left says nothing about it.
+                        Some("sourcemap.json") if from_tree => return false,
+
+                        _ => {}
+                    }
+                }
+
+                let Ok(text) = std::fs::read_to_string(path) else {
+                    return true;
+                };
+                let want = mirror_text(path, &root, config.as_ref(), &input, out.as_deref(), text);
+
+                std::fs::read_to_string(mirror).ok().as_deref() != Some(want.as_str())
+            })
+            .map(|(path, _)| path)
+            .collect();
         let fresh: Vec<PathBuf> = {
             let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -1095,20 +1122,39 @@ impl Server {
             .iter()
             .map(|p| imports::module_path(&normalize(p)))
             .collect();
+        // The specs are read outside the state lock. The pass runs after
+        // each pause in typing and lexes every source: on Strata it held
+        // the lock 75 ms, and 800 ms before the aliases were remembered.
+        let sources: Vec<(String, String)> = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .docs
+            .iter()
+            .filter(|(uri, _)| child_sees(uri))
+            .map(|(uri, doc)| (uri.clone(), doc.source.clone()))
+            .collect();
+        let specs: Vec<(String, HashSet<String>)> = sources
+            .into_iter()
+            .map(|(uri, source)| {
+                let specs = imports::imported_specs(&source);
+
+                (uri, specs)
+            })
+            .collect();
         let importers: Vec<String> = {
             let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
-            st.docs
-                .iter()
-                .filter(|(uri, doc)| {
-                    child_sees(uri)
-                        && imports::imported_specs(&doc.source).iter().any(|spec| {
-                            st.resolve_spec(uri, spec).is_some_and(|target| {
-                                changed.contains(&imports::module_path(&normalize(&target)))
-                            })
+            specs
+                .into_iter()
+                .filter(|(uri, specs)| {
+                    specs.iter().any(|spec| {
+                        st.resolve_spec(uri, spec).is_some_and(|target| {
+                            changed.contains(&imports::module_path(&normalize(&target)))
                         })
+                    })
                 })
-                .map(|(uri, _)| uri.clone())
+                .map(|(uri, _)| uri)
                 .collect()
         };
 
@@ -1173,7 +1219,7 @@ impl Server {
                 }
 
                 if !quiet.is_empty() {
-                    server.refresh_importers(&quiet);
+                    server.reading(|| server.refresh_importers(&quiet));
                 }
 
                 // The map is read again under its own lock: an edit
@@ -1235,6 +1281,8 @@ impl Server {
     /// Files moved: the shadows follow at once, and the imports that
     /// named the old paths follow after the editor's answer.
     pub(crate) fn renamed(&self, files: &[Value]) {
+        // A resolve found the old path on disk, and no longer does.
+        self.reads.clear();
         let mut renames = Vec::new();
 
         for f in files {

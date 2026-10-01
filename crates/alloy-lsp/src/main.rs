@@ -375,21 +375,57 @@ fn run() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    loop {
-        match rpc::read_message(&mut stdin) {
-            Ok(Some(message)) => {
-                if !server.handle_client(message) {
-                    break;
+    // A thread reads the editor, so the main thread sees what waits
+    // behind the message in hand. `None` is the end of the stream.
+    let (tx, rx) = std::sync::mpsc::channel::<Option<serde_json::Value>>();
+    std::thread::spawn(move || {
+        loop {
+            let message = match rpc::read_message(&mut stdin) {
+                Ok(message) => message,
+
+                Err(e) => {
+                    log::error(&format!("client stream: {e}"));
+
+                    None
                 }
-            }
+            };
+            let end = message.is_none();
 
-            Ok(None) => break,
-
-            Err(e) => {
-                log::error(&format!("client stream: {e}"));
-
+            if tx.send(message).is_err() || end {
                 break;
             }
+        }
+    });
+
+    /*
+    Each edit compiles the document before the next message is read. On
+    Strata on an NTFS disk, one compile took 300 ms, so 12 keystrokes
+    queued 3.6 s of compiles in front of the completion typed after
+    them. The edits to one document that wait in a row now compile once.
+    */
+    let mut next: Option<Option<serde_json::Value>> = None;
+
+    loop {
+        let Some(mut message) = next.take().unwrap_or_else(|| rx.recv().ok().flatten()) else {
+            break;
+        };
+
+        loop {
+            match rx.try_recv() {
+                Ok(Some(more)) if rpc::merge_change(&mut message, &more) => {}
+
+                Ok(other) => {
+                    next = Some(other);
+
+                    break;
+                }
+
+                Err(_) => break,
+            }
+        }
+
+        if !server.handle_client(message) {
+            break;
         }
     }
 

@@ -25,4 +25,4 @@ local __alloy = require("@alloy") local Shapes = {}
 
 local c = Shapes_Circle({ r = 2 })
 
-print(c:area(), Shapes.name_of(Shapes.Kind.Round))
+print(c:area(), Shapes.name_of(Shapes.Kind.Round)) return nil

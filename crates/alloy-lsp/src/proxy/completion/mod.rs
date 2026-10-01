@@ -16,7 +16,7 @@ mod namespaces;
 mod scope;
 mod std_completions;
 
-pub(crate) use context_items::MatchKind;
+pub(crate) use context_items::{MatchKind, readable_type};
 pub(crate) use deprecated::says_deprecated;
 #[cfg(test)]
 pub(crate) use members::child_details;
@@ -406,6 +406,106 @@ impl State {
             "signatures": [{
                 "label": label,
                 "parameters": parameters,
+                "activeParameter": active,
+            }],
+            "activeSignature": 0,
+            "activeParameter": active,
+        }))
+    }
+
+    /*
+    Signature help inside the parameter list of a handler that a
+    message's `on`, `once` or `replied` takes: `Ping.on(function(count,
+    |`. The child answers for `on` there, and its one parameter is the
+    whole handler. The handler of `on` takes the message's parameters,
+    and `respond` after them when the message declares a reply. The
+    handler of `replied` takes the reply. The help lists those, with the
+    one the caret is in.
+    */
+    pub(crate) fn message_handler_signature(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Option<Value> {
+        let doc = self.docs.get(uri)?;
+        let offset = offset_of(&doc.source, line, character)?;
+        let at = message_handler_at(doc, offset)?;
+        let label = format!("function({})", at.params.join(", "));
+        let parameters: Vec<Value> = at.params.iter().map(|p| json!({ "label": p })).collect();
+        let name = &at.message;
+        let text = match (at.verb.as_str(), at.params.last()) {
+            ("replied", _) => format!(
+                "The handler of `replied` takes the reply of the message `{name}`, in the order its `reply(...)` writes it."
+            ),
+
+            (_, Some(last)) if last.starts_with("respond:") => format!(
+                "The handler of the message `{name}` takes its parameters, in the order the declaration writes them, and then `respond`, which sends the reply back to the script that fired."
+            ),
+
+            _ => format!(
+                "The handler of the message `{name}` takes its parameters, in the order the declaration writes them."
+            ),
+        };
+
+        Some(json!({
+            "signatures": [{
+                "label": label,
+                "parameters": parameters,
+                "documentation": { "kind": "markdown", "value": text },
+                "activeParameter": at.active,
+            }],
+            "activeSignature": 0,
+            "activeParameter": at.active,
+        }))
+    }
+
+    /// The name the declaration gives the parameter the caret is about
+    /// to name, in the list of a message handler: `respond` in
+    /// `Light.on(function(job, input, |`. A parameter is a name being
+    /// declared, so nothing else completes there.
+    pub(crate) fn message_handler_completion(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Option<Value> {
+        let doc = self.docs.get(uri)?;
+        let offset = offset_of(&doc.source, line, character)?;
+        let at = message_handler_at(doc, offset)?;
+        let param = at.params.get(at.active as usize)?;
+        let label = param.split(':').next().unwrap_or(param).trim();
+
+        Some(json!([{
+            "label": label,
+            "kind": 6,
+            "detail": param,
+            "sortText": "0",
+        }]))
+    }
+
+    /*
+    Signature help in a call of the `respond` that a message handler
+    takes: `respond(job, |`. The child types the parameter from the
+    handler's type, but the check artifact of a line being typed may not
+    lower. The help lists the reply of the message.
+    */
+    pub(crate) fn respond_signature(&self, uri: &str, line: u32, character: u32) -> Option<Value> {
+        let doc = self.docs.get(uri)?;
+        let offset = offset_of(&doc.source, line, character)?;
+        let (word, active) = open_call(&doc.source, offset)?;
+        let (message, reply) = respond_owner(doc, offset, &word)?;
+        let label = format!("{word}({})", reply.join(", "));
+        let parameters: Vec<Value> = reply.iter().map(|p| json!({ "label": p })).collect();
+
+        Some(json!({
+            "signatures": [{
+                "label": label,
+                "parameters": parameters,
+                "documentation": {
+                    "kind": "markdown",
+                    "value": format!("Sends the reply of the message `{message}` back to the script that fired it. In a parallel handler it calls `task.synchronize()` first."),
+                },
                 "activeParameter": active,
             }],
             "activeSignature": 0,
@@ -1075,6 +1175,190 @@ pub(crate) fn string_left_behind(doc: &Doc, line: u32, character: u32) -> bool {
 ///
 /// `None` when no call is open, or when the name is a member of
 /// something else: the child answers for those.
+/// The byte of the `(` that the end of `head` still stands inside.
+fn unclosed_paren(head: &str) -> Option<usize> {
+    let mut depth = 0usize;
+
+    for (i, b) in head.bytes().enumerate().rev() {
+        match b {
+            b')' => depth += 1,
+
+            b'(' if depth == 0 => return Some(i),
+
+            b'(' => depth -= 1,
+
+            _ => {}
+        }
+    }
+
+    None
+}
+
+/// The commas of a list that no bracket inside it holds.
+fn top_level_commas(list: &str) -> u32 {
+    let mut depth = 0i32;
+    let mut commas = 0;
+
+    for b in list.bytes() {
+        match b {
+            b'(' | b'{' | b'[' => depth += 1,
+
+            b')' | b'}' | b']' => depth -= 1,
+
+            b',' if depth == 0 => commas += 1,
+
+            _ => {}
+        }
+    }
+
+    commas
+}
+
+/// The parameters and the reply a `message` declaration of the source
+/// writes for `name`, each as written: `count: number`.
+pub(crate) fn message_shape(
+    source: &str,
+    name: &str,
+) -> Option<(Vec<String>, Option<Vec<String>>)> {
+    if !source.contains("message") {
+        return None;
+    }
+
+    let parsed = alloy_syntax::parse_lenient(source, Default::default()).ok()?;
+    let toks = &parsed.lexed.toks;
+    let list = |params: &[alloy_syntax::ast::Param]| -> Vec<String> {
+        params
+            .iter()
+            .map(|p| {
+                let word = p.name.text(source, toks);
+
+                match p.ty {
+                    Some(ty) => format!(
+                        "{word}: {}",
+                        ty.text(source, toks)
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    ),
+
+                    None => word.to_string(),
+                }
+            })
+            .collect()
+    };
+
+    parsed
+        .chunk
+        .block
+        .stmts
+        .iter()
+        .find_map(|stmt| match stmt.under_default() {
+            alloy_syntax::ast::Stmt::Message(m) if m.name.text(source, toks) == name => {
+                Some((list(&m.params), m.reply.as_ref().map(|(_, ps)| list(ps))))
+            }
+
+            _ => None,
+        })
+}
+
+/// The message `name` names in the file or in a module it imports.
+fn message_of(doc: &Doc, name: &str) -> Option<(Vec<String>, Option<Vec<String>>)> {
+    std::iter::once(doc.source.as_str())
+        .chain(doc.import_sources.iter().map(String::as_str))
+        .find_map(|src| message_shape(src, name))
+}
+
+/// A message handler's parameter list with the caret in it.
+struct HandlerAt {
+    message: String,
+    verb: String,
+    /// What the handler takes, each as written.
+    params: Vec<String>,
+    active: u32,
+}
+
+/// The handler list the caret stands in: `Light.on(function(job, |` or
+/// `Light.replied(function(|`.
+fn message_handler_at(doc: &Doc, offset: usize) -> Option<HandlerAt> {
+    let head = &doc.source[..offset];
+    let open = unclosed_paren(head)?;
+    let call = head[..open].trim_end().strip_suffix("function")?;
+
+    if call.ends_with(|c: char| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+
+    let (path, verb) = call
+        .trim_end()
+        .strip_suffix('(')?
+        .trim_end()
+        .rsplit_once('.')?;
+
+    if !matches!(verb, "on" | "once" | "replied") {
+        return None;
+    }
+
+    let name = path
+        .rsplit(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .next()
+        .filter(|n| !n.is_empty())?;
+    let (mut params, reply) = message_of(doc, name)?;
+
+    match (verb, reply) {
+        ("replied", reply) => params = reply?,
+
+        (_, Some(reply)) => params.push(format!("respond: ({}) -> ()", reply.join(", "))),
+
+        (_, None) => {}
+    }
+
+    Some(HandlerAt {
+        message: name.to_string(),
+        verb: verb.to_string(),
+        params,
+        active: top_level_commas(&head[open + 1..]),
+    })
+}
+
+/*
+The message whose handler binds `word` as its `respond`, with the reply.
+The nearest `Name.on(function(` or `Name.once(function(` above the caret
+that names `word` right after the message's parameters. The name has to
+be in scope at the caret, so a handler that closed above answers nothing.
+*/
+fn respond_owner(doc: &Doc, offset: usize, word: &str) -> Option<(String, Vec<String>)> {
+    let src = &doc.source;
+
+    crate::context::binding_in_scope(src, offset, word)?;
+
+    for line in src[..offset].lines().rev() {
+        for verb in [".on(function(", ".once(function("] {
+            let Some(at) = line.find(verb) else {
+                continue;
+            };
+            let Some(name) = line[..at]
+                .rsplit(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .next()
+                .filter(|n| !n.is_empty())
+            else {
+                continue;
+            };
+            let list = &line[at + verb.len()..];
+            let list = &list[..list.find(')').unwrap_or(list.len())];
+            let names: Vec<&str> = list.split(',').map(str::trim).collect();
+            let Some((params, reply)) = message_of(doc, name) else {
+                continue;
+            };
+
+            if names.get(params.len()) == Some(&word) {
+                return reply.map(|r| (name.to_string(), r));
+            }
+        }
+    }
+
+    None
+}
+
 pub(crate) fn open_call(src: &str, offset: usize) -> Option<(String, u32)> {
     let (start, end, active) = open_paren_word(src, offset)?;
 
@@ -1226,9 +1510,20 @@ pub(crate) fn declares_params(src: &str, start: usize) -> bool {
         return false;
     }
 
+    // `message Light(job: number) reply(`: the reply declares too.
+    if &src[start..keywords::word_range(src, start).1] == "reply" && before.ends_with(')') {
+        let line = &before[before.rfind('\n').map_or(0, |i| i + 1)..];
+        let head = line.trim_start();
+
+        return head.starts_with("message ") || head.starts_with("export message ");
+    }
+
     let (s, e) = keywords::word_range(src, before.len() - 1);
 
-    matches!(&src[s..e], "function" | "remote" | "macro" | "attribute")
+    matches!(
+        &src[s..e],
+        "function" | "remote" | "macro" | "attribute" | "message"
+    )
 }
 
 /// Whether the innermost call open at `offset` is `new V(`.

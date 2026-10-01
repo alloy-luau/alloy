@@ -72,7 +72,7 @@ impl Server {
 
         let (hs, he) = keywords::word_range(&doc.source, head.len() - 1);
         let struct_name = &doc.source[hs..he];
-        let field_line = doc
+        let found = doc
             .decls
             .iter()
             .chain(st.docs.values().flat_map(|d| d.decls.iter()))
@@ -81,10 +81,10 @@ impl Server {
                 d.hover
                     .lines()
                     .find(|l| field_key(l) == Some(word))
-                    .map(|l| l.trim().to_string())
+                    .map(|l| (d, l.trim()))
             });
 
-        let Some(field_line) = field_line else {
+        let Some((decl, field_line)) = found else {
             return false;
         };
 
@@ -93,7 +93,11 @@ impl Server {
         let result = json!({
             "contents": {
                 "kind": "markdown",
-                "value": format!("```alloy\n{field_line}\n```\nA field of `struct {struct_name}`."),
+                "value": member_hover(
+                    &owner_line(decl),
+                    field_line,
+                    member_doc(doc, &decl.name, word).as_deref(),
+                ),
             },
             "range": {
                 "start": { "line": sl, "character": sc },
@@ -105,6 +109,42 @@ impl Server {
 
         true
     }
+}
+
+/*
+The hover of a member, in the shape rust-analyzer gives one: the owner in
+a code block of its own, the member's line in a second block, then a rule
+and the doc comment. The owner block names the type the member belongs to,
+so no sentence under the code has to say it.
+*/
+pub(crate) fn member_hover(owner: &str, member: &str, doc: Option<&str>) -> String {
+    let mut out = format!("```alloy\n{owner}\n```\n\n```alloy\n{member}\n```");
+
+    if let Some(text) = doc.map(str::trim).filter(|t| !t.is_empty()) {
+        out.push_str("\n\n---\n\n");
+        out.push_str(text);
+    }
+
+    out
+}
+
+/// The owner of a member as code writes it: the name, with its path for a
+/// namespace member, and the type parameters the head lists without their
+/// bounds. `struct Box<T: Ord>` gives `Box<T>`.
+pub(crate) fn owner_line(decl: &alloy::declarations::Declaration) -> String {
+    let head = decl.hover.lines().nth(1).unwrap_or("");
+    let generics = head.find(&format!(" {}<", decl.name)).and_then(|at| {
+        let list = &head[at + decl.name.len() + 1..];
+        let list = &list[1..super::restyle::angle_len(list)? - 1];
+        let names: Vec<&str> = list
+            .split(',')
+            .map(|p| p.split(':').next().unwrap_or("").trim())
+            .collect();
+
+        Some(format!("<{}>", names.join(", ")))
+    });
+
+    format!("{}{}", decl.name, generics.unwrap_or_default())
 }
 
 /// The field a struct body's line declares: the name before the colon,
@@ -189,18 +229,13 @@ pub(crate) fn foreign_method_hover(doc: &Doc, start: usize, end: usize) -> Optio
     let line_end = doc.source[start..]
         .find('\n')
         .map_or(doc.source.len(), |i| start + i);
-    let rest = doc.source[end..line_end].trim_end();
-    // An untyped `self` is the type the `impl` names.
-    let rest = match rest.starts_with("(self)") || rest.starts_with("(self,") {
-        true => rest.replacen("(self", &format!("(self: {owner}"), 1),
+    let member = method_line(word, doc.source[end..line_end].trim_end(), false, &owner)?;
 
-        false => rest.to_string(),
-    };
-    let rest = rest.replacen(" -> ", ": ", 1);
-
-    let value = format!("```alloy\nfunction {owner}.{word}{rest}\n```");
-
-    Some(name_method_doc(&value, doc).unwrap_or(value))
+    Some(member_hover(
+        &owner,
+        &member,
+        method_doc(doc, base, word).as_deref(),
+    ))
 }
 
 /// The hover of a function parameter at its declaration: the parameter
@@ -471,17 +506,37 @@ pub(crate) fn declared_field_hover(doc: &Doc, start: usize, end: usize) -> Optio
         .trim()
         .trim_end_matches(',')
         .trim_end();
-    let mut out = format!(
-        "```alloy\n{field_line}\n```\nA field of `{keyword} {}`.",
-        owner.name
-    );
+    // A field of a struct shows its visibility, `public` where the source
+    // wrote none, as the struct's own hover lists it and as a use of the
+    // field hovers. A wire attribute stays in front, and `read` or
+    // `write` after the visibility.
+    let shown = match keyword == "struct"
+        && !lead
+            .split_whitespace()
+            .any(|w| matches!(w, "private" | "public"))
+    {
+        true => {
+            let indent = doc.source[line_start..start].len()
+                - doc.source[line_start..start].trim_start().len();
+            let name_at = (start - line_start - indent).min(field_line.len());
+            let prefix = field_line[..name_at].trim_end();
+            let modifier_at = ["read", "write"]
+                .iter()
+                .find_map(|w| prefix.strip_suffix(w).map(str::len))
+                .unwrap_or(name_at);
+            let (attrs, rest) = field_line.split_at(modifier_at);
 
-    if let Some(comment) = alloy::declarations::doc_before(&doc.source, line_start) {
-        out.push_str("\n\n");
-        out.push_str(&comment);
-    }
+            format!("{attrs}public {rest}")
+        }
 
-    Some(out)
+        false => field_line.to_string(),
+    };
+
+    Some(member_hover(
+        &owner_line(owner),
+        &shown,
+        alloy::declarations::doc_before(&doc.source, line_start).as_deref(),
+    ))
 }
 
 /// The byte offset of the `{` that encloses `at`, at depth zero, when
@@ -564,7 +619,7 @@ pub(crate) fn receiver_type(st: &State, doc: &Doc, at: usize) -> Option<String> 
         let word = &doc.source[bs..be];
         let declared = match used_field_owner(st, doc, bs) {
             Some(hop) => declared_field_line(st, doc, &hop, word)?
-                .1
+                .0
                 .split_once(':')?
                 .1
                 .trim()
@@ -673,15 +728,14 @@ pub(crate) fn element_of(ty: &str) -> Option<String> {
     }
 }
 
-/// The line a struct body writes for one field, with the keyword of
-/// the declaration that holds it: this file's own, else a module of
-/// the workspace.
-fn declared_field_line(
-    st: &State,
-    doc: &Doc,
+/// The line a struct body writes for one field, with the declaration
+/// that holds it: this file's own, else a module of the workspace.
+fn declared_field_line<'a>(
+    st: &'a State,
+    doc: &'a Doc,
     owner: &str,
     field: &str,
-) -> Option<(&'static str, String, String)> {
+) -> Option<(String, &'a alloy::declarations::Declaration)> {
     // A namespace member is keyed by the path the source writes,
     // `Ns.T`, and a receiver carries the last word of it alone. A
     // struct of that spelling is the one the reader means, so the walk
@@ -700,16 +754,20 @@ fn declared_field_line(
                 false => d.name.contains('.') && d.name.rsplit('.').next() == Some(owner),
             })
             .find_map(|d| {
-                let keyword = ["struct", "interface", "class"]
-                    .into_iter()
-                    .find(|k| d.hover.contains(&format!("{k} ")))?;
+                if !["struct", "interface", "class"]
+                    .iter()
+                    .any(|k| d.hover.contains(&format!("{k} ")))
+                {
+                    return None;
+                }
+
                 let line = d
                     .hover
                     .lines()
                     .find(|l| field_key(l) == Some(field))
                     .map(|l| l.trim().trim_end_matches(',').trim_end().to_string())?;
 
-                Some((keyword, line, d.name.clone()))
+                Some((line, d))
             })
     };
 
@@ -719,7 +777,7 @@ fn declared_field_line(
 /// The type one field of a struct holds, as the name a next hop reads
 /// off it: `b: B?` gives `B`.
 fn field_type(st: &State, doc: &Doc, owner: &str, field: &str) -> Option<String> {
-    let (_, line, _) = declared_field_line(st, doc, owner, field)?;
+    let (line, _) = declared_field_line(st, doc, owner, field)?;
     let named = alloy::docs::type_head(line.split_once(':')?.1.trim())?;
 
     Some(named.split('<').next().unwrap_or(&named).to_string())
@@ -731,18 +789,15 @@ fn field_type(st: &State, doc: &Doc, owner: &str, field: &str) -> Option<String>
 pub(crate) fn used_field_hover(st: &State, doc: &Doc, start: usize, end: usize) -> Option<String> {
     let word = &doc.source[start..end];
     let owner = used_field_owner(st, doc, start)?;
-    let (keyword, line, owner) = declared_field_line(st, doc, &owner, word)?;
-
-    let mut out = format!("```alloy\n{line}\n```\nA field of `{keyword} {owner}`.");
+    let (line, owner) = declared_field_line(st, doc, &owner, word)?;
 
     // The comment above the declaration, from the source that holds it:
     // a field of an imported struct says the same at its use.
-    if let Some(text) = member_doc(doc, &owner, word) {
-        out.push_str("\n\n");
-        out.push_str(&text);
-    }
-
-    Some(out)
+    Some(member_hover(
+        &owner_line(owner),
+        &line,
+        member_doc(doc, &owner.name, word).as_deref(),
+    ))
 }
 
 /// A local whose hover prints a solver variable, `local b: t2 where t1 =
@@ -1103,7 +1158,7 @@ fn read_field_type(st: &State, doc: &Doc, line_start: usize, chain: &str) -> Opt
     let last = at + chain.rfind('.')? + 1;
     let owner = used_field_owner(st, doc, last)?;
     let field = &doc.source[last..at + chain.len()];
-    let (_, declaration, _) = declared_field_line(st, doc, &owner, field)?;
+    let (declaration, _) = declared_field_line(st, doc, &owner, field)?;
     let ty = declaration.split_once(':')?.1.trim();
 
     Some(match chain.contains("?.") && !ty.ends_with('?') {
@@ -1212,9 +1267,12 @@ pub(crate) fn literal_key_path(doc: &Doc, line: u32, character: u32) -> Option<V
 /// `strength: { default: number, kind: "int" }` out of the print of
 /// the whole table. A nested record keeps the child's lines, moved
 /// left to the key's own column.
-pub(crate) fn record_entry(text: &str, path: &[String]) -> Option<String> {
+///
+/// The comment under the print describes the table, so it goes. The
+/// key's own comment, `comment`, takes its place.
+pub(crate) fn record_entry(text: &str, path: &[String], comment: Option<&str>) -> Option<String> {
     let (fence, rest) = text.split_once('\n')?;
-    let (body, tail) = rest.split_once("\n```")?;
+    let (body, _) = rest.split_once("\n```")?;
     let mut record = body.to_string();
     let mut ty = String::new();
 
@@ -1240,5 +1298,7 @@ pub(crate) fn record_entry(text: &str, path: &[String]) -> Option<String> {
         out.push_str(line.get(indent..).unwrap_or(line.trim_start()));
     }
 
-    Some(format!("{fence}\n{out}\n```{tail}"))
+    let under = comment.map_or(String::new(), |c| format!("\n----------\n{c}"));
+
+    Some(format!("{fence}\n{out}\n```{under}"))
 }

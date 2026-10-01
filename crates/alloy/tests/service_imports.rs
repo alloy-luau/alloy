@@ -25,7 +25,7 @@ fn both_forms_bind_get_service_on_the_import_line() {
     assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
     assert_eq!(
         out.ship,
-        "local Players = game:GetService(\"Players\")\nlocal ReplicatedStorage = game:GetService(\"ReplicatedStorage\") local Run = game:GetService(\"RunService\")\n\nprint(Players, ReplicatedStorage, Run)\n"
+        "local Players = game:GetService(\"Players\")\nlocal ReplicatedStorage = game:GetService(\"ReplicatedStorage\") local Run = game:GetService(\"RunService\")\n\nprint(Players, ReplicatedStorage, Run) return nil\n"
     );
     // The check artifact is what the analyzer reads, and it is the
     // same text: `game:GetService` is what ships.

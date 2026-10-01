@@ -5,4 +5,4 @@ _1 = get() if _1[k] == nil then _1[k] = v end
 local function f()
 	if cache[key] == nil then cache[key] = compute() end
 	if cache[key] == nil then cache[key] = other() end
-end
+end return nil

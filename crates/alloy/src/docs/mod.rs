@@ -23,6 +23,7 @@ pub use table::{TABLE, keys_with_prefix, lookup};
 /// explains it. `alloy doc <kind>` opens the section, so every kind
 /// `kind_for` and the checker name has a row here.
 pub const KINDS: &[(&str, &str)] = &[
+    ("ActorError", "3.15"),
     ("AlloyError", "4.1"),
     ("AsyncError", "3.3"),
     ("AttributeContract", "3.11"),
@@ -39,8 +40,10 @@ pub const KINDS: &[(&str, &str)] = &[
     ("ImportError", "3.2"),
     ("IngotError", "5.12"),
     ("InternalError", "4.1"),
+    ("LuauLimit", "5.1"),
     ("MacroError", "3.10"),
     ("MarkupError", "3.13"),
+    ("ParallelError", "3.15"),
     ("ReservedWord", "6.1"),
     ("ResultError", "4.1"),
     ("StructError", "3.6"),
@@ -74,6 +77,34 @@ pub fn section_kinds(number: &str) -> Vec<&'static str> {
 /// first match wins, from the most specific wording to the least.
 const KIND_RULES: &[(&[&str], &str)] = &[
     (&["internal:"], "InternalError"),
+    // A limit of the Luau compiler. The report quotes a name of the
+    // module, which could reach any rule below.
+    (&["luau cannot compile this module"], "LuauLimit"),
+    // Parallel Luau. A report names the author's message and function
+    // names, which could reach any rule below, `Result` among them.
+    (
+        &[
+            "a message takes `reply(...)` and then `as parallel`",
+            "a message writes `reply(...)` before",
+        ],
+        "SyntaxError",
+    ),
+    (&["an actor message carries only data"], "WireType"),
+    (
+        &["a `parallel` block", "the parallel handler of"],
+        "ParallelError",
+    ),
+    (
+        &[
+            "`.actor.`",
+            "message `",
+            "a message takes",
+            "a message reaches",
+            "a message binds",
+            "a message call",
+        ],
+        "ActorError",
+    ),
     // A struct field with no name. The report quotes the field, so a
     // name like `result` or `remote` would reach a rule below.
     (&["a struct takes each field by name"], "StructError"),
@@ -550,6 +581,35 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A doc example shows the form the lints ask for, so a reader who
+    /// copies one gets no `prefer_new` report. Every `alloy` block of
+    /// the table counts, and every member example.
+    #[test]
+    fn no_doc_example_draws_prefer_new() {
+        let blocks = super::TABLE.iter().flat_map(|(key, text)| {
+            text.split("```alloy\n")
+                .skip(1)
+                .filter_map(|t| t.split("```").next())
+                .map(move |b| (key.to_string(), b))
+        });
+        let examples = super::MEMBERS.iter().flat_map(|(owner, members)| {
+            members
+                .iter()
+                .map(move |m| (format!("{owner}.{}", m.name), m.example))
+        });
+        let hits: Vec<String> = blocks
+            .chain(examples)
+            .filter_map(|(key, src)| {
+                let out = crate::compile(src).ok()?;
+                let lint = out.lints.iter().find(|l| l.name == "prefer_new")?;
+
+                Some(format!("`{key}`: {}", lint.message))
+            })
+            .collect();
+
+        assert!(hits.is_empty(), "{}", hits.join("\n"));
     }
 
     /// A member's signature opens with its own name: a static and a

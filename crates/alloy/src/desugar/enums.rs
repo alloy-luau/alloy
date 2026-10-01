@@ -456,8 +456,9 @@ impl<'s> Desugar<'s> {
 
         if !self.options.definitions && (own != "{}" || !variant_attrs.is_empty()) {
             let std = self.std();
+            let held = self.attrs_target(&name);
             printer.push_str(&format!(
-                " {std}.attrs({name}, {{ own = {own}, variants = {{ {} }} }})",
+                " {std}.attrs({held}, {{ own = {own}, variants = {{ {} }} }})",
                 variant_attrs.join(", ")
             ));
         }
@@ -587,6 +588,14 @@ impl<'s> Desugar<'s> {
             .rev()
             .find_map(|m| m.get(name).cloned())
             .or_else(|| self.ns_member_name(name))
+            .or_else(|| self.table_export(name))
+    }
+
+    /// `__exports.X` for an export that lives on the exports table, where
+    /// no local of an inner scope shadows it.
+    fn table_export(&self, name: &str) -> Option<String> {
+        (self.table_exports.contains(name) && !self.is_local_since(self.top_scope + 1, name))
+            .then(|| format!("{}.{name}", super::EXPORTS_TABLE))
     }
 
     /// The name a printer puts before a unit variant of type `ty`: the
@@ -2768,6 +2777,8 @@ impl<'s> Desugar<'s> {
         let guard_clause = i.branches.len() == 1
             && i.else_block.is_none()
             && matches!(i.branches[0].0, Cond::Local { negated: true, .. });
+        // The scopes a negated condition opens, which close at the `end`.
+        let mut opened = 0;
 
         for (idx, (cond, block)) in i.branches.iter().enumerate() {
             // The keyword token before the condition.
@@ -2814,11 +2825,35 @@ impl<'s> Desugar<'s> {
                 }
             }
 
+            // A name the condition binds shadows a namespace member of
+            // that name (LANG_BUGS 129). A negated condition declares it
+            // before the `if`, so it reaches the rest of the chain, and
+            // past the `end` of a guard clause.
+            let negated = matches!(cond, Cond::Local { negated: true, .. });
+
+            if !guard_clause {
+                self.scopes.push(HashSet::new());
+            }
+
+            for n in super::statements::cond_binds(cond) {
+                self.declare_name(n);
+            }
+
             cursor = then_end;
             let body_start = self.block_start_or(block, cursor);
             self.copy(cursor, body_start);
             self.block(block);
             cursor = self.block_end_or(block, body_start);
+
+            match (negated, guard_clause) {
+                (false, _) => {
+                    self.scopes.pop();
+                }
+
+                (true, false) => opened += 1,
+
+                (true, true) => {}
+            }
         }
 
         if let Some(e) = &i.else_block {
@@ -2834,6 +2869,10 @@ impl<'s> Desugar<'s> {
             self.copy(cursor, body_start);
             self.block(e);
             cursor = self.block_end_or(e, body_start);
+        }
+
+        for _ in 0..opened {
+            self.scopes.pop();
         }
 
         let end_tok = self.toks[span.end as usize - 1];
@@ -2966,9 +3005,17 @@ impl<'s> Desugar<'s> {
         self.append_decls(start, decls);
         self.generate(start, &format!(" if not ({test}) then break end"));
         self.write_binds(start, " local", &binds);
+        // The names shadow a namespace member in the body (LANG_BUGS 129).
+        self.scopes.push(HashSet::new());
+
+        for n in super::statements::cond_binds(&w.cond) {
+            self.declare_name(n);
+        }
+
         let body_start = self.block_start_or(&w.block, do_end);
         self.copy(do_end, body_start);
         self.block(&w.block);
+        self.scopes.pop();
         let after = self.block_end_or(&w.block, body_start);
         let end_tok = self.toks[span.end as usize - 1];
         self.copy(after, end_tok.start);

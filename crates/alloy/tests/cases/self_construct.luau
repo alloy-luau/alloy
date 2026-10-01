@@ -38,4 +38,4 @@ local a = Plain.new()
 local b = Marked.new()
 local c = Marked.one()
 local d: Held<number> = Held.new()
-print(a, b, c, d)
+print(a, b, c, d) return nil

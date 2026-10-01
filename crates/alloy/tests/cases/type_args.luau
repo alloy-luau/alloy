@@ -19,4 +19,4 @@ local function make(): __alloy.HashMap<string, __alloy.Array<number>>
     return __alloy.HashMap.new()
 end
 
-print(written, nested, inferred, make())
+print(written, nested, inferred, make()) return nil

@@ -5,4 +5,4 @@ local Palette = require("./returning_module")
 local All = require("./returning_module")
 local _m1 = require("./returning_module") local tint = _m1.tint
 
-print(Palette, All, tint)
+print(Palette, All, tint) return nil

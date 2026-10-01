@@ -405,7 +405,7 @@ fn an_import_resolves_where_it_stands() {
         std_globals: alloy::std_names::Globals::None,
         ..alloy::EmitOptions::default()
     };
-    let src = "local function f()\n    import { x } from \"./a\"\n    import { Signal } from \"@alloy/std/signal\"\n    return x, Signal.new()\nend\n\nprint(\"hello\")\nimport { y } from \"./a\"\nprint(f, y)\n";
+    let src = "local function f()\n    import { x } from \"./a\"\n    import { Signal } from \"@alloy/std/signal\"\n    return x, new Signal()\nend\n\nprint(\"hello\")\nimport { y } from \"./a\"\nprint(f, y)\n";
     let out = alloy::compile_with(src, &options).unwrap();
 
     assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);

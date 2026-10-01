@@ -50,6 +50,9 @@ pub fn is_contextual(word: &str) -> bool {
             | "trait"
             | "impl"
             | "remote"
+            | "message"
+            | "reply"
+            | "parallel"
             | "macro"
             | "attribute"
             | "namespace"
@@ -78,6 +81,7 @@ const EXPORT_DECL: &[&str] = &[
     "trait",
     "interface",
     "remote",
+    "message",
     "attribute",
     "macro",
     "namespace",
@@ -181,6 +185,21 @@ pub fn keyword_at(src: &str, toks: &[Tok], i: usize) -> bool {
                 && (name_at(src, toks, i + 1) || text(src, toks, i + 1) == "function")
         }
 
+        // `message Step(dt: number)`. `local message = "hi"`,
+        // `message(x)`, and `message.text` are the name.
+        "message" => message_decl_follows(src, toks, i),
+
+        // `message Light(job: number) reply(job: number)`. A `reply`
+        // anywhere else is a name.
+        "reply" => reply_clause_at(src, toks, i),
+
+        // `parallel do ... end`, and the `as parallel` of a message.
+        // `local parallel = true` and `parallel(x)` are the name.
+        "parallel" => {
+            (text(src, toks, i + 1) == "do" && !newline_after(src, toks, i))
+                || parallel_message_at(src, toks, i)
+        }
+
         // `private hp: number`, `public function f()`. `local private =
         // {}` and `private.x` are the name.
         "private" | "public" => {
@@ -199,6 +218,70 @@ pub fn keyword_at(src: &str, toks: &[Tok], i: usize) -> bool {
 
         _ => true,
     }
+}
+
+/// Reports if the `message` at token `i` opens a declaration: a name
+/// and its parameter list follow on the same line. No Luau statement
+/// holds two names in a row, so the shape cannot be a call or a local.
+pub fn message_decl_follows(src: &str, toks: &[Tok], i: usize) -> bool {
+    !newline_after(src, toks, i) && name_at(src, toks, i + 1) && text(src, toks, i + 2) == "("
+}
+
+/// Reports if the `parallel` at token `i` is the `as parallel` of a
+/// message declaration: `as` before it, and the `)` before that closes
+/// the parameters of `message Name(` or its `reply(`. `import * as
+/// parallel` binds the name.
+pub fn parallel_message_at(src: &str, toks: &[Tok], i: usize) -> bool {
+    if i < 2 || text(src, toks, i - 1) != "as" {
+        return false;
+    }
+
+    match open_of(src, toks, i - 2) {
+        Some(k) if k >= 1 && reply_clause_at(src, toks, k - 1) => true,
+
+        Some(k) => k >= 2 && message_decl_follows(src, toks, k - 2),
+
+        None => false,
+    }
+}
+
+/// Reports if the `reply` at token `i` opens the reply of a message
+/// declaration: `(` after it on the line, and the `)` before it closes
+/// the parameters of `message Name(`.
+pub fn reply_clause_at(src: &str, toks: &[Tok], i: usize) -> bool {
+    if i < 1 || text(src, toks, i + 1) != "(" || newline_after(src, toks, i) {
+        return false;
+    }
+
+    open_of(src, toks, i - 1).is_some_and(|k| k >= 2 && message_decl_follows(src, toks, k - 2))
+}
+
+/// The `(` that the `)` at token `close` shuts, or `None` when the
+/// token is no `)`.
+fn open_of(src: &str, toks: &[Tok], close: usize) -> Option<usize> {
+    if text(src, toks, close) != ")" {
+        return None;
+    }
+
+    let mut depth = 0usize;
+
+    for k in (0..=close).rev() {
+        match text(src, toks, k) {
+            ")" => depth += 1,
+
+            "(" => {
+                depth -= 1;
+
+                if depth == 0 {
+                    return Some(k);
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    None
 }
 
 /*
@@ -528,7 +611,8 @@ pub fn after_delay_follows(src: &str, toks: &[Tok], i: usize) -> bool {
 
 /*
 Reports if a `do` or a `where` closes the delay that opens after token
-`i`, with no newline before it.
+`i`, with no newline before it. A `where` may open the next line, as it
+may in any header, where it reads no value: `where = 1` is a local.
 
 The scan balances brackets, so the `do` of a nested `for` inside the
 delay does not count. At depth zero it gives up at a token no delay
@@ -539,7 +623,11 @@ fn do_closes_delay(src: &str, toks: &[Tok], i: usize) -> bool {
     let mut depth = 0usize;
 
     for n in 1..=SCRUTINEE_SCAN {
-        if newline_after(src, toks, i + n - 1) {
+        if newline_after(src, toks, i + n - 1)
+            && !(depth == 0
+                && text(src, toks, i + n) == "where"
+                && !stands_as_value(src, toks, i + n))
+        {
             return false;
         }
 
@@ -595,6 +683,29 @@ pub fn import_follows(src: &str, toks: &[Tok], i: usize) -> bool {
                 && (text(src, toks, i + 2) == "from"
                     || (text(src, toks, i + 2) == "," && text(src, toks, i + 3) == "{"))
         }
+    }
+}
+
+/*
+Reports if the `import` at token `i` is the call: `import(...)`,
+`import<<T>>(...)`, or `import "m"`.
+
+[`keyword_at`] reads the word there as a name, so the call parses and
+spaces as a call. The editor must still paint and hover it as the
+keyword, because the emit turns the call into a `require`. The rule is
+the one [`name_before`] holds for the terminal highlighter.
+*/
+pub fn import_call_at(src: &str, toks: &[Tok], i: usize) -> bool {
+    if text(src, toks, i) != "import"
+        || (i > 0 && matches!(text(src, toks, i - 1), "." | ":" | "?." | "function"))
+    {
+        return false;
+    }
+
+    match toks.get(i + 1).map(|t| t.kind) {
+        Some(TokKind::LParen | TokKind::Str { .. }) => true,
+
+        _ => text(src, toks, i + 1) == "<" && text(src, toks, i + 2) == "<",
     }
 }
 
@@ -927,6 +1038,29 @@ mod tests {
         assert!(!is_kw("local import = {}\n", "import"));
         assert!(!is_kw("import.cache = 1\n", "import"));
         assert!(!is_kw("print(import)\n", "import"));
+    }
+
+    /// The call is the module import to a painter and a hover, though
+    /// [`keyword_at`] reads the word as a name so the call parses.
+    #[test]
+    fn the_import_call_is_the_import() {
+        let call = |src: &str| {
+            let (toks, i) = at(src, "import");
+
+            import_call_at(src, &toks, i)
+        };
+
+        assert!(call("local m = import(\"./m\")\n"));
+        assert!(call("local m = import<<unknown>>(module)\n"));
+        assert!(call("import \"./m\"\n"));
+        assert!(call("import './m'\n"));
+
+        assert!(!call("local import = require\n"));
+        assert!(!call("import.cache = 1\n"));
+        assert!(!call("t.import(\"./m\")\n"));
+        assert!(!call("local function import(m) end\n"));
+        assert!(!call("print(import < 2)\n"));
+        assert!(!call("import { a } from \"m\"\n"));
     }
 
     /// The one-line reading the terminal highlighter uses.

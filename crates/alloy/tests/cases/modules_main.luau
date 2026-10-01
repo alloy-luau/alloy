@@ -24,4 +24,4 @@ local bag: Inventory = add({}, sword)
 add_item(bag, sword)
 
 print(total(bag), CAP, Inventory.version)
-print(Signal, theme.primary)
+print(Signal, theme.primary) return nil

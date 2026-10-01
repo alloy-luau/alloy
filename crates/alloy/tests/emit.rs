@@ -266,3 +266,257 @@ fn an_initializer_sets_parent_last() {
     assert!(last.contains("p.Parent = workspace"), "{last}");
     assert!(!last.contains("_parent"), "{last}");
 }
+
+/// A module of `count` exports whose values are no constants, so each
+/// would take a register, a function that reads some of them, and a
+/// local of the same name inside it.
+fn many_exports(count: usize) -> String {
+    let mut src = String::new();
+
+    for i in 0..count {
+        src.push_str(&format!(
+            "--- Constant {i}.\nexport const C{i} = tostring({i})\n"
+        ));
+    }
+
+    src.push_str(
+        "--- Joins three constants.\nexport function joined(): string\n    local C2 = \"own\"\n    return C1 .. C2 .. C0\nend\n--- A value from two constants.\nexport const BOTH = C0 .. C1\nlocal seen = `{C3}`\nprint(seen)\n",
+    );
+
+    src
+}
+
+/*
+Luau holds at most 200 locals in one function, the chunk included, and
+each `export const` built to a local. A constants file of 219 built and
+checked clean, then failed to load in Studio (LANG_BUGS 107). Past the
+budget the exported values live on one table, every reference in the
+module reads the table, and a local of the same name still shadows it.
+The module loads, and a module under the budget builds as before.
+*/
+#[test]
+fn a_module_past_the_local_budget_puts_its_exports_on_a_table() {
+    let src = many_exports(250);
+    let out = alloy::compile_file(
+        "constants.aly",
+        &src,
+        &alloy::EmitOptions::default(),
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    assert_eq!(out.ship.lines().count(), src.lines().count());
+    assert_eq!(out.check.lines().count(), src.lines().count());
+
+    for want in [
+        "local __exports = {} ",
+        "__exports.C249 = tostring(249)",
+        "    return __exports.C1 .. C2 .. __exports.C0",
+        "__exports.BOTH = __exports.C0 .. __exports.C1",
+        "local seen = `{__exports.C3}`",
+        " __exports.joined = joined return __exports",
+    ] {
+        assert!(out.ship.contains(want), "missing {want:?}");
+    }
+
+    let lua = mlua::Lua::new();
+    let exports: mlua::Table = lua.load(out.ship.as_str()).eval().unwrap();
+    assert_eq!(exports.get::<String>("C249").unwrap(), "249");
+    assert_eq!(exports.get::<String>("BOTH").unwrap(), "01");
+    let joined: mlua::Function = exports.get("joined").unwrap();
+    assert_eq!(joined.call::<String>(()).unwrap(), "1own0");
+
+    // Under the budget nothing moves.
+    let small = alloy::compile_with(&many_exports(20), &alloy::EmitOptions::default()).unwrap();
+    assert!(!small.ship.contains("__exports"), "{}", small.ship);
+    assert!(small.ship.contains("return { C0 = C0,"), "{}", small.ship);
+}
+
+/// The annotation of a moved export types its field in the check
+/// artifact, so a value of another type still reports, and a module
+/// that imports one reads the type.
+#[test]
+fn a_moved_export_keeps_its_type() {
+    let dir = std::env::temp_dir().join(format!("alloy-exports-table-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/constants.aly"),
+        many_exports(250) + "--- A count.\nexport const COUNT: number = 3\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/use.aly"),
+        "import { C7, COUNT, joined } from './constants'\n\nconst n: number = C7\nconst m: number = COUNT + #joined()\nprint(n, m)\n",
+    )
+    .unwrap();
+
+    let config = alloy::config::Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::flux_project(&dir, &config).unwrap();
+    assert!(report.is_clean(), "{:?}", report.diagnostics);
+
+    if alloy::typecheck::find_luau_lsp(&config.flux).is_none() {
+        eprintln!("skipped: luau-lsp is not installed");
+
+        return;
+    }
+
+    let analysis = alloy::typecheck::analyze(&dir, &config, &report.checks, &report.dep_artifacts)
+        .expect("the type check runs");
+    let errors: Vec<String> = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| d.is_error())
+        .map(|d| format!("{}:{} {}", d.rel.display(), d.line, d.message))
+        .collect();
+
+    assert_eq!(
+        errors,
+        vec!["use.aly:3 Expected this to be 'number', but got 'string'".to_string()]
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/*
+A provider that holds a struct with HashMaps, through a field typed in
+another module, checks clean. The check artifact wrote an `any` default
+into the field and returned an `any` as the struct, and luau-lsp solved
+the whole class of the field for each one. Three reports of its limit
+came back (LANG_BUGS 117). A default of the wrong type still reports.
+*/
+#[test]
+fn a_provider_that_holds_hashmaps_checks_clean() {
+    let dir = std::env::temp_dir().join(format!("alloy-held-maps-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let files = [
+        ("alloy.toml", "[build]\nin = \"src\"\nout = \"build\"\n"),
+        (
+            "src/use.aly",
+            "--- Any provider by name, as Forge.use gives it.\nexport function use(name: string) -> any\n  return name\nend\n",
+        ),
+        (
+            "src/chests.aly",
+            "import { HashMap } from '@alloy/std/collections'\n\n--- The chests.\nexport struct Chests\n  m0: HashMap<number, { number }> = new HashMap()\n  m1: HashMap<number, { number }> = new HashMap()\nend\n",
+        ),
+        (
+            "src/world.aly",
+            "import { HashMap } from '@alloy/std/collections'\nimport { Chests } from './chests'\n\n--- An open world.\nexport struct Open\n  chests: Chests\nend\n\n--- Holds the world.\nexport struct WorldProvider\n  private open: Open? = nil\n  private h0: HashMap<string, { number }> = new HashMap()\n  private h1: HashMap<string, { number }> = new HashMap()\n  private h2: HashMap<string, { number }> = new HashMap()\nend\n",
+        ),
+        (
+            "src/session.aly",
+            "import { use } from './use'\nimport { WorldProvider } from './world'\n\n--- Holds a provider.\nexport struct SessionProvider\n  private worlds: WorldProvider = use('WorldProvider')\nend\n",
+        ),
+        (
+            "src/bad.aly",
+            "--- A default of the wrong type.\nexport struct Bad\n  n: number = 'no'\nend\n",
+        ),
+    ];
+
+    for (path, text) in files {
+        std::fs::write(dir.join(path), text).unwrap();
+    }
+
+    let config = alloy::config::Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::flux_project(&dir, &config).unwrap();
+    assert!(report.is_clean(), "{:?}", report.diagnostics);
+
+    if alloy::typecheck::find_luau_lsp(&config.flux).is_none() {
+        eprintln!("skipped: luau-lsp is not installed");
+
+        return;
+    }
+
+    let analysis = alloy::typecheck::analyze(&dir, &config, &report.checks, &report.dep_artifacts)
+        .expect("the type check runs");
+    let errors: Vec<String> = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| d.is_error())
+        .map(|d| format!("{}:{} {}", d.rel.display(), d.line, d.message))
+        .collect();
+
+    assert_eq!(
+        errors,
+        vec!["bad.aly:2 Expected this to be 'number', but got 'string'".to_string()]
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/*
+A limit of the Luau compiler fails the module at load in Roblox, and
+nothing else saw it: the build, the analyzer, and `luau-compile --null`
+passed. The ship goes through the compiler, and a limit reports at the
+line of the declaration that crosses it. The check counts a local that
+holds a constant, as Studio did, where `luau-compile` folds it away.
+*/
+#[test]
+fn a_luau_compiler_limit_reports_at_its_declaration() {
+    let compile = |src: &str| {
+        alloy::compile_file(
+            "limits.aly",
+            src,
+            &alloy::EmitOptions::default(),
+            None,
+            None,
+        )
+        .unwrap()
+        .diagnostics
+        .into_iter()
+        .map(|d| {
+            let (line, _) = alloy::directives::line_col(src, d.start as usize);
+
+            (line, alloy::docs::kind_for(&d.message), d.message)
+        })
+        .collect::<Vec<_>>()
+    };
+
+    let mut locals = String::from("local function many(): number\n");
+
+    for i in 0..210 {
+        // `const` too: the compiler here reads it as `local`.
+        locals.push_str(&format!("    const v{i} = tostring({i})\n"));
+    }
+
+    locals.push_str("    return #v0 + #v209\nend\nprint(many())\n");
+    let got = compile(&locals);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0].0, 202, "{got:?}");
+    assert_eq!(got[0].1, "LuauLimit");
+    assert!(
+        got[0].2.starts_with("Luau cannot compile this module: out of local registers when trying to allocate `v200`: exceeded limit 200; one function holds at most 200 locals"),
+        "{got:?}"
+    );
+
+    // Locals that each hold a constant count too: Studio refused a
+    // module of 219 of them.
+    let folded: String = (0..210).map(|i| format!("local k{i} = {i}\n")).collect();
+    let got = compile(&(folded + "print(k0, k209)\n"));
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0].0, 201, "{got:?}");
+
+    let mut upvalues = String::new();
+
+    for i in 0..210 {
+        upvalues.push_str(&format!("local u{i} = tostring({i})\n"));
+    }
+
+    let reads: Vec<String> = (0..210).map(|i| format!("#u{i}")).collect();
+    upvalues.push_str(&format!(
+        "local function wide(): number\n    return {}\nend\nprint(wide())\n",
+        reads.join(" + ")
+    ));
+    let got = compile(&upvalues);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(got[0].2.contains("out of upvalue registers"), "{got:?}");
+    assert!(got[0].2.contains("read some through a table"), "{got:?}");
+}

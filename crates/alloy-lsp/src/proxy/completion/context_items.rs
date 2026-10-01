@@ -1500,6 +1500,48 @@ impl State {
                 ));
             }
 
+            Context::ParallelDo { prefix } => {
+                let from = offset - prefix.len();
+                items.push(word(
+                    "do",
+                    14,
+                    Some("Opens the block that runs in the parallel phase, between `task.desynchronize()` and `task.synchronize()`.".to_string()),
+                    from,
+                ));
+            }
+
+            Context::MessageTail {
+                prefix,
+                after_as,
+                replied,
+            } => {
+                let from = offset - prefix.len();
+
+                // The reply comes before the phase, so it goes first.
+                if !after_as && !replied {
+                    items.push(snippet(
+                        "reply",
+                        "reply(${1})",
+                        14,
+                        "reply(params)",
+                        Some("The answer the handler sends back. The handler takes `respond` after the parameters, and any script binds the answers with `replied`.".to_string()),
+                        from,
+                    ));
+                }
+
+                let label = match after_as {
+                    true => "parallel",
+
+                    false => "as parallel",
+                };
+                items.push(word(
+                    label,
+                    14,
+                    Some("Binds the handler with `BindToMessageParallel`, so it runs in the parallel phase and takes the rules of a `parallel` block.".to_string()),
+                    from,
+                ));
+            }
+
             Context::AfterDo { prefix, filtered } => {
                 let from = offset - prefix.len();
                 items.push(word(
@@ -1771,10 +1813,13 @@ impl State {
             Some(rest) => {
                 let (alias, tail) = rest.split_once('/').unwrap_or((rest, ""));
 
-                project_aliases(dir, self.root.as_deref())
-                    .into_iter()
+                self.aliases
+                    .borrow_mut()
+                    .entry(dir.to_path_buf())
+                    .or_insert_with(|| project_aliases(dir, self.root.as_deref()))
+                    .iter()
                     .find(|(a, _)| a == alias)
-                    .map(|(_, base)| imports::lexical(&base, tail))
+                    .map(|(_, base)| imports::lexical(base, tail))
             }
 
             None => Some(imports::lexical(dir, spec)),
@@ -2750,6 +2795,7 @@ fn attribute_target_doc(target: &str) -> Option<&'static str> {
         "field" => "A field of a struct.",
         "param" => "A parameter, on a function or a remote.",
         "remote" => "A remote declaration.",
+        "message" => "A message declaration.",
         "interface" => "An interface declaration.",
         "type" => "A type alias.",
         "local" => "A local or const binding.",

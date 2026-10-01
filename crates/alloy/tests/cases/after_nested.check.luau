@@ -22,4 +22,4 @@ task.delay(0, function()
     end
 end)
 
-print(schedule, armed)
+print(schedule, armed) return nil

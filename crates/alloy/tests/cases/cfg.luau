@@ -33,4 +33,4 @@ if __alloy.cfg.client() then if verbose then
     print(verbose)
 end end
 
-print(save, hud, key, store, verbose)
+print(save, hud, key, store, verbose) return nil

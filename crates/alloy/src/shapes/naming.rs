@@ -430,12 +430,16 @@ pub(crate) fn name_of_body(body: &str, known: &Known) -> Option<String> {
 
     // An interface prints as what it extends, met with a table of the
     // fields it adds; the source wrote one name.
-    if let Some(iface) = known
-        .interfaces
-        .iter()
-        .find(|i| i.matches(trimmed, &known.interfaces))
-    {
-        return Some(iface.name.clone());
+    if !known.interfaces.is_empty() {
+        let printed = super::Printed::of(trimmed);
+
+        if let Some(iface) = known
+            .interfaces
+            .iter()
+            .find(|i| i.matches(&printed, &known.interfaces))
+        {
+            return Some(iface.name.clone());
+        }
     }
 
     // A plain `local X = { }` table. No type names it, so the analyzer

@@ -9,4 +9,4 @@ local Counter = {}
     end Counter.bump = Counter_bump
 
 
-print(Counter.bump())
+print(Counter.bump()) return nil

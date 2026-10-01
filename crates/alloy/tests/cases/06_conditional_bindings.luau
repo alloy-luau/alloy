@@ -87,4 +87,4 @@ local function name_of(job: Job): string
     return model_name
 end
 
-print(pick, name, greet, run, first_name, name_of)
+print(pick, name, greet, run, first_name, name_of) return nil

@@ -9,6 +9,7 @@ mod enums;
 mod messages;
 mod metatables;
 mod naming;
+mod packages;
 mod receivers;
 mod results;
 mod strings;
@@ -23,6 +24,9 @@ use arrays::{
 use enums::{fold_enum_unions, fold_enums, fold_variant_tables};
 use metatables::{fold_empty_metatables, fold_metatable_groups};
 use naming::name_of_body;
+pub use packages::PackageAlias;
+use packages::fold_package_aliases;
+pub(crate) use packages::module_aliases;
 use receivers::{fold_call_receivers, fold_temp_receiver};
 use results::{
     drop_result_methods, fold_cut_results, fold_inline_result_methods, fold_lite_results,
@@ -52,6 +56,9 @@ pub struct Known {
     /// analyzer has no name for one, so a print of the whole shape as
     /// `self` reads back as `typeof(X)`.
     pub tables: Vec<(String, Vec<String>)>,
+    /// The record aliases of the Luau modules a file reaches, under the
+    /// names the file reads them by. A tie goes to the first.
+    pub aliases: Vec<PackageAlias>,
 }
 
 /// An interface a source declares: the interfaces it extends and the
@@ -258,20 +265,24 @@ fn declared_interfaces(source: &str) -> Vec<Interface> {
     out
 }
 
-impl Interface {
-    /// Whether a printed type is this interface: the bases it extends,
-    /// met with a table of the fields it adds, or one table holding
-    /// every field, the bases' included.
-    fn matches(&self, text: &str, all: &[Interface]) -> bool {
+/*
+A printed type as the interface match reads it: the bases it names and
+the keys of its tables, each sorted.
+
+A fold holds one print against every interface the document reaches.
+The editor's list held 429 of them on Strata, and a read of the print
+for each one took 400 ms for the 28 KB type of `Enum`.
+*/
+struct Printed {
+    bases: Vec<String>,
+    keys: Vec<String>,
+    marks: bool,
+}
+
+impl Printed {
+    fn of(text: &str) -> Self {
         let mut bases: Vec<String> = Vec::new();
         let mut keys: Vec<String> = Vec::new();
-
-        // `Readonly<Ent>` prints `{ read id: number, read name: string }`.
-        // The alias `Ent` marks no field, so the mapped form is not it,
-        // and `fold_aliases` names it after this fold declines.
-        if self.alias && marks_a_member(text) {
-            return false;
-        }
 
         for part in split_intersection(text) {
             match part.starts_with('{') {
@@ -284,26 +295,50 @@ impl Interface {
             }
         }
 
-        let mut wanted: Vec<String> = self.bases.clone();
-        wanted.sort();
         bases.sort();
         keys.sort();
 
-        if self.name.is_empty() || keys.is_empty() {
+        Self {
+            bases,
+            keys,
+            marks: marks_a_member(text),
+        }
+    }
+}
+
+impl Interface {
+    /// Whether a printed type is this interface: the bases it extends,
+    /// met with a table of the fields it adds, or one table holding
+    /// every field, the bases' included.
+    fn matches(&self, printed: &Printed, all: &[Interface]) -> bool {
+        // `Readonly<Ent>` prints `{ read id: number, read name: string }`.
+        // The alias `Ent` marks no field, so the mapped form is not it,
+        // and `fold_aliases` names it after this fold declines.
+        if self.alias && printed.marks {
             return false;
         }
 
+        if self.name.is_empty() || printed.keys.is_empty() {
+            return false;
+        }
+
+        let mut wanted: Vec<String> = self.bases.clone();
+        wanted.sort();
         let mut own = self.fields.clone();
         own.sort();
 
-        if bases == wanted && keys == own {
+        if printed.bases == wanted && printed.keys == own {
             return true;
+        }
+
+        if !printed.bases.is_empty() {
+            return false;
         }
 
         let mut every = self.inherited(all);
         every.sort();
 
-        bases.is_empty() && keys == every
+        printed.keys == every
     }
 
     /// Every field the interface carries: the bases' fields and its own.
@@ -444,6 +479,18 @@ fn split_intersection(text: &str) -> Vec<&str> {
 
 /// Folds every string of a JSON value, in place.
 pub fn fold_value(value: &mut Value, known: &Known) {
+    // The editor's list names a namespace once for each document that
+    // reaches it: 800 entries for 118 names on Strata. The test below
+    // ran each one over every string of a 1,100-row completion list,
+    // for 100 ms; the names once each take 27 ms.
+    let mut emitted: Vec<&str> = known.namespaces.iter().map(|(e, _)| e.as_str()).collect();
+    emitted.sort_unstable();
+    emitted.dedup();
+
+    fold_strings(value, known, &emitted);
+}
+
+fn fold_strings(value: &mut Value, known: &Known, emitted: &[&str]) {
     match value {
         Value::String(s) => {
             if s.contains(" & ")
@@ -463,18 +510,23 @@ pub fn fold_value(value: &mut Value, known: &Known) {
                 || s.contains("ResultErr")
                 || s.contains("Result2<")
                 || s.contains("Result3<")
-                || known
-                    .namespaces
-                    .iter()
-                    .any(|(emitted, _)| s.contains(emitted.as_str()))
+                || emitted.iter().any(|e| s.contains(e))
             {
                 *s = fold(s, known);
+            } else if s.contains('{') {
+                // The alias fold alone: a print with none of the marks
+                // above holds nothing the other folds read.
+                fold_package_aliases(s, known);
             }
         }
 
-        Value::Array(items) => items.iter_mut().for_each(|i| fold_value(i, known)),
+        Value::Array(items) => items
+            .iter_mut()
+            .for_each(|i| fold_strings(i, known, emitted)),
 
-        Value::Object(map) => map.values_mut().for_each(|v| fold_value(v, known)),
+        Value::Object(map) => map
+            .values_mut()
+            .for_each(|v| fold_strings(v, known, emitted)),
 
         _ => {}
     }
@@ -642,6 +694,7 @@ pub fn fold(text: &str, known: &Known) -> String {
                     .cloned()
                     .collect(),
                 namespaces: known.namespaces.clone(),
+                aliases: Vec::new(),
             };
 
             &narrowed
@@ -666,6 +719,7 @@ pub fn fold(text: &str, known: &Known) -> String {
                 shapes: known.shapes.clone(),
                 interfaces: known.interfaces.clone(),
                 namespaces: known.namespaces.clone(),
+                aliases: known.aliases.clone(),
             };
 
             &without_tables
@@ -798,6 +852,9 @@ pub fn fold(text: &str, known: &Known) -> String {
     fold_namespace_names(&mut out, known);
     fold_full_views(&mut out, known);
     fold_rig_characters(&mut out);
+    // Before the interfaces, which match a record by its keys alone: an
+    // alias the package writes out in full is the closer name.
+    fold_package_aliases(&mut out, known);
     fold_interfaces(&mut out, known);
     fold_bound_records(&mut out, known);
     // Before the parentheses fold: `(Player & { ... }) | Player` keeps
@@ -1622,12 +1679,12 @@ fn fold_bound_records(text: &mut String, known: &Known) {
         let Some(len) = balanced_len(&text[open..]) else {
             break;
         };
-        let body = text[open..open + len].to_string();
+        let printed = Printed::of(&text[open..open + len]);
 
         match known
             .interfaces
             .iter()
-            .find(|f| f.is_trait && f.matches(&body, &known.interfaces))
+            .find(|f| f.is_trait && f.matches(&printed, &known.interfaces))
         {
             Some(iface) => {
                 let name = iface.name.clone();
@@ -1665,12 +1722,12 @@ fn fold_interfaces(text: &mut String, known: &Known) {
         }
 
         let len = intersection_len(&text[start..]).expect("intersection");
-        let body = text[start..start + len].to_string();
+        let printed = Printed::of(&text[start..start + len]);
 
         match known
             .interfaces
             .iter()
-            .find(|f| f.matches(&body, &known.interfaces))
+            .find(|f| f.matches(&printed, &known.interfaces))
         {
             Some(iface) => {
                 let name = iface.name.clone();
@@ -2333,6 +2390,7 @@ mod tests {
             interfaces: interfaces(source),
             namespaces: Vec::new(),
             tables: Vec::new(),
+            aliases: Vec::new(),
         };
 
         assert_eq!(
@@ -2418,6 +2476,7 @@ mod tests {
             shapes: Vec::new(),
             namespaces: Vec::new(),
             tables: Vec::new(),
+            aliases: Vec::new(),
         };
 
         // The alias marks no field, so the `Readonly` print is not it,
@@ -2464,6 +2523,7 @@ mod tests {
             shapes: Vec::new(),
             namespaces: Vec::new(),
             tables: Vec::new(),
+            aliases: Vec::new(),
         };
         let printed = "local all: {\n        level: number,\n        name: string\n    }[]";
 
@@ -2676,6 +2736,7 @@ mod tests {
             ],
             namespaces: Vec::new(),
             tables: Vec::new(),
+            aliases: Vec::new(),
         }
     }
 
@@ -2746,6 +2807,7 @@ mod tests {
             }],
             namespaces: Vec::new(),
             tables: Vec::new(),
+            aliases: Vec::new(),
         };
         let text = "local held: t1 where t1 = {\n    read bump: (self: t1, n: number) -> number,\n    count: number,\n    read get: (self: t1) -> number,\n    value: number\n}";
         assert_eq!(fold(text, &known), "local held: Slotted<number>");
@@ -2766,6 +2828,7 @@ mod tests {
             }],
             namespaces: Vec::new(),
             tables: Vec::new(),
+            aliases: Vec::new(),
         };
         let text = "local g: {\n    data: unknown?,\n    phase: number\n}";
         assert_eq!(fold(text, &known), "local g: Scheduler<unknown>");
@@ -2796,6 +2859,7 @@ mod tests {
             ),
             namespaces: Vec::new(),
             tables: Vec::new(),
+            aliases: Vec::new(),
         };
         assert_eq!(fold(text, &known), ": Swinger");
 
@@ -3161,6 +3225,7 @@ mod tests {
             ],
             namespaces: Vec::new(),
             tables: Vec::new(),
+            aliases: Vec::new(),
         };
         let text = "local function describe(event: { _1: Player, _2: Vector3, tag: \"Spawn\" } | { _1: Player, _2: { _1: number, _2: number, tag: \"Rect\" } | { _1: number, tag: \"Circle\" }, tag: \"Hit\" } | { _1: Player, tag: \"Leave\" }): string";
         assert_eq!(
@@ -3186,6 +3251,7 @@ mod tests {
             }],
             namespaces: Vec::new(),
             tables: Vec::new(),
+            aliases: Vec::new(),
         };
         let inside = "function buy(id: string): Result<\"None\" | { _1: number, tag: \"Coins\" } | { _1: number, tag: \"Strength\" }, string>";
         assert_eq!(

@@ -1,7 +1,7 @@
-local __alloy = require("@alloy") local Slotted = {} Slotted.__index = Slotted function Slotted.__new<T>(f: { value: T, count: number? }): Slotted<T> if f.count == nil then f.count = 1 end return (setmetatable(f, Slotted) :: any) end
+local __alloy = require("@alloy") local Slotted = {} Slotted.__index = Slotted function Slotted.__new<T>(f: { value: T, count: number? }): Slotted<T> if f.count == nil then local _count: number = 1 f.count = _count end return ((setmetatable(f, Slotted) :: any) :: Slotted<T>) end
 
 
- export type Slotted<T> = { value: T, count: number, read get: (self: Slotted<T>) -> T, read bump: (self: Slotted<T>, n: number) -> number } Slotted.__tostring = function(s) return __alloy.show_struct("Slotted", s, { "value", "count" }) end
+ export type Slotted<T> = { value: T, count: number, read get: (self: Slotted<T>) -> T, read bump: (self: Slotted<T>, n: number) -> number } Slotted.__tostring = function(s) return __alloy.show_struct("Slotted", (s :: any), { "value", "count" }) end
 
 do
 	function Slotted.new<T>(value: T): Slotted<T>
@@ -18,10 +18,10 @@ do
 	end
 end
 
-local Pair = {} Pair.__index = Pair function Pair.__new<A, B>(f: { left: A, right: B }): Pair<A, B>  return (setmetatable(f, Pair) :: any) end function Pair.new<A, B>(f: { left: A, right: B }): Pair<A, B> return Pair.__new(f) end
+local Pair = {} Pair.__index = Pair function Pair.__new<A, B>(f: { left: A, right: B }): Pair<A, B>  return ((setmetatable(f, Pair) :: any) :: Pair<A, B>) end function Pair.new<A, B>(f: { left: A, right: B }): Pair<A, B> return Pair.__new(f) end
 
 
- type Pair<A, B> = { left: A, right: B, read swap: (self: Pair<A, B>) -> B } Pair.__tostring = function(s) return __alloy.show_struct("Pair", s, { "left", "right" }) end
+ type Pair<A, B> = { left: A, right: B, read swap: (self: Pair<A, B>) -> B } Pair.__tostring = function(s) return __alloy.show_struct("Pair", (s :: any), { "left", "right" }) end
 
 do
 	function Pair.swap<A, B>(self: Pair<A, B>): B
@@ -29,10 +29,10 @@ do
 	end
 end
 
-local Swap = {} Swap.__index = Swap function Swap.__new<A, B>(f: { left: A, right: B }): Swap<A, B>  return (setmetatable(f, Swap) :: any) end function Swap.new<A, B>(f: { left: A, right: B }): Swap<A, B> return Swap.__new(f) end
+local Swap = {} Swap.__index = Swap function Swap.__new<A, B>(f: { left: A, right: B }): Swap<A, B>  return ((setmetatable(f, Swap) :: any) :: Swap<A, B>) end function Swap.new<A, B>(f: { left: A, right: B }): Swap<A, B> return Swap.__new(f) end
 
 
- type Swap<A, B> = typeof(setmetatable({} :: { left: A, right: B }, Swap)) Swap.__tostring = function(s) return __alloy.show_struct("Swap", s, { "left", "right" }) end
+ type Swap<A, B> = typeof(setmetatable({} :: { left: A, right: B }, Swap)) Swap.__tostring = function(s) return __alloy.show_struct("Swap", (s :: any), { "left", "right" }) end
 
 do
 	function Swap.flip<A, B>(self: Swap<A, B>): Swap<B, A>
@@ -44,9 +44,9 @@ local Loud = {} type Loud = { read shout: (self: any) -> string } Loud.shout = (
 
 
 
-local Voiced = {} Voiced.__index = Voiced function Voiced.__new<T>(f: { value: T }): Voiced<T>  return (setmetatable(f, Voiced) :: any) end function Voiced.new<T>(f: { value: T }): Voiced<T> return Voiced.__new(f) end
+local Voiced = {} Voiced.__index = Voiced function Voiced.__new<T>(f: { value: T }): Voiced<T>  return ((setmetatable(f, Voiced) :: any) :: Voiced<T>) end function Voiced.new<T>(f: { value: T }): Voiced<T> return Voiced.__new(f) end
 
- type Voiced<T> = typeof(setmetatable({} :: { value: T }, Voiced)) Voiced.__tostring = function(s) return __alloy.show_struct("Voiced", s, { "value" }) end
+ type Voiced<T> = typeof(setmetatable({} :: { value: T }, Voiced)) Voiced.__tostring = function(s) return __alloy.show_struct("Voiced", (s :: any), { "value" }) end
 
 do
 	function Voiced.shout<T>(self: Voiced<T>): string

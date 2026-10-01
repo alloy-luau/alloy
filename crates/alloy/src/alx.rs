@@ -149,9 +149,23 @@ pub fn compile_alx(
             .any(|r| r.out_start <= at as usize && (at as usize) < r.out_end)
     };
     let written: String = src.split_whitespace().collect::<Vec<_>>().join(" ");
+    // A rewrite over bytes the author wrote is about the author's code,
+    // even when its message quotes the new form: `UDim2.new` in
+    // `Size={UDim2.new(1, 0)}` is copied from the source, and
+    // `new UDim2` lands there.
+    let authored = |l: &crate::lint::Lint| {
+        let mut back = [l.clone()];
+        crate::lint::to_source(&mut back, src, &lowering);
+
+        back[0].fix.is_some()
+            && l.fix
+                .iter()
+                .flat_map(|f| f.edits())
+                .all(|e| !lowering.is_generated(e.start))
+    };
 
     output.lints.retain(|l| {
-        if !in_markup(l.start) {
+        if !in_markup(l.start) || authored(l) {
             return true;
         }
 
@@ -1372,6 +1386,54 @@ mod tests {
             naming,
             ["`Count` is a function, and functions are snake_case here: `count`"]
         );
+    }
+
+    /// `X.new(...)` in an attribute and in a child hole is the author's
+    /// code, copied into the lowering, so `prefer_new` reports it and
+    /// its rewrite lands on the source. The markup emits the same Luau
+    /// after the rewrite. A call an ingot wrote stays quiet.
+    #[test]
+    fn prefer_new_reads_the_markup_holes() {
+        let src = "local function create(n: string, p: any, ...: any): any return n end\nreturn <Frame Size={UDim2.new(1, 0, 0, 24)}>\n    {Vector2.new(1, 2)}\n</Frame>\n";
+        let mut config = luaux::Config::bare();
+        config.create = "create".to_string();
+        let compile = |src: &str, options: &EmitOptions| {
+            compile_alx(src, options, config.clone())
+                .expect("the markup compiles")
+                .output
+        };
+        let out = compile(src, &EmitOptions::default());
+        let hits: Vec<&str> = out
+            .lints
+            .iter()
+            .filter(|l| l.name == "prefer_new")
+            .map(|l| &src[l.start as usize..l.end as usize])
+            .collect();
+
+        assert_eq!(hits, ["UDim2.new", "Vector2.new"]);
+
+        let (fixed, n) = crate::lint::apply_fixes(src, &out.lints);
+        let want = src
+            .replace("UDim2.new(", "new UDim2(")
+            .replace("Vector2.new(", "new Vector2(");
+
+        assert_eq!((fixed.as_str(), n), (want.as_str(), 2));
+        assert_eq!(compile(&fixed, &EmitOptions::default()).ship, out.ship);
+
+        // The same call, written by an ingot.
+        let at = src.find("UDim2.new").expect("the call") as u32;
+        let options = EmitOptions {
+            generated: vec![(at, at + "UDim2.new(1, 0, 0, 24)".len() as u32)],
+            ..EmitOptions::default()
+        };
+        let hits: Vec<u32> = compile(src, &options)
+            .lints
+            .iter()
+            .filter(|l| l.name == "prefer_new")
+            .map(|l| l.start)
+            .collect();
+
+        assert_eq!(hits, [src.find("Vector2.new").expect("the hole") as u32]);
     }
 
     /// A lint message quotes the markup the author wrote, not the

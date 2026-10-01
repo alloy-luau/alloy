@@ -33,6 +33,18 @@ function alloy.prop(v: any): any
 	return v
 end
 
+--- `a ?? b` where a closure around `a` would lose the narrowing of a
+--- local: an argument after one that reads a value, or an operand that
+--- runs on some paths only. The emit calls it only for a `b` that is a
+--- literal or a name, which is the same whether it runs or not.
+function alloy.coalesce<A, B>(value: A?, default: B): A | B
+	if value == nil then
+		return default
+	end
+
+	return value
+end
+
 local function show_list(values: { any }, open: string, close: string): string
 	if #values == 0 then
 		return open .. close
@@ -1069,7 +1081,12 @@ function Array.from<T>(t: { T }): Array<T>
 	return (setmetatable(t, Array) :: any) :: Array<T>
 end
 
-function Array.new<T>(): Array<T>
+-- `new Array(t)` is `Array.from(t)`. A dropped `t` gave an empty array
+-- that no report named.
+function Array.new<T>(t: { T }?): Array<T>
+	if t then
+		return Array.from(t)
+	end
 	return (setmetatable({}, Array) :: any) :: Array<T>
 end
 
@@ -1268,7 +1285,11 @@ export type HashMap<K, V> = typeof(setmetatable({} :: {
 local HashMap = {}
 HashMap.__index = HashMap
 
-function HashMap.new<K, V>(): HashMap<K, V>
+-- `new HashMap(t)` is `HashMap.from(t)`, as with `Array.new`.
+function HashMap.new<K, V>(t: { [K]: V }?): HashMap<K, V>
+	if t then
+		return HashMap.from(t)
+	end
 	return (setmetatable({ _items = {}, _count = 0 }, HashMap) :: any) :: HashMap<K, V>
 end
 
@@ -1524,7 +1545,11 @@ export type R6Character = Model & {
 local Set = {}
 Set.__index = Set
 
-function Set.new<T>(): Set<T>
+-- `new Set(list)` is `Set.from(list)`, as with `Array.new`.
+function Set.new<T>(t: { T }?): Set<T>
+	if t then
+		return Set.from(t)
+	end
 	return (setmetatable({ _items = {}, _count = 0 }, Set) :: any) :: Set<T>
 end
 
@@ -2137,7 +2162,12 @@ Queue.__index = Queue
 -- The slots are 1 to `_cap`, and the front sits at `_head`. A queue
 -- that slid its indices up and never emptied pushed its keys out of
 -- the array part, and ran 10x slower than this ring.
-function Queue.new<T>(): Queue<T>
+--
+-- `new Queue(list)` is `Queue.from(list)`, as with `Array.new`.
+function Queue.new<T>(t: { T }?): Queue<T>
+	if t then
+		return Queue.from(t)
+	end
 	return (setmetatable({ _items = {}, _head = 1, _len = 0, _cap = 0 }, Queue) :: any) :: Queue<T>
 end
 
@@ -3959,6 +3989,67 @@ function wire.check(layout: { any }, args: { any }, name: string?)
 end
 
 alloy.wire = wire
+
+--- `Step.once(handler)` of a message. The engine has no one-shot bind,
+--- so the first message disconnects the binding, then runs the handler.
+function alloy.message_once(actor: Actor, topic: string, parallel: boolean, handler: (...any) -> ()): RBXScriptConnection
+	local connection: RBXScriptConnection
+	local function first(...)
+		connection:Disconnect()
+		handler(...)
+	end
+	connection = if parallel then actor:BindToMessageParallel(topic, first) else actor:BindToMessage(topic, first)
+	return connection
+end
+
+--- The table of a message with a `reply`. Each Luau VM holds its own
+--- copy, and `replied` makes the BindableEvent of that VM on its first
+--- call. `fire` sends the event after the `count` arguments. Before any
+--- `replied`, no script of the VM listens, so `fire` sends nil and the
+--- worker's `respond` does nothing.
+function alloy.message(topic: string, count: number): any
+	local event: BindableEvent? = nil
+	local message = { topic = topic }
+
+	function message.fire(actor: Actor, ...: any)
+		local args = table.pack(...)
+		args[count + 1] = event
+		actor:SendMessage(topic, table.unpack(args, 1, count + 1))
+	end
+
+	function message.replied(handler: (...any) -> ()): RBXScriptConnection
+		if event == nil then
+			event = Instance.new("BindableEvent")
+		end
+
+		return (event :: BindableEvent).Event:Connect(handler)
+	end
+
+	return message
+end
+
+--- The handler of a message with a `reply`. The engine passes the
+--- event after the `count` arguments, and the handler takes `respond`
+--- in its place. A BindableEvent fires only in the serial phase, so the
+--- `respond` of a parallel handler synchronizes first.
+function alloy.message_respond(handler: (...any) -> (), count: number, parallel: boolean): (...any) -> ()
+	return function(...: any)
+		local args = table.pack(...)
+		local event = args[count + 1] :: BindableEvent?
+		args[count + 1] = function(...: any)
+			if event == nil then
+				return
+			end
+
+			if parallel then
+				task.synchronize()
+			end
+
+			event:Fire(...)
+		end
+		handler(table.unpack(args, 1, count + 1))
+	end
+end
 
 function alloy.remote(spec: any): Remote
 	local is_function = spec.kind == "function"

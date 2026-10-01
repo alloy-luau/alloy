@@ -139,7 +139,7 @@ impl Server {
                     .or_else(|| module_hover(&doc.source, &word, path.as_deref(), &aliases, quoted))
             });
 
-        let Some(answer) = answer else {
+        let Some(answer) = answer.map(|a| with_return_arrows(&a)) else {
             return false;
         };
 
@@ -185,8 +185,10 @@ pub(crate) fn shadows_an_import(source: &str, word: &str, start: usize) -> bool 
             .any(|l| l.name == word)
 }
 
-/// The hover of a `remote`: the declaration as the source wrote it,
-/// with the comment above it.
+/// The hover of a `remote` or a `message`: the declaration as the
+/// source wrote it, with the comment above it. The child sees the
+/// table the emit binds, and its type names the calls, not the
+/// declaration.
 pub(crate) fn remote_hover(source: &str, word: &str) -> Option<String> {
     let mut at = 0;
 
@@ -194,7 +196,10 @@ pub(crate) fn remote_hover(source: &str, word: &str) -> Option<String> {
         let text = line.trim();
         let head = text.strip_prefix("export ").unwrap_or(text);
 
-        if let Some(rest) = head.strip_prefix("remote ") {
+        if let Some(rest) = head
+            .strip_prefix("remote ")
+            .or_else(|| head.strip_prefix("message "))
+        {
             let rest = rest.strip_prefix("function ").unwrap_or(rest);
             let name: String = rest
                 .chars()

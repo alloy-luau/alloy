@@ -346,3 +346,34 @@ fn a_namespace_level_call_above_the_member_reports() {
         )]
     );
 }
+
+/// A parameter list without a body declares names and reads none:
+/// `message A(f: number)` reported the `f` as a use of the function
+/// below it. A default is an expression, so it stays a use.
+#[test]
+fn a_parameter_list_without_a_body_reads_no_name() {
+    let src = "message A(f: number) reply(f: number) as parallel\nremote B(f: number) from client\nremote function C(f: number) -> number from client\nattribute d(f: number) on field\ntrait T\n    function m(self, f: number): number\nend\ninterface I\n    f: (f: number) -> ()\nend\n\nlocal function f() end\nlocal function reply() end\nlocal function parallel() end\nlocal function client() end\nlocal function field() end\nprint(f, reply, parallel, client, field)\n";
+    let out = compile(src);
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+    let options = alloy::EmitOptions {
+        file_name: "decl.d.aly".to_string(),
+        definitions: true,
+        ..alloy::EmitOptions::default()
+    };
+    let src = "declare function greet(f: number): ()\n\nlocal function f() end\n";
+    let out = alloy::compile_with(src, &options).unwrap();
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+    let src =
+        "remote B(n: number = g()) from client\n\nlocal function g(): number\n    return 1\nend\n";
+    let messages: Vec<String> = compile(src)
+        .diagnostics
+        .iter()
+        .map(|d| d.message.clone())
+        .collect();
+    assert_eq!(
+        messages,
+        vec!["`g` is declared below this use; move the function above it".to_string()]
+    );
+}

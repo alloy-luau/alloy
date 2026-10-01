@@ -29,6 +29,9 @@ pub fn remap(data: &[u64], doc: &Doc, types: &[String], modifiers: &[String]) ->
     let mut start = 0u64;
     let mut tokens: Vec<Token> = Vec::new();
     let copies = macro_copies(doc, out);
+    let keys = table_keys(&doc.shadow);
+    let callable = [type_index(types, "function"), type_index(types, "method")];
+    let property = type_index(types, "property");
 
     for t in data.chunks_exact(5) {
         let (dl, ds, len, kind, mods) = (t[0], t[1], t[2], t[3], t[4]);
@@ -72,6 +75,15 @@ pub fn remap(data: &[u64], doc: &Doc, types: &[String], modifiers: &[String]) ->
             continue;
         }
 
+        // The child types a key by its value, so `title = Rising(Title)`
+        // painted the key as a function. A key of a table is a property
+        // whatever it holds, as `count = 5` is.
+        let kind = match property {
+            Some(p) if keys.contains(&first) && callable.contains(&Some(kind)) => p,
+
+            _ => kind,
+        };
+
         let (sl, sc) = doc.to_source(l, s);
         tokens.push((sl, sc, len, kind, mods));
     }
@@ -101,6 +113,43 @@ pub fn remap(data: &[u64], doc: &Doc, types: &[String], modifiers: &[String]) ->
     }
 
     encoded
+}
+
+/// The byte of each key of a table constructor in the shadow: a name
+/// with `=` after it that opens an entry, right after the `{` or a `,`
+/// or `;` of a table.
+fn table_keys(shadow: &str) -> std::collections::HashSet<usize> {
+    let mut keys = std::collections::HashSet::new();
+    let Ok(lexed) = alloy_syntax::lexer::lex(shadow) else {
+        return keys;
+    };
+    let toks = &lexed.toks;
+    let text = |i: usize| &shadow[toks[i].start as usize..toks[i].end as usize];
+    let mut open: Vec<&str> = Vec::new();
+
+    for i in 0..toks.len() {
+        match text(i) {
+            "{" | "(" | "[" => open.push(text(i)),
+
+            "}" | ")" | "]" => {
+                open.pop();
+            }
+
+            _ => {}
+        }
+
+        if toks[i].kind == TokKind::Ident
+            && open.last() == Some(&"{")
+            && i >= 1
+            && matches!(text(i - 1), "{" | "," | ";")
+            && i + 1 < toks.len()
+            && text(i + 1) == "="
+        {
+            keys.insert(toks[i].start as usize);
+        }
+    }
+
+    keys
 }
 
 /// The code copy of each macro argument. `$assert(x > 0)` lowers to
@@ -249,8 +298,8 @@ fn declared_word(doc: &Doc, path: &str) -> Option<&'static str> {
 
 /// What `member` draws as when an `impl` of the type at `path` writes
 /// it: `method` with `self` first, as its call sites paint, and
-/// `function` without. The hover of the type lists what its `impl`
-/// blocks write, as `public function describe(self): string`.
+/// `function` without. Each block holds its methods as lines, as
+/// `public function describe(self): string`.
 fn impl_function_kind(doc: &Doc, path: &str, member: &str) -> Option<&'static str> {
     let hover_of = |name: &str| {
         doc.decls
@@ -259,11 +308,18 @@ fn impl_function_kind(doc: &Doc, path: &str, member: &str) -> Option<&'static st
             .find(|d| d.name == name)
             .map(|d| d.hover.as_str())
     };
+    let methods: Vec<&str> = doc
+        .impl_blocks
+        .iter()
+        .chain(doc.import_impl_blocks.iter())
+        .filter(|b| b.target == path)
+        .flat_map(|b| b.methods.iter().map(String::as_str))
+        .collect();
     let hover = hover_of(path)?;
 
     // A default method of a trait the type implements: the `impl` writes
     // no line for it, and the hover of the trait lists it.
-    function_kind(hover, member).or_else(|| {
+    function_kind(&methods.join("\n"), member).or_else(|| {
         let traits = hover
             .lines()
             .find_map(|l| l.trim().strip_prefix("Implements "))?;
@@ -524,11 +580,13 @@ fn alloy_tokens(doc: &Doc, types: &[String], modifiers: &[String]) -> Vec<Token>
         // is a plain name. The child paints no local, so without a token
         // the grammar paints the word as the keyword it spells. A member,
         // `Instance.new`, and a declared name keep the walks below.
+        // `import(...)` is the module import and keeps the keyword color.
         let after = |w: &[&str]| i > 0 && w.contains(&toks[i - 1].text(src));
 
         if alloy_syntax::contextual::is_contextual(text)
             && !after(&[".", ":", "function"])
             && !alloy_syntax::contextual::keyword_at(src, toks, i)
+            && !alloy_syntax::contextual::import_call_at(src, toks, i)
         {
             push(tok.start, tok.end, "variable", 0);
             i += 1;
@@ -536,30 +594,30 @@ fn alloy_tokens(doc: &Doc, types: &[String], modifiers: &[String]) -> Vec<Token>
             continue;
         }
 
-        // The head of a `macro` or an `attribute` declaration. The emit
-        // keeps neither, so the child draws nothing on the line: the
-        // name reads as its call site does, and the list holds
+        // The head of a `macro`, an `attribute`, or a `message`
+        // declaration. The emit keeps none of them as written, so the
+        // child draws nothing on the line: the name reads as its call
+        // site does, a message as the event it is, and the list holds
         // parameters.
-        if matches!(text, "macro" | "attribute")
+        if matches!(text, "macro" | "attribute" | "message")
             && toks.get(i + 1).is_some_and(|n| n.kind == TokKind::Ident)
             && alloy_syntax::contextual::keyword_at(src, toks, i)
         {
             let name = toks[i + 1];
-            push(
-                name.start,
-                name.end,
-                match text {
-                    "macro" => "macro",
+            let (kind, mods) = match text {
+                "macro" => ("macro", 0),
 
-                    _ => "decorator",
-                },
-                0,
-            );
+                "message" => ("event", declaration),
+
+                _ => ("decorator", 0),
+            };
+            push(name.start, name.end, kind, mods);
             i += 2;
 
             // `(x)` and `(min: number, max: number)`: the name that
-            // opens each entry of the list.
-            if toks.get(i).is_some_and(|t| t.kind == TokKind::LParen) {
+            // opens each entry of the list. A message's `reply(...)`
+            // holds a second list; its word keeps the grammar's colour.
+            while toks.get(i).is_some_and(|t| t.kind == TokKind::LParen) {
                 let mut depth = 0i32;
 
                 while let Some(t) = toks.get(i) {
@@ -583,6 +641,15 @@ fn alloy_tokens(doc: &Doc, types: &[String], modifiers: &[String]) -> Vec<Token>
                     if depth == 0 {
                         break;
                     }
+                }
+
+                if text == "message"
+                    && toks.get(i).is_some_and(|t| t.text(src) == "reply")
+                    && alloy_syntax::contextual::keyword_at(src, toks, i)
+                {
+                    i += 1;
+                } else {
+                    break;
                 }
             }
 
@@ -827,6 +894,31 @@ mod tests {
             .collect();
 
         assert_eq!(drawn, [(0, 6), (1, 6), (2, 6), (2, 13)]);
+    }
+
+    /// `import(...)`, `import<<T>>(...)`, and `import "m"` are the module
+    /// import, so they draw nothing and the grammar's keyword color
+    /// shows. A variable token there hid the keyword color. A local
+    /// named `import` still draws as a variable.
+    #[test]
+    fn the_import_call_draws_no_variable() {
+        const SRC: &str = "local a = import(\"./m\")\nlocal b = m is ModuleScript ? import<<unknown>>(m) : nil\nimport \"./m\"\nlocal import = 2\nprint(a, b, import)\n";
+        let doc = Doc::new(
+            SRC.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let types = legend();
+        let variable = type_index(&types, "variable").expect("the type");
+        let drawn: Vec<(u32, u32)> = alloy_tokens(&doc, &types, &[])
+            .into_iter()
+            .filter(|t| t.3 == variable)
+            .map(|t| (t.0, t.1))
+            .collect();
+
+        assert_eq!(drawn, [(3, 6), (4, 12)]);
     }
 
     /// The words of a `match` and of a guard draw as names where they
@@ -1112,6 +1204,83 @@ mod tests {
         );
     }
 
+    /// A `message` declaration draws its name as the event it is and
+    /// its parameters. The keywords draw nothing, so the grammar's colour
+    /// shows, and the words as names draw as variables.
+    #[test]
+    fn a_message_declaration_carries_its_name_and_parameters() {
+        const SRC: &str = concat!(
+            "message Step(dt: number, reply: Actor) as parallel\n",
+            "local message = 1\n",
+            "local parallel = 2\n",
+            "parallel do\n",
+            "end\n",
+        );
+        let doc = Doc::new(
+            SRC.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let types = legend();
+        let modifiers = ["definition".to_string(), "declaration".to_string()];
+        let drawn = alloy_tokens(&doc, &types, &modifiers);
+        let at = |needle: &str| {
+            let (line, column) = position_of(SRC, SRC.find(needle).expect(needle));
+
+            drawn
+                .iter()
+                .find(|t| (t.0, t.1) == (line, column))
+                .map(|t| (types[t.3 as usize].as_str(), t.4))
+        };
+
+        assert_eq!(at("Step("), Some(("event", 2)), "{drawn:?}");
+        assert_eq!(at("dt:"), Some(("parameter", 0)), "{drawn:?}");
+        assert_eq!(at("reply:"), Some(("parameter", 0)), "{drawn:?}");
+        assert_eq!(at("message Step"), None, "{drawn:?}");
+        assert_eq!(at("parallel\n"), None, "{drawn:?}");
+        assert_eq!(at("parallel do"), None, "{drawn:?}");
+        assert_eq!(at("message = 1"), Some(("variable", 0)), "{drawn:?}");
+        assert_eq!(at("parallel = 2"), Some(("variable", 0)), "{drawn:?}");
+    }
+
+    /// `reply(...)` holds parameters too. The word draws nothing, so the
+    /// grammar's keyword colour shows, and a local named `reply` draws
+    /// as the variable it is.
+    #[test]
+    fn a_reply_clause_carries_its_parameters() {
+        const SRC: &str = concat!(
+            "message Light(job: number) reply(done: number, levels: buffer) as parallel\n",
+            "local reply = 1\n",
+        );
+        let doc = Doc::new(
+            SRC.to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let types = legend();
+        let modifiers = ["definition".to_string(), "declaration".to_string()];
+        let drawn = alloy_tokens(&doc, &types, &modifiers);
+        let at = |needle: &str| {
+            let (line, column) = position_of(SRC, SRC.find(needle).expect(needle));
+
+            drawn
+                .iter()
+                .find(|t| (t.0, t.1) == (line, column))
+                .map(|t| (types[t.3 as usize].as_str(), t.4))
+        };
+
+        assert_eq!(at("Light("), Some(("event", 2)), "{drawn:?}");
+        assert_eq!(at("job:"), Some(("parameter", 0)), "{drawn:?}");
+        assert_eq!(at("done:"), Some(("parameter", 0)), "{drawn:?}");
+        assert_eq!(at("levels:"), Some(("parameter", 0)), "{drawn:?}");
+        assert_eq!(at("reply("), None, "{drawn:?}");
+        assert_eq!(at("reply = 1"), Some(("variable", 0)), "{drawn:?}");
+    }
+
     /// The contract body of an `attribute` declaration carries its own
     /// tokens. The emit keeps no attribute, so the child drew nothing on
     /// the clauses: the name and the uses painted, and the body between
@@ -1264,6 +1433,24 @@ mod tests {
         }
 
         assert_eq!(drawn, [("number", 0, 22), ("number", 2, 24)], "{drawn:?}");
+    }
+
+    /// The child types a key by its value, so a key that holds a
+    /// function drew as a function. A table key is a property.
+    #[test]
+    fn a_table_key_is_a_property_whatever_it_holds() {
+        let src = "local t = {\n  title = Rising(Title),\n  count = 5,\n  [k] = 1,\n}\nlocal a, b = f, g\nprint(t.title, x == y)\n";
+        let keys = table_keys(src);
+        let at = |word: &str| src.find(word).unwrap();
+
+        assert!(keys.contains(&at("title =")));
+        assert!(keys.contains(&at("count")));
+        // A call argument, an index key, a second assignment target, and
+        // a comparison are no keys.
+        assert!(!keys.contains(&at("Title")));
+        assert!(!keys.contains(&at("k]")));
+        assert!(!keys.contains(&at("b =")));
+        assert!(!keys.contains(&at("x ==")));
     }
 
     /// An `.alx` file with no markup maps like any other: the tokens

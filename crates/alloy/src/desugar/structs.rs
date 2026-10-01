@@ -642,7 +642,8 @@ impl<'s> Desugar<'s> {
 
         if own != "{}" && !foreign {
             let std = self.std();
-            tail.push_str(&format!(" {std}.attrs({target}, {{ own = {own} }})"));
+            let held = self.attrs_target(&target);
+            tail.push_str(&format!(" {std}.attrs({held}, {{ own = {own} }})"));
         }
 
         // A struct's `end` line carried its tables; the impl adds after.
@@ -909,10 +910,16 @@ impl<'s> Desugar<'s> {
                     }
                 }
 
-                self.expected_generic = generic_head(self.alias_value(&ty));
+                // The source text, `HashMap<K, V>`, names the head the
+                // default writes; the rendered `__alloy.HashMap<K, V>`
+                // matched no `new HashMap()`, and the call took no
+                // arguments.
+                let written = self.text_of(f.ty).to_string();
+                self.expected_generic = generic_head(self.alias_value(&written));
+                self.note_alias_cast(&ty, dv);
                 let v = self.render_to_string(dv);
                 self.expected_generic = None;
-                defaults.push(format!("if f.{fname} == nil then f.{fname} = {v} end"));
+                defaults.push((fname.clone(), ty.clone(), v));
             }
 
             let attrs = self.attr_table(&f.attributes);
@@ -996,7 +1003,24 @@ impl<'s> Desugar<'s> {
         } else {
             ("f".to_string(), String::new())
         };
-        let d = defaults.join(" ");
+        /*
+        The typed constructor checks a default as the value of a local
+        of the field's type, then writes the local. A write of an `any`,
+        as `Forge.use` gives, into the field of `f` made the checker
+        solve the whole class of the field, and each provider that held
+        a struct with HashMaps took it past its limit (LANG_BUGS 117).
+        */
+        let d = defaults
+            .iter()
+            .map(|(fname, ty, v)| match typed {
+                true => format!(
+                    "if f.{fname} == nil then local _{fname}: {ty} = {v} f.{fname} = _{fname} end"
+                ),
+
+                false => format!("if f.{fname} == nil then f.{fname} = {v} end"),
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
         let head = self.decl_head(&name);
         let header = if self.options.check {
             let new_fn = if self.structs_with_new.contains_key(&name) {
@@ -1013,8 +1037,21 @@ impl<'s> Desugar<'s> {
                 String::new()
             };
 
+            /*
+            The result takes the struct's type by a cast. A return of
+            `any` into the `: Name` slot made the checker solve the
+            whole class, which reaches each field's type in other modules.
+            A provider that held a struct with two HashMaps took it past
+            its limit (LANG_BUGS 117).
+            */
+            let made = match typed {
+                true => format!("((setmetatable(f, {name}) :: any) :: {name}{fn_generics})"),
+
+                false => format!("(setmetatable(f, {name}) :: any)"),
+            };
+
             format!(
-                "{head}{name}.__index = {name}{private_table} function {name}.__new{fn_generics}({param}){ret} {d} return (setmetatable(f, {name}) :: any) end{new_fn}"
+                "{head}{name}.__index = {name}{private_table} function {name}.__new{fn_generics}({param}){ret} {d} return {made} end{new_fn}"
             )
         } else {
             format!(
@@ -1092,8 +1129,9 @@ impl<'s> Desugar<'s> {
 
         if own != "{}" || !field_attrs.is_empty() {
             let std = self.std();
+            let held = self.attrs_target(&name);
             tail.push_str(&format!(
-                " {std}.attrs({name}, {{ own = {own}, fields = {{ {} }} }})",
+                " {std}.attrs({held}, {{ own = {own}, fields = {{ {} }} }})",
                 field_attrs.join(", ")
             ));
         }
@@ -1274,6 +1312,21 @@ impl<'s> Desugar<'s> {
 
     /// `{ range = { 0, 100 }, skip = {} }` from a list of attributes,
     /// skipping the ones the compiler consumes itself.
+    /*
+    The table `__alloy.attrs` registers the attributes on. The check
+    artifact casts it to `any`, the type the parameter takes. Passed as
+    it is, the call made the checker solve the type of the whole class,
+    and a provider of 16 methods and four collections took it past its
+    limit (LANG_BUGS 115). The ship artifact passes the table as it is.
+    */
+    pub(crate) fn attrs_target(&self, target: &str) -> String {
+        match self.options.check {
+            true => format!("({target} :: any)"),
+
+            false => target.to_string(),
+        }
+    }
+
     pub(crate) fn attr_table(&mut self, attrs: &[Attr]) -> String {
         let mut parts = Vec::new();
 
@@ -1326,9 +1379,13 @@ impl<'s> Desugar<'s> {
             false => format!(", {{ {} }}", enums.join(", ")),
         };
 
+        // The check artifact passes the instance as `any`, the type the
+        // parameter takes. Passed as it is, the call made the checker
+        // solve the whole class (LANG_BUGS 117).
         format!(
-            "{std}.show_struct({}, s, {{ {} }}{enums})",
+            "{std}.show_struct({}, {}, {{ {} }}{enums})",
             luau_string(&self.display_name(name)),
+            self.any_cast("s"),
             fields.join(", ")
         )
     }
@@ -2742,23 +2799,92 @@ impl<'s> Desugar<'s> {
     /// map, so a binding typed `Rows` passes the map's arguments to its
     /// constructor. One step, as `alias_head` reads an alias.
     pub(crate) fn alias_value<'a>(&'a self, ty: &'a str) -> &'a str {
-        self.alias_values.get(ty.trim()).map_or(ty, String::as_str)
+        let key = ty.trim();
+
+        if let Some(value) = self.alias_values.get(key) {
+            return value;
+        }
+
+        // An imported alias reads the same way when this file can write
+        // its value. See `note_alias_cast` for one it cannot write.
+        self.options
+            .import_alias_values
+            .iter()
+            .find(|(name, (_, portable))| name == key && *portable)
+            .map_or(ty, |(_, (value, _))| value.as_str())
+    }
+
+    /*
+    An imported alias whose value names a type of its module, `Grid =
+    HashMap<Vector2, Cell>`. `Cell` may mean nothing in this file, so the
+    arguments cannot go on the call. The check artifact casts an empty
+    constructor under the alias to the alias itself, as a field of an
+    imported struct takes `index<S, "field">`. `from(t)` reads its type
+    off `t`, so it takes no cast.
+    */
+    pub(crate) fn note_alias_cast(&mut self, ty: &str, value: &Expr) {
+        let key = ty.trim().trim_end_matches('?').trim();
+
+        if !self.options.check || self.alias_values.contains_key(key) {
+            return;
+        }
+
+        let Some(base) = self
+            .options
+            .import_alias_values
+            .iter()
+            .find(|(name, (_, portable))| name == key && !*portable)
+            .and_then(|(_, (value, _))| generic_head(value))
+            .map(|(base, _)| base.rsplit('.').next().unwrap_or(&base).to_string())
+        else {
+            return;
+        };
+
+        if self.empty_constructor(value, &base) {
+            let cast = self.lower_type_name(key);
+            self.field_casts
+                .insert(std::ptr::from_ref(value) as usize, cast);
+        }
     }
 
     /// The return type's base and arguments when a `return` hands back
     /// that container's constructor call: `return HashMap.new()` under
     /// `function f(): HashMap<K, V>`. The solver infers no arguments for
     /// the call, so the annotation's arguments go on it.
+    ///
+    /// `return Ok(v)` and `return Err(e)` under `Result<T, E>` give
+    /// `("Result", "T, E")` too: `Ok` takes `T`, and the checker reads
+    /// `v` as a `T`. With the type of `v` inferred, it compared the two
+    /// Results method by method, and a struct with HashMaps in `v` took
+    /// it past its limit (LANG_BUGS 126).
     pub(crate) fn returned_constructor(&self, values: &[Expr]) -> Option<(String, String)> {
-        if values.len() != 1 {
+        let [value] = values else {
             return None;
-        }
+        };
 
         let ty = self.ret_types.last()?.clone()?;
+
+        if let Expr::Call {
+            func,
+            method: None,
+            type_args: None,
+            ..
+        } = value
+            && let Expr::Name(n) = func.as_ref()
+            && matches!(self.text_of(*n), "Ok" | "Err")
+        {
+            let args = self
+                .alias_value(&ty)
+                .trim()
+                .strip_prefix("Result<")?
+                .strip_suffix('>')?;
+
+            return Some(("Result".to_string(), args.trim().to_string()));
+        }
+
         let head = self.generic_annotation(&ty)?;
 
-        self.is_constructor_call(&values[0], &head.0)
-            .then_some(head)
+        self.is_constructor_call(value, &head.0).then_some(head)
     }
 
     /// A call that builds `base` and nothing else: `Base.new()`,
@@ -4545,6 +4671,36 @@ mod tests {
         );
     }
 
+    /*
+    `return Ok(v)` under a declared `Result<T, E>` passes `T` to `Ok`, and
+    `return Err(e)` passes `E` to `Err`, so the checker reads the value
+    as the declared type. With the type of `v` inferred, it compared the
+    two Results method by method. In Strata a struct with HashMaps in `v`
+    took it past its limit, once an import elsewhere made a field of `v`
+    an `any` (LANG_BUGS 126). A call inside the value is no return of
+    its own, and the ship artifact writes no arguments.
+    */
+    #[test]
+    fn a_returned_result_takes_the_return_type_arguments() {
+        let src = "type Saved = { n: number }\nfunction load(x: number): Result<Saved, string>\n    if x > 1 then\n        return Err('big')\n    end\n    return Ok({ n = Ok(x):unwrap() })\nend\nprint(load(1))\n";
+        let out = crate::compile(src).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+        for want in [
+            "return __alloy.Err<<string>>('big')",
+            "return __alloy.Ok<<Saved>>({ n = __alloy.Ok(x):unwrap() })",
+        ] {
+            assert!(out.check.contains(want), "{want}\n{}", out.check);
+        }
+
+        assert!(
+            out.ship
+                .contains("return __alloy.Ok({ n = __alloy.Ok(x):unwrap() })"),
+            "{}",
+            out.ship
+        );
+    }
+
     /// An exported local takes the annotation's arguments as a plain one
     /// does. `export const` wrote `HashMap.new()`, and the checker
     /// reported that the type arguments differ.
@@ -4700,6 +4856,8 @@ mod tests {
         // The runtime is a require away; the enum only needs a table.
         let (head, body) = out.ship.split_once(" local Describe").unwrap();
         assert!(head.starts_with("local __alloy = require("), "{head}");
+        // The module returns nil, and the program returns its own values.
+        let body = body.trim_end().strip_suffix(" return nil").unwrap();
         let program = format!(
             "local __alloy = {{}} local Describe{body}\nreturn Enemy.twice(Enemy.Flyer), Enemy.twice(Enemy.Grunt(1)), Dog.twice(Dog.new({{ n = 1 }}))"
         );
@@ -4735,5 +4893,48 @@ mod tests {
                 out.check
             );
         }
+    }
+
+    /*
+    The check artifact gives the checker no reason to solve the whole
+    class in the struct's own lines. The raw constructor checks a
+    default as a typed local and casts its result to the struct's type,
+    and the printer passes the instance as `any`. A write of an `any`
+    into a field, a return of `any` into the `: S` slot, and the
+    instance passed as it is each did, and a provider that held a struct
+    with HashMaps took the checker past its limit (LANG_BUGS 117). The
+    ship artifact keeps each one as it was.
+    */
+    #[test]
+    fn the_struct_lines_cast_the_class_in_checks() {
+        let src = "import { HashMap } from '@alloy/std/collections'\nstruct S as\n    x: number = 1\n    m: HashMap<string, number> = new HashMap()\nend\nprint(S)\n";
+        let out = crate::compile(src).unwrap();
+
+        for want in [
+            "if f.x == nil then local _x: number = 1 f.x = _x end",
+            "local _m: __alloy.HashMap<string, number> = __alloy.HashMap.new<<string, number>>() f.m = _m",
+            "return ((setmetatable(f, S) :: any) :: S) end",
+            "__alloy.show_struct(\"S\", (s :: any), { \"x\", \"m\" })",
+        ] {
+            assert!(out.check.contains(want), "{want}\n{}", out.check);
+        }
+
+        assert!(
+            out.ship.contains("if f.x == nil then f.x = 1 end"),
+            "{}",
+            out.ship
+        );
+
+        assert!(
+            out.ship
+                .contains("__alloy.show_struct(\"S\", s, { \"x\", \"m\" })"),
+            "{}",
+            out.ship
+        );
+        assert!(
+            out.ship.contains("return setmetatable(f, S) end"),
+            "{}",
+            out.ship
+        );
     }
 }

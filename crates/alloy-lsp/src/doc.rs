@@ -38,6 +38,9 @@ pub struct Doc {
     /// Every `impl` block of the file, so its header hovers as the
     /// block instead of as the name it targets.
     pub impl_blocks: Vec<alloy::impl_blocks::ImplBlock>,
+    /// The `impl` blocks of the modules the file imports. A method of an
+    /// imported type draws as the blocks write it.
+    pub import_impl_blocks: Vec<alloy::impl_blocks::ImplBlock>,
     /// The plain `local X = { }` tables with their members, for the
     /// folds: a print of the whole shape as `self` reads back as
     /// `typeof(X)`.
@@ -57,6 +60,9 @@ pub struct Doc {
     /// The interfaces of the modules the file imports. A file names an
     /// interface it took from another module.
     pub import_interfaces: Vec<alloy::shapes::Interface>,
+    /// The record aliases of the Luau packages the file reaches, so a
+    /// printed record reads as `jecs.Entity<T>`.
+    pub import_aliases: Vec<alloy::shapes::PackageAlias>,
     /// The declarations of the modules the file imports. A hover on an
     /// imported name reads them, so it answers before the workspace
     /// pass has opened the module.
@@ -375,6 +381,7 @@ impl Doc {
             decls: Vec::new(),
             namespaces: Vec::new(),
             impl_blocks: Vec::new(),
+            import_impl_blocks: Vec::new(),
             tables: Vec::new(),
             namespace_ranges: Vec::new(),
             bindings: Vec::new(),
@@ -383,6 +390,7 @@ impl Doc {
             import_decls: Vec::new(),
             interfaces: Vec::new(),
             import_interfaces: Vec::new(),
+            import_aliases: Vec::new(),
             import_sources: Vec::new(),
             import_types: Vec::new(),
             std_globals: options.std_globals.clone(),
@@ -424,6 +432,11 @@ impl Doc {
             alloy::modules::import_shapes_for_file(std::path::Path::new(&options.file_name), text);
         self.import_sources =
             alloy::modules::import_sources_for_file(std::path::Path::new(&options.file_name), text);
+        self.import_impl_blocks = self
+            .import_sources
+            .iter()
+            .flat_map(|text| alloy::impl_blocks::impl_blocks(text))
+            .collect();
         self.import_types = options.import_types.clone();
         self.std_globals = options.std_globals.clone();
         // A member of an imported namespace prints by its emit name
@@ -438,6 +451,10 @@ impl Doc {
             .iter()
             .flat_map(|text| alloy::shapes::interfaces(text))
             .collect();
+        self.import_aliases = alloy::modules::import_package_aliases_for_file(
+            std::path::Path::new(&options.file_name),
+            text,
+        );
         // A name a barrel passes on reads as the module it names
         // declares it, under the name the barrel sends it out as.
         self.import_decls = alloy::modules::import_summaries_for_file(
@@ -746,16 +763,22 @@ impl Doc {
             .iter()
             .any(|(start, end)| (*start..*end).contains(&offset))
     }
+}
 
-    /// Applies one LSP content change. A whole-document change says
-    /// again whether the editor's text opens with the mark.
-    pub fn apply_change(&mut self, range: Option<((u32, u32), (u32, u32))>, text: &str) {
-        if range.is_none() {
-            self.bom = text.starts_with(MARK);
-        }
-
-        apply_change(&mut self.source, range, text);
+/// Applies one LSP content change to a source and its mark flag. A
+/// whole-document change says again whether the editor's text opens
+/// with the mark.
+pub fn apply_edit(
+    source: &mut String,
+    bom: &mut bool,
+    range: Option<((u32, u32), (u32, u32))>,
+    text: &str,
+) {
+    if range.is_none() {
+        *bom = text.starts_with(MARK);
     }
+
+    apply_change(source, range, text);
 }
 
 /// Applies one LSP content change to a text.
@@ -863,7 +886,7 @@ mod tests {
         );
         assert_eq!(
             doc.shadow,
-            "local v = (if a == nil then 0 else a)\nprint(v)\n"
+            "local v = (if a == nil then 0 else a)\nprint(v) return nil\n"
         );
 
         // `print` is copied: same column.
@@ -899,12 +922,22 @@ mod tests {
         assert_eq!(position_of(&doc.source, 6), (0, 6));
 
         // The editor saved the file without the mark.
-        doc.apply_change(None, "local greeting = \"ho\"\n");
+        apply_edit(
+            &mut doc.source,
+            &mut doc.bom,
+            None,
+            "local greeting = \"ho\"\n",
+        );
 
         assert!(!doc.bom);
 
         // And put it back.
-        doc.apply_change(None, &format!("{MARK}local greeting = \"hi\"\n"));
+        apply_edit(
+            &mut doc.source,
+            &mut doc.bom,
+            None,
+            &format!("{MARK}local greeting = \"hi\"\n"),
+        );
 
         assert!(doc.bom);
         assert_eq!(doc.source, "local greeting = \"hi\"\n");
@@ -1194,7 +1227,7 @@ local r = b?.
             &alloy::luaux::Config::default(),
             None,
         );
-        doc.apply_change(Some(((0, 1), (1, 1))), "X");
+        apply_edit(&mut doc.source, &mut doc.bom, Some(((0, 1), (1, 1))), "X");
         assert_eq!(doc.source, "aXd\n");
     }
 }

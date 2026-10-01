@@ -857,6 +857,45 @@ fn a_local_of_the_body_shadows_the_member() {
     assert!(!out.contains("return Foo_x"), "{out}");
 }
 
+/// Each name a loop or a condition binds shadows the member, as a local
+/// does. The emit read the member `item` for each of them, so the code
+/// indexed a function at run time (LANG_BUGS 129).
+#[test]
+fn a_loop_or_condition_name_shadows_the_member() {
+    let out = clean(concat!(
+        "namespace Box as\n",
+        "    function a(xs: { string }): string?\n",
+        "        for _, item in xs do\n            return item\n        end\n",
+        "        return nil\n    end\n",
+        "    function b(): number\n        local sum = 0\n",
+        "        for item = 1, 3 do\n            sum += item\n        end\n",
+        "        return sum\n    end\n",
+        "    function c(xs: { string }): string?\n",
+        "        for _, item in xs where #item > 0 do\n            return item\n        end\n",
+        "        return nil\n    end\n",
+        "    function d(v: string?): string?\n",
+        "        if const item = v then\n            return item\n        end\n",
+        "        return nil\n    end\n",
+        "    function e(v: string?): string?\n",
+        "        while const item = v do\n            return item\n        end\n",
+        "        return nil\n    end\n",
+        "    function f(v: string?): string\n",
+        "        if not const item = v then\n            return ''\n        end\n",
+        "        return item\n    end\n",
+        "    function g(v: string?, w: string?): string?\n",
+        "        if const item = v then\n            return item\n",
+        "        elseif const other = w then\n            return item(other)\n        end\n",
+        "        return nil\n    end\n",
+        "    function item(key: string): string\n        return key\n    end\nend\n\n",
+        "print(Box.a({}), Box.b(), Box.c({}), Box.d(nil), Box.e(nil), Box.f(nil), Box.g(nil, nil))\n",
+    ));
+    assert!(!out.contains("return Box_item\n"), "{out}");
+    assert!(!out.contains("sum += Box_item"), "{out}");
+    assert!(!out.contains("#Box_item"), "{out}");
+    // A name a branch binds stays in that branch.
+    assert!(out.contains("return Box_item(other)"), "{out}");
+}
+
 /// A member reads a name of the file that no member declares.
 #[test]
 fn a_member_reads_the_parent_scope() {
@@ -977,8 +1016,9 @@ fn a_class_reports_once_and_leaves_no_text() {
         ]
     );
 
+    // The module's `return nil` is the one text left.
     for out in [&ship, &check] {
-        assert!(out.trim().is_empty(), "{out:?}");
+        assert_eq!(out.trim(), "return nil", "{out:?}");
         assert_eq!(out.lines().count(), src.lines().count());
     }
 }

@@ -8,4 +8,4 @@ local All = require("./theme")
 
 local dark: Shade = All.default
 
-print(Theme, Palette, swatch, All.default, dark)
+print(Theme, Palette, swatch, All.default, dark) return nil

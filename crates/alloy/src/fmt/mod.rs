@@ -337,6 +337,7 @@ fn format_tokens(src: &str, options: &FmtConfig) -> Result<String, String> {
         held_chain: Vec::new(),
         conds: Vec::new(),
         cond_line: Vec::new(),
+        list_value: Vec::new(),
     };
     f.rewrite_tokens();
     f.sort_requires();
@@ -592,6 +593,10 @@ struct Formatter<'s> {
     /// Each line sits one level under the `if`, with no step for the
     /// operator it opens with.
     cond_line: Vec<bool>,
+    /// The first item of each value after the first in a list of values,
+    /// `return a, b`. Such an item that opens a line continues the
+    /// statement, one level in.
+    list_value: Vec<bool>,
 }
 
 /// A binary chain by item; see `colons::Chain`.
@@ -640,13 +645,21 @@ impl<'s> Formatter<'s> {
 
     /// The chains and the `if` conditions the tree names by byte, as
     /// items. A chain whose last operand is a table breaks the table
-    /// instead: `x = options or {` then the fields.
+    /// instead: `x = options or {` then the fields. A list of values has
+    /// no such rule: its last value is one value like the others.
     fn read_chains(&mut self, chains: &[colons::Chain], conds: &[(usize, usize)]) {
         let at: std::collections::HashMap<usize, usize> = (0..self.items.len())
             .filter(|&i| !self.items[i].is_comment() && self.items[i].start != usize::MAX)
             .map(|i| (self.items[i].start, i))
             .collect();
         let item = |byte: &usize| at.get(byte).copied();
+        self.list_value = vec![false; self.items.len()];
+
+        for k in chains.iter().filter(|c| c.list).flat_map(|c| &c.ops) {
+            if let Some(i) = item(k) {
+                self.list_value[i] = true;
+            }
+        }
 
         self.chains = chains
             .iter()
@@ -661,7 +674,8 @@ impl<'s> Formatter<'s> {
                         None => None,
                     },
                 };
-                let table_tail = self.items[chain.last].is("}")
+                let table_tail = !c.list
+                    && self.items[chain.last].is("}")
                     && self.opener_of(chain.last).is_some_and(|o| {
                         chain.ops.last().and_then(|&op| self.next_code(op)) == Some(o)
                     });
@@ -682,6 +696,20 @@ impl<'s> Formatter<'s> {
         self.cond_line = vec![false; self.items.len()];
 
         for &(kw, then) in &self.conds {
+            // A `while` condition that starts on the line of `while` keeps
+            // the continuation step of a long condition. A condition that
+            // opens its own line takes this layout (LANG_BUGS 121), and
+            // `block_depths` puts the `do` back under the `while`.
+            let is_while = self.items[kw].is("while");
+
+            if is_while
+                && !self
+                    .next_code(kw)
+                    .is_some_and(|n| self.items[n].newlines_before > 0)
+            {
+                continue;
+            }
+
             let mut depth = 0i32;
             let mut lines = Vec::new();
 
@@ -715,7 +743,7 @@ impl<'s> Formatter<'s> {
                 self.cond_line[k] = true;
             }
 
-            if then_opens {
+            if then_opens && !is_while {
                 self.depths[then] = self.depths[then].saturating_sub(1);
             }
         }
@@ -1223,6 +1251,150 @@ mod tests {
         assert_eq!(fmt(short), short);
     }
 
+    /// A header may break at its `where`, on either side of the word
+    /// (LANG_BUGS 116). The break stays where the author put it, the line
+    /// after it sits one step past the body, as a broken `and` does, and
+    /// the header opens one block. A second run changes nothing.
+    #[test]
+    fn a_header_broken_at_where_keeps_its_break() {
+        let src = concat!(
+            "local held: number? = 1\n",
+            "if const n = held\n",
+            "where n > 0 then\n",
+            "print(n)\n",
+            "end\n",
+            "if const m = held where\n",
+            "m > 0 then\n",
+            "print(m)\n",
+            "end\n",
+            "for _, p in [ 1, 2 ]\n",
+            "where p > 1 do\n",
+            "print(p)\n",
+            "end\n",
+            "while local k = held\n",
+            "where k > 5 do\n",
+            "print(k)\n",
+            "end\n",
+            "print(held)\n",
+        );
+        let want = concat!(
+            "local held: number? = 1\n",
+            "if const n = held\n",
+            "    where n > 0 then\n",
+            "  print(n)\n",
+            "end\n",
+            "if const m = held where\n",
+            "    m > 0 then\n",
+            "  print(m)\n",
+            "end\n",
+            "for _, p in [ 1, 2 ]\n",
+            "    where p > 1 do\n",
+            "  print(p)\n",
+            "end\n",
+            "while local k = held\n",
+            "    where k > 5 do\n",
+            "  print(k)\n",
+            "end\n",
+            "print(held)\n",
+        );
+
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want);
+    }
+
+    /// A long `where` test breaks after its `and` operators. The `do` at
+    /// the end of the last line opened a second block, so the body sat
+    /// two steps too deep and every line below the loop one step in
+    /// (LANG_BUGS 106). The broken header opens one block.
+    #[test]
+    fn a_broken_for_where_header_opens_one_block() {
+        let src = "export function f(root: Instance)\n    for _, piece in root:GetChildren() where piece:IsA('Frame') and piece.Name ~= 'HeldHolder' and piece.Name ~= 'Glow' do\n        piece.Visible = false\n    end\n\n    root.Name = 'x'\nend\n\nexport function g(): number\n    return 1\nend\n";
+        let got = fmt(src);
+        let lines: Vec<&str> = got.lines().collect();
+
+        // The body keeps its level, and the lines below the loop keep
+        // theirs to the end of the file.
+        for (line, indent) in [
+            ("piece.Visible = false", 4),
+            ("root.Name = 'x'", 2),
+            ("export function g(): number", 0),
+            ("return 1", 2),
+        ] {
+            let at = lines.iter().find(|l| l.trim() == line).expect(line);
+            assert_eq!(at.len() - at.trim_start().len(), indent, "{line}\n{got}");
+        }
+
+        assert_eq!(
+            lines.iter().filter(|l| l.trim() == "end").count(),
+            3,
+            "{got}"
+        );
+        assert_eq!(fmt(&got), got);
+    }
+
+    /// A `while` condition that opens its own line takes the layout of a
+    /// split `if` condition. The `do` opened a second block, so `do`, the
+    /// body, and each line below the loop moved one step in (LANG_BUGS
+    /// 121). The input here is that wrong layout.
+    #[test]
+    fn a_while_condition_on_its_own_line_opens_one_block() {
+        let want = "export function count(list: { number }) -> number\n  local n = 1\n\n  while\n    n <= #list\n    and list[n] == 1\n  do\n    n += 1\n  end\n\n  return n - 1\nend\n\nexport function after() -> number\n  return 1\nend\n";
+        let leaked = "export function count(list: { number }) -> number\n  local n = 1\n\n  while\n    n <= #list\n      and list[n] == 1\n    do\n      n += 1\n    end\n\n    return n - 1\n  end\n\n  export function after() -> number\n    return 1\n  end\n";
+
+        assert_eq!(fmt(leaked), want);
+        assert_eq!(fmt(want), want);
+    }
+
+    /// A long `for` header breaks after `in`. The `do` opened a second
+    /// block there too, so each line below the loop moved one step in
+    /// (LANG_BUGS 132). The `do` goes back under the `for`.
+    #[test]
+    fn a_for_header_broken_after_in_opens_one_block() {
+        let src = "local function run(): number\n  local sum = 0\n\n  for _, value in\n    list(\n      1000000000000000000000000000000000000000,\n      2000000000000000000000000000000000000000\n    )\n  do\n    sum += value\n  end\n\n  return sum\nend\n\nlocal function after(): number\n  return run()\nend\n";
+        let want = "local function run(): number\n  local sum = 0\n\n  for _, value in\n    list(1000000000000000000000000000000000000000, 2000000000000000000000000000000000000000)\n  do\n    sum += value\n  end\n\n  return sum\nend\n\nlocal function after(): number\n  return run()\nend\n";
+
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want);
+    }
+
+    /// A comment before an `end` or an `until` ends the body of its
+    /// block, so it keeps the body's level. It took the level of the
+    /// `end`, and read as a comment after the block (LANG_BUGS 122).
+    #[test]
+    fn a_comment_that_ends_a_block_keeps_the_block_level() {
+        let want = "export function count(list: { number }): number\n  local n = 0\n\n  for _, v in list do\n    if v > 0 then\n      n += 1\n    end\n\n    -- A note at the end of the loop's body.\n  end\n\n  repeat\n    n -= 1\n    -- A note at the end of the repeat.\n  until n < 0\n\n  if n > 0 then\n    -- Nothing yet.\n  end\n\n  return n\nend\n";
+        let out = "export function count(list: { number }): number\n  local n = 0\n\n  for _, v in list do\n    if v > 0 then\n      n += 1\n    end\n\n  -- A note at the end of the loop's body.\n  end\n\n  repeat\n    n -= 1\n  -- A note at the end of the repeat.\n  until n < 0\n\n  if n > 0 then\n  -- Nothing yet.\n  end\n\n  return n\nend\n";
+
+        assert_eq!(fmt(out), want);
+        assert_eq!(fmt(want), want);
+    }
+
+    /// A long `if const ... where` holds two chains on one line: `x //
+    /// 170` inside the call, and the `<=` test outside it. Both broke in
+    /// one pass, so the call broke around `x // 170`, and a second run
+    /// joined the call again (LANG_BUGS 124). Only the outer chain breaks.
+    #[test]
+    fn a_long_line_breaks_its_outer_chain_first() {
+        let src = "export function near(g: number, x: number): { x: number }?\n  if const found = pick(g, x // 170) where math.abs(x - found.x) <= 5 + 5 + 5 + 5 + 5 + 5 + 5 + 5 + 5 + 5 then\n    return found\n  end\n\n  return nil\nend\n";
+        let want = "export function near(g: number, x: number): { x: number }?\n  if const found = pick(g, x // 170) where math.abs(x - found.x)\n      <= 5 + 5 + 5 + 5 + 5 + 5 + 5 + 5 + 5 + 5 then\n    return found\n  end\n\n  return nil\nend\n";
+
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want);
+    }
+
+    /// A function in a branch of a broken ternary opens its body on a
+    /// line that continues the statement. fmt put the body at the level
+    /// of that line and the `end)` at the statement's (LANG_BUGS 101).
+    /// The body sits one level under the branch, and `end)` under it.
+    #[test]
+    fn a_function_in_a_ternary_branch_indents_under_the_branch() {
+        let want = "local function pick(alone: boolean, height: number): number\n  const last = alone\n    ? 0\n    : run(function(next: number): boolean\n      return next > height and next < height * 2 and next ~= height + 1 and next ~= height + 2\n    end)\n\n  return last\nend\n";
+        let flat = "local function pick(alone: boolean, height: number): number\n  const last = alone\n    ? 0\n    : run(function(next: number): boolean\n    return next > height and next < height * 2 and next ~= height + 1 and next ~= height + 2\n  end)\n\n  return last\nend\n";
+
+        assert_eq!(fmt(flat), want);
+        assert_eq!(fmt(want), want);
+    }
+
     /// The `;` between two bindings ended the scan of the `if`, so it
     /// found no `then` and the index `ITEMS[s.item]` broke instead.
     #[test]
@@ -1620,6 +1792,34 @@ mod tests {
         assert_eq!(fmt(&fmt(src)), src);
         assert_eq!(fmt("local c = a < b\n"), "local c = a < b\n");
         assert_eq!(fmt("local d = t.x < y\n"), "local d = t.x < y\n");
+    }
+
+    /// The `[]` and the `?` after type arguments stay tight in every
+    /// type position: `Pair<A, B>[]`, never `Pair<A, B> []`.
+    #[test]
+    fn a_suffix_after_type_arguments_stays_tight() {
+        let src = "import { HashMap } from '@alloy/std/collections'
+
+struct Pair<A, B>
+  first: A
+  second: B
+  rest: Pair<A, B>[]
+end
+
+type Pairs = Pair<number, string>[]
+type MaybePair = Pair<number, string>?
+
+function f(p: Pair<number, string>[], q: Pair<number, string>?): Pair<number, string>[]
+  local t: { Pair<number, string>[] } = {}
+  local u = p :: Pair<number, string>[]
+  return u
+end
+
+const nested = HashMap.new<<string, Pair<number, string[]>[]>>()
+const deeper = HashMap.new<<string, HashMap<string, Pair<number, string>[]>[]>>()
+";
+        assert_eq!(fmt(src), src);
+        assert_eq!(fmt(&fmt(src)), src);
     }
 
     #[test]
@@ -2071,6 +2271,17 @@ mod tests {
             "export function NewCard(props: {\n  label: string,\n  width: number,\n  height: number,\n  on_click: () -> (),\n}): Instance\nend\n",
         );
 
+        // A lone array hugs the same way. fmt put `[` and `]` on lines
+        // of their own inside `new ColorSequence(` (LANG_BUGS 102).
+        stable(
+            "local s = new ColorSequence([ new ColorSequenceKeypoint(0, first_colour_here), new ColorSequenceKeypoint(1, second_colour) ])\n",
+            "local s = new ColorSequence([\n  new ColorSequenceKeypoint(0, first_colour_here),\n  new ColorSequenceKeypoint(1, second_colour),\n])\n",
+        );
+        stable(
+            "local s = pick(rows[first_long_index_name_here + second_long_index_name_here + third_long_index_name])\n",
+            "local s = pick(\n  rows[first_long_index_name_here + second_long_index_name_here + third_long_index_name]\n)\n",
+        );
+
         // One parenthesized value hugs too.
         stable(
             "list:push((first_long_argument_name_here + second_long_argument_name_here + third_long_one + fourth_one_x))\n",
@@ -2134,6 +2345,35 @@ mod tests {
         );
         let noted = "print(a == 'first_long_name' or b == 'second_long_name') -- a note that runs on past the column\n";
         stable(noted, noted);
+    }
+
+    /// A long list of values breaks after its commas, one value a line,
+    /// and a value breaks inside only when its line is still too long.
+    /// fmt broke each value at its operators, so a comma ended a line
+    /// in the middle of the next value.
+    #[test]
+    fn a_long_list_of_values_breaks_at_its_commas() {
+        let values = "cx0 * CHUNK_TILES - 1, cy0 * CHUNK_TILES - 1, (cx1 + 1) * CHUNK_TILES, (cy1 + 1) * CHUNK_TILES";
+        let broken = "cx0 * CHUNK_TILES - 1,\n    cy0 * CHUNK_TILES - 1,\n    (cx1 + 1) * CHUNK_TILES,\n    (cy1 + 1) * CHUNK_TILES";
+
+        for head in ["return ", "a, b, c, d = ", "const a, b, c, d = "] {
+            stable(
+                &format!("function f()\n  {head}{values}\nend\n"),
+                &format!("function f()\n  {head}{broken}\nend\n"),
+            );
+        }
+
+        // The list breaks first, then a value still too long for its line.
+        stable(
+            "return first_long_operand * second_long_operand + third_long_operand * fourth_long_operand - fifth_operand, 1\n",
+            "return first_long_operand * second_long_operand\n  + third_long_operand * fourth_long_operand\n  - fifth_operand,\n  1\n",
+        );
+
+        // A list the source broke keeps its lines, one level in. A comma
+        // in the body of an `enum` ends a member and adds no level.
+        stable("return a,\nb\n", "return a,\n  b\n");
+        let members = "enum Tier\n  Common,\n  Rare\nend\n";
+        stable(members, members);
     }
 
     /// `on` is a keyword only in `attribute Name on ...`. fmt spaced a

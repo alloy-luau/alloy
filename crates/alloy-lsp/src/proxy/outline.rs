@@ -360,6 +360,8 @@ fn push_statement(stmt: &Stmt, src: &str, toks: &[Tok], out: &mut Vec<Entry>) {
 
         Stmt::Remote(r) => out.push(named(r.name, EVENT, Vec::new())),
 
+        Stmt::Message(m) => out.push(named(m.name, EVENT, Vec::new())),
+
         Stmt::Macro(m) => out.push(named(m.name, FUNCTION, Vec::new())),
 
         Stmt::Attribute(a) => out.push(named(a.name, PROPERTY, Vec::new())),

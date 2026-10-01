@@ -1,9 +1,21 @@
 use super::super::hover::{
-    child_cast, child_value_home, impl_self_type, intrinsic_code_home, member_doc, shadow_home,
-    shadows_an_import, source_type, star_module_hover,
+    child_cast, child_value_home, impl_self_type, intrinsic_code_home, member_doc,
+    method_member_hover, shadow_home, shadows_an_import, source_type, star_module_hover,
 };
 use super::super::*;
 use super::support::one_file;
+
+/// The member shape, spelled out: the owner, the member, then the doc
+/// under a rule when there is one.
+pub(crate) fn shaped(owner: &str, member: &str, doc: &str) -> String {
+    let mut out = format!("```alloy\n{owner}\n```\n\n```alloy\n{member}\n```");
+
+    if !doc.is_empty() {
+        out.push_str(&format!("\n\n---\n\n{doc}"));
+    }
+
+    out
+}
 
 #[test]
 pub(crate) fn a_declared_annotation_keeps_its_type_arguments() {
@@ -306,7 +318,7 @@ pub(crate) fn a_foreign_impl_names_its_type() {
 
     assert_eq!(
         foreign_method_hover(doc, at, at + "trim".len()),
-        Some("```alloy\nfunction string.trim(self: string): string\n```".to_string())
+        Some(shaped("string", "function trim(self) -> string", ""))
     );
 
     // A struct's own impl reads through the child.
@@ -473,32 +485,63 @@ fn a_star_alias_lists_a_name_passed_on_with_export_from() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
-/// A hover on a std member reads the member's own section, not the
-/// type's whole page. The receiver resolves from the source: an
+/// A std member hovers like any member: the type with its parameters,
+/// the member's line with its return after an arrow, then the doc and
+/// the example under a rule. The receiver resolves from the source: an
 /// annotation, an initializer, or the type name itself.
 #[test]
-pub(crate) fn a_hover_on_a_std_member_names_the_member() {
+pub(crate) fn a_std_member_hovers_under_its_type() {
     let src = concat!(
         "local prices: HashMap<string, number> = HashMap.new()\n",
-        "local price = prices:get(\"sword\")\n",
+        "local old = prices:remove(\"sword\")\n",
+        "local seen: Set<number> = Set.new()\n",
+        "seen:add(1)\n",
         "local xs = [ 1, 2, 3 ]\n",
-        "local n = xs:len()\n",
+        "xs:push(4)\n",
     );
     let (st, uri) = one_file(src);
     let doc = st.docs.get(uri).expect("doc");
+    let hover = |line: u32, character: u32| {
+        std_member_hover("```luau\n(...)\n```", doc, line, character).expect("a std member")
+    };
+    let section = |owner: &str, name: &str| {
+        let m = alloy::docs::member(owner, name).expect("a documented member");
 
-    let at_new = std_member_hover("```luau\n(...)\n```", doc, 0, 49).expect("HashMap.new");
-    assert!(at_new.starts_with("**HashMap.new**"), "{at_new}");
+        format!("{}\n\n```alloy\n{}\n```", m.doc, m.example)
+    };
 
-    let at_get = std_member_hover("```luau\n(...)\n```", doc, 1, 22).expect("HashMap:get");
-    assert!(at_get.starts_with("**HashMap:get**"), "{at_get}");
-    assert!(
-        at_get.contains("```alloy"),
-        "the section carries an example"
+    assert_eq!(
+        hover(0, 49),
+        shaped(
+            "HashMap<K, V>",
+            "function new(t: { [K]: V }?) -> HashMap<K, V>",
+            &section("HashMap", "new")
+        )
     );
-
-    let at_len = std_member_hover("```luau\n(...)\n```", doc, 3, 14).expect("Array:len");
-    assert!(at_len.starts_with("**Array:len**"), "{at_len}");
+    assert_eq!(
+        hover(1, 20),
+        shaped(
+            "HashMap<K, V>",
+            "function remove(self, key: K) -> V?",
+            &section("HashMap", "remove")
+        )
+    );
+    assert_eq!(
+        hover(3, 5),
+        shaped(
+            "Set<T>",
+            "function add(self, value: T) -> Set<T>",
+            &section("Set", "add")
+        )
+    );
+    assert_eq!(
+        hover(5, 3),
+        shaped(
+            "Array<T>",
+            "function push(self, ...: T) -> Array<T>",
+            &section("Array", "push")
+        )
+    );
 }
 /// With no annotation the type the child printed names the receiver.
 #[test]
@@ -509,7 +552,10 @@ pub(crate) fn a_printed_type_names_the_member_the_source_cannot() {
     let printed = "```luau\n(self: Queue<string>) -> string?\n```";
     let hover = std_member_hover(printed, doc, 0, 20).expect("Queue:pop");
 
-    assert!(hover.starts_with("**Queue:pop**"), "{hover}");
+    assert!(
+        hover.starts_with("```alloy\nQueue<T>\n```\n\n```alloy\nfunction pop(self) -> T?\n```"),
+        "{hover}"
+    );
 }
 /// A hover on the type name keeps the overview and lists the names.
 #[test]
@@ -549,7 +595,7 @@ pub(crate) fn a_case_binding_reads_its_payload() {
     );
     assert_eq!(
         case_binding_text(doc, line_of(field), field, "amount", &known),
-        Some("```alloy\namount: number\n```\nA field of `struct Boost`.".to_string())
+        Some(shaped("Boost", "public amount: number", ""))
     );
 }
 /// A name a nested pattern binds reads its type off the level that
@@ -665,13 +711,13 @@ pub(crate) fn a_type_body_field_reads_as_it_is_written() {
 
     assert_eq!(
         declared_field_hover(doc, at, at + "on_swing".len()),
-        Some("```alloy\non_swing: () -> ()\n```\nA field of `type HudProps`.".to_string())
+        Some(shaped("HudProps", "on_swing: () -> ()", ""))
     );
     let label = SRC.find("label").expect("label");
 
     assert_eq!(
         declared_field_hover(doc, label, label + "label".len()),
-        Some("```alloy\nlabel: string\n```\nA field of `type HudProps`.".to_string())
+        Some(shaped("HudProps", "label: string", ""))
     );
 }
 /// A field of a namespace member names the path the source writes.
@@ -687,7 +733,7 @@ pub(crate) fn a_namespace_member_field_names_the_path() {
 
     assert_eq!(
         declared_field_hover(doc, at, at + "value".len()),
-        Some("```alloy\nvalue: number\n```\nA field of `struct Ns.T`.".to_string())
+        Some(shaped("Ns.T", "public value: number", ""))
     );
 }
 /// A `type` that names no record has no field to answer for, and a
@@ -849,24 +895,24 @@ fn a_field_at_a_use_reads_its_declaration() {
     let (start, end) = at("secret + ");
     let (start, end) = (start, end - " + ".len());
     assert_eq!(
-        used_field_hover(&st, doc, start, end).as_deref(),
-        Some("```alloy\nprivate secret: number\n```\nA field of `struct S`.")
+        used_field_hover(&st, doc, start, end),
+        Some(shaped("S", "private secret: number", ""))
     );
 
     // A local bound by a constructor names the struct too.
     let (start, end) = at("s.x)");
     let (start, end) = (start + 2, end - 1);
     assert_eq!(
-        used_field_hover(&st, doc, start, end).as_deref(),
-        Some("```alloy\nx: number\n```\nA field of `struct S`.")
+        used_field_hover(&st, doc, start, end),
+        Some(shaped("S", "public x: number", ""))
     );
 
     // `?.` reads the same field.
     let (start, end) = at("s?.x)");
     let (start, end) = (start + 3, end - 1);
     assert_eq!(
-        used_field_hover(&st, doc, start, end).as_deref(),
-        Some("```alloy\nx: number\n```\nA field of `struct S`.")
+        used_field_hover(&st, doc, start, end),
+        Some(shaped("S", "public x: number", ""))
     );
 
     // A method after a `:` is no field.
@@ -890,17 +936,11 @@ fn every_hop_of_a_field_chain_names_its_owner() {
 
         used_field_hover(&st, doc, start, start + name)
     };
+    assert_eq!(hover("b.c.value", 1), Some(shaped("A", "public b: B", "")));
+    assert_eq!(hover("c.value", 1), Some(shaped("B", "public c: C", "")));
     assert_eq!(
-        hover("b.c.value", 1).as_deref(),
-        Some("```alloy\nb: B\n```\nA field of `struct A`.")
-    );
-    assert_eq!(
-        hover("c.value", 1).as_deref(),
-        Some("```alloy\nc: C\n```\nA field of `struct B`.")
-    );
-    assert_eq!(
-        hover("value)", 5).as_deref(),
-        Some("```alloy\nvalue: number\n```\nA field of `struct C`.")
+        hover("value)", 5),
+        Some(shaped("C", "public value: number", ""))
     );
 }
 
@@ -1471,8 +1511,8 @@ pub(crate) fn a_method_of_an_imported_struct_hovers_as_the_source_wrote_it() {
     let doc = st.docs.get(uri).expect("doc");
     let start = src.find("length").expect("the name");
     assert_eq!(
-        foreign_method_hover(doc, start, start + "length".len()).as_deref(),
-        Some("```alloy\nfunction Point.length(self: Point): number\n```")
+        foreign_method_hover(doc, start, start + "length".len()),
+        Some(shaped("Point", "function length(self) -> number", ""))
     );
 
     // A struct this file declares reads through the child, which types
@@ -2069,20 +2109,123 @@ fn a_key_of_a_const_table_hovers_as_its_entry() {
     assert_eq!(path(2, 31), None);
     assert_eq!(path(0, 13), None);
     assert_eq!(
-        record_entry(printed, &strength.1).as_deref(),
+        record_entry(printed, &strength.1, None).as_deref(),
         Some("```alloy\nstrength: {\n    default: number,\n    kind: \"int\"\n}\n```")
     );
     assert_eq!(
-        record_entry(printed, &stats.1).as_deref(),
+        record_entry(printed, &stats.1, None).as_deref(),
         Some(
             "```alloy\nstats: {\n    strength: {\n        default: number,\n        kind: \"int\"\n    }\n}\n```"
         )
     );
     assert_eq!(
-        record_entry(printed, &x.1).as_deref(),
+        record_entry(printed, &x.1, None).as_deref(),
         Some("```alloy\nx: number\n```")
     );
-    assert_eq!(record_entry(printed, &["y".to_string()]), None);
+    assert_eq!(record_entry(printed, &["y".to_string()], None), None);
+}
+
+/// Strata keeps its components in one table, `const ct = { ... }`. A
+/// key hovers with its type and the comment above the key. The comment
+/// above `ct` describes the table, so it goes. Another file's `enum
+/// Look` is no answer for the key `Look`.
+#[test]
+fn a_key_of_a_table_const_hovers_with_its_own_comment() {
+    let src = concat!(
+        "--- Every shared component.\n",
+        "const ct = {\n",
+        "  --- The stacks a character carries.\n",
+        "  Inventory = jecs.component<<{ Stack }>>(),\n",
+        "\n",
+        "  Look = jecs.component<<Appearance>>(),\n",
+        "}\n",
+        "\n",
+        "export default ct\n",
+    );
+    let printed = "```alloy\nconst ct: {\n    Inventory: {\n        __T: {Stack}\n    },\n    Look: {\n        __T: Appearance\n    }\n}\n```\n----------\nEvery shared component.";
+    let entry = |needle: &str| {
+        let at = src.find(needle).expect("the key");
+        let (_, path) = literal_key(src, at).expect("a key");
+        let comment = alloy::declarations::doc_before(src, at);
+
+        record_entry(printed, &path, comment.as_deref()).expect("an entry")
+    };
+
+    assert_eq!(
+        entry("Inventory"),
+        "```alloy\nInventory: {\n    __T: {Stack}\n}\n```\n----------\nThe stacks a character carries."
+    );
+    assert_eq!(
+        entry("Look"),
+        "```alloy\nLook: {\n    __T: Appearance\n}\n```"
+    );
+
+    let state = super::support::files(&[
+        ("file:///c.aly", src),
+        ("file:///e.aly", "export enum Look as\n    Plain\nend\n"),
+    ]);
+    let server = Server::new(
+        Box::new(std::io::sink()),
+        Box::new(std::io::sink()),
+        Vec::new(),
+        None,
+    );
+    *server.state.lock().expect("state") = state;
+    let (line, character) = position_of(src, src.find("Look").expect("the key"));
+    let message = json!({ "params": {
+        "textDocument": { "uri": "file:///c.aly" },
+        "position": { "line": line, "character": character },
+    } });
+
+    assert!(!server.declaration_hover("file:///c.aly", &message, &json!(1)));
+}
+
+/// A function head in a hover returns after an arrow, as the source
+/// writes it: a top-level function, a local that holds a function, a
+/// lambda, a head over several lines, and a method in a block. A
+/// function type keeps its text, and so does an example in the doc.
+#[test]
+fn a_function_hover_returns_after_an_arrow() {
+    let cases = [
+        (
+            "```alloy\nlocal function count_of(items: { Stack }): number\n```\n----------\nHow many items.",
+            "```alloy\nlocal function count_of(items: { Stack }) -> number\n```\n----------\nHow many items.",
+        ),
+        (
+            "```alloy\nlocal half(n: number): number\n```",
+            "```alloy\nlocal half(n: number) -> number\n```",
+        ),
+        (
+            "```alloy\nfunction(n: number): number\n```",
+            "```alloy\nfunction(n: number) -> number\n```",
+        ),
+        (
+            "```alloy\nexport function pick<T>(\n    a: T,\n    b: T\n): T\n```",
+            "```alloy\nexport function pick<T>(\n    a: T,\n    b: T\n) -> T\n```",
+        ),
+        (
+            "```alloy\nimpl Farm\n    public function count(self): number\n    public function name(self): string\nend\n```",
+            "```alloy\nimpl Farm\n    public function count(self) -> number\n    public function name(self) -> string\nend\n```",
+        ),
+        (
+            "```alloy\nlocal f: (n: number) -> string\n```",
+            "```alloy\nlocal f: (n: number) -> string\n```",
+        ),
+        (
+            "```alloy\nfunction f(): number\n```\n\nFor example:\n\n```alloy\nfunction g(): number\nend\n```",
+            "```alloy\nfunction f() -> number\n```\n\nFor example:\n\n```alloy\nfunction g(): number\nend\n```",
+        ),
+    ];
+
+    for (printed, written) in cases {
+        assert_eq!(with_return_arrows(printed), written);
+    }
+
+    // A signature label has no fence.
+    assert_eq!(
+        arrow_heads("function HashMap:remove(self: HashMap, key: string): number?"),
+        "function HashMap:remove(self: HashMap, key: string) -> number?"
+    );
 }
 
 /// `Hit.Swing` reads the variant, not the remote `Swing` the file
@@ -2565,7 +2708,10 @@ fn an_aliased_variant_hovers_as_its_enum_s() {
     assert!(server.declaration_hover("file:///f.aly", &message, &json!(1)));
 
     let sent = String::from_utf8_lossy(&log.lock().expect("the log")).into_owned();
-    assert!(sent.contains("Status.Active"), "{sent}");
+    assert!(
+        sent.contains(r#"```alloy\nStatus\n```\n\n```alloy\nActive\n```"#),
+        "{sent}"
+    );
 }
 
 /// A child lookup hovers with the type the check artifact gives it: the
@@ -2925,7 +3071,7 @@ fn a_list_over_several_lines_hovers_as_its_declarations() {
         assert!(sent.contains("export const LIMIT: number"), "{sent}");
         let sent = hover("helper", occurrence);
         assert!(
-            sent.contains("export function helper(n: number): number"),
+            sent.contains("export function helper(n: number) -> number"),
             "{sent}"
         );
     }
@@ -3126,4 +3272,422 @@ fn a_tested_field_hovers_without_its_optional() {
         narrowed_field("```alloy\nlocal x: R15Character?\n```", doc, 2, 24),
         None
     );
+}
+
+/// A field hovers the way rust-analyzer hovers one: the owner in a code
+/// block of its own, the field's line, then the doc comment under a
+/// rule. The owner carries its type parameters, and a field of an
+/// imported struct reads the same at its use.
+#[test]
+fn a_field_hovers_under_its_owner() {
+    let shapes =
+        "--- A box.\nexport struct Box<T: Ord>\n    --- The value it holds.\n    value: T\nend\n";
+    let main = concat!(
+        "import { Box } from \"./shapes\"\n",
+        "\n",
+        "struct Farm\n",
+        "    --- The crops.\n",
+        "    private crops: number = 0\n",
+        "end\n",
+        "\n",
+        "impl Farm\n",
+        "    function f(self): number\n",
+        "        return self.crops\n",
+        "    end\n",
+        "end\n",
+        "\n",
+        "local b: Box<number> = new Box { value = 1 }\n",
+        "print(b.value)\n",
+    );
+    let mut st =
+        super::support::files(&[("file:///main.aly", main), ("file:///shapes.aly", shapes)]);
+    st.docs
+        .get_mut("file:///main.aly")
+        .expect("doc")
+        .import_sources = vec![shapes.to_string()];
+    let doc = st.docs.get("file:///main.aly").expect("doc");
+    let word = |src: &str, needle: &str, name: &str| {
+        let start = src.find(needle).expect("needle") + needle.find(name).expect("name");
+
+        (start, start + name.len())
+    };
+    let crops =
+        "```alloy\nFarm\n```\n\n```alloy\nprivate crops: number = 0\n```\n\n---\n\nThe crops.";
+
+    // At the declaration, and at a use inside the impl.
+    let (s, e) = word(main, "crops:", "crops");
+    assert_eq!(declared_field_hover(doc, s, e).as_deref(), Some(crops));
+    let (s, e) = word(main, "self.crops", "crops");
+    assert_eq!(used_field_hover(&st, doc, s, e).as_deref(), Some(crops));
+
+    // An imported struct, at its use and at its own declaration.
+    let value = shaped("Box<T>", "public value: T", "The value it holds.");
+    let (s, e) = word(main, "b.value", "value");
+    assert_eq!(used_field_hover(&st, doc, s, e), Some(value.clone()));
+    let home = st.docs.get("file:///shapes.aly").expect("doc");
+    let (s, e) = word(shapes, "value: T", "value");
+    assert_eq!(declared_field_hover(home, s, e), Some(value));
+}
+
+/// A method hovers under the type it is on: the owner leaves the head
+/// the child prints, `self` reads bare, and the return takes the arrow.
+/// A trait's own method names the trait; a default method called
+/// through a type names the type. A function on a plain table keeps its
+/// print, since no type owns it.
+#[test]
+fn a_method_hovers_under_its_owner() {
+    let shapes = "export struct Box<T>\n    value: T\nend\n\nimpl Box<T>\n    --- Reads the value.\n    function get(self) -> T\n        return self.value\n    end\nend\n";
+    let main = concat!(
+        "import { Box } from \"./shapes\"\n",
+        "\n",
+        "enum CropKind\n",
+        "    Wheat\n",
+        "end\n",
+        "\n",
+        "trait Describe\n",
+        "    function label(self) -> string\n",
+        "    --- Says what it is.\n",
+        "    function describe(self) -> string\n",
+        "        return self:label()\n",
+        "    end\n",
+        "end\n",
+        "\n",
+        "impl Describe for CropKind\n",
+        "    function label(self) -> string\n",
+        "        return \"w\"\n",
+        "    end\n",
+        "end\n",
+        "\n",
+        "struct Farm\n",
+        "    size: number\n",
+        "end\n",
+        "\n",
+        "impl Farm\n",
+        "    function new(size: number) -> Farm\n",
+        "        return new Farm { size = size }\n",
+        "    end\n",
+        "end\n",
+        "\n",
+        "local Palette = {}\n",
+    );
+    let mut st =
+        super::support::files(&[("file:///main.aly", main), ("file:///shapes.aly", shapes)]);
+    st.docs
+        .get_mut("file:///main.aly")
+        .expect("doc")
+        .import_sources = vec![shapes.to_string()];
+    let doc = st.docs.get("file:///main.aly").expect("doc");
+    let shape = |print: &str| method_member_hover(&format!("```alloy\n{print}"), &st, doc);
+
+    // The trait's own methods, at the declaration.
+    assert_eq!(
+        shape("function Describe.label(self: Describe): string\n```"),
+        Some(shaped("Describe", "function label(self) -> string", ""))
+    );
+    assert_eq!(
+        shape("function Describe.describe(self: Describe): string\n```\n\nSays what it is."),
+        Some(shaped(
+            "Describe",
+            "function describe(self) -> string",
+            "Says what it is."
+        ))
+    );
+    // The default called through the type, and the impl's own method.
+    assert_eq!(
+        shape("function CropKind.describe(self: CropKind): string\n```"),
+        Some(shaped("CropKind", "function describe(self) -> string", ""))
+    );
+    assert_eq!(
+        shape("function CropKind:label(): string\n```"),
+        Some(shaped("CropKind", "function label(self) -> string", ""))
+    );
+    // A function with no receiver keeps its list.
+    assert_eq!(
+        shape("function Farm.new(size: number): Farm\n```"),
+        Some(shaped("Farm", "function new(size: number) -> Farm", ""))
+    );
+    // An imported generic struct, at its declaration and at a use. The
+    // child's own doc comment moves under the rule.
+    assert_eq!(
+        shape("function Box.get<T>(self: Box<T>): T\n```\n----------\nReads the value."),
+        Some(shaped(
+            "Box<T>",
+            "function get(self) -> T",
+            "Reads the value."
+        ))
+    );
+    assert_eq!(
+        shape("function Box:get(): number\n```"),
+        Some(shaped("Box<T>", "function get(self) -> number", ""))
+    );
+    // A plain table is no owner.
+    assert_eq!(
+        shape("function Palette.tint(hex: string): string\n```"),
+        None
+    );
+}
+
+/// An enum's variant and a namespace member hover under their owner,
+/// at the declaration and at a use, local and imported. The member's
+/// line takes back the `const` the path pushed out, and the private
+/// note becomes the `private` in front of it.
+#[test]
+fn a_variant_and_a_namespace_member_hover_under_their_owner() {
+    use super::documents::Recorder;
+
+    let shapes = concat!(
+        "export enum Maybe<T>\n",
+        "    --- Holds a value.\n",
+        "    Some(T)\n",
+        "    Nothing\n",
+        "end\n",
+        "\n",
+        "export namespace Outer\n",
+        "    --- Doubles a number.\n",
+        "    public function double(n: number) -> number\n",
+        "        return n * 2\n",
+        "    end\n",
+        "\n",
+        "    private const LIMIT = 10\n",
+        "end\n",
+    );
+    let main = concat!(
+        "import { Maybe, Outer } from \"./shapes\"\n",
+        "\n",
+        "enum Crop\n",
+        "    Wheat\n",
+        "end\n",
+        "\n",
+        "namespace Tools\n",
+        "    public const MAX = 3\n",
+        "end\n",
+        "\n",
+        "print(Crop.Wheat, Tools.MAX, Maybe.Some(1), Outer.double(2))\n",
+    );
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let server = Server::new(
+        Box::new(std::io::sink()),
+        Box::new(Recorder(Arc::clone(&log))),
+        Vec::new(),
+        None,
+    );
+    *server.state.lock().expect("state") =
+        super::support::files(&[("file:///main.aly", main), ("file:///shapes.aly", shapes)]);
+    let hover = |uri: &str, src: &str, needle: &str| {
+        let (line, character) = position_of(src, src.find(needle).expect("needle"));
+        let message = json!({ "params": {
+            "textDocument": { "uri": uri },
+            "position": { "line": line, "character": character },
+        } });
+        log.lock().expect("the log").clear();
+
+        assert!(
+            server.declaration_hover(uri, &message, &json!(1)),
+            "{needle}"
+        );
+
+        let sent = String::from_utf8_lossy(&log.lock().expect("the log")).into_owned();
+        let body: Value =
+            serde_json::from_str(sent.split("\r\n\r\n").last().expect("body")).expect("json");
+
+        body["result"]["contents"]["value"]
+            .as_str()
+            .expect("value")
+            .to_string()
+    };
+    let main_uri = "file:///main.aly";
+    let wheat = shaped("Crop", "Wheat", "");
+    let max = shaped("Tools", "const MAX = 3", "");
+
+    assert_eq!(hover(main_uri, main, "Wheat\n"), wheat);
+    assert_eq!(hover(main_uri, main, "Wheat,"), wheat);
+    assert_eq!(hover(main_uri, main, "MAX ="), max);
+    assert_eq!(hover(main_uri, main, "MAX,"), max);
+    assert_eq!(
+        hover(main_uri, main, "Some(1"),
+        shaped("Maybe<T>", "Some(T)", "Holds a value.")
+    );
+    assert_eq!(
+        hover(main_uri, main, "double(2"),
+        shaped(
+            "Outer",
+            "function double(n: number) -> number",
+            "Doubles a number."
+        )
+    );
+    assert_eq!(
+        hover("file:///shapes.aly", shapes, "LIMIT"),
+        shaped("Outer", "private const LIMIT = 10", "")
+    );
+}
+
+/// A record a Luau package's alias holds reads by the alias's name. The
+/// package entry passes `Id` and `Entity` on from the real module, and
+/// the two hold one record. A tie goes to the alias the value's origin
+/// names, `jecs.component` returns `Entity<T>`, and else to the alias
+/// the package declares first. A file that imports the package reads
+/// `jecs.Entity`, and a file that imports the name reads `Entity`. A
+/// file that meets the record through another module names the package
+/// as that module does.
+#[test]
+fn a_package_record_reads_as_its_alias() {
+    let dir = std::env::temp_dir().join(format!("alloy-alias-hover-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let real = dir.join("packages/.ember/jecs/src");
+    std::fs::create_dir_all(&real).expect("temp dir");
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n\n[mount]\npkg = [\"packages\", \"@game/ReplicatedStorage/Packages\"]\n",
+    )
+    .expect("alloy.toml");
+    std::fs::write(
+        dir.join("packages/jecs.luau"),
+        concat!(
+            "local module = require(\"./.ember/jecs/src/jecs\")\n",
+            "export type Id<T = any> = module.Id<T>\n",
+            "export type Entity<T = nil> = module.Entity<T>\n",
+            "return module\n",
+        ),
+    )
+    .expect("entry");
+    std::fs::write(
+        real.join("jecs.luau"),
+        concat!(
+            "export type Entity<T = nil> = { __T: T }\n",
+            "export type Id<T = any> = { __T: T }\n",
+            "return {\n",
+            "    component = (nil :: any) :: <T>() -> Entity<T>,\n",
+            "}\n",
+        ),
+    )
+    .expect("module");
+
+    let sources = [
+        (
+            "components",
+            "import jecs from '@pkg/jecs'\n\nconst ct = {\n  Inventory = jecs.component<<{ Stack }>>(),\n}\n\nexport default ct\n",
+        ),
+        (
+            "pickup",
+            "import ct from './components'\n\nprint(ct.Inventory)\n",
+        ),
+        (
+            "named",
+            "import { type Entity } from '@pkg/jecs'\n\nlocal e: Entity<number>\n",
+        ),
+    ];
+    let mut st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        ..State::default()
+    };
+
+    for (name, source) in sources {
+        let path = dir.join(format!("src/{name}.aly"));
+        std::fs::write(&path, source).expect("source");
+        let uri = path_to_uri(&path);
+        let (options, jsx) = st.options_for(&uri);
+        st.docs
+            .insert(uri, Doc::new(source.to_string(), 1, &options, &jsx, None));
+    }
+
+    let hover = |name: &str, printed: &str, at: Option<(u32, u32)>| {
+        let uri = path_to_uri(&dir.join(format!("src/{name}.aly")));
+        let mut known = st.known_shapes_at(Some(&uri));
+
+        if let Some((line, character)) = at {
+            let doc = st.docs.get(&uri).expect("doc");
+            prefer_origin_alias(&mut known.aliases, doc, line, character);
+        }
+
+        alloy::shapes::fold(&format!("```alloy\n{printed}\n```"), &known)
+    };
+    let inventory = "{\n    __T: {Stack}\n}";
+
+    // The key where it takes its value: the call names `Entity`.
+    assert_eq!(
+        hover(
+            "components",
+            &format!("Inventory: {inventory}"),
+            Some((3, 2))
+        ),
+        "```alloy\nInventory: jecs.Entity<{ Stack }>\n```"
+    );
+    // A use in another file reads no origin, and `Id` comes first.
+    assert_eq!(
+        hover("pickup", inventory, Some((2, 9))),
+        "```alloy\njecs.Id<{ Stack }>\n```"
+    );
+    // The name the file imports reads bare, and a default argument goes.
+    assert_eq!(
+        hover("named", "local e: { __T: nil }", None),
+        "```alloy\nlocal e: Entity\n```"
+    );
+    // Another record keeps its print.
+    assert_eq!(
+        hover("named", "local p: { __T: number, x: number }", None),
+        "```alloy\nlocal p: { __T: number, x: number }\n```"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An ingot hover that names a Roblox member takes the host's hover for
+/// it: the class, the member with its type, and the API docs, with the
+/// ingot's note under a rule. A class alone reads as its tag does.
+#[test]
+fn an_ingot_hover_on_a_roblox_member_takes_the_member_hover() {
+    let dir = std::env::temp_dir().join(format!("alloy-ingot-roblox-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("api-docs.json");
+    std::fs::write(
+        &path,
+        "{\"@roblox/globaltype/ScreenGui.DisplayOrder\": { \"documentation\": \"The order of the <code>ScreenGui</code>.\" }}",
+    )
+    .unwrap();
+
+    let src = "<meta name=\"display-order\" content=\"10\" />\n";
+    let (mut st, uri) = one_file(src);
+    st.api_docs = Some(path);
+    let doc = &st.docs[uri];
+    let reply = json!({
+        "roblox": { "class": "ScreenGui", "member": "DisplayOrder" },
+        "span": [11, 26],
+        "note": "Set by `<meta>`.",
+    });
+    let out = crate::ingots::hover(doc, &reply, |c, m| st.roblox_hover(c, m));
+
+    assert_eq!(
+        out["contents"]["value"],
+        json!(format!(
+            "{}\n\n---\n\nSet by `<meta>`.",
+            shaped(
+                "ScreenGui",
+                "DisplayOrder: number",
+                "The order of the `ScreenGui`."
+            )
+        ))
+    );
+    assert_eq!(out["range"]["start"]["character"], json!(11));
+
+    let class = json!({ "roblox": { "class": "ScreenGui" } });
+    let text = crate::ingots::hover(doc, &class, |c, m| st.roblox_hover(c, m));
+
+    assert!(
+        text["contents"]["value"]
+            .as_str()
+            .is_some_and(|t| t.starts_with("```alx\n<ScreenGui>\n```\nRoblox class `ScreenGui`.")),
+        "{text}"
+    );
+
+    // A name the host does not know keeps the note alone.
+    let unknown = json!({ "roblox": { "class": "Nope", "member": "X" }, "note": "n" });
+
+    assert_eq!(
+        crate::ingots::hover(doc, &unknown, |c, m| st.roblox_hover(c, m))["contents"]["value"],
+        json!("n")
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

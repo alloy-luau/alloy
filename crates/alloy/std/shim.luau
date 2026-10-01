@@ -8,34 +8,107 @@
 -- `Instance` parents and finds children, a `task.wait` parks the
 -- thread.
 
--- Under the engine every name is the engine's own.
-if game ~= nil then
-	return {
-		typeof = typeof,
-		Vector3 = Vector3,
-		Vector2 = Vector2,
-		CFrame = CFrame,
-		Color3 = Color3,
-		UDim = UDim,
-		UDim2 = UDim2,
-		NumberRange = NumberRange,
-		Random = Random,
-		Enum = Enum,
-		Instance = Instance,
-		task = task,
-		game = game,
-		workspace = workspace,
-		warn = warn,
-		step = function()
-			return 0
-		end,
-		settle = function(future)
-			return future
-		end,
-	}
+local shim = {}
+
+-- A scoped import, an `import` in a function body, requires its module
+-- at the first call in the game. lest's VM resolves a `require` only
+-- while a spec loads, so a module of the test build gives the require
+-- to `later` (LANG_BUGS 120). The temp of the import holds a stand-in
+-- that loads the module when it is read. The spec calls `preload` at
+-- the end of its load, and `set` puts the module itself in the temp.
+local pending = {}
+
+-- The path from the modules folder to what `path` names from the
+-- module at `owner`. A module writes a path from its own folder, and
+-- `@self/` in an `init` module names that folder too.
+local function rebase(owner, path)
+	local parts = string.split(owner, "/")
+	table.remove(parts)
+
+	for _, part in string.split((string.gsub(path, "^@self/", "")), "/") do
+		if part == ".." and #parts > 0 and parts[#parts] ~= ".." then
+			table.remove(parts)
+		elseif part ~= "." then
+			table.insert(parts, part)
+		end
+	end
+
+	return table.concat(parts, "/")
 end
 
-local shim = {}
+-- A module gives its loader the require to call. In `preload` that is
+-- the spec's own, with the path from the spec: lest reads a path from
+-- the module that loads at the time, Lune from the chunk that calls,
+-- and here both are the spec. A module that reads the import while it
+-- loads gives the loader the plain `require`, and both read the path
+-- from that module.
+local function load_once(entry, root, spec_require)
+	local load = entry.load
+
+	if load ~= nil then
+		entry.load = nil
+		local from_spec = spec_require
+			and function(path)
+				if string.sub(path, 1, 1) == "@" and string.sub(path, 1, 6) ~= "@self/" then
+					return spec_require(path)
+				end
+
+				return spec_require(root .. rebase(entry.owner, path))
+			end
+		entry.ok, entry.value = pcall(load, from_spec or require)
+
+		if entry.ok then
+			entry.set(entry.value)
+		end
+	end
+end
+
+-- A module that fails to load fails the read, as the call fails in the
+-- game, and not the load of the whole spec.
+local function loaded(entry)
+	load_once(entry, nil, nil)
+
+	if not entry.ok then
+		error(entry.value, 0)
+	end
+
+	return entry.value
+end
+
+function shim.later(owner, load, set)
+	local entry = { owner = owner, load = load, set = set }
+	table.insert(pending, entry)
+
+	return setmetatable({}, {
+		__index = function(_, key)
+			return loaded(entry)[key]
+		end,
+		__call = function(_, ...)
+			return loaded(entry)(...)
+		end,
+	})
+end
+
+-- Loads each module that a scoped import names, and the modules that
+-- their own scoped imports name. `root` is the spec's path to the
+-- modules folder, and `spec_require` calls `require` in the spec.
+function shim.preload(root, spec_require)
+	while #pending > 0 do
+		load_once(table.remove(pending, 1), root, spec_require)
+	end
+end
+
+-- Under the engine every name is the engine's own.
+if game ~= nil then
+	shim.step = function()
+		return 0
+	end
+	shim.settle = function(future)
+		return future
+	end
+
+	return shim
+end
 
 -- ---------------------------------------------------------------------------
 -- typeof: the doubles answer with the engine's names.
@@ -52,7 +125,7 @@ local function typeof_double(value)
 	return raw_typeof(value)
 end
 
-typeof = typeof_double
+local typeof = typeof_double
 
 local function mark(value, kind)
 	kinds[value] = kind
@@ -108,10 +181,16 @@ function Vector3.__mul(a, b)
 end
 
 function Vector3.__div(a, b)
-	if type(b) == "number" then
+	if type(a) == "number" then
+		return v3(a / b.X, a / b.Y, a / b.Z)
+	elseif type(b) == "number" then
 		return v3(a.X / b, a.Y / b, a.Z / b)
 	end
 	return v3(a.X / b.X, a.Y / b.Y, a.Z / b.Z)
+end
+
+function Vector3.__idiv(a, b)
+	return (a / b):Floor()
 end
 
 function Vector3.__unm(a)
@@ -144,7 +223,14 @@ function Vector3.FuzzyEq(a, b, epsilon)
 end
 
 local Vector2 = {}
-Vector2.__index = Vector2
+
+-- `Unit` comes on read, as it does for a Vector3.
+function Vector2.__index(v, key)
+	if key == "Unit" then
+		return v / v.Magnitude
+	end
+	return Vector2[key]
+end
 
 local function v2(x, y)
 	local self = setmetatable({ X = x or 0, Y = y or 0 }, Vector2)
@@ -158,6 +244,8 @@ end
 
 Vector2.zero = v2(0, 0)
 Vector2.one = v2(1, 1)
+Vector2.xAxis = v2(1, 0)
+Vector2.yAxis = v2(0, 1)
 
 function Vector2.__add(a, b)
 	return v2(a.X + b.X, a.Y + b.Y)
@@ -176,12 +264,88 @@ function Vector2.__mul(a, b)
 	return v2(a.X * b.X, a.Y * b.Y)
 end
 
+function Vector2.__div(a, b)
+	if type(a) == "number" then
+		return v2(a / b.X, a / b.Y)
+	elseif type(b) == "number" then
+		return v2(a.X / b, a.Y / b)
+	end
+	return v2(a.X / b.X, a.Y / b.Y)
+end
+
+function Vector2.__idiv(a, b)
+	return (a / b):Floor()
+end
+
+function Vector2.__unm(a)
+	return v2(-a.X, -a.Y)
+end
+
 function Vector2.__eq(a, b)
 	return a.X == b.X and a.Y == b.Y
 end
 
 function Vector2.__tostring(a)
 	return `{a.X}, {a.Y}`
+end
+
+function Vector2.Dot(a, b)
+	return a.X * b.X + a.Y * b.Y
+end
+
+-- The engine's Vector2 cross product is a number: the Z of the 3D one.
+function Vector2.Cross(a, b)
+	return a.X * b.Y - a.Y * b.X
+end
+
+-- Counterclockwise is positive when the angle is signed.
+function Vector2.Angle(a, b, signed)
+	local angle = math.atan2(a:Cross(b), a:Dot(b))
+	return if signed then angle else math.abs(angle)
+end
+
+function Vector2.Lerp(a, b, t)
+	return a + (b - a) * t
+end
+
+function Vector2.FuzzyEq(a, b, epsilon)
+	local e = epsilon or 1e-5
+	return math.abs(a.X - b.X) <= e and math.abs(a.Y - b.Y) <= e
+end
+
+-- The axis gives the angle a sign: negative when the turn from `a` to
+-- `b` goes clockwise about it.
+function Vector3.Angle(a, b, axis)
+	local cross = a:Cross(b)
+	local angle = math.atan2(cross.Magnitude, a:Dot(b))
+	return if axis ~= nil and cross:Dot(axis) < 0 then -angle else angle
+end
+
+-- The methods that act on each component.
+for name, f in { Abs = math.abs, Ceil = math.ceil, Floor = math.floor, Sign = math.sign } do
+	Vector3[name] = function(a)
+		return v3(f(a.X), f(a.Y), f(a.Z))
+	end
+	Vector2[name] = function(a)
+		return v2(f(a.X), f(a.Y))
+	end
+end
+
+for name, f in { Max = math.max, Min = math.min } do
+	Vector3[name] = function(a, ...)
+		local x, y, z = a.X, a.Y, a.Z
+		for _, b in { ... } do
+			x, y, z = f(x, b.X), f(y, b.Y), f(z, b.Z)
+		end
+		return v3(x, y, z)
+	end
+	Vector2[name] = function(a, ...)
+		local x, y = a.X, a.Y
+		for _, b in { ... } do
+			x, y = f(x, b.X), f(y, b.Y)
+		end
+		return v2(x, y)
+	end
 end
 
 -- A CFrame holds its rotation as a row-major 3x3 matrix in the slots 1
@@ -504,7 +668,7 @@ function CFrame.FuzzyEq(a, b, epsilon)
 end
 
 -- ---------------------------------------------------------------------------
--- Color3, UDim, UDim2, NumberRange
+-- Color3, UDim, UDim2, NumberRange, Rect
 -- ---------------------------------------------------------------------------
 
 local Color3 = {}
@@ -600,6 +764,144 @@ NumberRange.__index = NumberRange
 
 function NumberRange.new(min, max)
 	return mark(table.freeze(setmetatable({ Min = min, Max = max or min }, NumberRange)), "NumberRange")
+end
+
+-- A Rect holds its corners as they come: the engine does not sort them,
+-- so a Width can be negative.
+local Rect = {}
+Rect.__index = Rect
+
+function Rect.new(a, b, c, d)
+	local min, max
+	if typeof(a) == "Vector2" then
+		min, max = a, b
+	else
+		min, max = v2(a, b), v2(c, d)
+	end
+	local self = { Min = min, Max = max, Width = max.X - min.X, Height = max.Y - min.Y }
+	return mark(table.freeze(setmetatable(self, Rect)), "Rect")
+end
+
+function Rect.__eq(a, b)
+	return a.Min == b.Min and a.Max == b.Max
+end
+
+function Rect.__tostring(a)
+	return `{a.Min}, {a.Max}`
+end
+
+-- ---------------------------------------------------------------------------
+-- ColorSequence, NumberSequence: keypoints along a time from 0 to 1.
+-- ---------------------------------------------------------------------------
+
+-- `Keypoints` gives a new table on each read, as the engine does, so a
+-- test that changes it changes no sequence.
+local function sequence_index(class)
+	return function(self, key)
+		if key == "Keypoints" then
+			return table.clone(rawget(self, "points"))
+		end
+		return class[key]
+	end
+end
+
+-- `new(value)`, `new(first, last)`, or a table of keypoints, which the
+-- engine checks the way this does.
+local function sequence(class, kind, keypoint, ...)
+	local first, last = ...
+	local points
+	-- An Alloy array carries a metatable, and a list it is all the same.
+	if typeof(first) == "table" then
+		points = table.move(first, 1, #first, 1, {})
+		if #points < 2 then
+			error(`{kind}: requires at least 2 keypoints`, 3)
+		end
+		for i, point in points do
+			if i > 1 and point.Time < points[i - 1].Time then
+				error(`{kind}: all keypoints must be ordered by time`, 3)
+			end
+		end
+		if points[1].Time ~= 0 then
+			error(`{kind} must start at time=0.0`, 3)
+		end
+		if points[#points].Time ~= 1 then
+			error(`{kind} must end at time=1.0`, 3)
+		end
+	else
+		points = { keypoint.new(0, first), keypoint.new(1, if last == nil then first else last) }
+	end
+	return mark(table.freeze(setmetatable({ points = table.freeze(points) }, class)), kind)
+end
+
+local function same_points(a, b)
+	local x, y = rawget(a, "points"), rawget(b, "points")
+	if #x ~= #y then
+		return false
+	end
+	for i, point in x do
+		if point ~= y[i] then
+			return false
+		end
+	end
+	return true
+end
+
+local function points_text(a)
+	local parts = {}
+	for _, point in rawget(a, "points") do
+		table.insert(parts, tostring(point))
+	end
+	return table.concat(parts)
+end
+
+local NumberSequenceKeypoint = {}
+NumberSequenceKeypoint.__index = NumberSequenceKeypoint
+
+function NumberSequenceKeypoint.new(time, value, envelope)
+	local self = { Time = time, Value = value, Envelope = envelope or 0 }
+	return mark(table.freeze(setmetatable(self, NumberSequenceKeypoint)), "NumberSequenceKeypoint")
+end
+
+function NumberSequenceKeypoint.__eq(a, b)
+	return a.Time == b.Time and a.Value == b.Value and a.Envelope == b.Envelope
+end
+
+function NumberSequenceKeypoint.__tostring(a)
+	return `{a.Time} {a.Value} {a.Envelope} `
+end
+
+local NumberSequence = {}
+NumberSequence.__index = sequence_index(NumberSequence)
+NumberSequence.__eq = same_points
+NumberSequence.__tostring = points_text
+
+function NumberSequence.new(...)
+	return sequence(NumberSequence, "NumberSequence", NumberSequenceKeypoint, ...)
+end
+
+local ColorSequenceKeypoint = {}
+ColorSequenceKeypoint.__index = ColorSequenceKeypoint
+
+function ColorSequenceKeypoint.new(time, color)
+	local self = { Time = time, Value = color }
+	return mark(table.freeze(setmetatable(self, ColorSequenceKeypoint)), "ColorSequenceKeypoint")
+end
+
+function ColorSequenceKeypoint.__eq(a, b)
+	return a.Time == b.Time and a.Value == b.Value
+end
+
+function ColorSequenceKeypoint.__tostring(a)
+	return `{a.Time} {a.Value.R} {a.Value.G} {a.Value.B} 0 `
+end
+
+local ColorSequence = {}
+ColorSequence.__index = sequence_index(ColorSequence)
+ColorSequence.__eq = same_points
+ColorSequence.__tostring = points_text
+
+function ColorSequence.new(...)
+	return sequence(ColorSequence, "ColorSequence", ColorSequenceKeypoint, ...)
 end
 
 -- ---------------------------------------------------------------------------
@@ -985,6 +1287,12 @@ function methods.BindToClose(self, f)
 	self.__props.__close = f
 end
 
+-- A BindableEvent: `Fire` runs the handlers of its `Event` at once, as
+-- the engine does in the serial phase. The reply of a message rides one.
+function methods.Fire(self, ...)
+	self.Event:Fire(...)
+end
+
 function instance_meta.__index(self, key)
 	local props = rawget(self, "__props")
 	local value = props[key]
@@ -1000,7 +1308,10 @@ function instance_meta.__index(self, key)
 	end
 	local signals = rawget(self, "__signals")
 	local signal = signals[key]
-	if signal == nil and (key:match("^[A-Z]") and key:match("ed$") or key == "Destroying" or key == "Changed") then
+	if
+		signal == nil
+		and (key:match("^[A-Z]") and key:match("ed$") or key == "Destroying" or key == "Changed" or key == "Event")
+	then
 		signal = new_signal()
 		signals[key] = signal
 	end
@@ -1135,23 +1446,51 @@ data_model.__props.Name = "game"
 local workspace_service = data_model:GetService("Workspace")
 workspace_service.__props.Name = "Workspace"
 
-shim.Vector3 = Vector3
-shim.Vector2 = Vector2
-shim.CFrame = CFrame
-shim.Color3 = Color3
-shim.UDim = UDim
-shim.UDim2 = UDim2
-shim.NumberRange = NumberRange
-shim.Random = Random
-shim.Enum = Enum
-shim.Instance = Instance
-shim.task = task
-shim.game = data_model
-shim.workspace = workspace_service
+-- Roblox's `debug` adds the MicroProfiler labels to Luau's own. Here
+-- they do nothing.
+local debug_double = table.clone(debug)
 
-shim.typeof = typeof_double
-shim.warn = warn or function(...)
-	print("[warn]", ...)
+function debug_double.profilebegin(_label) end
+
+function debug_double.profileend() end
+
+local doubles = {
+	typeof = typeof_double,
+	Vector3 = Vector3,
+	Vector2 = Vector2,
+	CFrame = CFrame,
+	Color3 = Color3,
+	ColorSequence = ColorSequence,
+	ColorSequenceKeypoint = ColorSequenceKeypoint,
+	NumberSequence = NumberSequence,
+	NumberSequenceKeypoint = NumberSequenceKeypoint,
+	UDim = UDim,
+	UDim2 = UDim2,
+	NumberRange = NumberRange,
+	Rect = Rect,
+	Random = Random,
+	Enum = Enum,
+	Instance = Instance,
+	task = task,
+	game = data_model,
+	workspace = workspace_service,
+	debug = debug_double,
+	warn = warn or function(...)
+		print("[warn]", ...)
+	end,
+}
+
+-- The doubles are globals, as the engine's names are. Every chunk of a
+-- spec reads them from one environment: an Alloy module, the runtime,
+-- and a plain Luau package that reads `game` as it loads (LANG_BUGS
+-- 125). A module takes no locals for them, so it keeps the 200 locals
+-- of Luau for its own names (LANG_BUGS 127). On Lune that environment
+-- is not `_G`, so the shim writes to its own environment.
+local env = getfenv(1)
+
+for name, value in doubles do
+	shim[name] = value
+	env[name] = value
 end
 
 return shim

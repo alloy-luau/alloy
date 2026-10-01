@@ -674,7 +674,7 @@ pub(crate) fn complete_std_members(
                 "value": alloy::docs::member_hover(key, m),
             },
         });
-        // The signature reads `HashMap.new<K, V>(): HashMap<K, V>`; the
+        // The signature reads `HashMap.from<K, V>(t: { [K]: V }): HashMap<K, V>`; the
         // call the list inserts starts after the name.
         let sigil = match m.kind {
             alloy::docs::MemberKind::Method => ':',

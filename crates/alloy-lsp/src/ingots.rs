@@ -20,10 +20,28 @@ fn range_of_span(source: &str, span: &Value) -> Option<Value> {
     }))
 }
 
-/// A hover reply as the LSP hover.
-pub fn hover(doc: &Doc, hover: &Value) -> Value {
+/// A hover reply as the LSP hover. A reply that names a Roblox class or
+/// member takes the host's own hover for it from `roblox`, and the
+/// ingot's `note` goes under it.
+pub fn hover(
+    doc: &Doc,
+    hover: &Value,
+    roblox: impl Fn(&str, Option<&str>) -> Option<String>,
+) -> Value {
+    let named = hover["roblox"]["class"]
+        .as_str()
+        .and_then(|class| roblox(class, hover["roblox"]["member"].as_str()));
+    let text: Vec<&str> = [
+        named
+            .as_deref()
+            .or_else(|| hover["contents"].as_str().filter(|c| !c.is_empty())),
+        hover["note"].as_str().filter(|n| !n.is_empty()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     let mut out = json!({
-        "contents": { "kind": "markdown", "value": hover["contents"].as_str().unwrap_or("") },
+        "contents": { "kind": "markdown", "value": text.join("\n\n---\n\n") },
     });
 
     if let Some(range) = range_of_span(&doc.source, &hover["span"]) {

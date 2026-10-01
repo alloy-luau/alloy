@@ -34,4 +34,4 @@ local held = __alloy.future(function()
     return __alloy.await(rank(4))
 end)
 
-print(best, warm, held)
+print(best, warm, held) return nil

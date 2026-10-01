@@ -1,11 +1,11 @@
 -- A `try` inside a `try do` block leaves the block through the block's
 -- `fail`, so the block's own `return` decides the value type.
 local __alloy = require("@alloy") local function parse(s: string): __alloy.Result<number, string>
-    return __alloy.Ok(1)
+    return __alloy.Ok<<number>>(1)
 end
 
 local function code(s: string): __alloy.Result<string, number>
-    return __alloy.Ok("x")
+    return __alloy.Ok<<string>>("x")
 end
 
 local plain = __alloy.try_block(function(__fail) return 1 end)
@@ -55,11 +55,11 @@ end)
 -- function.
 local function reader(): __alloy.Result<number, string>
     local _1 = parse("4") if _1.tag == "Err" then return (_1 :: any) end local v = _1:unwrap()
-    return __alloy.Ok(v)
+    return __alloy.Ok<<number>>(v)
 end
 
 local outer = __alloy.try_block(function(__fail)
     return reader()
 end)
 
-print(plain, through, one, same, mixed, nested, guarded, outer)
+print(plain, through, one, same, mixed, nested, guarded, outer) return nil

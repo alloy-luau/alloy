@@ -1651,3 +1651,195 @@ fn an_empty_interpolation_hole_reports_at_its_brace() {
         "expected a name, found `}`"
     );
 }
+
+/// `parallel do` opens a block and `message Name(` declares a channel.
+/// Each word stays a name everywhere else, as `match` and `try` do.
+#[test]
+fn parallel_and_message_are_statements_and_names() {
+    use alloy_syntax::ast::Stmt;
+
+    let stmts = |src: &str| {
+        let lexed = lexer::lex(src).expect("lex");
+
+        parser::parse(src, &lexed.toks)
+            .unwrap_or_else(|e| panic!("{src:?}: {}", e.message))
+            .block
+            .stmts
+    };
+
+    assert!(matches!(
+        &stmts("parallel do\n    x = 1\nend\n")[0],
+        Stmt::Parallel(p) if p.block.stmts.len() == 1
+    ));
+    assert!(matches!(
+        &stmts("message Step(dt: number, g: number)\n")[0],
+        Stmt::Message(m) if m.params.len() == 2 && m.parallel.is_none() && !m.exported
+    ));
+    assert!(matches!(
+        &stmts("message Hit(part: Part) as parallel\n")[0],
+        Stmt::Message(m) if m.parallel.is_some()
+    ));
+    assert!(matches!(
+        &stmts("export message Ping()\n")[0],
+        Stmt::Message(m) if m.exported
+    ));
+    assert!(matches!(
+        &stmts("@tag\nmessage Ping()\n")[0],
+        Stmt::Message(m) if m.attributes.len() == 1
+    ));
+
+    let names = "local parallel = true\nparallel = false\nprint(parallel)\nparallel(1)\nlocal message = \"hi\"\nmessage = message .. \"!\"\nmessage(1)\nprint(message.len)\nimport * as parallel from \"./p\"\n";
+
+    for s in stmts(names) {
+        assert!(!matches!(s, Stmt::Parallel(_) | Stmt::Message(_)), "{s:?}");
+    }
+
+    let src = "message Hit(part: Part) as parallel\nparallel do end\nlocal parallel = 1\n";
+    let toks = lexer::lex(src).expect("lex").toks;
+    let words: Vec<bool> = toks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| matches!(t.text(src), "parallel" | "message"))
+        .map(|(i, _)| alloy_syntax::contextual::keyword_at(src, &toks, i))
+        .collect();
+
+    assert_eq!(words, [true, true, true, false]);
+}
+
+/// `reply(...)` follows the parameters and comes before `as parallel`.
+/// The word is a keyword there alone: a parameter or a local named
+/// `reply` stays a name.
+#[test]
+fn a_message_takes_a_reply_clause() {
+    use alloy_syntax::ast::Stmt;
+
+    let parse = |src: &str| {
+        let lexed = lexer::lex(src).expect("lex");
+
+        parser::parse(src, &lexed.toks)
+    };
+    let first = |src: &str| {
+        parse(src)
+            .unwrap_or_else(|e| panic!("{src:?}: {}", e.message))
+            .block
+            .stmts
+            .remove(0)
+    };
+
+    let m = first(
+        "export message Light(job: number, input: buffer) reply(job: number, levels: buffer) as parallel\n",
+    );
+    let Stmt::Message(m) = m else { panic!("{m:?}") };
+    assert_eq!(m.params.len(), 2);
+    assert_eq!(m.reply.as_ref().map(|(_, p)| p.len()), Some(2));
+    assert!(m.parallel.is_some());
+
+    let Stmt::Message(m) = first("message Done() reply()\n") else {
+        panic!("no message")
+    };
+    assert_eq!(m.reply.as_ref().map(|(_, p)| p.len()), Some(0));
+
+    let Stmt::Message(m) = first("message Step(dt: number, reply: Actor)\n") else {
+        panic!("no message")
+    };
+    assert!(m.reply.is_none());
+
+    let late = parse("message Light(job: number) as parallel reply(job: number)\n")
+        .expect_err("the order");
+    assert_eq!(
+        late.message,
+        "a message writes `reply(...)` before `as parallel`"
+    );
+
+    let src = "message Light(job: number) reply(job: number) as parallel\nlocal reply = 1\nreply(2)\nmessage Step(reply: Actor)\n";
+    let toks = lexer::lex(src).expect("lex").toks;
+    let words: Vec<bool> = toks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| matches!(t.text(src), "reply" | "parallel"))
+        .map(|(i, _)| alloy_syntax::contextual::keyword_at(src, &toks, i))
+        .collect();
+
+    assert_eq!(words, [true, true, false, false, false]);
+}
+
+/// A line break is white space in a header, so `where` may open a line
+/// or close one, in each header that takes it. `if const` with `where` on
+/// its own line reported `expected then, found where` (LANG_BUGS 116).
+#[test]
+fn where_may_open_or_close_a_line_of_a_header() {
+    use alloy_syntax::ast::{Cond, Stmt};
+
+    let first = |src: &str| {
+        let lexed = lexer::lex(src).expect("lex");
+
+        parser::parse(src, &lexed.toks)
+            .unwrap_or_else(|e| panic!("{src:?}: {}", e.message))
+            .block
+            .stmts
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("{src:?}: no statement"))
+    };
+    let filtered_if = |stmt: &Stmt| match stmt {
+        Stmt::If(i) => matches!(
+            &i.branches[0].0,
+            Cond::Local {
+                filter: Some(_),
+                ..
+            }
+        ),
+
+        _ => false,
+    };
+
+    for src in [
+        "if const n = held\n  where n > 0 then\n  print(n)\nend\n",
+        "if const n = held where\n  n > 0 then\n  print(n)\nend\n",
+        "if local n = held\nwhere n > 0\nthen\n  print(n)\nend\n",
+        "if const n = held\n  where n > 0\n    and n < 9 then\n  print(n)\nend\n",
+    ] {
+        assert!(filtered_if(&first(src)), "{src}");
+    }
+
+    let src = "if const n = held then\n  print(n)\nelseif local m = other\n  where m > 1 then\n  print(m)\nend\n";
+    let Stmt::If(i) = first(src) else {
+        panic!("no if")
+    };
+    assert!(matches!(
+        &i.branches[1].0,
+        Cond::Local {
+            filter: Some(_),
+            ..
+        }
+    ));
+
+    let src = "while local job = queue:pop()\n  where job.ready do\n  run(job)\nend\n";
+    assert!(
+        matches!(first(src), Stmt::While(w) if matches!(&w.cond, Cond::Local { filter: Some(_), .. }))
+    );
+
+    for src in [
+        "for _, p in parts\n  where p.ok do\n  print(p)\nend\n",
+        "for _, p in parts where\n  p.ok do\n  print(p)\nend\n",
+    ] {
+        assert!(
+            matches!(first(src), Stmt::GenericFor(f) if f.filter.is_some()),
+            "{src}"
+        );
+    }
+
+    for src in [
+        "after 2\n  where ready do\n  go()\nend\n",
+        "after (a + b)\n  where ready do\n  go()\nend\n",
+    ] {
+        assert!(
+            matches!(first(src), Stmt::After(a) if a.filter.is_some()),
+            "{src}"
+        );
+    }
+
+    // A local named `where` on the next line stays one.
+    let src = "after(x)\nwhere = 1\n";
+    assert!(matches!(first(src), Stmt::Call(..)), "{src}");
+}

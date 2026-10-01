@@ -12,4 +12,4 @@ local __alloy = require("@alloy") local Outer = {}
 
 local p: Outer_Inner_Point = { x = Outer.A + Outer.Inner.B }
 
-print(p)
+print(p) return nil

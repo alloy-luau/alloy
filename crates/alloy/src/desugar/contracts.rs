@@ -48,8 +48,15 @@ pub(crate) struct Owner<'a> {
 
 /// The targets whose members a contract can read. A `requires` clause on
 /// any other target has nothing to check, and the declaration says so.
-pub(crate) const CONTRACT_TARGETS: &[&str] =
-    &["struct", "impl", "namespace", "enum", "interface", "trait"];
+pub(crate) const CONTRACT_TARGETS: &[&str] = &[
+    "struct",
+    "impl",
+    "namespace",
+    "enum",
+    "interface",
+    "trait",
+    "message",
+];
 
 impl<'s> Desugar<'s> {
     /// One `requires` clause of an attribute declaration, as the check
@@ -179,6 +186,12 @@ impl<'s> Desugar<'s> {
     /// Records what the editor writes for a member the declaration does
     /// not carry: the member, and the `end` it goes in front of.
     fn note_gap(&mut self, at: TokSpan, attr: &str, owner: Owner<'_>, want: &Require) {
+        // A message has no body to write a member into: its fields are
+        // the parameters on its one line.
+        if owner.target == "message" {
+            return;
+        }
+
         /*
         A field belongs in the struct and a method in an `impl`, even
         where the contract sits on the other half of the same type.

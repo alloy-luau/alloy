@@ -401,7 +401,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Correctness,
         default: Level::Warn,
         summary: "a call passes more arguments than the function takes",
-        detail: "The extra values are evaluated and dropped, so a mistake in the argument order reads as working code. The lint counts a call of a function with a fixed parameter list that the file or an imported module declares: a plain name, `M.f` through `import * as M`, a static, a method on a value the file types with an annotation or a `new`, and a function in a table a local holds. A vararg, a default, or a name declared twice makes the count a range and the lint stands down. The checker reports the other direction, a call with too few arguments.",
+        detail: "The extra values are evaluated and dropped, so a mistake in the argument order reads as working code. The lint counts a call of a function with a fixed parameter list that the file or an imported module declares: a plain name, `M.f` through `import * as M`, a static, a method on a value the file types with an annotation or a `new`, a function in a table a local holds, and the constructor that `new W(a)` calls. A vararg, a default, or a name declared twice makes the count a range and the lint stands down. The checker reports the other direction, a call with too few arguments.",
     },
     LintInfo {
         name: "unreachable_default",
@@ -693,6 +693,13 @@ pub const LINTS: &[LintInfo] = &[
         detail: "Flux. The metatable idiom writes the constructor, the `__index`, and the method table by hand, and the checker sees plain tables. `struct X as ... end` with `impl X` emits the same tables with types, `new X(...)` for construction, and traits for shared behaviour. No automatic rewrite.",
     },
     LintInfo {
+        name: "prefer_new",
+        group: Group::Style,
+        default: Level::Warn,
+        summary: "`X.new(...)` in place of `new X(...)`",
+        detail: "Flux. `new X(...)` is the constructor call, and it emits `X.new(...)`. The lint fires when each part of the type path starts with a capital letter: `Vector3.new(1, 2, 3)`, `Net.Route.new(r)`, and `HashMap.new<<string, number>>()`. In an `.alx` file it also reads the markup: an attribute such as `Size={UDim2.new(1, 0, 0, 24)}`, and a `{...}` hole. A call that an ingot writes stays quiet. A lowercase name such as `t.new()` or `self.new()` may hold no class, so it stays quiet. `X:new()`, `X.New(...)`, and a `.new` that nothing calls stay quiet too. The lint also stays quiet where `new X` does not build the same value: a call inside `typeof(...)`, a call that a `{ ... }` table follows, and an enum. So does a struct whose impl writes no `new` or writes `New`, and `X.new()` with no arguments inside the impl of `X`. `alloy flux --fix` writes `new X` over `X.new` and keeps the rest: `X.new(a):m()` becomes `new X(a):m()`.",
+    },
+    LintInfo {
         name: "manual_ternary_return",
         group: Group::Style,
         default: Level::Warn,
@@ -818,8 +825,8 @@ pub const LINTS: &[LintInfo] = &[
         name: "instance_new_parent",
         group: Group::Roblox,
         default: Level::Warn,
-        summary: "`Instance.new(class, parent)`, the parent as an argument",
-        detail: "With the parent set first, every property written after it replicates and fires a change on its own. Create the instance, set its properties, then set `Parent` last. No automatic rewrite: the assignments move.",
+        summary: "`Instance.new(class, parent)` or `new Instance(class, parent)`, the parent as an argument",
+        detail: "With the parent set first, every property written after it replicates and fires a change on its own. Create the instance, set its properties, then set `Parent` last. `new Instance(class) { Parent = parent }` does that: the braces set `Parent` after every other field. No automatic rewrite: the assignments move.",
     },
     LintInfo {
         name: "deprecated_body_mover",
@@ -1390,6 +1397,25 @@ mod tests {
         );
     }
 
+    /// The head of a message declares its parameters and its answer; it
+    /// calls no function of the same name.
+    #[test]
+    fn a_message_head_is_no_call() {
+        let fns = "local function f()\nend\nlocal function reply()\nend\nf()\nreply()\n";
+        // A message named `f` also draws naming_convention.
+        let counts = |src: String| names(&src).contains(&"argument_count");
+        assert!(!counts(format!(
+            "{fns}message f(x: number) reply(y: number)\n"
+        )));
+        // The parser reads a `reply` on the next line as the head's own.
+        assert!(!counts(format!(
+            "{fns}message f(x: number)\nreply(y: number)\n"
+        )));
+        assert!(counts(format!(
+            "{fns}message A(x: number)\nprint(1)\nreply(1)\n"
+        )));
+    }
+
     /// A method on a value the file types, a static, and a function in
     /// a local table count their arguments too.
     #[test]
@@ -1432,6 +1458,35 @@ mod tests {
         );
     }
 
+    /// `new W(a)` calls `W.new(a)`, so it counts its arguments the same
+    /// way. A value `new` passed to a constructor that takes none went
+    /// nowhere, and neither the build nor the checker said so.
+    #[test]
+    fn a_new_counts_the_arguments_of_its_constructor() {
+        let head = "struct W as\n    d: number\nend\n\nimpl W as\n    function new(): W\n        return new W { d = 0 }\n    end\nend\n\nstruct M as\n    d: number\nend\n\nimpl M as\n    function New(d: number): M\n        return new M { d = d }\n    end\nend\n\n";
+
+        for (call, fires) in [
+            ("new W(1)", true),
+            ("new W()", false),
+            ("new M(1, 2)", true),
+            ("new M(1)", false),
+        ] {
+            let out = crate::compile(&format!("{head}print({call})\n")).unwrap();
+            let messages: Vec<&str> = out
+                .lints
+                .iter()
+                .filter(|l| l.name == "argument_count")
+                .map(|l| l.message.as_str())
+                .collect();
+            let want = match (fires, call.contains('W')) {
+                (false, _) => vec![],
+                (true, true) => vec!["`W.new` takes 0 arguments; this call passes 1"],
+                (true, false) => vec!["`M.New` takes 1 argument; this call passes 2"],
+            };
+            assert_eq!(messages, want, "{call}");
+        }
+    }
+
     #[test]
     fn an_access_after_a_keyword_still_fires() {
         for src in [
@@ -1452,6 +1507,22 @@ mod tests {
     #[test]
     fn indexing_an_optional_result_is_a_lint() {
         let src = "local function find(): Player?\n    return nil\nend\nprint(find().Name)\n";
+        assert_eq!(names(src), vec!["optional_access"]);
+    }
+
+    #[test]
+    fn a_ternary_else_is_not_a_method_call() {
+        // The `:` of a ternary reads nothing through the value before it.
+        for src in [
+            "local function find(): Player?\n    return nil\nend\nlocal p = ok ? find() : nil\nprint(p)\n",
+            "local function f(t: Player?, ok: boolean): Player?\n    return ok ? t : nil\nend\n",
+            "local t: Player? = nil\nlocal u = ok ? t : nil\nprint(u)\n",
+        ] {
+            assert_eq!(names(src), Vec::<&str>::new(), "{src}");
+        }
+
+        // A method call through the result still fires.
+        let src = "local function find(): string?\n    return nil\nend\nprint(find():upper())\n";
         assert_eq!(names(src), vec!["optional_access"]);
     }
 

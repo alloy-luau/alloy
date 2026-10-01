@@ -163,6 +163,67 @@ fn allow_quiets_a_lint_over_an_attribute_declaration() {
     );
 }
 
+/// `@allow` writes nothing, so each statement under it lowers as it
+/// does with a blank line in its place. A plain `local` or `const`
+/// under it went to the Luau as written, with `a ?? b`, `new T()` and
+/// `-> T` in it (LANG_BUGS 133).
+#[test]
+fn allow_keeps_the_lowering_of_each_statement() {
+    let kinds = [
+        "local c = a ?? b",
+        "const c = a ?? b",
+        "local c = new Vector3(1, 2, 3)",
+        "local c = function(x: number) -> number\n    return x ?? 1\nend",
+        "local c, d = a ?? b, a ?? b",
+        "local c: number = a ?? b",
+        "local { x } = { x = a ?? b }",
+        "local c = match a with\n    case 1 then\n        print(1)\n        b ?? 3\n    default b ?? 1\nend",
+        "const c = match a with\n    case 1 then\n        print(1)\n        b ?? 3\n    default b ?? 1\nend",
+        "export local c = a ?? b",
+        "export const c = a ?? b",
+        "local function c(x: number) -> number\n    return x ?? 1\nend",
+        "function c(x: number) -> number\n    return x ?? 1\nend",
+        "export function c(x: number) -> number\n    return x ?? 1\nend",
+        "print(a ?? b)",
+        "a = a ?? b",
+        "if (a ?? b) > 1 then\n    print(a ?? b)\nend",
+        "for i = 1, a ?? b do\n    print(i)\nend",
+        "do\n    print(a ?? b)\nend",
+        "type T = { x: number }",
+        "struct S as\n    x: number = a ?? b\nend",
+        "enum E as\n    A\n    B\nend",
+        "namespace N as\n    const x = a ?? b\nend",
+    ];
+    let head = "local a: number? = nil\nlocal b = 2\n";
+    // A temp of a destructure goes in front of the statement, on the
+    // line of the attribute, so the words compare and the lines do not.
+    let words = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    for kind in kinds {
+        let plain = compile(&format!("{head}\n{kind}\n"));
+        let allowed = compile(&format!("{head}@allow(missing_doc)\n{kind}\n"));
+
+        assert!(
+            plain.diagnostics.is_empty(),
+            "{kind}\n{:?}",
+            plain.diagnostics
+        );
+        assert!(
+            allowed.diagnostics.is_empty(),
+            "{kind}\n{:?}",
+            allowed.diagnostics
+        );
+        assert_eq!(words(&allowed.ship), words(&plain.ship), "{kind}");
+        assert_eq!(words(&allowed.check), words(&plain.check), "{kind}");
+        assert_eq!(
+            allowed.ship.lines().count(),
+            plain.ship.lines().count(),
+            "{kind}"
+        );
+        assert!(!allowed.ship.contains("??"), "{kind}\n{}", allowed.ship);
+    }
+}
+
 #[test]
 fn luau_attribute_list_takes_luau_attributes_alone() {
     let ok = compile(

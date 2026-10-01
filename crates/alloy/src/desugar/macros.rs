@@ -1602,17 +1602,20 @@ mod tests {
                 .collect::<Vec<String>>(),
             vec!["`give_up` returns from the function; nothing can follow it in the block"]
         );
-        // One `return` in the block, and the body's other statement.
-        assert!(out.check.contains("print(\"bye\")"), "{}", out.check);
-        assert_eq!(out.check.matches("return").count(), 1, "{}", out.check);
+        // One `return` in the block, and the body's other statement. The
+        // module's own `return nil` closes the file.
+        let check = out.check.trim_end().strip_suffix(" return nil").unwrap();
+        assert!(check.contains("print(\"bye\")"), "{check}");
+        assert_eq!(check.matches("return").count(), 1, "{check}");
 
         // A body that is the `return` alone writes nothing: `nil` is no
         // Luau statement.
         let bare = "macro stop()\n    return\nend\n\n";
         let out = crate::compile(&format!("{bare}$stop()\nprint(1)\n")).unwrap();
 
-        assert!(!out.check.contains("nil"), "{}", out.check);
-        assert!(!out.check.contains("return"), "{}", out.check);
+        let check = out.check.trim_end().strip_suffix(" return nil").unwrap();
+        assert!(!check.contains("nil"), "{check}");
+        assert!(!check.contains("return"), "{check}");
     }
 
     /// `const low = lo` then `math.max(low, ...)`: the body ends in a

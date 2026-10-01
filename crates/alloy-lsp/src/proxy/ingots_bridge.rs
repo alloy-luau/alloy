@@ -159,7 +159,8 @@ impl Server {
         let Some(hover) = ingots.hover(&path.to_string_lossy(), &doc.source, offset as u32) else {
             return false;
         };
-        let result = crate::ingots::hover(doc, &hover);
+        let result =
+            crate::ingots::hover(doc, &hover, |class, member| st.roblox_hover(class, member));
         drop(st);
         self.respond(id, result);
 

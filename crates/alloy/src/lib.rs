@@ -297,6 +297,16 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         });
     }
 
+    // `.actor.` on a module or an `init` script names an Actor the
+    // build cannot write.
+    if let Some(message) = directives::actor_name_problem(&options.file_name) {
+        diagnostics.push(Diagnostic {
+            start: 0,
+            end: 0,
+            message,
+        });
+    }
+
     // One mistake reaches the parser through several rules, so the same
     // sentence lands on one position more than once.
     diagnostics.sort_by_key(|d| d.start);
@@ -572,7 +582,101 @@ pub fn compile_file(
         out.diagnostics.dedup();
     }
 
+    if !options.definitions
+        && let Some((line, text)) = luau_limit(&out.ship)
+    {
+        // The ship keeps every line of the source, so the line the
+        // compiler names is the source's own.
+        let (start, end) = directives::span_of_line(source, line.saturating_sub(1));
+        out.diagnostics.push(Diagnostic {
+            start: start as u32,
+            end: end as u32,
+            message: format!(
+                "Luau cannot compile this module: {}",
+                luau_limit_text(&text)
+            ),
+        });
+        out.diagnostics.sort_by_key(|d| d.start);
+    }
+
     Ok(out)
+}
+
+/*
+The ship artifact through the Luau compiler that Roblox runs on it at
+load. A limit the emit crosses, 200 locals or 200 upvalues in one
+function, or the constants of one function, fails there and nowhere
+else: the build, the analyzer and `luau-compile --null` pass it, and
+Studio refused the module (LANG_BUGS 107). A syntax report is left out:
+the parser here may differ from the one in Roblox. Gives the line of the
+report, from 1, with its text.
+*/
+#[cfg(not(target_arch = "wasm32"))]
+fn luau_limit(ship: &str) -> Option<(usize, String)> {
+    // The compiler here predates `const`, which Roblox reads as a local
+    // that is never assigned again. Both words take five bytes, so each
+    // position holds.
+    let mut text = ship.to_string();
+
+    if let Ok(lexed) = alloy_syntax::lexer::lex(ship) {
+        let toks = &lexed.toks;
+
+        for (i, t) in toks.iter().enumerate() {
+            if t.text(ship) == "const"
+                && toks
+                    .get(i + 1)
+                    .is_some_and(|n| n.kind == alloy_syntax::lexer::TokKind::Ident)
+            {
+                text.replace_range(t.start as usize..t.end as usize, "local");
+            }
+        }
+    }
+
+    // At the default level the compiler folds a local that holds a
+    // constant, and it takes no register. Studio refused a module of
+    // such constants all the same, so the check counts every local, as
+    // the compiler does with no optimization.
+    let compiler = mlua::Compiler::new().set_optimization_level(0);
+    let Err(mlua::Error::SyntaxError { message, .. }) = compiler.compile(&text) else {
+        return None;
+    };
+    let (line, text) = message.split_once(": ")?;
+    let line = line.trim().parse().ok()?;
+
+    (text.starts_with("Out of ") || text.starts_with("Exceeded ")).then(|| (line, text.to_string()))
+}
+
+// The playground has no Luau VM, so it cannot see the limits.
+#[cfg(target_arch = "wasm32")]
+fn luau_limit(_: &str) -> Option<(usize, String)> {
+    None
+}
+
+/// The compiler's text with the name it allocates quoted, and what to
+/// change: `out of local registers when trying to allocate `GLOW_MOST`:
+/// exceeded limit 200; ...`. An `Exceeded` report carries its own advice.
+fn luau_limit_text(text: &str) -> String {
+    let lower = text[..1].to_lowercase() + &text[1..];
+    let quoted = match lower.split_once("allocate ") {
+        Some((head, rest)) => match rest.split_once(": ") {
+            Some((name, tail)) if !name.contains(' ') => format!("{head}allocate `{name}`: {tail}"),
+
+            _ => lower,
+        },
+
+        None => lower,
+    };
+    let fix = if quoted.starts_with("out of local registers") {
+        "; one function holds at most 200 locals, so put some in a table or in a second module"
+    } else if quoted.starts_with("out of upvalue registers") {
+        "; a function reads at most 200 locals of the functions around it, so read some through a table"
+    } else if quoted.starts_with("out of registers") {
+        "; split the expression or the call into parts"
+    } else {
+        ""
+    };
+
+    format!("{quoted}{fix}")
 }
 
 /// Desugars Alloy source to plain Luau, the ship artifact.
@@ -1168,7 +1272,7 @@ mod tests {
 
     #[test]
     fn plain_luau_round_trips_unchanged() {
-        let source = "local x = 1 -- comment\nprint(x)\n";
+        let source = "local x = 1 -- comment\nprint(x)\nreturn x\n";
         assert_eq!(desugar(source), source);
     }
 
@@ -1181,13 +1285,13 @@ mod tests {
         let out = compile_with("local h = gui=>Hud=>Health\n", &options).unwrap();
         assert_eq!(
             out.ship,
-            "local _1 = gui:WaitForChild(\"Hud\", 5) local h = (if _1 == nil then nil else _1:WaitForChild(\"Health\", 5))\n"
+            "local _1 = gui:WaitForChild(\"Hud\", 5) local h = (if _1 == nil then nil else _1:WaitForChild(\"Health\", 5)) return nil\n"
         );
 
         let out = compile("local h = gui=>Hud=>Health\n").unwrap();
         assert_eq!(
             out.ship,
-            "local h = gui:WaitForChild(\"Hud\"):WaitForChild(\"Health\")\n"
+            "local h = gui:WaitForChild(\"Hud\"):WaitForChild(\"Health\") return nil\n"
         );
     }
 
@@ -1651,7 +1755,7 @@ mod tests {
     fn nil_coalescing_desugars() {
         assert_eq!(
             desugar("local v = a ?? 0\n"),
-            "local v = (if a == nil then 0 else a)\n"
+            "local v = (if a == nil then 0 else a) return nil\n"
         );
     }
 }

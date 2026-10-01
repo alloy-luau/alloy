@@ -4,7 +4,7 @@ local describe, it, expect = lest.describe, lest.it, lest.expect
 local shim = require("../shim")
 local alloy = require("../alloy")
 local Scope, Signal = alloy.Scope, alloy.Signal
--- Each chunk has its own globals on this VM, so the doubles bind here.
+-- The shim sets the doubles as globals too. The locals name them here.
 local Instance, task, game, step = shim.Instance, shim.task, shim.game, shim.step
 
 describe("delete", function()
@@ -147,6 +147,8 @@ describe("destroy", function()
 end)
 
 describe("destroy after", function()
+	-- The shim sets its `task` as a global before the runtime loads, so
+	-- the timer parks until a step, as in a test of a project.
 	it("waits the delay, then destroys", function()
 		local left = 5
 		alloy.destroy_after({
@@ -154,6 +156,8 @@ describe("destroy after", function()
 				left = 0
 			end,
 		}, 0)
+		expect(left).toBe(5)
+		step()
 		expect(left).toBe(0)
 	end)
 

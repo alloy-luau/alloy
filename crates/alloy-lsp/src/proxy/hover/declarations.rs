@@ -117,11 +117,16 @@ impl Server {
             return false;
         };
 
+        // A key of a table literal names an entry of the table. Another
+        // file's `enum Look` says nothing about `Look = ...` in `ct`.
+        if literal_key(&doc.source, start).is_some() {
+            return false;
+        }
+
         // An attribute contract with an `each` clause reads best where
         // it is used: the arguments of this use name the members, so the
         // hover writes one line per member instead of the clause.
         let hover = expand_each(&decl.hover, &doc.source, start);
-        let hover = with_member_methods(&hover, doc, &key);
         let hover = formatted_hover(&hover, &st.fmt_config(uri));
         // The source the declaration sits in: this file, another open
         // one, or a module an import reads.
@@ -140,6 +145,16 @@ impl Server {
 
             None => hover,
         };
+        let hover = match member_declaration(&hover, decl, home.map(String::as_str)) {
+            Some((owner, member, text)) => {
+                let owner = lookup(&owner).map_or(owner, owner_line);
+
+                member_hover(&owner, &member, Some(&text))
+            }
+
+            None => hover,
+        };
+        let hover = with_return_arrows(&hover);
         let (sl, sc) = position_of(&doc.source, start);
         let (el, ec) = position_of(&doc.source, end);
         let result = json!({
@@ -201,90 +216,77 @@ impl Server {
 }
 
 /*
-The hover of a namespace member, with the methods of its `impl` blocks
-in a block under the declaration.
+A member's declaration hover, split for the member shape: the owner's
+path, the member's code, and the text under it. A member is an enum's
+variant, `CropKind.Wheat`, or a namespace member, `Tools.twice`. `None`
+for any other declaration.
 
-`summaries` keys its impl index by the bare name of a top level `impl`,
-so a member of a namespace finds none: the block stands inside the
-namespace body as `impl Vec2`, or outside it as `impl Geo.Vec2`. Both
-routes read here, from the sources in reach.
+The index writes the owner into the member's line, since the line was
+the only place to name it: `function Tools.twice(n: number)`, and
+`Tools.MAX = 3`, where the `const` goes because no path can follow it.
+The owner has a block of its own now, so the line reads as the source
+declares it, `const MAX = 3`. The notes that named the owner go: the
+variant's "A variant of" line, and the private note, which becomes the
+`private` in front of the line.
 */
-fn with_member_methods(hover: &str, doc: &Doc, path: &str) -> String {
-    let Some((ns, name)) = path.rsplit_once('.') else {
-        return hover.to_string();
-    };
-    let mut lines: Vec<&str> = hover.lines().collect();
-    // The block the hover opens with: a struct or an enum takes methods,
-    // and one that already carries an `impl` block needs none.
-    let opens = lines
-        .get(1)
-        .map(|l| l.trim_start().trim_start_matches("export "))
-        .is_some_and(|l| l.starts_with("struct ") || l.starts_with("enum "));
-    let Some(end) = lines.iter().position(|l| *l == "end") else {
-        return hover.to_string();
-    };
+fn member_declaration(
+    hover: &str,
+    decl: &alloy::declarations::Declaration,
+    home: Option<&str>,
+) -> Option<(String, String, String)> {
+    let (fence, rest) = hover.split_once('\n')?;
+    let (code, tail) = rest.split_once("\n```")?;
 
-    if !opens || lines.iter().any(|l| l.starts_with("impl ")) {
-        return hover.to_string();
+    if !fence.starts_with("```") {
+        return None;
     }
 
-    let methods = member_methods(doc, ns, name, path);
+    let word = decl.name.rsplit('.').next()?;
+    let variant = tail
+        .lines()
+        .find_map(|l| l.strip_prefix("A variant of `enum ")?.strip_suffix("`."));
+    let owner = match variant {
+        Some(owner) => owner,
 
-    if methods.is_empty() {
-        return hover.to_string();
+        None => decl.name.rsplit_once('.')?.0,
+    };
+    let qualified = format!("{owner}.{word}");
+    let at = code.find(&qualified)?;
+    let after = at + qualified.len();
+
+    if code[after..].starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+        return None;
     }
 
-    let mut block = vec![String::new(), format!("impl {path} as")];
-    block.extend(methods.iter().map(|m| format!("    {m}")));
-    block.push("end".to_string());
-    lines.splice(end + 1..end + 1, block.iter().map(String::as_str));
+    let mut member = format!("{}{word}{}", &code[..at], &code[after..]);
 
-    lines.join("\n")
-}
+    if member.starts_with(word)
+        && let Some(src) = home
+        && let Some(keyword) = src[..decl.offset.min(src.len())]
+            .rsplit('\n')
+            .next()
+            .and_then(|l| l.split_whitespace().last())
+            .filter(|k| matches!(*k, "const" | "local"))
+    {
+        member = format!("{keyword} {member}");
+    }
 
-/// The public method lines of every `impl` of `path`, from the sources in
-/// reach: a block that names the path outright, and one inside the
-/// namespace body that names the member alone.
-fn member_methods(doc: &Doc, ns: &str, name: &str, path: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+    let private = format!("`{word}` is private to `{owner}`.");
+    let mut text = Vec::new();
 
-    for src in std::iter::once(&doc.source).chain(doc.import_sources.iter()) {
-        let blocks = alloy::impl_blocks::impl_blocks(src);
-
-        if blocks.is_empty() {
-            continue;
-        }
-
-        let ranges = alloy::declarations::namespace_ranges(src);
-
-        for block in blocks {
-            let inside = || {
-                ranges
-                    .iter()
-                    .any(|r| r.path == ns && block.start >= r.start && block.start <= r.end)
-            };
-
-            if block.target != path && !(block.target == name && inside()) {
-                continue;
-            }
-
-            // The header, then one line per method, then `end`: the
-            // hover of the block already writes them as an author would.
-            for line in block.hover.lines().skip(2) {
-                if line == "end" {
-                    break;
-                }
-
-                let line = line.trim();
-
-                if !line.is_empty() && !out.iter().any(|held| held == line) {
-                    out.push(line.to_string());
-                }
-            }
+    for line in tail.lines() {
+        if line == private {
+            member = format!("private {member}");
+        } else if variant.is_none_or(|v| line != format!("A variant of `enum {v}`.")) {
+            text.push(line);
         }
     }
 
-    out
+    Some((
+        owner.to_string(),
+        member,
+        text.join("\n").trim().to_string(),
+    ))
 }
 
 /*
@@ -888,7 +890,7 @@ pub(crate) fn formatted_hover(hover: &str, fmt: &alloy::config::FmtConfig) -> St
 
 /// The hover of one field of a named struct, from the declaration index.
 pub(crate) fn field_of_struct(doc: &Doc, name: &str, field: &str) -> Option<String> {
-    let line = doc
+    let (decl, line) = doc
         .decls
         .iter()
         .filter(|d| d.name == name && d.hover.contains("struct "))
@@ -896,11 +898,13 @@ pub(crate) fn field_of_struct(doc: &Doc, name: &str, field: &str) -> Option<Stri
             d.hover
                 .lines()
                 .find(|l| field_key(l) == Some(field))
-                .map(|l| l.trim().to_string())
+                .map(|l| (d, l.trim()))
         })?;
 
-    Some(format!(
-        "```alloy\n{line}\n```\nA field of `struct {name}`."
+    Some(member_hover(
+        &owner_line(decl),
+        line,
+        member_doc(doc, name, field).as_deref(),
     ))
 }
 
@@ -1376,7 +1380,7 @@ mod tests {
 
         assert_eq!(
             super::with_derives(&decl.hover, src, decl.offset),
-            "```alloy\n@derive(Eq, Debug)\nstruct N.Entry\n  wins: number\nend\n```\n\nAn entry."
+            "```alloy\n@derive(Eq, Debug)\nstruct N.Entry\n    public wins: number\nend\n```\n\nAn entry."
         );
     }
 
@@ -1408,36 +1412,101 @@ mod tests {
         )
     }
 
-    /// The hover of a namespace member lists the methods of its `impl`,
-    /// whether the block stands inside the namespace body or outside it
-    /// under the member's path.
+    /// The hover of a struct shows the struct alone: each field with its
+    /// visibility on the left, `public` where the source wrote none, and
+    /// no method of its `impl`. A struct with no field is its head.
     #[test]
-    fn a_namespace_member_lists_the_methods_of_its_impl() {
-        const INSIDE: &str = "namespace Geo as\n    struct Vec2 as\n        x: number\n    end\n\n    impl Vec2 as\n        function new(x: number): Vec2\n            return new Vec2 { x = x }\n        end\n    end\nend\n";
-        const OUTSIDE: &str = "namespace Geo as\n    struct Vec2 as\n        x: number\n    end\nend\n\nimpl Geo.Vec2 as\n    function new(x: number): Geo.Vec2\n        return new Geo.Vec2 { x = x }\n    end\nend\n";
-
-        for src in [INSIDE, OUTSIDE] {
-            let doc = doc_of(src);
-            let decl = doc
-                .decls
-                .iter()
-                .find(|d| d.name == "Geo.Vec2")
-                .expect("the member");
-            let hover = with_member_methods(&decl.hover, &doc, "Geo.Vec2");
-
-            assert!(
-                hover.contains("    public function new(x: number)"),
-                "{hover}"
-            );
-        }
-
-        // A top level struct already carries them, so nothing repeats.
+    fn a_struct_hovers_as_its_fields() {
         let doc = doc_of(
-            "struct P as\n    x: number\nend\nimpl P as\n    function new(x: number): P\n        return new P { x = x }\n    end\nend\n",
+            "--- A thing.\nstruct Foo as\n    name: string\n    private count: number = 0\n    read size: number\nend\n\nimpl Foo as\n    function describe(self): string\n        return self.name\n    end\nend\n\nstruct Empty as\nend\n",
         );
-        let decl = doc.decls.iter().find(|d| d.name == "P").expect("P");
+        let hover = |name: &str| {
+            doc.decls
+                .iter()
+                .find(|d| d.name == name)
+                .map(|d| d.hover.clone())
+                .expect(name)
+        };
 
-        assert_eq!(with_member_methods(&decl.hover, &doc, "P"), decl.hover);
+        assert_eq!(
+            hover("Foo"),
+            "```alloy\nstruct Foo\n    public name: string\n    private count: number = 0\n    public read size: number\nend\n```\n\nA thing."
+        );
+        assert_eq!(hover("Empty"), "```alloy\nstruct Empty\n```");
+    }
+
+    /// The hover of an `impl` header shows the type with the methods of
+    /// every `impl` of it: the fields, then the methods, each with its
+    /// visibility, a private one too. The methods of the file that
+    /// declares the type come first, in the order it writes them, then
+    /// those of the other sources.
+    #[test]
+    fn an_impl_hovers_as_the_type_with_every_method() {
+        let home = concat!(
+            "struct Foo as\n",
+            "    name: string\n",
+            "    private count: number\n",
+            "end\n",
+            "\n",
+            "impl Foo as\n",
+            "    function describe(self): string\n",
+            "        return self.name\n",
+            "    end\n",
+            "\n",
+            "    private function bump(self)\n",
+            "        self.count += 1\n",
+            "    end\n",
+            "end\n",
+            "\n",
+            "--- The reset.\n",
+            "impl Foo as\n",
+            "    function reset(self)\n",
+            "    end\n",
+            "end\n",
+        );
+        let other = "import { Foo } from './foo'\n\nimpl Foo as\n    function shout(self): string\n        return self.name\n    end\nend\n";
+        let doc = doc_of(other);
+        let block = &doc.impl_blocks[0];
+        let hover = super::super::impls::impl_hover(block, &[other, home]);
+
+        assert_eq!(
+            hover,
+            "```alloy\nstruct Foo\n    public name: string\n    private count: number\n    public function describe(self): string\n    private function bump(self)\n    public function reset(self)\n    public function shout(self): string\nend\n```"
+        );
+
+        // The block's own comment follows the code.
+        let doc = doc_of(home);
+        let hover = super::super::impls::impl_hover(&doc.impl_blocks[1], &[home]);
+        assert!(hover.ends_with("```\n\nThe reset."), "{hover}");
+    }
+
+    /// With nothing to list, the head stands alone, and an enum shows
+    /// its variants, then the methods.
+    #[test]
+    fn an_impl_of_nothing_is_its_head_and_an_enum_lists_its_variants() {
+        let src = "struct Mark as\nend\n\nimpl Mark as\nend\n\nenum Kind as\n    Small\n    Big(number)\nend\n\nimpl Kind as\n    function size(self): number\n        return 1\n    end\nend\n";
+        let doc = doc_of(src);
+        let hover = |k: usize| super::super::impls::impl_hover(&doc.impl_blocks[k], &[src]);
+
+        assert_eq!(hover(0), "```alloy\nstruct Mark\n```");
+        assert_eq!(
+            hover(1),
+            "```alloy\nenum Kind\n    Small\n    Big(number)\n    public function size(self): number\nend\n```"
+        );
+
+        let kind = doc.decls.iter().find(|d| d.name == "Kind").expect("Kind");
+        assert_eq!(
+            kind.hover,
+            "```alloy\nenum Kind\n    Small\n    Big(number)\nend\n```"
+        );
+
+        // A target with no type in reach shows as its block.
+        let foreign = "impl string as\n    function shout(self): string\n        return self:upper()\n    end\nend\n";
+        let doc = doc_of(foreign);
+        assert_eq!(
+            super::super::impls::impl_hover(&doc.impl_blocks[0], &[foreign]),
+            "```alloy\nimpl string\n    public function shout(self): string\nend\n```"
+        );
     }
 
     /// A doc comment that ends in a full stop stands right above the

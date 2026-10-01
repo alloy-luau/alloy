@@ -160,6 +160,18 @@ pub enum Context {
     /// puts a condition on it. `filtered` is true once a `where` is
     /// written, so only the `do` is left.
     AfterDo { prefix: String, filtered: bool },
+    /// `parallel |`: the `do` that opens the block.
+    ParallelDo { prefix: String },
+    /// `message Step(dt: number) |`: the `reply(...)` of the answer and
+    /// the `as parallel` that binds the handler in the parallel phase.
+    /// `after_as` is true once the `as` is written, so only the word is
+    /// left. `replied` is true once a `reply(...)` stands, so only
+    /// `as parallel` is left.
+    MessageTail {
+        prefix: String,
+        after_as: bool,
+        replied: bool,
+    },
     /// `match e |`: the `with` that opens the arms, and the `as` that
     /// names the value. `aliased` is true once a name stands there, so
     /// only the `with` is left.
@@ -786,6 +798,42 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
             return Some(Context::DestroyAfter {
                 prefix: prefix.to_string(),
             });
+        }
+
+        // `parallel |`: the word opens a block, as `after 3 |` does.
+        if head_words == ["parallel"] {
+            return Some(Context::ParallelDo {
+                prefix: prefix.to_string(),
+            });
+        }
+
+        // `message Step(dt: number) |` and its `as |`. The list closed,
+        // so the declaration takes one tail and nothing else.
+        let message = match head_words.first() {
+            Some(&"export") => head_words.get(1) == Some(&"message"),
+
+            first => first == Some(&"message"),
+        };
+
+        if message && head.contains(')') && head.matches('(').count() == head.matches(')').count() {
+            // `reply(` after the parameters' `)`. A parameter named
+            // `reply` sits inside the list and has no `)` before it.
+            let replied = head.contains(") reply(") || head.contains(")reply(");
+            let tail = |after_as| {
+                Some(Context::MessageTail {
+                    prefix: prefix.to_string(),
+                    after_as,
+                    replied,
+                })
+            };
+
+            match last {
+                "as" => return tail(true),
+
+                _ if last.ends_with(')') => return tail(false),
+
+                _ => {}
+            }
         }
 
         // `after 3 |` and `after 3 where ready |`.

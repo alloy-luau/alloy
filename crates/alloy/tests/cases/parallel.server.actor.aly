@@ -1,0 +1,23 @@
+-- A worker Actor: a message in, a parallel scan, a message out.
+message Step(dt: number, reply: Actor)
+message Fallen(parts: { BasePart }) as parallel
+
+local parts: { BasePart } = {}
+
+Step.on(function(dt, reply)
+    local hits = {}
+
+    parallel do
+        for _, part in parts do
+            if part.Position.Y < 0 then
+                table.insert(hits, part)
+            end
+        end
+    end
+
+    Fallen.fire(reply, hits)
+end)
+
+Fallen.once(function(found)
+    print(#found)
+end)

@@ -1,0 +1,26 @@
+-- A worker Actor that answers: a reply comes back to any script.
+message Light(job: number, input: buffer) reply(job: number, levels: buffer)
+message Heat(job: number) reply(job: number) as parallel
+
+local worker = script.Parent :: Actor
+
+Light.replied(function(job, levels)
+    print(job, buffer.len(levels))
+end)
+
+Light.fire(worker, 7, buffer.create(8))
+
+Light.on(function(job, input, respond)
+    local levels = buffer.create(0)
+
+    parallel do
+        levels = input
+    end
+
+    respond(job, levels)
+end)
+
+Heat.once(function(job, respond)
+    respond(job)
+    worker.Name = "warm"
+end)

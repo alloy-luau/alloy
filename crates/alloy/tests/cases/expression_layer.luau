@@ -42,4 +42,4 @@ assert(a > b, "assertion failed: a > b")
 __alloy.assert_eq("expression_layer.aly:42", "a", a, "b", b)
 local bn = bit32.bnot(a)
 local sym = __alloy.Symbol.new("k")
-local arr = __alloy.Array.from({ 1 })
+local arr = __alloy.Array.from({ 1 }) return nil

@@ -75,7 +75,7 @@ impl<'s> Formatter<'s> {
                 || (self.items[j - 1].is_ident() && self.function_name_before(j - 1)))
     }
 
-    fn continues_at(&self, i: usize) -> bool {
+    pub(crate) fn continues_at(&self, i: usize) -> bool {
         let it = &self.items[i];
 
         if it.is_comment() {
@@ -86,8 +86,22 @@ impl<'s> Formatter<'s> {
             return !it.value_start;
         }
 
-        self.prev_code(i)
-            .is_some_and(|p| leaves_open(&self.items[p].text) && !is_closer(&it.text))
+        // The `where` of a header, at either end of a line: the header
+        // goes on to its `then` or `do` (LANG_BUGS 116). A local named
+        // `where` starts a line of its own.
+        if it.is("where") && !it.name_here {
+            return true;
+        }
+
+        // A comma leaves a line open only in a list of values. In the body
+        // of an `enum`, a comma ends a member.
+        self.list_value[i]
+            || self.prev_code(i).is_some_and(|p| {
+                let prev = &self.items[p];
+
+                (leaves_open(&prev.text) || (prev.is("where") && !prev.name_here))
+                    && !is_closer(&it.text)
+            })
     }
 
     /// The canonical space before item `i` on the current line.
@@ -154,9 +168,10 @@ impl<'s> Formatter<'s> {
         }
 
         // Type arguments: `Result<number, string>`, `show_all<T>(items)`.
+        // An array suffix holds the type it closes: `Pair<A, B>[]`.
         if self.generic.get(ai) == Some(&true) {
             return !matches!(at, "<" | "<<")
-                && !matches!(bt, "(" | "?" | "," | "." | "?." | ">" | ">>")
+                && !matches!(bt, "(" | "[" | "?" | "," | "." | "?." | ">" | ">>")
                 && !closes(bt);
         }
 

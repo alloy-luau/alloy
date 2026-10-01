@@ -1,6 +1,6 @@
 //! Inlay hints: the folds that clean and filter what the child offers.
 
-use super::hover::source_type;
+use super::hover::{drop_bounds, source_type, type_bounds};
 use super::*;
 
 /// The text of a hint label, whether a string or parts.
@@ -160,6 +160,7 @@ pub(crate) fn clean_hints(hints: &mut Vec<Value>, doc: &Doc) {
     let parameters = declared_type_parameters(&doc.source);
     let modules = whole_modules(doc);
     let reach = super::completion::StdReach::of(doc);
+    let bounds = type_bounds(doc);
 
     hints.retain_mut(|h| {
         // The label and the edit are one text.
@@ -175,7 +176,7 @@ pub(crate) fn clean_hints(hints: &mut Vec<Value>, doc: &Doc) {
         // A bound leaves the type parameter list at emit and joins every
         // use of the parameter as an intersection: the check artifact
         // casts `xs[i]` to `(T & Ord)`. The reader wrote `T`.
-        if let Some(text) = drop_bound_intersections(&hint_label(h), doc) {
+        if let Some(text) = drop_bounds(&hint_label(h), &bounds) {
             h["label"] = json!(text.clone());
 
             if h.pointer("/textEdits/0/newText").is_some() {

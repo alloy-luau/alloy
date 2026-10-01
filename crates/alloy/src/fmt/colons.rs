@@ -53,12 +53,17 @@ pub(crate) fn expr_ifs(src: &str, toks: &[Tok], chunk: &Chunk) -> HashSet<usize>
 /// between the operands. The layout breaks a long one before each
 /// operator. `then` is the `then` after it when the run is the whole
 /// condition of an `if` or an `elseif` statement.
+///
+/// The values of a statement, `return a, b` or `x, y = a, b`, are a
+/// chain too. There `list` is true and `ops` holds the first token of
+/// each value after the first, so a long list breaks after its commas.
 #[derive(Debug)]
 pub(crate) struct Chain {
     pub first: usize,
     pub last: usize,
     pub ops: Vec<usize>,
     pub then: Option<usize>,
+    pub list: bool,
 }
 
 /// The precedence of a binary operator, as the parser reads it. `??`
@@ -73,11 +78,12 @@ fn precedence(op: &str) -> Option<u8> {
     }
 }
 
-/// Every binary chain of the chunk, outer before inner. A chain breaks
-/// only before an operator that can open a line: a word operator, `bor`
-/// or `shl`, stays on the line of its left operand. A `-` in a value arm
-/// of a `match` opens the next value when it opens a line, so a chain
-/// with one there never breaks either.
+/// Every binary chain and list of values of the chunk, outer before
+/// inner, so a list breaks at its commas before a value breaks at its
+/// operators. A chain breaks only before an operator that can open a
+/// line: a word operator, `bor` or `shl`, stays on the line of its left
+/// operand. A `-` in a value arm of a `match` opens the next value when
+/// it opens a line, so a chain with one there never breaks either.
 pub(crate) fn binary_chains(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Chain> {
     let walk = Walk::new(src, toks, chunk);
     let arms = super::structure::structure(src, toks).value_arm;
@@ -98,21 +104,32 @@ pub(crate) fn binary_chains(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Chain
             last: byte(span.end as usize - 1),
             ops: ops.into_iter().map(byte).collect(),
             then: walk.conds.get(&(span.start, span.end)).map(|&t| byte(t)),
+            list: false,
         })
         .collect();
+    out.extend(walk.lists.into_iter().map(|(span, starts)| Chain {
+        first: byte(span.start as usize),
+        last: byte(span.end as usize - 1),
+        ops: starts.into_iter().map(byte).collect(),
+        then: None,
+        list: true,
+    }));
     out.sort_by_key(|c| (c.first, std::cmp::Reverse(c.last)));
 
     out
 }
 
 /// The `if` or `elseif` and the `then` of each condition of an `if`
-/// statement, by byte.
+/// statement, and the `while` and the `do` of each `while` loop, by
+/// byte.
 pub(crate) fn if_conditions(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<(usize, usize)> {
     let walk = Walk::new(src, toks, chunk);
 
     walk.conds
         .iter()
-        .map(|(&(start, _), &then)| {
+        .map(|(&(start, _), &then)| (start, then))
+        .chain(walk.whiles.iter().copied())
+        .map(|(start, then)| {
             (
                 toks[start as usize - 1].start as usize,
                 toks[then].start as usize,
@@ -133,15 +150,22 @@ pub(crate) fn ternary_colons(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<usiz
 }
 
 /// The type spans of a tree, in source order, the token of each `if`
-/// expression, each binary chain with its operators, and the span of
-/// each `if` condition with its `then`.
+/// expression, each binary chain with its operators, each list of
+/// values with the first token of each value after the first, the
+/// span of each `if` condition with its `then`, and each `while`
+/// condition with its `do`.
 struct Walk<'a> {
     src: &'a str,
     toks: &'a [Tok],
     spans: Vec<TokSpan>,
     ifs: Vec<usize>,
     chains: Vec<(TokSpan, Vec<usize>)>,
+    lists: Vec<(TokSpan, Vec<usize>)>,
     conds: HashMap<(u32, u32), usize>,
+    /// The first token of each `while` condition, with its `do`. A long
+    /// `while` condition breaks at its operators, so these are not in
+    /// `conds`, which chains read.
+    whiles: Vec<(u32, usize)>,
     /// The operators a chain holds already, so an operand of the same
     /// precedence opens no chain of its own.
     in_chain: HashSet<u32>,
@@ -155,7 +179,9 @@ impl<'a> Walk<'a> {
             spans: Vec::new(),
             ifs: Vec::new(),
             chains: Vec::new(),
+            lists: Vec::new(),
             conds: HashMap::new(),
+            whiles: Vec::new(),
             in_chain: HashSet::new(),
         };
         walk.block(&chunk.block);
@@ -183,6 +209,22 @@ impl<'a> Walk<'a> {
     }
 
     fn stmt(&mut self, s: &Stmt) {
+        let values = match s {
+            Stmt::Return(r) => &r.values[..],
+
+            Stmt::Assign(a) => &a.values,
+
+            Stmt::Local(l) => &l.values,
+
+            _ => &[],
+        };
+
+        if let [first, .., last] = values {
+            let span = TokSpan::new(first.span().start as usize, last.span().end as usize);
+            let starts = values[1..].iter().map(|v| v.span().start as usize);
+            self.lists.push((span, starts.collect()));
+        }
+
         let out = &mut self.spans;
 
         match s {
@@ -215,6 +257,13 @@ impl<'a> Walk<'a> {
             }
 
             Stmt::Attribute(a) => out.extend(a.params.iter().filter_map(|p| p.ty)),
+
+            Stmt::Message(m) => out.extend(
+                m.params
+                    .iter()
+                    .chain(m.reply.iter().flat_map(|(_, ps)| ps))
+                    .filter_map(|p| p.ty),
+            ),
 
             Stmt::Macro(m) => out.extend(m.params.iter().filter_map(|p| p.ty)),
 
@@ -255,7 +304,20 @@ impl<'a> Walk<'a> {
                 }
             }
 
-            Stmt::While(w) => self.cond(&w.cond),
+            Stmt::While(w) => {
+                self.cond(&w.cond);
+
+                let span = w.cond.span();
+
+                if matches!(w.cond, Cond::Expr(_))
+                    && self
+                        .toks
+                        .get(span.end as usize)
+                        .is_some_and(|t| t.text(self.src) == "do")
+                {
+                    self.whiles.push((span.start, span.end as usize));
+                }
+            }
 
             // The walker leaves a namespace's members to the namespace.
             Stmt::Namespace(ns) => {

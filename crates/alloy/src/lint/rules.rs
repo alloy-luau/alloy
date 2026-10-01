@@ -637,6 +637,23 @@ pub fn run(src: &str, toks: &[Tok], chunk: &Chunk, options: &crate::EmitOptions)
     lints.extend(stale_exports(src, toks, &chunk.block));
 
     let text = |i: usize| toks[i].text(src);
+    // Whether the token at `i` reads through the value before it: `.x`,
+    // `[k]`, or a method call `:m(...)`. The `:` in `c ? f() : nil` is
+    // the else of a ternary, and reads nothing.
+    let reads_through = |i: usize| match toks.get(i).map(|t| t.text(src)) {
+        Some("." | "[") => true,
+        Some(":") => {
+            toks.get(i + 1).is_some_and(|t| t.kind == TokKind::Ident)
+                && toks.get(i + 2).is_some_and(|t| {
+                    matches!(t.text(src), "(" | "{")
+                        || matches!(
+                            t.kind,
+                            TokKind::Str { .. } | TokKind::InterpStr | TokKind::InterpHead
+                        )
+                })
+        }
+        _ => false,
+    };
     let st = structure(src, toks);
     let line_of = |i: usize| st.lines[i];
 
@@ -964,7 +981,7 @@ pub fn run(src: &str, toks: &[Tok], chunk: &Chunk, options: &crate::EmitOptions)
                 // `return t` passes the optional on; `return t.x` reads
                 // through it. The token after the name decides, so a
                 // guard word before it never covers an access.
-                let access = matches!(next, Some("." | ":" | "["));
+                let access = reads_through(i + 1);
 
                 if !access && (guard_after || guard_before) {
                     guarded = true;
@@ -1064,7 +1081,7 @@ pub fn run(src: &str, toks: &[Tok], chunk: &Chunk, options: &crate::EmitOptions)
                 prev,
                 Some("if" | "elseif" | "not" | "while" | "until" | "assert")
             );
-            let access = matches!(next, Some("." | ":" | "["));
+            let access = reads_through(i + 1);
 
             if !access && (guard_after || guard_before) {
                 guarded = true;
@@ -1110,10 +1127,7 @@ pub fn run(src: &str, toks: &[Tok], chunk: &Chunk, options: &crate::EmitOptions)
         }
 
         if let Some(close) = matching(src, toks, i + 1)
-            && matches!(
-                toks.get(close + 1).map(|t| t.text(src)),
-                Some("." | ":" | "[")
-            )
+            && reads_through(close + 1)
         {
             lints.push(Lint {
                 name: "optional_access",

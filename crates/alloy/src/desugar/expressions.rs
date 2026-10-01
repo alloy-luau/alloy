@@ -5,7 +5,7 @@ use alloy_syntax::ast::{Block, CallArgs, ChildName, Cond, Expr, IndexKey, TableF
 
 use crate::roblox_classes::{DATATYPES, INSTANCE_CLASSES};
 
-use super::types::pack_type_args;
+use super::types::{pack_type_args, split_top_level};
 use super::*;
 
 pub(crate) const WORD_OPS: &[&str] = &["band", "bor", "bxor", "shl", "shr", "bnot", "in"];
@@ -203,7 +203,7 @@ impl<'s> Desugar<'s> {
     /// arguments off: `HashMap.new()`, `new Set()`, `Queue.with_capacity(n)`.
     /// `HashMap.from(t)` reads them off `t`, and a cast would hide what
     /// `t` holds.
-    fn empty_constructor(&self, value: &Expr, base: &str) -> bool {
+    pub(crate) fn empty_constructor(&self, value: &Expr, base: &str) -> bool {
         let from = matches!(
             value,
             Expr::Call { func, .. }
@@ -272,6 +272,17 @@ impl<'s> Desugar<'s> {
     `expr_in_place`.
     */
     pub(crate) fn expr(&mut self, e: &Expr) {
+        // `Step.fire(actor)` and `Step.on(handler)` of a message: the
+        // checks run in both artifacts, and the ship artifact rewrites
+        // the call in `expr_node`.
+        if let Expr::Call {
+            func, method: None, ..
+        } = e
+            && self.message_call_of(func).is_some()
+        {
+            self.check_message_call(e);
+        }
+
         // A field of an imported `new S { }` whose type names a type of
         // the module: the empty constructor takes the field's own type.
         if let Some(cast) = self.field_casts.remove(&(std::ptr::from_ref(e) as usize)) {
@@ -360,6 +371,15 @@ impl<'s> Desugar<'s> {
         let anchor = self.byte_start(e.span());
 
         match e {
+            Expr::Call {
+                func,
+                method: None,
+                args: CallArgs::Paren(_),
+                ..
+            } if !self.options.check && self.rewrites_message_call(func) => {
+                self.message_call(e);
+            }
+
             Expr::Name(span) => {
                 let name = self.text_of(*span);
 
@@ -925,6 +945,37 @@ impl<'s> Desugar<'s> {
     pub(crate) fn coalesce(&mut self, span: TokSpan, lhs: &Expr, rhs: &Expr) {
         let anchor = self.byte_start(span);
 
+        /*
+        In place, the hoist of the left side becomes a closure around the
+        operand, and Luau forgets inside it that a local assigned again
+        above was tested for nil (LANG_BUGS 104). A literal or a name on
+        the right reads the same whether it runs or not, so the runtime's
+        `coalesce` takes both sides as arguments, and no closure forms.
+        */
+        if self.in_place
+            && !self.is_simple(lhs)
+            && matches!(
+                rhs,
+                Expr::Name(_)
+                    | Expr::Number(_)
+                    | Expr::String(_)
+                    | Expr::True(_)
+                    | Expr::False(_)
+                    | Expr::Nil(_)
+            )
+        {
+            let left = self.render_to_side(lhs);
+            let right = self.render_to_side(rhs);
+            let std = self.std();
+            self.generate(anchor, &format!("{std}.coalesce("));
+            self.r.append(left);
+            self.generate(anchor, ", ");
+            self.r.append(right);
+            self.generate(anchor, ")");
+
+            return;
+        }
+
         // Both sides keep their source map, so the tokens, the colours
         // and the hovers inside them land on the text the author wrote.
         // A simple left side is copied at its first read; the second
@@ -1133,6 +1184,10 @@ impl<'s> Desugar<'s> {
 
             "attribute" => Some(format!(
                 "`{n}` is an attribute, metadata and not a type; `is` takes a type name"
+            )),
+
+            "message" => Some(format!(
+                "`{n}` is a message, a channel and not a type; `is` takes a type name"
             )),
 
             // A trait answers above, through an index the prescan fills.
@@ -1948,6 +2003,39 @@ impl<'s> Desugar<'s> {
             };
         }
 
+        // `return Ok(v)` under a declared `Result<T, E>`: `Ok` takes `T`
+        // and `Err` takes `E`. See `returned_constructor`.
+        if let (
+            Some((base_name, args_text)),
+            [
+                Link::Plain(Step::Call {
+                    method: None,
+                    type_args: None,
+                    args,
+                }),
+            ],
+        ) = (self.expected_generic.clone(), links.as_slice())
+            && base_name == "Result"
+            && let [ok, err] = split_top_level(&args_text, ',')[..]
+            && let Some(arg) = match inner.strip_prefix(&format!("{}.", self.std())) {
+                Some("Ok") => Some(ok),
+
+                Some("Err") => Some(err),
+
+                _ => None,
+            }
+        {
+            let targs = self.lower_type_args(&format!("<<{arg}>>"));
+            // A call in the argument is no `return` of its own.
+            self.expected_generic = None;
+            let a = self.args_text(args);
+
+            return ChainParts {
+                guards: Vec::new(),
+                inner: format!("{inner}{targs}{a}"),
+            };
+        }
+
         // `c.HashMap.new()` through `import * as c` takes the same
         // arguments, under `c.HashMap<K, V>` or a bare `HashMap<K, V>`.
         if let (Expr::Name(n), Some((base_name, args_text))) = (base, self.expected_generic.clone())
@@ -2515,7 +2603,9 @@ mod tests {
             check: true,
             ..EmitOptions::default()
         };
-        let out = crate::compile_with("take(g(), { x = tonumber(s) ?? 0 })\n", &options).unwrap();
+        // A right side that calls code keeps its closure: the runtime's
+        // `coalesce` would call it when the left side is not nil.
+        let out = crate::compile_with("take(g(), { x = tonumber(s) ?? h() })\n", &options).unwrap();
         assert!(
             out.check
                 .contains("take(g(), { x = (function() local _1 = tonumber(s) return"),
@@ -2529,6 +2619,38 @@ mod tests {
         )
         .unwrap();
         assert!(!out.check.contains("(function()"), "{}", out.check);
+    }
+
+    /// A `??` that stays in place, an argument after one that reads a
+    /// value, put its left side in a closure. Luau forgets inside one that
+    /// a local assigned again above was tested for nil, so flux reported
+    /// it as maybe nil (LANG_BUGS 104). A literal or a name on the right
+    /// takes the runtime's `coalesce`, and no closure forms. A right side
+    /// that calls code keeps the closure, and a `return` keeps its hoist.
+    #[test]
+    fn a_coalesce_in_place_takes_no_closure_when_the_right_side_reads_nothing() {
+        let src = "local function under(x: number): number?\n    return nil\nend\n\nlocal function pick(a: Vector2?, b: Vector2?, d: number): Vector2\n    local cell: Vector2? = a\n    if a == nil then\n        cell = b\n    end\n    if cell == nil then\n        return Vector2.zero\n    end\n    print(cell.X, under(cell.X) ?? d, under(cell.Y) ?? false)\n    print(cell.X, under(cell.X) ?? under(cell.Y))\n    return new Vector2(cell.X, (under(cell.X) ?? 0) - 1)\nend\n\nprint(pick)\n";
+
+        for check in [true, false] {
+            let options = EmitOptions {
+                check,
+                ..EmitOptions::default()
+            };
+            let out = crate::compile_with(src, &options).unwrap();
+            let text = if check { &out.check } else { &out.ship };
+
+            assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+            for want in [
+                "print(cell.X, __alloy.coalesce(under(cell.X), d), __alloy.coalesce(under(cell.Y), false))",
+                "print(cell.X, (function() local _1 = under(cell.X) return (if _1 == nil then under(cell.Y) else _1) end)())",
+                "return Vector2.new(cell.X, (__alloy.coalesce(under(cell.X), 0)) - 1)",
+            ] {
+                assert!(text.contains(want), "{want}\n{text}");
+            }
+
+            assert_eq!(text.lines().count(), src.lines().count());
+        }
     }
 
     /// An empty `[ ]` carries `Array<any>` in the check artifact, so a
@@ -2739,7 +2861,7 @@ mod tests {
             "local c = (if p == nil then nil else (p:FindFirstChild(\"Hud\") :: Instance):WaitForChild(\"Bar\"))\n",
             "local d = (p:WaitForChild(\"Hud\") :: any).Size\n",
             "local e = require(p:FindFirstChild(\"Hud\"):FindFirstChild(\"Mod\"))\n",
-            "(p:WaitForChild(\"Hud\") :: any).Name = \"x\"\n",
+            "(p:WaitForChild(\"Hud\") :: any).Name = \"x\" return nil\n",
         ] {
             assert!(out.contains(want), "{want}\n{out}");
         }
@@ -2782,7 +2904,7 @@ mod tests {
             "_1 = (if p == nil then nil else ((p:FindFirstChild(\"Humanoid\") :: any) :: Humanoid?)) local b = (if _1 == nil then nil else _1:TakeDamage(5))\n",
             "_1 = (if p == nil then nil else (p:FindFirstChild(\"Spawn1\") :: any)) local c = (if _1 == nil then nil else _1.CFrame)\n",
             "local d = (if p == nil then nil else (p:FindFirstChild(\"Humanoid\") :: any).Health)\n",
-            "_1 = (if p == nil then nil else p:FindFirstChild(\"Humanoid\")) local e = (if _1 == nil then nil else _1:FindFirstChild(\"Animator\"))\n",
+            "_1 = (if p == nil then nil else p:FindFirstChild(\"Humanoid\")) local e = (if _1 == nil then nil else _1:FindFirstChild(\"Animator\")) return nil\n",
         ] {
             assert!(out.contains(want), "{want}\n{out}");
         }

@@ -304,6 +304,13 @@ impl<'s> Scan<'s> {
         None
     }
 
+    /// Whether `j` is the `.` or the `:` of a member: `a.b` or `a:b()`.
+    /// A ternary's `:` before a name lexes as a method call, so only
+    /// the tree tells `c ? a : b` from `a:b`.
+    pub(crate) fn member_at(&self, j: usize) -> bool {
+        matches!(self.t(j), "." | ":") && self.is_name(j + 1) && !self.ternary_colons.contains(&j)
+    }
+
     /// The exclusive end of a simple expression at `i`: a literal, a
     /// name with members, calls and indexes, or a bracket group; with
     /// one prefix `-`, `#`, or `not`.
@@ -343,7 +350,7 @@ impl<'s> Scan<'s> {
             let same_line = self.line_of(j) == self.line_of(j - 1);
             let group = matches!(text, "(" | "[") || (text == "{" && self.is_name(j - 1));
 
-            if matches!(text, "." | ":") && self.is_name(j + 1) {
+            if self.member_at(j) {
                 j += 2;
             } else if group && same_line {
                 j = self.matching(j)? + 1;
@@ -365,6 +372,26 @@ impl<'s> Scan<'s> {
         }
 
         Some(j)
+    }
+
+    /// Whether a statement whose tokens run up to `j` ends there: the
+    /// token closes the block, is a `;`, or opens the next statement.
+    /// A line break alone ends nothing, so `x = x` over `or {}` is one
+    /// statement, and `return v` over `? a : b` returns one ternary. A
+    /// lint that reads a value from its tokens asks this, or
+    /// `value_ends_at`, before it trusts the end.
+    pub(crate) fn statement_ends_at(&self, j: usize) -> bool {
+        j >= self.toks.len()
+            || CLOSERS.contains(&self.t(j))
+            || self.at(j, ";")
+            || self.begins_after_expr(j)
+    }
+
+    /// Whether a value that runs up to token `j` ends there: the
+    /// statement ends, or the token closes a group, a list, or a
+    /// condition. See `statement_ends_at`.
+    pub(crate) fn value_ends_at(&self, j: usize) -> bool {
+        self.statement_ends_at(j) || matches!(self.t(j), "," | ")" | "]" | "}" | "then" | "do")
     }
 
     /// Whether the token at `j` goes on with the right operand of an

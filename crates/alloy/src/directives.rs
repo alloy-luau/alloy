@@ -392,6 +392,8 @@ fn allow_ranges(src: &str) -> Vec<(usize, usize, String)> {
 
                 Stmt::Remote(r) => add(&r.attributes, r.span, out),
 
+                Stmt::Message(m) => add(&m.attributes, m.span, out),
+
                 Stmt::TypeAlias(t) => add(&t.attributes, t.span, out),
 
                 Stmt::Attribute(a) => add(&a.attributes, a.span, out),
@@ -815,12 +817,14 @@ impl Directives {
 }
 
 /// The side a file name declares: `ui.client.aly` is the client, and
-/// `main.server.aly` is the server. Any other name is shared.
+/// `main.server.aly` is the server. Any other name is shared. The
+/// `.actor` infix after the side changes nothing here.
 pub fn file_side(file: &str) -> Option<Side> {
     let stem = file
         .strip_suffix(".aly")
         .or_else(|| file.strip_suffix(".alx"))
         .unwrap_or(file);
+    let stem = stem.strip_suffix(".actor").unwrap_or(stem);
 
     if stem.ends_with(".client") {
         Some(Side::Client)
@@ -829,6 +833,54 @@ pub fn file_side(file: &str) -> Option<Side> {
     } else {
         None
     }
+}
+
+/// Whether a file name puts its script in an Actor: `.actor` after the
+/// side, `physics.server.actor.aly`. The build writes the Actor, named
+/// for the file, with the script inside.
+pub fn is_actor(file: &str) -> bool {
+    let name = file.rsplit(['/', '\\']).next().unwrap_or(file);
+    let stem = name.rsplit_once('.').map_or(name, |(s, _)| s);
+
+    stem.strip_suffix(".actor").is_some_and(|s| {
+        (s.ends_with(".server") || s.ends_with(".client")) && !s.starts_with("init.")
+    })
+}
+
+/// The report for a file name that holds `.actor.` where no Actor can
+/// go: on a module, on an `init` script, or before the side. `None`
+/// for any other name.
+pub fn actor_name_problem(file: &str) -> Option<String> {
+    let name = file.rsplit(['/', '\\']).next().unwrap_or(file);
+    let (stem, ext) = name.rsplit_once('.')?;
+
+    if !(stem.ends_with(".actor") || stem.contains(".actor.")) || is_actor(file) {
+        return None;
+    }
+
+    let base = stem.split(".actor").next().unwrap_or(stem);
+    let (base, side) = match base.rsplit_once('.') {
+        Some((b, s @ ("server" | "client"))) => (b, Some(s)),
+
+        _ => (base, None),
+    };
+
+    Some(if base == "init" {
+        format!(
+            "`{name}`: an `init` script takes the name of its folder, and `.actor.` names the Actor after the file; name the script, `physics.{}.actor.{ext}`",
+            side.unwrap_or("server")
+        )
+    } else if !stem.ends_with(".actor") {
+        let side = stem.rsplit('.').next().unwrap_or("server");
+
+        format!(
+            "`{name}`: `.actor.` comes after the side; name the file `{base}.{side}.actor.{ext}`"
+        )
+    } else {
+        format!(
+            "`{name}` is a module, and `.actor.` goes on a script; a module under an Actor runs nothing on its own, so put `.actor.` on the script that requires it, `{base}.server.actor.{ext}`"
+        )
+    })
 }
 
 /// The word of a `--@alloy-` comment that names no directive, or `None`

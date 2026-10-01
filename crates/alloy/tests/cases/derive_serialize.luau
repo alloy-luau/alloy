@@ -12,4 +12,4 @@ local function to_data<T>(v: (T & __alloy.Serialize)): any
 end
 
 local p = Point({ x = 1, name = "a" })
-print(to_data(p), p:to_table(), Point.from_table({ x = 2, label = "b" }))
+print(to_data(p), p:to_table(), Point.from_table({ x = 2, label = "b" })) return nil

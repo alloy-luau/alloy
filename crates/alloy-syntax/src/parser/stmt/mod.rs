@@ -256,6 +256,12 @@ impl<'a> Parser<'a> {
         crate::contextual::after_delay_follows(self.src, self.toks, self.pos)
     }
 
+    /// Reports if `message` at the cursor opens a declaration. The rule
+    /// lives in [`crate::contextual`], so the server reads it too.
+    pub(in super::super) fn message_decl_follows(&self) -> bool {
+        crate::contextual::message_decl_follows(self.src, self.toks, self.pos)
+    }
+
     /*
     Reports if the cursor stands outside a body whose `end` is missing.
 
@@ -295,6 +301,8 @@ impl<'a> Parser<'a> {
                 "struct" | "trait" | "interface" | "remote" | "attribute" | "macro"
             ) && self.name_at(1))
             || (self.at("namespace") && self.namespace_follows())
+            || (self.at("parallel") && self.text_at(1) == "do" && !self.newline_after(0))
+            || (self.at("message") && self.message_decl_follows())
             || (self.at("export")
                 && matches!(self.text_at(1), "local" | "const" | "function" | "type"))
             || (self.at("global") && self.global_follows())
@@ -428,7 +436,7 @@ impl<'a> Parser<'a> {
             "after" if self.after_delay_follows() => {
                 self.bump();
                 let delay = self.expr()?;
-                let filter = match self.at("where") && self.infix_word_here() {
+                let filter = match self.at("where") {
                     true => {
                         self.bump();
 
@@ -448,6 +456,22 @@ impl<'a> Parser<'a> {
                     span: TokSpan::new(start, self.pos),
                 }))
             }
+
+            // `parallel do ... end`. The word is a name everywhere else,
+            // so `parallel = true` and `parallel(x)` read the Luau way.
+            "parallel" if self.text_at(1) == "do" && !self.newline_after(0) => {
+                self.bump();
+                self.bump();
+                let block = self.block()?;
+                self.expect_end(start)?;
+
+                Ok(Stmt::Parallel(ParallelBlock {
+                    block,
+                    span: TokSpan::new(start, self.pos),
+                }))
+            }
+
+            "message" if self.message_decl_follows() => self.message_decl(start, Vec::new(), false),
 
             "local" => self.local_stmt(start),
 
@@ -659,6 +683,11 @@ impl<'a> Parser<'a> {
             "export" if self.text_at(1) == "remote" => {
                 self.bump();
                 self.remote_decl(start, Vec::new(), true)
+            }
+
+            "export" if self.text_at(1) == "message" && self.name_at(2) => {
+                self.bump();
+                self.message_decl(start, Vec::new(), true)
             }
 
             "export" if self.text_at(1) == "attribute" && self.name_at(2) => {
@@ -943,6 +972,10 @@ impl<'a> Parser<'a> {
 
             "remote" if self.name_at(1) || self.text_at(1) == "function" => {
                 return self.remote_decl(start, attrs, exported);
+            }
+
+            "message" if self.message_decl_follows() => {
+                return self.message_decl(start, attrs, exported);
             }
 
             "impl" if self.name_at(1) => {

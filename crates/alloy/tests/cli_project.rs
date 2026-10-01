@@ -106,7 +106,10 @@ fn a_file_with_an_error_writes_no_luau_to_stdout() {
         .expect("alloy runs");
 
     assert_eq!(out.status.code(), Some(0));
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "print(1)\n");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "print(1) return nil\n"
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }

@@ -37,6 +37,7 @@ pub const ATTRIBUTE_TARGETS: &[&str] = &[
     "field",
     "param",
     "remote",
+    "message",
     "interface",
     "type",
     "local",

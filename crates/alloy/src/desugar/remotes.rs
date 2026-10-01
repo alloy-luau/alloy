@@ -286,7 +286,7 @@ type Field = (String, String);
 
 /// What one remote parameter cannot carry: the field path that holds it,
 /// the type, and why.
-type Offender = (Option<String>, String, &'static str);
+pub(crate) type Offender = (Option<String>, String, &'static str);
 
 /// The part of a remote parameter that cannot cross the wire.
 /// `fields_of` gives the fields of a struct the file names, since a
@@ -580,13 +580,17 @@ impl<'s> Desugar<'s> {
         }
 
         let key = luau_string(&shape.wire_key());
+        // The check artifact stores the table as `any`, the type the
+        // registry holds. Stored as it is, the class took the checker
+        // past its limit in a provider (LANG_BUGS 117).
+        let held = self.any_cast(name);
 
-        format!(" {}.wire.types[{key}] = {name}", self.std())
+        format!(" {}.wire.types[{key}] = {held}", self.std())
     }
 
     /// `wire_offender` with the structs of this file, so a parameter
     /// that names one reports the field that cannot cross the wire.
-    fn offender_of(&self, ty: &str) -> Option<Offender> {
+    pub(crate) fn offender_of(&self, ty: &str) -> Option<Offender> {
         offender(
             ty,
             &|name| {
@@ -1727,6 +1731,12 @@ mod tests {
         }
 
         assert_eq!(out.ship.matches("wire.types").count(), 2, "{}", out.ship);
+        assert!(
+            out.check
+                .contains("__alloy.wire.types[\"types.aly:Stats\"] = (Stats :: any)"),
+            "{}",
+            out.check
+        );
     }
 
     /// A layout reads a type name through the imports of the file that

@@ -605,6 +605,18 @@ pub(crate) fn fold_std_shapes(value: &str) -> String {
         out.replace_range(open..=close, &format!("Future<{inner}>"));
     }
 
+    // `import(...)` types its value with `__module_value_of<T>`. The child
+    // prints that call whole when the module has no type, ex: a path the
+    // sourcemap does not hold. The call then gives `T`.
+    while let Some(i) = out.find("__module_value_of<") {
+        let open = i + "__module_value_of".len();
+        let Some(len) = angle_len(&out[open..]) else {
+            break;
+        };
+        let inner = out[open + 1..open + len - 1].to_string();
+        out.replace_range(i..open + len, &inner);
+    }
+
     // A plain `Array<T>` reads as the sugar the source has.
     let mut from = 0;
 
@@ -628,6 +640,39 @@ pub(crate) fn fold_std_shapes(value: &str) -> String {
     }
 
     out
+}
+
+/// Two package aliases of one record print alike, and the fold takes the
+/// first of the list. The alias the value's origin names goes first:
+/// `Inventory = jecs.component<<{ Stack }>>()` calls `jecs.component`,
+/// which returns `Entity<T>`. The origin reads from the caret's line,
+/// where the name takes its value; elsewhere the package's order holds.
+pub(crate) fn prefer_origin_alias(
+    aliases: &mut [alloy::shapes::PackageAlias],
+    doc: &Doc,
+    line: u32,
+    character: u32,
+) {
+    let Some(offset) = offset_of(&doc.source, line, character) else {
+        return;
+    };
+    let (_, end) = keywords::word_range(&doc.source, offset);
+    let after = doc.source[end..].trim_start_matches([' ', '\t']);
+    let Some(value) = after
+        .strip_prefix('=')
+        .filter(|v| !v.starts_with('='))
+        .map(str::trim_start)
+    else {
+        return;
+    };
+    let path_len = value
+        .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+        .unwrap_or(value.len());
+    let func = value[..path_len].rsplit('.').next().unwrap_or("");
+
+    if !func.is_empty() {
+        aliases.sort_by_key(|a| !a.made_by.iter().any(|m| m == func));
+    }
 }
 
 /// Two structs of one shape print alike, so the child may name either.
@@ -2052,10 +2097,12 @@ pub(crate) fn member_doc(doc: &Doc, owner: &str, member: &str) -> Option<String>
             // A block opens at the margin, and the line at the margin
             // after it closes the one before.
             if !line.starts_with([' ', '\t']) && !text.is_empty() {
-                // `impl Trait for Owner` names the owner after `for`.
+                // `impl Trait for Owner` names the owner after `for`. A
+                // head with no `as` ends at the name.
                 inside = heads.iter().any(|h| {
-                    head.starts_with(h.as_str())
-                        && head[h.len()..].starts_with(|c: char| c.is_whitespace() || c == '<')
+                    head.strip_prefix(h.as_str()).is_some_and(|rest| {
+                        rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace() || c == '<')
+                    })
                 }) || head.starts_with("impl ")
                     && head
                         .split(" for ")
@@ -2104,20 +2151,227 @@ pub(crate) fn name_method_doc(value: &str, doc: &Doc) -> Option<String> {
 
     let body = block.split_once('\n')?.1;
     let head = body.strip_prefix("function ")?;
-    let (owner, rest) = head.split_once([':', '.'])?;
-    let member: String = rest
-        .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
-        .collect();
+    // The last `.` or `:` before the list: `Tools.Pt.doubled` is a
+    // method of the namespace member `Tools.Pt`.
+    let open = head.find(['(', '<'])?;
+    let (owner, member) = head[..open].rsplit_once([':', '.'])?;
 
-    if member.is_empty() || !rest[member.len()..].starts_with(['(', '<']) {
+    if member.is_empty() {
         return None;
     }
 
-    let text = member_doc(doc, owner, &member)
-        .or_else(|| member_doc(doc, &trait_of_method(doc, &member)?, &member))?;
+    let text = method_doc(doc, owner, member)?;
 
     Some(format!("{block}\n```{tail}\n\n{text}"))
+}
+
+/// The doc comment of a method: from the `impl` of its owner, else from
+/// the trait that declares it.
+pub(crate) fn method_doc(doc: &Doc, owner: &str, member: &str) -> Option<String> {
+    member_doc(doc, owner, member)
+        .or_else(|| member_doc(doc, &trait_of_method(doc, member)?, member))
+}
+
+/*
+A method's line under its owner, `function count(self) -> number`, from
+the text after its name: `(self: Farm): number` in a print, or the list
+and the return the source wrote.
+
+The receiver reads bare, the way an `impl` writes it. A print that hangs
+the method off `:` passes `self` without a word for it, so `colon` puts
+it back. The return takes the arrow, as a declaration writes it. The
+type parameters of `owner` belong to the owner's block, so the method's
+own list drops them: `Box.get<T>` of `Box<T>` reads `get`.
+*/
+pub(crate) fn method_line(name: &str, rest: &str, colon: bool, owner: &str) -> Option<String> {
+    let spans = head_spans(rest, 0)?;
+    let owned: Vec<&str> = owner
+        .split_once('<')
+        .map(|(_, g)| g.trim_end_matches('>').split(',').map(str::trim).collect())
+        .unwrap_or_default();
+    let mut out = format!("function {name}");
+
+    if let Some((a, b)) = spans.generics {
+        let own: Vec<&str> = rest[a + 1..b - 1]
+            .split(',')
+            .map(str::trim)
+            .filter(|g| !owned.contains(&g.split(':').next().unwrap_or("").trim()))
+            .collect();
+
+        if !own.is_empty() {
+            out.push_str(&format!("<{}>", own.join(", ")));
+        }
+    }
+
+    let inner = rest[spans.params.0 + 1..spans.params.1 - 1].trim();
+    let receiver = inner
+        .strip_prefix("self")
+        .is_some_and(|after| after.is_empty() || after.starts_with([':', ',', ' ']));
+    let params = match (colon, receiver) {
+        (_, true) => format!(
+            "self{}",
+            &inner[super::fields::parameter_end(inner, 0, inner.len())..]
+        ),
+
+        (true, false) if inner.is_empty() => "self".to_string(),
+
+        (true, false) => format!("self, {inner}"),
+
+        (false, false) => inner.to_string(),
+    };
+    out.push_str(&format!("({params})"));
+
+    if let Some((a, b)) = spans.ret {
+        out.push_str(&format!(" -> {}", rest[a..b].trim()));
+    }
+
+    Some(out)
+}
+
+/*
+A method the child prints, `function Farm:count(): number`, in the
+member shape: `Farm` in a block of its own, then `function count(self)
+-> number`, then the doc comment under a rule.
+
+The owner has to be a type a declaration in reach names: a struct, an
+enum, a trait, an interface, or a class. A function on a plain table or
+on a module keeps its print, since the table is no type to put above it.
+*/
+pub(crate) fn method_member_hover(value: &str, st: &State, doc: &Doc) -> Option<String> {
+    let (block, tail) = value.split_once("\n```")?;
+    let body = block.split_once('\n')?.1;
+
+    if body.contains('\n') {
+        return None;
+    }
+
+    let head = body.strip_prefix("function ")?;
+    let open = head.find(['(', '<'])?;
+    let (owner, name) = head[..open].rsplit_once([':', '.'])?;
+    let colon = head[owner.len()..].starts_with(':');
+    let decl = doc
+        .decls
+        .iter()
+        .chain(&doc.import_decls)
+        .chain(st.docs.values().flat_map(|d| d.decls.iter()))
+        .find(|d| {
+            d.name == owner
+                && d.hover.lines().nth(1).is_some_and(|l| {
+                    let l = l.trim_start().trim_start_matches("export ");
+
+                    ["struct ", "enum ", "trait ", "interface ", "class "]
+                        .iter()
+                        .any(|k| l.starts_with(k))
+                })
+        })?;
+    let owner = owner_line(decl);
+    let member = method_line(name, &head[open..], colon, &owner)?;
+    // The child writes a doc comment under a rule of its own.
+    let tail = tail.trim_start();
+    let text = tail.strip_prefix("----------").unwrap_or(tail);
+
+    Some(member_hover(&owner, &member, Some(text)))
+}
+
+/*
+A hover with every function head in its code written the Alloy way: the
+return after an arrow, `function f(n: number) -> string`. The child
+prints Luau's colon, `function f(n: number): string`, and the index
+writes the colon too. The reader writes the arrow.
+
+Only the code blocks above the first text change. A doc comment can
+hold an example, and an example keeps the spelling its author chose.
+*/
+pub(crate) fn with_return_arrows(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+
+    while let Some(open) = rest.find("```") {
+        // Text between two blocks is the doc. It ends the heads.
+        if !rest[..open].trim().is_empty() {
+            break;
+        }
+
+        let body = rest[open..].find('\n').map_or(rest.len(), |k| open + k + 1);
+        let close = rest[body..].find("```").map_or(rest.len(), |k| body + k);
+        let end = (close + 3).min(rest.len());
+        out.push_str(&rest[..body]);
+        out.push_str(&arrow_heads(&rest[body..close]));
+        out.push_str(&rest[close..end]);
+        rest = &rest[end..];
+    }
+
+    out.push_str(rest);
+
+    out
+}
+
+/*
+One code block with the arrow in front of each function's return.
+
+A head is a name with a list right after it: after the word `function`,
+`function Farm:count(`, or at the start of a line, `local half(`, the
+print of a local that holds a function. A lambda has no name. A function
+type already reads `(n: number) -> string`, and `local x: T` has no list
+after its name.
+*/
+pub(crate) fn arrow_heads(code: &str) -> String {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut names = Vec::new();
+
+    for (at, _) in code.match_indices("function") {
+        let after = at + "function".len();
+
+        if !code[..at].ends_with(word) && !code[after..].starts_with(word) {
+            names.push(after + code[after..].len() - code[after..].trim_start().len());
+        }
+    }
+
+    let mut line = 0;
+
+    for text in code.split_inclusive('\n') {
+        let mut rest = text.trim_start();
+
+        while let Some(r) = ["export ", "local ", "const ", "global "]
+            .iter()
+            .find_map(|k| rest.strip_prefix(k))
+        {
+            rest = r;
+        }
+
+        if !rest.starts_with("function") {
+            names.push(line + text.len() - rest.len());
+        }
+
+        line += text.len();
+    }
+
+    names.sort_unstable();
+
+    let mut code = code.to_string();
+
+    // From the last head back, so an edit moves no head still to come.
+    for at in names.into_iter().rev() {
+        let end = code[at..]
+            .find(|c: char| !(word(c) || matches!(c, '.' | ':')))
+            .map_or(code.len(), |n| at + n);
+
+        if !code[end..].starts_with(['(', '<']) {
+            continue;
+        }
+
+        if let Some(Head {
+            params,
+            ret: Some((ret, _)),
+            ..
+        }) = head_spans(&code, end)
+            && code[params.1..ret].trim() == ":"
+        {
+            code.replace_range(params.1..ret, " -> ");
+        }
+    }
+
+    code
 }
 
 /// Whether the text after `for` in an `impl` header names `owner`.
@@ -2403,7 +2657,14 @@ pub(crate) fn mentions_word(text: &str, word: &str) -> bool {
 /// of the parameter as an intersection. The reader wrote neither, so
 /// `Priced & T` reads as `T` when the enclosing head bounds `T`.
 pub(crate) fn drop_bound_intersections(value: &str, doc: &Doc) -> Option<String> {
-    let mut out = value.to_string();
+    drop_bounds(value, &type_bounds(doc))
+}
+
+/// Every bounded type parameter the document and its imports declare,
+/// as `(name, bound)`. The read walks every line of each source, so a
+/// list of hints reads it once.
+pub(crate) fn type_bounds(doc: &Doc) -> Vec<(String, String)> {
+    let mut out = Vec::new();
 
     for src in std::iter::once(&doc.source).chain(doc.import_sources.iter()) {
         for line in src.lines() {
@@ -2417,17 +2678,26 @@ pub(crate) fn drop_bound_intersections(value: &str, doc: &Doc) -> Option<String>
                 };
                 let (name, bound) = (name.trim(), bound.trim());
 
-                if name.is_empty() || bound.is_empty() {
-                    continue;
+                if !name.is_empty() && !bound.is_empty() {
+                    out.push((name.to_string(), bound.to_string()));
                 }
-
-                out = out
-                    .replace(&format!("({bound} & {name})"), name)
-                    .replace(&format!("({name} & {bound})"), name)
-                    .replace(&format!("{bound} & {name}"), name)
-                    .replace(&format!("{name} & {bound}"), name);
             }
         }
+    }
+
+    out
+}
+
+/// `drop_bound_intersections` over bounds already read.
+pub(crate) fn drop_bounds(value: &str, bounds: &[(String, String)]) -> Option<String> {
+    let mut out = value.to_string();
+
+    for (name, bound) in bounds {
+        out = out
+            .replace(&format!("({bound} & {name})"), name)
+            .replace(&format!("({name} & {bound})"), name)
+            .replace(&format!("{bound} & {name}"), name)
+            .replace(&format!("{name} & {bound}"), name);
     }
 
     (out != value).then_some(out)
@@ -2611,6 +2881,20 @@ mod tests {
         assert_eq!(list["items"][0]["detail"], "State");
         assert_eq!(list["items"][1]["detail"], "{State}");
         assert_eq!(list["items"][2]["detail"], "number | string");
+    }
+
+    /// `import(...)` of a module with no type printed the helper the emit
+    /// writes, `__module_value_of<unknown>`. The value is `unknown`.
+    #[test]
+    fn an_untyped_import_call_reads_as_its_value() {
+        assert_eq!(
+            fold_std_shapes("```alloy\nconst c: __module_value_of<unknown>\n```"),
+            "```alloy\nconst c: unknown\n```"
+        );
+        assert_eq!(
+            fold_std_shapes("local m: __module_value_of<Map<string, () -> ()>>"),
+            "local m: Map<string, () -> ()>"
+        );
     }
 
     fn doc_of(src: &str) -> Doc {

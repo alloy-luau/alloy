@@ -78,6 +78,8 @@ const KEYWORDS: &[&str] = &[
     "from",
     "type",
     "remote",
+    "message",
+    "parallel",
     "macro",
     "namespace",
     "attribute",

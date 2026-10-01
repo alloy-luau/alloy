@@ -66,6 +66,7 @@ pub(crate) fn builtin_attr_targets(name: &str) -> Option<&'static [&'static str]
             "interface",
             "impl",
             "remote",
+            "message",
             "type",
             "field",
             "variant",
@@ -210,6 +211,8 @@ impl<'s> Desugar<'s> {
             }
 
             Stmt::Remote(r) => self.check_attrs(&r.attributes, "remote"),
+
+            Stmt::Message(m) => self.check_attrs(&m.attributes, "message"),
 
             Stmt::TypeAlias(t) => self.check_attrs(&t.attributes, "type"),
 
@@ -1679,6 +1682,11 @@ impl<'s> Desugar<'s> {
                 Stmt::Remote(r) => {
                     self.not_constructible
                         .insert(self.decl_name(r.name), "remote");
+                }
+
+                Stmt::Message(m) => {
+                    self.not_constructible
+                        .insert(self.decl_name(m.name), "message");
                 }
 
                 Stmt::Import(i) => self.note_import(i),
@@ -3197,6 +3205,28 @@ print(a)
             out.ship
         );
         assert_eq!(out.ship.lines().count(), src.lines().count());
+
+        // The check artifact passes the table as `any`, the type the
+        // parameter takes. Passed as it is, the call made the checker
+        // solve the whole class, and a provider of 16 methods and four
+        // collections took it past its limit (LANG_BUGS 115). The
+        // struct's own attributes and an enum's take the same form.
+        for want in [
+            "__alloy.attrs((S :: any), { own = { tagged = { 1 } }, fields = {  } })",
+            "end __alloy.attrs((S :: any), { own = { tagged = { 2 } } })",
+        ] {
+            assert!(out.check.contains(want), "{want}\n{}", out.check);
+        }
+
+        let enum_src =
+            "attribute tagged(n: number) on enum\n@tagged(3)\nenum E as\n    A\nend\nprint(E)\n";
+        let out = crate::compile(enum_src).unwrap();
+        assert!(
+            out.check.contains("__alloy.attrs((E :: any), "),
+            "{}",
+            out.check
+        );
+        assert!(out.ship.contains("__alloy.attrs(E, "), "{}", out.ship);
     }
 
     #[test]

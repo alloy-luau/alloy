@@ -172,7 +172,7 @@ pub fn struct_shapes(
     };
 
     for path in sources {
-        let Ok(src) = std::fs::read_to_string(path) else {
+        let Ok(src) = crate::modules::disk_text(path) else {
             continue;
         };
         // The key holds all the result reads: the text, the base, the
@@ -710,33 +710,41 @@ fn run_inner(
     }
 
     let type_cuts = type_cycle_cuts(&input, &sources);
+    // A dependency pushes onto the stack and pops before it returns, so
+    // the depth holds for the whole loop.
+    let depth = deps.stack.len();
 
-    for path in sources {
-        let rel = path.strip_prefix(&input).unwrap_or(&path).to_path_buf();
+    /*
+    A file's options and compile read the sources and the tables above,
+    and nothing that the compile of another file writes, so they run on
+    every core. On Strata (170 files) they took 9.4 s of a 10 s check,
+    and the reads of each file's imports took 7.6 s of that. The loop
+    below takes the results in path order, so the report and the output
+    are the same as on one thread.
+    */
+    let prepare = |path: &PathBuf| -> Option<std::io::Result<Prepared>> {
+        let rel = path.strip_prefix(&input).unwrap_or(path);
 
-        if exclude.is_match(&rel) {
-            report.skipped.push(rel);
-
-            continue;
+        if exclude.is_match(rel) {
+            return None;
         }
 
-        let Some(rel_out) = output_for(&rel) else {
-            continue;
-        };
-        // The diagnostics this file adds start here; one is enough to
-        // keep its output unwritten.
-        let errors_before = report.diagnostics.len();
-
-        let target = out.join(&rel_out);
+        let rel_out = output_for(rel)?;
         let is_alx = rel.extension().and_then(|e| e.to_str()) == Some("alx");
-        let source = std::fs::read_to_string(&path)?;
+        let source = match std::fs::read_to_string(path) {
+            Ok(source) => source,
+
+            Err(e) => return Some(Err(e)),
+        };
 
         // The runtime sits at the output root; a file requires it by a
         // relative path unless the project names one. Under a mount the
         // ship names the runtime's `@game/...` path instead.
-        let source_rel = build.input.join(&rel);
+        let source_rel = build.input.join(rel);
+        // An actor script ships one folder deeper, inside its Actor, and
+        // either artifact the build writes goes there.
         let by_file = relative_require(
-            &module_base(&build.out.join(&rel_out)),
+            &module_base(&build.out.join(crate::project::placed_output(&rel_out))),
             &build.out.join("alloy"),
         );
         let ship_by_tree = crate::project::std_require_for(&tree, &source_rel);
@@ -749,7 +757,7 @@ fn run_inner(
             // alias the flux mirror declares, as the language server
             // does. A project an import leads into sits outside the
             // mirror's configuration and keeps the file path.
-            None if keep && deps.stack.len() == 1 => {
+            None if keep && depth == 1 => {
                 ("@alloy".to_string(), Some(ship_by_tree.unwrap_or(by_file)))
             }
 
@@ -757,7 +765,7 @@ fn run_inner(
         };
         // A project an import leads into sits outside the sourcemap, so
         // its check artifact keeps the file path, as for the runtime.
-        let mount_requires = match deps.stack.len() {
+        let mount_requires = match depth {
             1 => crate::project::mount_requires(&tree, &source_rel, &source),
 
             _ => Vec::new(),
@@ -766,15 +774,13 @@ fn run_inner(
             file_name: rel.to_string_lossy().into_owned(),
             module_rel: build.out.join(&rel_out).to_string_lossy().into_owned(),
             mount_requires,
-            type_cuts: type_cuts.get(&path).cloned().unwrap_or_default(),
+            type_cuts: type_cuts.get(path).cloned().unwrap_or_default(),
             mount_side: crate::project::place_side(&tree, &source_rel),
             definitions: rel.to_string_lossy().ends_with(".d.aly"),
             std_require,
             ship_std_require,
             ambient_names: ambient_names.clone(),
-            ..base_options
-                .clone()
-                .imports(&source, &path, &module_aliases)
+            ..base_options.clone().imports(&source, path, &module_aliases)
         };
 
         // `--@alloy-lint alx.<name>=<level>` sets a markup lint for
@@ -804,23 +810,14 @@ fn run_inner(
 
             (Err(_), false) => None,
 
-            (Err(e), true) => {
-                held.insert(target.clone());
-                report.skipped.push(rel);
-
-                if !markup_reported {
-                    markup_reported = true;
-                    let (file, at) = config.markup_problem_at(root, e);
-                    // `markup:` gives the report the MarkupError kind.
-                    let message = match at {
-                        Some((line, col)) => format!("{}:{}: markup: {e}", line + 1, col + 1),
-
-                        None => format!("markup: {e}"),
-                    };
-                    report.failures.push((file, message));
-                }
-
-                continue;
+            // The loop reports the markup table once, for every file.
+            (Err(_), true) => {
+                return Some(Ok(Prepared {
+                    source,
+                    compiled: None,
+                    scanned: Vec::new(),
+                    definitions: options.definitions,
+                }));
             }
         };
         let compiled = crate::compile_file(
@@ -830,12 +827,83 @@ fn run_inner(
             jsx,
             Some(&ingots),
         );
+        let scanned = match compiled.is_ok() {
+            true => crate::modules::import_problems(&source, &source_rel, path, &module_aliases),
+
+            false => Vec::new(),
+        };
+
+        Some(Ok(Prepared {
+            source,
+            compiled: Some(compiled),
+            scanned,
+            definitions: options.definitions,
+        }))
+    };
+
+    let reads = std::sync::Arc::new(crate::modules::Reads::default());
+    let prepared = par_map(&sources, |path| {
+        crate::modules::with_reads(&reads, || prepare(path))
+    });
+
+    for (path, prepared) in sources.iter().zip(prepared) {
+        let rel = path.strip_prefix(&input).unwrap_or(path).to_path_buf();
+
+        if exclude.is_match(&rel) {
+            report.skipped.push(rel);
+
+            continue;
+        }
+
+        // `prepare` passes over a file for the same two reasons.
+        let (Some(rel_out), Some(prepared)) = (output_for(&rel), prepared) else {
+            continue;
+        };
+        let Prepared {
+            source,
+            compiled,
+            scanned,
+            definitions,
+        } = prepared?;
+        // The diagnostics this file adds start here; one is enough to
+        // keep its output unwritten.
+        let errors_before = report.diagnostics.len();
+
+        // An actor script goes into the folder of its Actor, and the
+        // meta file there gives the folder that class.
+        let actor = crate::project::actor_output(&rel_out);
+        let target = out.join(actor.as_ref().map_or(&rel_out, |(script, _)| script));
+        let actor_meta = actor.map(|(_, meta)| out.join(meta));
+        let source_rel = build.input.join(&rel);
+
+        let Some(compiled) = compiled else {
+            held.insert(target.clone());
+            held.extend(actor_meta.clone());
+            report.skipped.push(rel);
+
+            if let Err(e) = &jsx_config
+                && !markup_reported
+            {
+                markup_reported = true;
+                let (file, at) = config.markup_problem_at(root, e);
+                // `markup:` gives the report the MarkupError kind.
+                let message = match at {
+                    Some((line, col)) => format!("{}:{}: markup: {e}", line + 1, col + 1),
+
+                    None => format!("markup: {e}"),
+                };
+                report.failures.push((file, message));
+            }
+
+            continue;
+        };
 
         let mut compiled = match compiled {
             Ok(c) => c,
 
             Err(e) => {
                 held.insert(target.clone());
+                held.extend(actor_meta.clone());
                 report.skipped.push(rel.clone());
                 report.failures.push((rel, e.located(&source)));
 
@@ -847,7 +915,7 @@ fn run_inner(
         // first, and the require here names its output.
         let outside = deps.outside(
             &Site {
-                from: &absolute(&path),
+                from: &absolute(path),
                 out_file: &absolute(&target),
                 input: &absolute(&input),
                 root,
@@ -894,7 +962,7 @@ fn run_inner(
         // names the project and its first error, over the module scan's.
         // The data files below report a data import.
         let taken: Vec<u32> = outside.problems.iter().map(|p| p.start).collect();
-        let scanned = crate::modules::import_problems(&source, &source_rel, &path, &module_aliases)
+        let scanned = scanned
             .into_iter()
             .filter(|p| !taken.contains(&p.start) && p.kind != "DataError");
 
@@ -1004,7 +1072,7 @@ fn run_inner(
 
         // A `.d.aly` feeds the type check of the editor and of `flux`
         // and runs nowhere, so the output tree takes nothing from it.
-        if options.definitions {
+        if definitions {
             continue;
         }
 
@@ -1021,6 +1089,7 @@ fn run_inner(
         // a run before this one left.
         if !compiled.parsed_clean || report.diagnostics.len() > errors_before {
             held.insert(target.clone());
+            held.extend(actor_meta.clone());
             report.skipped.push(rel);
 
             continue;
@@ -1052,6 +1121,46 @@ fn run_inner(
                 report.written.push(rel_out);
             }
         }
+
+        if let Some(meta) = &actor_meta {
+            expected.insert(meta.clone());
+
+            if std::fs::read_to_string(meta).ok().as_deref() != Some(crate::project::ACTOR_META) {
+                std::fs::write(meta, crate::project::ACTOR_META)?;
+            }
+        }
+    }
+
+    // Rojo makes `art.luau` a module named `art`, and the folder `art/`
+    // beside it a second child named `art`. A require takes one of the
+    // two, so `../art/tiles` fails at run time when it gets the module.
+    let folders: HashSet<&Path> = builds
+        .keys()
+        .chain(&report.data)
+        .flat_map(|p| p.ancestors().skip(1))
+        .collect();
+
+    for (out_rel, rel) in &builds {
+        let module = out_rel.with_extension("");
+
+        if is_init(out_rel) || !folders.contains(module.as_path()) {
+            continue;
+        }
+
+        let folder = build.input.join(rel.with_extension(""));
+        let name = module.file_name().unwrap_or_default().to_string_lossy();
+        report.diagnostics.push((
+            rel.clone(),
+            Diagnostic {
+                start: 0,
+                end: 0,
+                message: format!(
+                    "{} and the folder {} both make an instance named `{name}` in Roblox, and a require takes only one of them. Move this file into the folder as `init`, or rename one",
+                    shown(rel),
+                    folder.to_string_lossy().replace('\\', "/"),
+                ),
+            },
+        ));
     }
 
     report.lints.extend(circular_imports(&imports));
@@ -1928,6 +2037,64 @@ pub fn type_cycle_cuts(input: &Path, sources: &[PathBuf]) -> HashMap<PathBuf, Ve
     cuts
 }
 
+/// One source after its compile, as the build loop takes it.
+struct Prepared {
+    source: String,
+    /// `None` for markup under a markup table that did not load.
+    compiled: Option<Result<crate::Output, crate::CompileError>>,
+    /// The problems of its imports, from the module scan.
+    scanned: Vec<crate::modules::ImportProblem>,
+    /// Whether it is a `.d.aly`, which writes no output.
+    definitions: bool,
+}
+
+/// `f` of each item, in item order, on as many threads as there are
+/// cores. Each thread takes the next item when it finishes one, so one
+/// slow file holds up one thread. A thread that does not start leaves
+/// its share to the others, so a target with no threads maps on the
+/// caller's own.
+fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let work = || {
+        let mut done = Vec::new();
+
+        loop {
+            let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let Some(item) = items.get(at) else {
+                break done;
+            };
+            done.push((at, f(item)));
+        }
+    };
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let mut done: Vec<(usize, R)> = std::thread::scope(|scope| {
+        // A parse goes as deep as on the main thread, so each thread
+        // takes its stack.
+        let others: Vec<_> = (1..threads.min(items.len()))
+            .filter_map(|_| {
+                std::thread::Builder::new()
+                    .stack_size(alloy_syntax::parser::DEEP_STACK)
+                    .spawn_scoped(scope, work)
+                    .ok()
+            })
+            .collect();
+        let mut done = work();
+
+        for thread in others {
+            done.extend(
+                thread
+                    .join()
+                    .unwrap_or_else(|e| std::panic::resume_unwind(e)),
+            );
+        }
+
+        done
+    });
+    done.sort_by_key(|(at, _)| *at);
+
+    done.into_iter().map(|(_, r)| r).collect()
+}
+
 /// `circular_import`: an import that leads back to the file it sits in.
 /// Each file on the cycle reports the import that starts it. An import
 /// the ship artifact drops, such as `import type`, runs nothing, so it
@@ -2169,6 +2336,20 @@ fn walk_all(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The results come back in item order, whichever thread ends first.
+    #[test]
+    fn par_map_keeps_the_item_order() {
+        let items: Vec<u64> = (0..500).collect();
+        let slow_first = par_map(&items, |&n| {
+            std::thread::sleep(std::time::Duration::from_micros(500 - n));
+
+            n * 2
+        });
+
+        assert_eq!(slow_first, items.iter().map(|n| n * 2).collect::<Vec<_>>());
+        assert!(par_map(&[] as &[u8], |_| 0).is_empty());
+    }
 
     #[test]
     fn a_cycle_of_imports_is_a_lint_on_each_file() {

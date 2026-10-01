@@ -9,4 +9,4 @@ local __alloy = require("@alloy") local Stats = {} Stats.__index = Stats setmeta
 local Damage = __alloy.remote({ name = "Damage", kind = "event", from_client = true, from_server = false, params = { "target", "amount", "crit" }, defaults = {  }, attrs = {}, wire = { "inst:Player", "u16", "bool" } })
 local Toast = __alloy.remote({ name = "Toast", kind = "event", from_client = false, from_server = true, params = { "message", "seconds" }, defaults = { seconds = 3 }, attrs = {}, wire = { "str", "f64" }, pack = false })
 local Sync = __alloy.remote({ name = "Sync", kind = "event", from_client = false, from_server = true, params = { "stats", "tags", "pos" }, defaults = {  }, attrs = {}, wire = { { fields = { { "level", "u8" }, { "hp", "f64" }, { "title", "str?" } }, struct = Stats }, { item = "str", array = true }, { fields = { { "x", "f64" }, { "y", "f64" } } } } })
-print(Damage, Toast, Sync)
+print(Damage, Toast, Sync) return nil

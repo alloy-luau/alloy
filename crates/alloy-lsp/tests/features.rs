@@ -444,7 +444,7 @@ fn hover_completion_and_extensions() {
     assert!(h.contains("A record with fields"), "struct: {h}");
     let h = s.hover(&uri, 1, 8);
     assert!(
-        h.contains("struct Vec2\n  x: number\n  y: number\nend"),
+        h.contains("struct Vec2\n  public x: number\n  public y: number\nend"),
         "struct name: {h}"
     );
     let h = s.hover(&uri, 10, 10);
@@ -518,7 +518,7 @@ fn hover_completion_and_extensions() {
     );
     let h = s.hover(&std_uri, 2, 12);
     assert!(
-        h.contains("HashMap.new()") && h.contains("get_or_insert"),
+        h.contains("new HashMap()") && h.contains("get_or_insert"),
         "HashMap: {h}"
     );
 
@@ -548,9 +548,10 @@ fn hover_completion_and_extensions() {
         "enum: {h}"
     );
     let h = s.hover(&uri, 51, 16);
-    assert!(h.contains("Msg.Move(number)"), "dotted variant: {h}");
+    let variant = "```alloy\nMsg\n```\n\n```alloy\nMove(number)\n```";
+    assert!(h.contains(variant), "dotted variant: {h}");
     let h = s.hover(&uri, 53, 10);
-    assert!(h.contains("Msg.Move(number)"), "pattern variant: {h}");
+    assert!(h.contains(variant), "pattern variant: {h}");
 
     // A user attribute and a macro hover as what they are.
     let h = s.hover(&uri, 61, 2);
@@ -639,7 +640,7 @@ fn hover_completion_and_extensions() {
     assert!(h.contains("local rs: number[]"), "rest: {h}");
     let h = s.hover(&uri, 5, 21);
     assert!(
-        h.contains("x: number") && h.contains("A field of `struct Vec2`"),
+        h.contains("```alloy\nVec2\n```\n\n```alloy\npublic x: number\n```"),
         "field: {h}"
     );
     let h = s.hover(&uri, 76, 7);
@@ -675,7 +676,7 @@ fn hover_completion_and_extensions() {
     // Future in hover and as the inner type in the insertable hint.
     let h = s.hover(&uri, 37, 16);
     assert!(
-        h.contains("async function stamp(): Future<number>"),
+        h.contains("async function stamp() -> Future<number>"),
         "inferred: {h}"
     );
     let hints = s.request(
@@ -3194,9 +3195,10 @@ local a: Test = t
 print(t, a, t:test(), t:show())
 ";
 
-/// The header of an `impl` hovers as the block: its own line, the
-/// public methods inside it, and the doc comment above it. The same
-/// name anywhere else still hovers as the struct.
+/// The header of an `impl` hovers as the type with the methods of every
+/// `impl` of it, a private one too, each with its visibility, then the
+/// doc comment of the block and the traits. The same name anywhere else
+/// hovers as the struct alone, with no method.
 #[test]
 fn an_impl_header_hovers_as_its_block() {
     let Some(child) = luau_lsp() else {
@@ -3220,29 +3222,26 @@ fn an_impl_header_hovers_as_its_block() {
     );
     s.drain(Duration::from_secs(2));
 
-    // The `impl` keyword and the target name both answer with the block.
+    let whole = "struct Test\n  public x: number\n  public function test()\n  private function hidden()\n  public function show(self) -> string\nend";
+
+    // The `impl` keyword and the target name both answer with the type.
     for character in [0, 6] {
         let h = s.hover(&uri, 5, character);
-        assert!(h.contains("impl Test\n"), "impl header: {h}");
-        assert!(h.contains("public function test()"), "impl header: {h}");
-        assert!(!h.contains("hidden"), "a private method: {h}");
-        assert!(!h.contains("struct Test"), "impl header: {h}");
+        assert!(h.contains(whole), "impl header: {h}");
         assert!(h.contains("What the block adds."), "the doc comment: {h}");
+        assert!(h.contains("Implements `Display`."), "the trait: {h}");
     }
 
-    // A block for a trait names the trait first.
+    // A block for a trait answers the same way.
     let h = s.hover(&uri, 17, 18);
-    assert!(h.contains("impl Display for Test\n"), "trait impl: {h}");
-    assert!(
-        h.contains("public function show(self): string"),
-        "trait impl: {h}"
-    );
+    assert!(h.contains(whole), "trait impl: {h}");
 
-    // The same name in an annotation and in a `new` keeps the struct.
-    let h = s.hover(&uri, 24, 10);
-    assert!(h.contains("struct Test\n"), "annotation: {h}");
-    let h = s.hover(&uri, 23, 15);
-    assert!(h.contains("struct Test\n"), "new: {h}");
+    // The same name in an annotation and in a `new` is the struct alone.
+    for (line, character) in [(24, 10), (23, 15)] {
+        let h = s.hover(&uri, line, character);
+        assert!(h.contains("struct Test\n  public x: number\nend"), "{h}");
+        assert!(!h.contains("function"), "{h}");
+    }
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -3433,4 +3432,423 @@ fn a_config_file_completes_from_the_schema() {
     assert!(text.contains("The output root"), "{text}");
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+impl Session {
+    fn notify(&mut self, method: &str, params: Value) {
+        write(
+            &mut self.stdin,
+            &json!({ "jsonrpc": "2.0", "method": method, "params": params }),
+        );
+    }
+
+    /// Types `text` at a position, one character per `didChange`, the
+    /// way an editor sends a word as it is typed. Returns the version
+    /// of the last change.
+    fn type_at(&mut self, uri: &str, line: u32, character: u32, text: &str, version: i64) -> i64 {
+        let mut version = version;
+
+        for (i, c) in text.chars().enumerate() {
+            version += 1;
+            let at = json!({ "line": line, "character": character + i as u32 });
+            self.notify(
+                "textDocument/didChange",
+                json!({
+                    "textDocument": { "uri": uri, "version": version },
+                    "contentChanges": [{ "range": { "start": at, "end": at }, "text": c.to_string() }]
+                }),
+            );
+        }
+
+        version
+    }
+
+    /// The labels of a completion a trigger character asked for.
+    fn triggered_labels(
+        &mut self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        trigger: &str,
+    ) -> Vec<String> {
+        let r = self.request(
+            "textDocument/completion",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character },
+                "context": { "triggerKind": 2, "triggerCharacter": trigger }
+            }),
+        );
+
+        r.get("items")
+            .and_then(Value::as_array)
+            .or_else(|| r.as_array())
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|i| i["label"].as_str().map(str::to_string))
+            .collect()
+    }
+}
+
+/// `local test: Enum.` typed a keystroke at a time: the `.` asks for a
+/// list, and the list holds the enums. After `Enum.KeyCode.` in a value
+/// the items of the enum complete.
+#[test]
+fn a_dot_after_enum_in_a_type_lists_the_enums() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-enum-dot-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "local count = 1\n\nprint(count)\n";
+    let file = dir.join("main.aly");
+    std::fs::write(&file, src).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", file.display());
+    s.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": src } }),
+    );
+
+    // The `.` is a trigger the server lists, and the list after it in a
+    // type is the enums.
+    let version = s.type_at(&uri, 1, 0, "local test: Enum.", 1);
+    let labels = s.triggered_labels(&uri, 1, 17, ".");
+    assert!(labels.iter().any(|l| l == "KeyCode"), "{labels:?}");
+    assert!(!labels.iter().any(|l| l == "print"), "{labels:?}");
+
+    // `Enum.KeyCode` names a type there; in a value its items complete.
+    let version = s.type_at(&uri, 1, 17, "KeyCode", version);
+    s.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": uri, "version": version + 1 },
+            "contentChanges": [{
+                "range": { "start": { "line": 1, "character": 10 }, "end": { "line": 1, "character": 11 } },
+                "text": " ="
+            }]
+        }),
+    );
+    // The line reads `local test = Enum.KeyCode` now.
+    s.type_at(&uri, 1, 25, ".", version + 1);
+    let labels = s.triggered_labels(&uri, 1, 26, ".");
+    assert!(labels.iter().any(|l| l == "Space"), "{labels:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An edit to a module the editor holds reaches the file that imports
+/// it: the new function completes after `M.`, and the changed return
+/// type hovers.
+#[test]
+fn an_edit_to_an_imported_module_reaches_the_importer() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-importer-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let module = "export function first(): number\n    return 1\nend\n";
+    let main = "import * as M from \"./m\"\nlocal a = M.first()\nlocal b = M.\nprint(a, b)\n";
+    std::fs::write(dir.join("m.aly"), module).unwrap();
+    std::fs::write(dir.join("main.aly"), main).unwrap();
+
+    let mut s = start(&child, &dir);
+    let m_uri = format!("file://{}", dir.join("m.aly").display());
+    let uri = format!("file://{}", dir.join("main.aly").display());
+    s.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": m_uri, "languageId": "alloy-luau", "version": 1, "text": module } }),
+    );
+    s.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": main } }),
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut labels = Vec::new();
+
+    while Instant::now() < deadline && !labels.iter().any(|l| l == "first") {
+        labels = s.completion_labels(&uri, 2, 12);
+    }
+
+    assert!(labels.iter().any(|l| l == "first"), "{labels:?}");
+    assert!(!labels.iter().any(|l| l == "second"), "{labels:?}");
+
+    // The module changes in the editor, not on disk.
+    let edited = "export function first(): string\n    return \"one\"\nend\n\nexport function second(): boolean\n    return true\nend\n";
+    s.notify(
+        "textDocument/didChange",
+        json!({ "textDocument": { "uri": m_uri, "version": 2 }, "contentChanges": [{ "text": edited }] }),
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut hover = String::new();
+
+    while Instant::now() < deadline {
+        s.drain(Duration::from_millis(500));
+        labels = s.completion_labels(&uri, 2, 12);
+        hover = s.hover(&uri, 1, 6);
+
+        if labels.iter().any(|l| l == "second") && hover.contains("string") {
+            break;
+        }
+    }
+
+    assert!(labels.iter().any(|l| l == "second"), "{labels:?}");
+    assert!(hover.contains("string"), "{hover}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A module created on disk after the importer compiled: the watcher's
+/// notice clears what the server probed, so the next compile of the
+/// importer finds the file, and the report on the import goes.
+#[test]
+fn a_watched_change_reaches_the_next_compile() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-watched-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "import later from \"./later\"\nprint(later)\n";
+    let file = dir.join("main.aly");
+    std::fs::write(&file, src).unwrap();
+
+    // No poll tick in the test's time: the notice alone moves it.
+    let mut s = start_env(
+        &child,
+        json!({ "processId": std::process::id(), "rootUri": format!("file://{}", dir.display()), "capabilities": {} }),
+        &[("ALLOY_LSP_POLL_SECS", "3600")],
+    );
+    let uri = format!("file://{}", file.display());
+    s.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": src } }),
+    );
+    s.diagnostics(&uri, |ds| ds.iter().any(|d| d.starts_with("UnknownModule")));
+    // Only a batch sent after the file exists counts.
+    s.seen.clear();
+
+    let later = dir.join("later.luau");
+    std::fs::write(&later, "return 1\n").unwrap();
+    s.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({ "changes": [{ "uri": format!("file://{}", later.display()), "type": 1 }] }),
+    );
+    // An edit compiles the importer again.
+    s.notify(
+        "textDocument/didChange",
+        json!({ "textDocument": { "uri": uri, "version": 2 }, "contentChanges": [{ "text": src }] }),
+    );
+
+    s.diagnostics(&uri, |ds| {
+        !ds.iter().any(|d| d.starts_with("UnknownModule"))
+    });
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A worker that answers through `reply`. Line 2 binds the answers,
+/// line 6 fires, and the handler takes `respond` on line 7.
+const REPLY_WORKER: &str = "\
+--- A job, and the levels a worker answers with.
+message Light(job: number, input: buffer) reply(job: number, levels: buffer)
+Light.replied(function(job, levels)
+    print(job, levels)
+end)
+local worker = script.Parent :: Actor
+Light.fire(worker, 7, buffer.create(1))
+Light.on(function(job, input, respond)
+    respond(job, input)
+end)
+";
+
+/// The reply of a message types both ends in the editor: `replied`
+/// completes and hovers with the reply, `respond` hovers as the function
+/// the handler takes, and a wrong value sent back is a type error.
+#[test]
+fn a_reply_types_replied_and_respond() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-reply-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("worker.server.actor.aly");
+    std::fs::write(&file, REPLY_WORKER).unwrap();
+
+    let mut s = start(&child, &dir);
+    let uri = format!("file://{}", file.display());
+    s.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": REPLY_WORKER } }),
+    );
+    s.drain(Duration::from_secs(3));
+
+    // `Light.` lists `replied` beside `fire`, `on` and `once`.
+    let labels = s.completion_labels(&uri, 6, 6);
+    for want in ["fire", "on", "once", "replied"] {
+        assert!(labels.iter().any(|l| l == want), "{want}: {labels:?}");
+    }
+
+    let replied = s.hover(&uri, 2, 8);
+    assert!(
+        replied.contains("levels: buffer"),
+        "the hover of replied: {replied}"
+    );
+
+    let respond = s.hover(&uri, 7, 32);
+    assert!(
+        respond.contains("respond") && respond.contains("levels: buffer"),
+        "the hover of respond: {respond}"
+    );
+
+    // `respond(job, input)` sends a buffer as the levels, which fits.
+    // A string does not.
+    let wrong = REPLY_WORKER.replace("respond(job, input)", "respond(job, \"no\")");
+    s.notify(
+        "textDocument/didChange",
+        json!({ "textDocument": { "uri": uri, "version": 2 }, "contentChanges": [{ "text": wrong }] }),
+    );
+    let reports = s.diagnostics(&uri, |ds| ds.iter().any(|d| d.contains("buffer")));
+    assert!(reports.iter().any(|d| d.contains("string")), "{reports:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A module past the budget of locals keeps its exported values on one
+/// table. The editor still reads each one: a use inside the module
+/// hovers with its type, a wrong type reports, and go to definition
+/// from an importer lands on the declaration.
+#[test]
+fn a_module_past_the_local_budget_still_hovers_and_defines() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-budget-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n",
+    )
+    .unwrap();
+    let mut constants = String::new();
+
+    for i in 0..200 {
+        constants.push_str(&format!(
+            "--- Constant {i}.\nexport const C{i} = tostring({i})\n"
+        ));
+    }
+
+    // Line 400: the function that reads two of them.
+    constants.push_str("export function joined(): string\n    return C1 .. C0\nend\n");
+    std::fs::write(dir.join("src/constants.aly"), &constants).unwrap();
+    let use_src = "import { C7 } from './constants'\n\nconst n: number = C7\nprint(n)\n";
+    let use_file = dir.join("src/use.aly");
+    std::fs::write(&use_file, use_src).unwrap();
+
+    let mut s = start(&child, &dir);
+    let constants_uri = format!("file://{}", dir.join("src/constants.aly").display());
+    let use_uri = format!("file://{}", use_file.display());
+
+    for (uri, text) in [(&constants_uri, constants.as_str()), (&use_uri, use_src)] {
+        s.notify(
+            "textDocument/didOpen",
+            json!({ "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": text } }),
+        );
+    }
+
+    let reports = s.diagnostics(&use_uri, |ds| ds.iter().any(|d| d.contains("'number'")));
+    assert_eq!(reports.len(), 1, "{reports:?}");
+
+    let h = s.hover(&constants_uri, 401, 12);
+    assert!(h.contains("string"), "the hover of C1: {h}");
+
+    let defs = s.request(
+        "textDocument/definition",
+        json!({ "textDocument": { "uri": use_uri }, "position": { "line": 2, "character": 19 } }),
+    );
+    let def = defs.get(0).unwrap_or(&defs);
+    assert_eq!(def["uri"], json!(constants_uri), "{defs}");
+    assert_eq!(def["range"]["start"]["line"], 15, "{defs}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An actor script ships inside its Actor, one folder below its file,
+/// so its relative imports climb one more folder. The editor put the
+/// shadow at the file's own place, so a project with no Rojo file, and
+/// no sourcemap to place the Actor, reported `./jobs` as a module that
+/// does not exist. The shadow now sits in the folder of its Actor. With
+/// mounts, the sourcemap names it there, so `script.Parent` stays the
+/// Actor.
+#[test]
+fn an_actor_script_imports_a_sibling_with_or_without_a_tree() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    // With no tree the analyzer knows no parent, so the script casts.
+    // With mounts the sourcemap types `script.Parent` as the Actor.
+    let layouts = [
+        ("none", "", "script.Parent :: Actor"),
+        (
+            "mounts",
+            "\n[mount]\nserver = [\"src/server\", \"@game/ServerScriptService/Server\"]\n",
+            "script.Parent",
+        ),
+    ];
+
+    for (name, mounts, parent) in layouts {
+        let dir =
+            std::env::temp_dir().join(format!("alloy-lsp-actor-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/server")).unwrap();
+        std::fs::write(
+            dir.join("alloy.toml"),
+            format!("[build]\nin = \"src\"\nout = \"build\"\n{mounts}"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("src/server/jobs.aly"),
+            "--- A count.\nexport const COUNT = 3\n",
+        )
+        .unwrap();
+        let src = format!(
+            "import {{ COUNT }} from './jobs'\n\nconst actor: Actor = {parent}\nconst n: string = COUNT\nprint(actor, n)\n"
+        );
+        let file = dir.join("src/server/worker.server.actor.aly");
+        std::fs::write(&file, &src).unwrap();
+
+        let mut s = start(&child, &dir);
+        let uri = format!("file://{}", file.display());
+        s.notify(
+            "textDocument/didOpen",
+            json!({ "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": src } }),
+        );
+
+        // The import resolves and the cast holds, so the one report is
+        // the type the value has.
+        let reports = s.diagnostics(&uri, |ds| ds.iter().any(|d| d.contains("'string'")));
+        assert_eq!(reports.len(), 1, "{name}: {reports:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

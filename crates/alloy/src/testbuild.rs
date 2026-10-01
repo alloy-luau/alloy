@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use alloy_syntax::ast::{Chunk, Expr, ImportKind, Stmt};
+use alloy_syntax::ast::{Chunk, Expr, Import, ImportKind, ImportSpec, Stmt};
 use alloy_syntax::lexer::{Tok, TokKind};
 
 use crate::build::relative_require;
@@ -235,7 +235,20 @@ fn namespace_has_test(src: &str, toks: &[Tok], ns: &alloy_syntax::ast::Namespace
     })
 }
 
-fn describe(src: &str, toks: &[Tok], stmt: &Stmt) -> Decl {
+/// What a file's names bind, for the uses a statement reads.
+struct Names {
+    /// The tokens that name a field, a method, a key or a variant.
+    members: HashSet<usize>,
+    /// The methods of each `impl` on a type the file does not declare,
+    /// `impl string`. A test reaches one by its name after `:`, so that
+    /// member name is a use of the impl.
+    foreign_methods: HashSet<String>,
+    /// Each binding with its declaring token and the token ranges its
+    /// scope holds; `None` for a scope the walk does not know.
+    bindings: Vec<crate::naming::ScopedBinding>,
+}
+
+fn describe(src: &str, toks: &[Tok], stmt: &Stmt, names: &Names) -> Decl {
     let span = stmt.span();
     let start = toks[span.start as usize].start as usize;
     let end = toks[(span.end as usize)
@@ -252,7 +265,10 @@ fn describe(src: &str, toks: &[Tok], stmt: &Stmt) -> Decl {
         })
     };
 
-    match stmt {
+    // `export default function f` declares `f` as the plain declaration
+    // does. The test artifact returns no export table, so the spec keeps
+    // the function and drops the export (LANG_BUGS 131).
+    match stmt.under_default() {
         Stmt::Local(l) => {
             for b in &l.names {
                 match &b.destructure {
@@ -343,6 +359,7 @@ fn describe(src: &str, toks: &[Tok], stmt: &Stmt) -> Decl {
         Stmt::Interface(i) => declares.push(name_of(src, toks, i.name)),
         Stmt::TypeAlias(t) => declares.push(name_of(src, toks, t.name)),
         Stmt::Remote(r) => declares.push(name_of(src, toks, r.name)),
+        Stmt::Message(m) => declares.push(name_of(src, toks, m.name)),
         Stmt::Attribute(a) => declares.push(name_of(src, toks, a.name)),
         Stmt::Macro(m) => declares.push(name_of(src, toks, m.name)),
         Stmt::Class(c) => declares.push(name_of(src, toks, c.name)),
@@ -371,16 +388,49 @@ fn describe(src: &str, toks: &[Tok], stmt: &Stmt) -> Decl {
                 | Stmt::While(_)
                 | Stmt::Repeat(_)
                 | Stmt::Do(_)
+                | Stmt::Parallel(_)
                 | Stmt::If(_)
                 | Stmt::Call(..)
                 | Stmt::Assign(_)
                 | Stmt::Match(_)
         );
 
-    let refs = (span.start..span.end)
-        .map(|j| toks[j as usize])
-        .filter(|t| t.kind == TokKind::Ident)
-        .map(|t| t.text(src).to_string())
+    /*
+    A use is a name that reads a binding. A field name, in a table or
+    after a dot, reads none, and a name that a local or a parameter of
+    the statement itself binds reads that one. Each kept a top-level
+    function of the same name in the spec, with its imports, and the
+    spec failed to load (LANG_BUGS 112).
+    */
+    let inner = (span.start as usize)..(span.end as usize);
+    let bound_inside = |j: usize, name: &str| {
+        names.bindings.iter().any(|(n, tok, reach)| {
+            n == name
+                && inner.contains(tok)
+                && reach
+                    .as_ref()
+                    .is_none_or(|ranges| ranges.iter().any(|&(a, b)| a <= j && j < b))
+        })
+    };
+    // `{ swim: number }` in a type, and `(spec: Spec)`: the name before
+    // the annotation's `:` is a key or a parameter. The walk reads no
+    // type, so the shape tells it from `obj:method(`.
+    let text = |j: usize| toks.get(j).map_or("", |t| t.text(src));
+    let annotated = |j: usize| {
+        j > 0
+            && text(j + 1) == ":"
+            && matches!(text(j - 1), "{" | "," | "(")
+            && !(toks.get(j + 2).is_some_and(|t| t.kind == TokKind::Ident)
+                && matches!(text(j + 3), "(" | "{"))
+    };
+    let refs = inner
+        .clone()
+        .filter(|&j| {
+            toks[j].kind == TokKind::Ident
+                && (!names.members.contains(&j) || names.foreign_methods.contains(text(j)))
+        })
+        .filter(|&j| !annotated(j) && !bound_inside(j, toks[j].text(src)))
+        .map(|j| toks[j].text(src).to_string())
         .collect();
 
     Decl {
@@ -408,11 +458,44 @@ pub fn slice(
     markup: &[(usize, usize)],
     factory: &[&str],
 ) -> Option<String> {
+    let types: HashSet<&str> = chunk
+        .block
+        .stmts
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::Struct(d) => Some(d.name),
+            Stmt::Enum(d) => Some(d.name),
+            Stmt::Class(d) => Some(d.name),
+            Stmt::Trait(d) => Some(d.name),
+            Stmt::Interface(d) => Some(d.name),
+            Stmt::TypeAlias(d) => Some(d.name),
+
+            _ => None,
+        })
+        .map(|n| n.text(src, toks))
+        .collect();
+    let foreign_methods = chunk
+        .block
+        .stmts
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::Impl(i) if !types.contains(i.target.text(src, toks)) => Some(i),
+
+            _ => None,
+        })
+        .flat_map(|i| i.methods.iter().filter_map(|m| m.path.last()))
+        .map(|n| n.text(src, toks).to_string())
+        .collect();
+    let names = Names {
+        members: crate::naming::member_tokens(src, toks, &chunk.block),
+        foreign_methods,
+        bindings: crate::naming::scoped_bindings(src, toks, &chunk.block),
+    };
     let mut decls: Vec<Decl> = chunk
         .block
         .stmts
         .iter()
-        .map(|s| describe(src, toks, s))
+        .map(|s| describe(src, toks, s, &names))
         .collect();
 
     for d in &mut decls {
@@ -476,14 +559,32 @@ pub fn slice(
         }
     }
 
+    // A kept import keeps the names the kept code reads. A type name
+    // needs no require, so `import heavy, { type Shape }` that a test
+    // reaches for `Shape` alone loads nothing (LANG_BUGS 119).
+    let used: HashSet<&str> = decls
+        .iter()
+        .zip(&chunk.block.stmts)
+        .zip(&selected)
+        .filter(|((_, stmt), s)| **s && !matches!(stmt, Stmt::Import(_)))
+        .flat_map(|((d, _), _)| d.refs.iter().map(String::as_str))
+        .collect();
+    let mut blanks: Vec<(usize, usize)> = Vec::new();
+
+    for ((d, stmt), s) in decls.iter().zip(&chunk.block.stmts).zip(&selected) {
+        match (stmt, *s) {
+            (_, false) => blanks.push((d.start, d.end)),
+
+            (Stmt::Import(i), true) => blanks.extend(unread_import_parts(src, toks, i, &used)),
+
+            _ => {}
+        }
+    }
+
     let mut out = src.as_bytes().to_vec();
 
-    for (d, s) in decls.iter().zip(&selected) {
-        if *s {
-            continue;
-        }
-
-        for b in out.iter_mut().take(d.end).skip(d.start) {
+    for (start, end) in blanks {
+        for b in out.iter_mut().take(end).skip(start) {
             if *b != b'\n' {
                 *b = b' ';
             }
@@ -499,6 +600,65 @@ pub fn slice(
     }
 
     Some(joined)
+}
+
+/// The byte ranges of an import that bind a name no kept statement
+/// reads, each with its comma. A list of names left with types alone
+/// is erased to ship, so its module does not load.
+fn unread_import_parts(
+    src: &str,
+    toks: &[Tok],
+    i: &Import,
+    used: &HashSet<&str>,
+) -> Vec<(usize, usize)> {
+    let text = |j: u32| toks[j as usize].text(src);
+    // The bytes of the tokens `a` up to, not with, `b`.
+    let range = |a: u32, b: u32| {
+        (
+            toks[a as usize].start as usize,
+            toks[b as usize - 1].end as usize,
+        )
+    };
+    let bound = |s: &ImportSpec| s.alias.unwrap_or(s.name);
+    let read = |s: &ImportSpec| used.contains(text(bound(s).start));
+    // The first token of the name for the whole module, and that name.
+    let (head, specs) = match &i.kind {
+        ImportKind::Default(n) => (Some((n.start, *n)), &[][..]),
+
+        ImportKind::Namespace(n, specs) => (Some((i.span.start + 1, *n)), &specs[..]),
+
+        ImportKind::Both(n, specs) => (Some((n.start, *n)), &specs[..]),
+
+        ImportKind::Named(specs) | ImportKind::TypeOnly(specs) => (None, &specs[..]),
+    };
+    let head_read = head.is_some_and(|(_, n)| used.contains(text(n.start)));
+    let specs_read = specs.iter().any(read);
+
+    if !head_read && !specs_read {
+        return vec![range(i.span.start, i.span.end)];
+    }
+
+    let mut cuts = Vec::new();
+
+    match head {
+        // The name and the comma after it.
+        Some((first, n)) if !head_read => cuts.push(range(first, n.end + 1)),
+
+        // The comma and the list, up to `from`.
+        Some((_, n)) if !specs_read && !specs.is_empty() => {
+            return vec![range(n.end, i.path.start - 1)];
+        }
+
+        _ => {}
+    }
+
+    for s in specs.iter().filter(|s| !read(s)) {
+        let first = s.name.start - u32::from(s.is_type) - u32::from(s.is_attribute);
+        let end = bound(s).end + u32::from(text(bound(s).end) == ",");
+        cuts.push(range(first, end));
+    }
+
+    cuts
 }
 
 /// The spec's require target for a path the source requires, relative
@@ -555,38 +715,15 @@ fn target_for(
     Some(normal)
 }
 
-/// The engine names the doubles stand in for.
-const SHIM_NAMES: &[&str] = &[
-    "typeof",
-    "Vector3",
-    "Vector2",
-    "CFrame",
-    "Color3",
-    "UDim",
-    "UDim2",
-    "NumberRange",
-    "Random",
-    "Enum",
-    "Instance",
-    "task",
-    "game",
-    "workspace",
-    "warn",
-];
-
-/// The doubles as locals at the head of a chunk, so a module that names
-/// `Vector3` or `game` at load has them. The VM gives each chunk its own
-/// globals, so a global the shim set would stay in the shim. The line
-/// joins the first line, so every later line keeps its number.
+/// The shim's require at the head of a chunk. The shim sets the doubles
+/// as globals, so a module that names `Vector3` or `game` at load has
+/// them, and takes no local for them. A local for each name cost a
+/// module 15 of the 200 that Luau allows (LANG_BUGS 127). The `;` ends
+/// the call, so a first line that opens with `(` starts a statement of
+/// its own. The line joins the first line, so every later line keeps
+/// its number.
 fn with_shim(text: &str, shim_require: &str) -> String {
-    let values: Vec<String> = SHIM_NAMES.iter().map(|n| format!("__shim.{n}")).collect();
-
-    format!(
-        "local __shim = require({}) local {} = {} {text}",
-        luau_string(shim_require),
-        SHIM_NAMES.join(", "),
-        values.join(", ")
-    )
+    format!("require({}); {text}", luau_string(shim_require))
 }
 
 /// Writes the modules folder: every source compiled with file-path
@@ -604,7 +741,16 @@ fn write_modules(
     let dir = root.join(&modules);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join("alloy.luau"), crate::RUNTIME)?;
+    // The runtime reads `Instance`, `game`, `typeof` and `task` as a
+    // module does, so it takes the doubles too. Without them `replied`
+    // indexed a nil `Instance`, and a timed `destroy` a nil `game`
+    // (LANG_BUGS 105).
+    let runtime_text = match config.test.shim {
+        true => with_shim(crate::RUNTIME, "./shim"),
+
+        false => crate::RUNTIME.to_string(),
+    };
+    std::fs::write(dir.join("alloy.luau"), runtime_text)?;
     std::fs::write(dir.join("shim.luau"), crate::SHIM)?;
     let exclude = crate::build::globs(&config.build.exclude)?;
     let written = crate::build::written_dirs(root, config);
@@ -640,6 +786,15 @@ fn write_modules(
             extensions: extensions.to_vec(),
             shapes: shapes.clone(),
             wire_scopes: wire_scopes.clone(),
+            late_requires: config.test.shim.then(|| {
+                (
+                    relative_require(&source_rel, &modules.join("shim")),
+                    rel_out
+                        .with_extension("")
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                )
+            }),
             ..EmitOptions::default().imports(&source, &path, &aliases)
         };
         let compiled = crate::compile_file(
@@ -873,12 +1028,10 @@ pub fn spec(
         ingots,
     )?;
     let mut text = rewrite_requires(config, &tree, root, source_rel, &spec_rel, &out.ship);
+    let shim = relative_require(&spec_rel, &modules_dir(config).join("shim"));
 
     if config.test.shim {
-        text = with_shim(
-            &text,
-            &relative_require(&spec_rel, &modules_dir(config).join("shim")),
-        );
+        text = with_shim(&text, &shim);
     }
 
     let name = source_rel
@@ -902,6 +1055,31 @@ pub fn spec(
     ));
     // `$expect(v)` reaches the matchers through the runtime.
     text.push_str("__alloy.set_expect(__lest.expect)\n");
+
+    // The modules that scoped imports name load now, while lest still
+    // resolves a require. The shim calls the spec's own `require`, with
+    // the path from the spec to the modules. An async test hands its
+    // Future to the shim, so the spec binds the shim only when it has
+    // one.
+    if config.test.shim {
+        let shim = luau_string(&shim);
+        let preload = format!(
+            "preload({}, function(path) return require(path) end)",
+            luau_string(&format!(
+                "{}/",
+                relative_require(&spec_rel, &modules_dir(config))
+            ))
+        );
+
+        match out.tests.iter().any(|(_, is_async)| *is_async) {
+            true => text.push_str(&format!(
+                "local __shim = require({shim})\n__shim.{preload}\n"
+            )),
+
+            false => text.push_str(&format!("require({shim}).{preload}\n")),
+        }
+    }
+
     text.push_str(&format!(
         "__lest.describe({}, function()\n",
         luau_string(&name)
@@ -948,6 +1126,19 @@ pub fn lest_toml(config: &Config) -> String {
 /// Writes the specs of a project under `[test] out`. With `write`
 /// false, nothing changes and `stale` lists the specs that would.
 pub fn run(root: &Path, config: &Config, write: bool) -> std::io::Result<Report> {
+    /*
+    Each module and each spec compiles once more here, and every compile
+    reads all its imports again. With no `Reads`, the run read 347 MB on
+    Strata, where the build reads 12 MB. On the NTFS disk under FUSE, one
+    daemon thread serves every read, so four runs at once took more than
+    10 minutes and looked like a deadlock with the ingots.
+    */
+    let reads = std::sync::Arc::new(crate::modules::Reads::default());
+
+    crate::modules::with_reads(&reads, || write_specs(root, config, write))
+}
+
+fn write_specs(root: &Path, config: &Config, write: bool) -> std::io::Result<Report> {
     let mut report = Report::default();
     let input = root.join(&config.build.input);
     let out_dir = root.join(&config.test.out);
@@ -1201,6 +1392,70 @@ mod tests {
         slice(src, &parsed.lexed.toks, &parsed.chunk, &[], &[])
     }
 
+    /*
+    A test keeps what it reaches by name, not by word. A field name, in a
+    table or after a dot, a word in a comment, and a local or a parameter
+    of the test named like a function of the file are no use of that
+    function. Each kept one here, with the imports it read, and the spec
+    failed to load (LANG_BUGS 112). A real call still keeps it.
+    */
+    #[test]
+    fn a_test_keeps_what_it_reaches_by_name() {
+        let src = concat!(
+            "import { scheduler } from './scheduler'\n",
+            "\n",
+            "type Spec = { swim: number, rank: number }\n",
+            "\n",
+            "local function rise(spec: Spec): number\n",
+            "    return spec.swim\n",
+            "end\n",
+            "\n",
+            "local function swim()\n",
+            "    scheduler:getDeltaTime()\n",
+            "end\n",
+            "\n",
+            "local function rank(): number\n",
+            "    return 1\n",
+            "end\n",
+            "\n",
+            "local function strike(): number\n",
+            "    return 2\n",
+            "end\n",
+            "\n",
+            "local function used(): number\n",
+            "    return 3\n",
+            "end\n",
+            "\n",
+            "@test\n",
+            "function rises()\n",
+            "    -- The rank of the swim does not matter here.\n",
+            "    const strike = { rank = 1 }\n",
+            "    $assert_eq(rise({ swim = 2, rank = strike.rank }), 2)\n",
+            "    $assert_eq(used(), 3)\n",
+            "end\n",
+        );
+        let out = sliced(src).unwrap();
+
+        for kept in ["local function rise", "local function used", "type Spec"] {
+            assert!(out.contains(kept), "{kept}\n{out}");
+        }
+
+        for gone in [
+            "local function swim",
+            "local function rank",
+            "local function strike",
+            "import { scheduler }",
+        ] {
+            assert!(!out.contains(gone), "{gone}\n{out}");
+        }
+
+        // A method of an impl on a foreign type is reached by its name
+        // after `:`, and the impl stays.
+        let foreign = "impl string as\n    function shout(self): string\n        return self:upper()\n    end\nend\n\n@test\nfunction shouts()\n    $assert_eq((\"a\"):shout(), \"A\")\nend\n";
+        let out = sliced(foreign).unwrap();
+        assert!(out.contains("impl string"), "{out}");
+    }
+
     #[test]
     fn a_file_without_tests_has_no_spec() {
         assert_eq!(sliced("local x = 1\nprint(x)\n"), None);
@@ -1249,6 +1504,206 @@ mod tests {
 
         assert_eq!(report.removed, [PathBuf::from("tests/main.spec.luau")]);
         assert!(!dir.join("tests/main.spec.luau").is_file());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Writes `files` into a new project, builds its specs, and runs lest
+    /// there. The output of a run that passed, or `None` where lest is
+    /// not installed and the test skips.
+    fn lest_run(name: &str, files: &[(&str, &str)]) -> Option<String> {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        let Some(lest) = std::env::var_os("PATH")
+            .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into_iter()
+            .chain([home.join(".ember/bin")])
+            .map(|d| d.join("lest"))
+            .find(|p| p.is_file())
+        else {
+            eprintln!("skipped: lest is not installed");
+
+            return None;
+        };
+
+        let dir = std::env::temp_dir().join(format!("alloy-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        for (path, text) in files {
+            let path = dir.join(path);
+            std::fs::create_dir_all(path.parent().expect("the folder")).expect("the folder");
+            std::fs::write(path, text).expect("the file");
+        }
+
+        let config = Config::default();
+        let report = run(&dir, &config, true).expect("the write");
+        assert!(
+            report.is_clean(),
+            "{:?} {:?}",
+            report.diagnostics,
+            report.failures
+        );
+
+        let out = std::process::Command::new(lest)
+            .current_dir(&dir)
+            .arg(&config.test.suite)
+            .output()
+            .expect("lest runs");
+        let text = String::from_utf8_lossy(&out.stdout).into_owned()
+            + &String::from_utf8_lossy(&out.stderr);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(out.status.success(), "{text}");
+
+        Some(text)
+    }
+
+    /*
+    The runtime copy under `tests/.modules` took none of the shim's
+    doubles, so `Instance`, `game` and `task` were nil there. A message's
+    `replied` failed with `attempt to index nil with 'new'`, and a timed
+    `destroy` of an Instance with one on `GetService` (LANG_BUGS 105).
+    The copy now takes the doubles, as every module does, and lest runs
+    both. The test skips where lest is not installed.
+    */
+    #[test]
+    fn the_test_runtime_takes_the_shim() {
+        let Some(text) = lest_run(
+            "test-shim",
+            &[(
+                "src/jobs.aly",
+                "--- A job, and its answer.\nexport message Job(job: number) reply(job: number)\n\n@test\nfunction a_reply_binds() -> ()\n    local got = 0\n    Job.replied(function(job: number) -> () got = job end)\n    $assert_eq(got, 0)\nend\n\nlocal function part(): any\n    return new Instance('Part')\nend\n\n@test\nfunction a_timed_destroy_waits() -> ()\n    const p = part()\n    p.Parent = workspace\n    destroy p after 1\n    $assert_eq(p.Parent, workspace)\nend\n",
+            )],
+        ) else {
+            return;
+        };
+
+        assert!(text.contains("2 passed"), "{text}");
+    }
+
+    /*
+    The shim bound the doubles as locals of each Alloy module, so a plain
+    package that reads `game` as a global found nil and failed to load
+    (LANG_BUGS 125). The locals also took 15 of the 200 that Luau allows
+    a function, so a module with 190 locals loaded in the game and not in
+    a test (LANG_BUGS 127). The shim now sets the doubles as globals, and
+    a module takes none of its locals for them.
+    */
+    #[test]
+    fn a_package_reads_the_doubles_as_globals() {
+        let Some(text) = lest_run(
+            "shim-globals",
+            &[
+                (
+                    "vendor/pkg.luau",
+                    "local Players = game:GetService(\"Players\")\nreturn { name = function() return \"players: \" .. tostring(Players ~= nil) .. \" \" .. typeof(Vector3.new()) end }\n",
+                ),
+                (
+                    "src/main.aly",
+                    "import pkg from '../vendor/pkg'\n\n@test\nfunction a_package_that_reads_game_loads() -> ()\n  $assert_eq(pkg.name(), 'players: true Vector3')\nend\n",
+                ),
+            ],
+        ) else {
+            return;
+        };
+
+        assert!(text.contains("1 passed"), "{text}");
+    }
+
+    #[test]
+    fn a_module_near_the_local_limit_loads_in_a_test() {
+        // Luau folds a local that holds a constant, and such a local
+        // takes no register, so each one holds a call.
+        let locals: String = (0..190)
+            .map(|i| format!("local c{i} = tonumber('{i}')\n"))
+            .collect();
+        let names: Vec<String> = (0..190).map(|i| format!("c{i}")).collect();
+        let many = format!(
+            "{locals}\n--- Every constant.\nexport function all() -> {{ number }}\n  return {{ {} }}\nend\n\n@test\nfunction it_loads() -> ()\n  $assert_eq(#all(), 190)\nend\n",
+            names.join(", ")
+        );
+        let Some(text) = lest_run(
+            "local-limit",
+            &[
+                ("src/many.aly", many.as_str()),
+                (
+                    "src/use.aly",
+                    "import { all } from './many'\n\n@test\nfunction the_module_loads() -> ()\n  $assert_eq(all()[190], 189)\nend\n",
+                ),
+            ],
+        ) else {
+            return;
+        };
+
+        assert!(text.contains("2 passed"), "{text}");
+    }
+
+    /*
+    A scoped import requires its module at the call. lest's VM resolves a
+    `require` only while a spec loads, so a test in another module that
+    reached one failed (LANG_BUGS 120). The spec now loads each module a
+    scoped import names before its load ends. Here the import breaks a
+    cycle, the test lives in a folder of its own, and an `init` module
+    holds a second import.
+    */
+    #[test]
+    fn a_scoped_import_loads_for_a_test_in_another_module() {
+        let Some(text) = lest_run(
+            "scoped-import",
+            &[
+                (
+                    "src/b.aly",
+                    "import { four } from './parts/a'\n\nexport function two() -> number\n  return 2\nend\n\nexport function eight() -> number\n  return four() * 2\nend\n",
+                ),
+                (
+                    "src/parts/a.aly",
+                    "export function four() -> number\n  import { two } from '../b'\n\n  return two() * 2\nend\n",
+                ),
+                (
+                    "src/lib/init.aly",
+                    "export function three() -> number\n  import { two } from '../b'\n\n  return two() + 1\nend\n",
+                ),
+                (
+                    "src/deep/c.aly",
+                    "import { four } from '../parts/a'\nimport { three } from '../lib'\n\n@test\nfunction four_is_four() -> ()\n  $assert_eq(four(), 4)\nend\n\n@test\nasync function three_is_three() -> ()\n  $assert_eq(three(), 3)\nend\n",
+                ),
+            ],
+        ) else {
+            return;
+        };
+
+        assert!(text.contains("2 passed"), "{text}");
+    }
+
+    /// A run compiles each module and each spec, and each compile reads
+    /// its imports many times. One `Reads` for the run keeps that to one
+    /// disk read a file. With none, the reads of `alloy test` on a slow
+    /// disk took more than 10 minutes and looked like a hang.
+    #[test]
+    fn a_run_reads_each_module_once() {
+        let dir = std::env::temp_dir().join(format!("alloy-reads-once-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("the folder");
+        std::fs::write(dir.join("src/shared.aly"), "export const K = 1\n").expect("the file");
+
+        for i in 0..6 {
+            std::fs::write(
+                dir.join(format!("src/m{i}.aly")),
+                format!(
+                    "import {{ K }} from \"./shared\"\n\n@test\nfunction t{i}()\n    $assert_eq(K, 1)\nend\n"
+                ),
+            )
+            .expect("the file");
+        }
+
+        crate::modules::DISK_READS.with(|n| n.set(0));
+        let report = run(&dir, &Config::default(), true).expect("the write");
+        let reads = crate::modules::DISK_READS.with(std::cell::Cell::get);
+
+        assert_eq!(report.tests, 6, "{:?}", report.failures);
+        assert!(reads <= 7, "{reads} reads of 7 files");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1628,6 +2083,69 @@ end
             "{text}"
         );
         assert_eq!(text.matches("set_testing").count(), 1, "{text}");
+    }
+
+    /// `export default function tick` declares `tick`, as the plain
+    /// declaration does. The slice read no name through the export, so
+    /// the spec held blank lines where the function was, and the test
+    /// called nil (LANG_BUGS 131).
+    #[test]
+    fn a_default_function_stays_in_its_spec() {
+        let src = "--- One tick.\nexport default function tick(n: number) -> number\n  return n + 1\nend\n\n@test\nfunction ticks() -> ()\n  $assert_eq(tick(1), 2)\nend\n";
+        let (text, diagnostics, count) = spec(
+            &Config::default(),
+            Path::new("/none"),
+            Path::new("src/tick.aly"),
+            src,
+            None,
+            &[],
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(count, 1);
+        assert!(text.contains("local function tick("), "{text}");
+    }
+
+    /// A test that reached a type of a mixed import kept the whole
+    /// import, so the spec required the module for a name the ship
+    /// erases, and the module failed the load (LANG_BUGS 119). The slice
+    /// now keeps the names the kept code reads, and a list of types
+    /// requires nothing.
+    #[test]
+    fn a_type_of_a_mixed_import_requires_nothing() {
+        let src = "import heavy, { type Shape } from './heavy'\nimport { type Size, scale, unused } from './sizes'\nimport * as Whole, { type Part } from './whole'\n\nexport function area(shape: Shape, size: Size, part: Part) -> number\n  return scale(shape.size * size)\nend\n\nexport function use_value() -> number\n  return heavy + unused + Whole.n\nend\n\n@test\nfunction area_reads_the_size() -> ()\n  $assert_eq(area({ size = 3 }, 3, {}), 9)\nend\n";
+        let out = sliced(src).unwrap();
+
+        assert_eq!(out.lines().count(), src.lines().count());
+        assert!(
+            out.contains("import        { type Shape } from './heavy'"),
+            "{out}"
+        );
+        assert!(
+            out.contains("import { type Size, scale,        } from './sizes'"),
+            "{out}"
+        );
+        assert!(
+            out.contains("import             { type Part } from './whole'"),
+            "{out}"
+        );
+
+        let (text, diagnostics, _) = spec(
+            &Config::default(),
+            Path::new("/none"),
+            Path::new("src/mixed.aly"),
+            src,
+            None,
+            &[],
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(!text.contains("heavy") && !text.contains("whole"), "{text}");
+        assert!(text.contains("/sizes"), "{text}");
     }
 
     /// A source that does not parse gives the recovery's tree, not the

@@ -181,6 +181,10 @@ pub enum Stmt {
     },
     /// `after seconds do ... end`, with an optional `where` filter.
     After(After),
+    /// `parallel do ... end`: the block runs in the parallel phase.
+    Parallel(ParallelBlock),
+    /// `message Name(params)`, a typed channel between actors.
+    Message(MessageDecl),
     /// `@cfg(server) f()`: an attribute on a plain statement. Only
     /// `@cfg` has a meaning here, and it runs the statement where the
     /// condition holds. The compiler reports any other attribute.
@@ -224,6 +228,7 @@ impl Stmt {
             Stmt::Class(c) => Some(c.name),
             Stmt::TypeAlias(t) => Some(t.name),
             Stmt::Remote(r) => Some(r.name),
+            Stmt::Message(m) => Some(m.name),
             Stmt::Macro(m) => Some(m.name),
             Stmt::Namespace(n) => Some(n.name),
 
@@ -262,6 +267,10 @@ impl Stmt {
             Stmt::Interface(n) => n.span,
 
             Stmt::Remote(n) => n.span,
+
+            Stmt::Message(n) => n.span,
+
+            Stmt::Parallel(n) => n.span,
 
             Stmt::Attribute(n) => n.span,
 
@@ -389,6 +398,32 @@ pub struct RemoteDecl {
     pub ret_type: Option<TokSpan>,
     pub from_client: bool,
     pub from_server: bool,
+    pub span: TokSpan,
+}
+
+/// `message Name(params)` and `message Name(params) as parallel`: a
+/// typed channel between actors. The topic is the name.
+#[derive(Debug)]
+pub struct MessageDecl {
+    pub attributes: Vec<Attr>,
+    pub exported: bool,
+    pub name: TokSpan,
+    pub params: Vec<Param>,
+    /// `reply(params)`: the `reply` word and the parameters of the
+    /// answer. The handler then takes a `respond` after the parameters,
+    /// and `replied` binds the answers on the side that fires.
+    pub reply: Option<(TokSpan, Vec<Param>)>,
+    /// The `parallel` of `as parallel`. The handler then binds with
+    /// `BindToMessageParallel` and runs in the parallel phase.
+    pub parallel: Option<TokSpan>,
+    pub span: TokSpan,
+}
+
+/// `parallel do ... end`. The emit wraps the block in
+/// `task.desynchronize()` and `task.synchronize()`.
+#[derive(Debug)]
+pub struct ParallelBlock {
+    pub block: Block,
     pub span: TokSpan,
 }
 

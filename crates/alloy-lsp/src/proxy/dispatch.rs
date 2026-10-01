@@ -27,6 +27,9 @@ pub struct Server {
     /// files which import it reads the time, so a burst of keystrokes
     /// costs one pass. See `schedule_import_refresh`.
     pub(crate) edited: Mutex<HashMap<PathBuf, std::time::Instant>>,
+    /// The same table as `State::reads`, reached without the state
+    /// lock: every thread that compiles reads the disk through it.
+    pub(crate) reads: Arc<alloy::modules::Reads>,
 }
 
 impl Server {
@@ -36,10 +39,12 @@ impl Server {
         extensions: Vec<alloy::extensions::Extension>,
         api_docs: Option<PathBuf>,
     ) -> Self {
+        let reads = Arc::new(alloy::modules::Reads::default());
         let state = State {
             settings: settings::defaults(),
             extensions,
             api_docs,
+            reads: Arc::clone(&reads),
             ..State::default()
         };
 
@@ -51,7 +56,20 @@ impl Server {
             busy: std::sync::atomic::AtomicUsize::new(0),
             stopping: std::sync::atomic::AtomicBool::new(false),
             edited: Mutex::new(HashMap::new()),
+            reads,
         }
+    }
+
+    /*
+    Runs `f` with the session's reads on this thread.
+
+    The import passes of one keystroke read every module the file
+    imports, seventeen times, and each resolve probes the folder. On
+    Strata on an NTFS disk under FUSE, those reads cost 165 ms of the
+    310 ms that one keystroke spent before the child saw it.
+    */
+    pub(crate) fn reading<R>(&self, f: impl FnOnce() -> R) -> R {
+        alloy::modules::with_reads(&self.reads, f)
     }
 
     pub(crate) fn to_child(&self, message: &Value) {
@@ -99,7 +117,7 @@ impl Server {
         use std::sync::atomic::Ordering;
 
         self.busy.fetch_add(1, Ordering::Relaxed);
-        let more = self.dispatch_client(message);
+        let more = self.reading(|| self.dispatch_client(message));
         self.busy.fetch_sub(1, Ordering::Relaxed);
 
         more
@@ -239,7 +257,9 @@ impl Server {
                 // `didOpen`, and every request after it, until the
                 // last file, so they run on their own thread.
                 let scanner = Arc::clone(self);
-                alloy_syntax::parser::spawn_deep(move || scanner.open_shadows(files));
+                alloy_syntax::parser::spawn_deep(move || {
+                    scanner.reading(|| scanner.open_shadows(files));
+                });
             }
 
             Some("shutdown") => {
@@ -389,6 +409,8 @@ impl Server {
 
             Some("textDocument/didSave") => {
                 let uri = text_document_uri(&message).unwrap_or_default();
+                // The file on disk moved, and the import passes read it.
+                self.reads.clear();
 
                 if is_alloy_uri(&uri)
                     && let Some(params) = message.get_mut("params").and_then(Value::as_object_mut)
@@ -420,6 +442,13 @@ impl Server {
                     .and_then(Value::as_array)
                     .cloned()
                     .unwrap_or_default();
+
+                // A file came, went, or changed on disk, and a resolve
+                // or an import pass may have read it.
+                if !changes.is_empty() {
+                    self.reads.clear();
+                }
+
                 // The child re-reads a `.luau` it hears about; a data
                 // file's module joins the list under the module's name.
                 let mut modules: Vec<Value> = Vec::new();
@@ -439,7 +468,11 @@ impl Server {
                     // the disk and the next compile reads it again.
                     let config_file = uri.ends_with("/alloy.toml") || uri.ends_with("/.config.aly");
 
-                    if config_file || uri.ends_with("/.luaurc") || uri.ends_with("/luaux.toml") {
+                    if config_file
+                        || uri.ends_with("/.luaurc")
+                        || uri.ends_with("/.config.luau")
+                        || uri.ends_with("/luaux.toml")
+                    {
                         self.state
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
@@ -661,6 +694,24 @@ impl Server {
                 if let Some(id) = message.get("id").cloned()
                     && self.pattern_answer(m, &uri, &message, &id)
                 {
+                    return true;
+                }
+
+                // `Light.on(function(job, |`: the parameter being named
+                // takes the name the message declares, `respond` last,
+                // after a space as after a letter.
+                if m == "textDocument/completion"
+                    && let Some(id) = message.get("id").cloned()
+                    && let Some(items) =
+                        position_of_message(&message).and_then(|(line, character)| {
+                            self.state
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .message_handler_completion(&uri, line, character)
+                        })
+                {
+                    self.respond(&id, items);
+
                     return true;
                 }
 
@@ -926,6 +977,22 @@ impl Server {
             Some(m @ "textDocument/signatureHelp") => {
                 let uri = text_document_uri(&message).unwrap_or_default();
 
+                // `Ping.on(function(count, |`: the handler takes the
+                // message's parameters, which the child cannot name. The
+                // list declares, so this goes before the check below.
+                let handler = position_of_message(&message).and_then(|(line, character)| {
+                    let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+
+                    st.message_handler_signature(&uri, line, character)
+                        .or_else(|| st.respond_signature(&uri, line, character))
+                });
+
+                if let Some(help) = handler {
+                    self.respond(&message["id"], help);
+
+                    return true;
+                }
+
                 // `remote test(` declares; the child sees a call there.
                 // `HashMap.new(` with no import calls no global.
                 if self.in_declared_params(&uri, &message)
@@ -1137,7 +1204,11 @@ impl Server {
     }
 
     /// Handles one message from the child.
-    pub fn handle_child(&self, mut message: Value) {
+    pub fn handle_child(&self, message: Value) {
+        self.reading(|| self.route_child(message));
+    }
+
+    fn route_child(&self, mut message: Value) {
         let method = message
             .get("method")
             .and_then(Value::as_str)
@@ -1472,7 +1543,9 @@ impl Server {
                             }
 
                             text = fold_std_shapes(&text);
-                            text = alloy::shapes::fold(&text, &st.known_shapes_at(ctx.as_deref()));
+                            let mut known = st.known_shapes_at(ctx.as_deref());
+                            prefer_origin_alias(&mut known.aliases, doc, line, character);
+                            text = alloy::shapes::fold(&text, &known);
                             text = colon_without_self(&text);
 
                             if let Some(narrowed) = narrowed_field(&text, doc, line, character) {
@@ -1590,9 +1663,12 @@ impl Server {
                             // hover, and a record with no such entry
                             // says nothing about the key.
                             let key_path = literal_key_path(doc, line, character);
-                            let key_entry = key_path
-                                .as_deref()
-                                .and_then(|path| record_entry(&text, path));
+                            let key_entry = key_path.as_deref().and_then(|path| {
+                                let at = Caret::at(&doc.source, line, character)?.start;
+                                let comment = alloy::declarations::doc_before(&doc.source, at);
+
+                                record_entry(&text, path, comment.as_deref())
+                            });
                             let key_missing = key_path.is_some() && key_entry.is_none();
 
                             if let Some(entry) = key_entry
@@ -1618,15 +1694,25 @@ impl Server {
                                 || lowers_a_block(&text, doc, line, character)
                                 || (is_byte_count(&text) && names_a_key(doc, line, character));
 
-                            // A std member: the type above, then what
-                            // the member does and an example, which no
-                            // type carries.
+                            // A std member reads like any member: its
+                            // type, its line, then what it does and an
+                            // example, which no print carries.
                             let member = std_member_hover(&text, doc, line, character);
 
-                            if let Some(section) = &member {
-                                text.push_str("\n\n");
-                                text.push_str(section);
+                            if let Some(shaped) = &member {
+                                text = shaped.clone();
                             }
+
+                            // A method of a type reads under its owner,
+                            // the way a field does.
+                            if !says_nothing
+                                && member.is_none()
+                                && let Some(shaped) = method_member_hover(&text, &st, doc)
+                            {
+                                text = shaped;
+                            }
+
+                            text = with_return_arrows(&text);
 
                             if says_nothing && member.is_none() {
                                 *result = Value::Null;
@@ -2054,6 +2140,19 @@ impl Server {
                             && let Some(help) = st.declared_signature_help(uri, line, character)
                         {
                             *result = help;
+                        }
+
+                        // A label reads the way a hover does: the
+                        // return after an arrow.
+                        for sig in result
+                            .get_mut("signatures")
+                            .and_then(Value::as_array_mut)
+                            .into_iter()
+                            .flatten()
+                        {
+                            if let Some(label) = sig["label"].as_str() {
+                                sig["label"] = json!(arrow_heads(label));
+                            }
                         }
 
                         parameter_labels_as_offsets(result);

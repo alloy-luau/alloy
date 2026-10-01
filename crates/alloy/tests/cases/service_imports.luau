@@ -8,4 +8,4 @@ local remotes = ReplicatedStorage:WaitForChild("Remotes")
 
 Players.PlayerAdded:Connect(function(player)
     print(player.Name, remotes, Run.Heartbeat)
-end)
+end) return nil

@@ -45,6 +45,92 @@ pub fn set_open_source(path: &Path, text: Option<&str>) {
     };
 }
 
+/*
+The files one build has read and probed. The import passes of each
+file read every module it imports again, and a resolve probes up to 9
+paths and lists the folder of the one it finds. On an NTFS disk under
+FUSE, a read costs about 75 us and a probe about 45 us. On Strata the
+repeats took 2 s of a 3.7 s build, on one FUSE thread.
+
+The build puts its `Reads` on each thread that compiles, for the time
+of the compile alone. A language server keeps one for its session and
+clears it when it hears that the disk changed. A thread with no `Reads`,
+such as a test beside the build, reads the disk as before.
+*/
+#[derive(Default)]
+pub struct Reads {
+    texts: RwLock<HashMap<PathBuf, Result<String, std::io::ErrorKind>>>,
+    files: RwLock<HashMap<PathBuf, bool>>,
+    /// Moves on each `clear`. A read that started before a clear keeps
+    /// its answer out of the table, since the disk may have changed
+    /// under it.
+    generation: std::sync::atomic::AtomicU64,
+}
+
+impl Reads {
+    /// Forgets every text and probe, so the next read goes to the disk.
+    pub fn clear(&self) {
+        let (Ok(mut texts), Ok(mut files)) = (self.texts.write(), self.files.write()) else {
+            return;
+        };
+
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        texts.clear();
+        files.clear();
+    }
+}
+
+thread_local! {
+    static READS: std::cell::RefCell<Option<std::sync::Arc<Reads>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` with `reads` holding what this thread reads from the disk.
+pub fn with_reads<R>(reads: &std::sync::Arc<Reads>, f: impl FnOnce() -> R) -> R {
+    // The slot empties again on the way out, a panic included.
+    struct Restore(Option<std::sync::Arc<Reads>>);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            READS.with(|r| *r.borrow_mut() = self.0.take());
+        }
+    }
+
+    let _restore = Restore(READS.with(|r| r.replace(Some(reads.clone()))));
+
+    f()
+}
+
+/// `read` of `key`, from the build's `Reads` when this thread has one.
+fn remembered<T: Clone>(
+    table: impl Fn(&Reads) -> &RwLock<HashMap<PathBuf, T>>,
+    key: &Path,
+    read: impl FnOnce() -> T,
+) -> T {
+    let Some(reads) = READS.with(|r| r.borrow().clone()) else {
+        return read();
+    };
+    let table = table(&reads);
+
+    if let Some(held) = table.read().ok().and_then(|t| t.get(key).cloned()) {
+        return held;
+    }
+
+    let generation = reads.generation.load(std::sync::atomic::Ordering::SeqCst);
+    let value = read();
+
+    // `clear` holds this lock while it moves the generation, so the
+    // check and the insert see one side of a clear.
+    if let Ok(mut t) = table.write()
+        && reads.generation.load(std::sync::atomic::Ordering::SeqCst) == generation
+    {
+        t.insert(key.to_path_buf(), value.clone());
+    }
+
+    value
+}
+
 /// The text of one module: the editor's buffer where it holds one,
 /// else the file on disk.
 fn module_text(path: &Path) -> std::io::Result<String> {
@@ -56,8 +142,30 @@ fn module_text(path: &Path) -> std::io::Result<String> {
     match held {
         Some(text) => Ok(text),
 
-        None => std::fs::read_to_string(path),
+        None => disk_text(path),
     }
+}
+
+/// The text of a file on disk, through the `Reads` of this thread.
+pub(crate) fn disk_text(path: &Path) -> std::io::Result<String> {
+    remembered(
+        |r| &r.texts,
+        path,
+        || {
+            #[cfg(test)]
+            DISK_READS.with(|n| n.set(n.get() + 1));
+
+            std::fs::read_to_string(path).map_err(|e| e.kind())
+        },
+    )
+    .map_err(std::io::Error::from)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The reads `disk_text` sent to the disk on this thread. A test
+    /// counts them to prove that a run shares one `Reads`.
+    pub(crate) static DISK_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The type names a source exports: `export struct X`, `export enum X`,/// The type names a source exports: `export struct X`, `export enum X`,
@@ -952,6 +1060,7 @@ pub fn is_script(name: &str) -> bool {
         .iter()
         .find_map(|ext| name.strip_suffix(&format!(".{ext}")))
         .unwrap_or(name);
+    let stem = stem.strip_suffix(".actor").unwrap_or(stem);
 
     stem.ends_with(".server") || stem.ends_with(".client")
 }
@@ -965,6 +1074,10 @@ pub fn is_script(name: &str) -> bool {
 /// read costs one call, and only for a name the file system already
 /// found.
 fn is_file_exact(path: &Path) -> bool {
+    remembered(|r| &r.files, path, || probe_file_exact(path))
+}
+
+fn probe_file_exact(path: &Path) -> bool {
     if !path.is_file() {
         return false;
     }
@@ -1602,6 +1715,41 @@ pub fn import_remotes(
     keyed_by_binding(source, from, aliases, &modules)
 }
 
+/// The messages every module a source imports declares, keyed by the
+/// name this file binds, with what a call reads off the declaration:
+/// the topic, the phase of the handler, and the reply. The ship
+/// artifact writes `Step.fire(actor)` as the engine's own call there.
+pub fn import_messages(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<(String, crate::desugar::MessageSig)> {
+    let modules = module_decls(source, from, aliases, |text| {
+        let Ok(parsed) = alloy_syntax::parse_lenient(text, Default::default()) else {
+            return Vec::new();
+        };
+        let toks = &parsed.lexed.toks;
+
+        parsed
+            .chunk
+            .block
+            .stmts
+            .iter()
+            .filter_map(|stmt| match stmt.under_default() {
+                alloy_syntax::ast::Stmt::Message(m) if m.exported => {
+                    let sig = crate::desugar::MessageSig::of(m, text, toks);
+
+                    Some((sig.topic.clone(), sig))
+                }
+
+                _ => None,
+            })
+            .collect()
+    });
+
+    keyed_by_binding(source, from, aliases, &modules)
+}
+
 /// The remote a statement declares, by its path from the top of the
 /// file, with whether the client and the server fire it. A remote in
 /// `namespace Net` is `Net.Up`, so the side check reads `Net.Up.fire`.
@@ -1661,6 +1809,22 @@ pub fn import_field_types(
     });
 
     keyed_by_local(source, from, aliases, &modules)
+}
+
+/// The type aliases the modules a source imports export, keyed by the
+/// name this file binds, with each value and whether this file can
+/// write it. `const l: Lists = HashMap.new()` then takes the arguments
+/// of `Lists`, as under an alias of the file's own.
+pub fn import_alias_values(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<(String, (String, bool))> {
+    let modules = module_decls(source, from, aliases, |text| {
+        crate::declarations::type_alias_values(text)
+    });
+
+    keyed_by_binding(source, from, aliases, &modules)
 }
 
 /// The constructor every struct a module the source imports declares
@@ -2436,6 +2600,117 @@ pub fn import_shapes_for_file(path: &Path, source: &str) -> Vec<crate::declarati
     import_shapes(source, &from, &aliases)
 }
 
+/// The record aliases of the Luau modules a file imports, under the
+/// names the file reads them by. Then the aliases of the Luau modules
+/// that its Alloy imports import, under the names those modules read
+/// them by. Strata's `ct` holds jecs components, so a file that reads
+/// `ct.Look` meets `jecs.Entity` and imports no jecs.
+pub fn import_package_aliases_for_file(
+    path: &Path,
+    source: &str,
+) -> Vec<crate::shapes::PackageAlias> {
+    let (from, aliases) = file_context(path);
+    let mut out = Vec::new();
+    let mut seen = Vec::new();
+    let mut reached = Vec::new();
+
+    package_aliases(source, &from, &aliases, &mut out, &mut seen, &mut reached);
+
+    for module in reached {
+        if let Ok(text) = module_text(&module) {
+            package_aliases(
+                &text,
+                &module,
+                &aliases,
+                &mut out,
+                &mut seen,
+                &mut Vec::new(),
+            );
+        }
+    }
+
+    out
+}
+
+/// The aliases the imports of one source bring, each alias once. A name
+/// the source imports reads bare and comes first; the rest read under
+/// the module's local name, `jecs.Entity`. The Alloy modules the source
+/// imports go to `reached`.
+fn package_aliases(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+    out: &mut Vec<crate::shapes::PackageAlias>,
+    seen: &mut Vec<(PathBuf, String)>,
+    reached: &mut Vec<PathBuf>,
+) {
+    use alloy_syntax::ast::{ImportKind, Stmt};
+
+    let mut push = |module: &Path, alias: &crate::shapes::PackageAlias, name: String| {
+        let key = (module.to_path_buf(), alias.name.clone());
+
+        if !seen.contains(&key) {
+            seen.push(key);
+            out.push(crate::shapes::PackageAlias {
+                name,
+                ..alias.clone()
+            });
+        }
+    };
+    let mut locals = Vec::new();
+
+    for statement in alloy_syntax::scan::import_statements(source) {
+        let Some(module) = resolve(&statement.spec, from, aliases) else {
+            continue;
+        };
+
+        if is_alloy(&module) {
+            if !reached.contains(&module) {
+                reached.push(module);
+            }
+
+            continue;
+        }
+
+        // The statement alone parses in a fraction of the file's time.
+        let Ok(parsed) = alloy_syntax::parse_lenient(&statement.text, Default::default()) else {
+            continue;
+        };
+        let Some(Stmt::Import(node)) = parsed.chunk.block.stmts.first() else {
+            continue;
+        };
+        let text = |span: alloy_syntax::ast::TokSpan| {
+            span.text(&statement.text, &parsed.lexed.toks).to_string()
+        };
+        let (local, names) = match &node.kind {
+            ImportKind::Default(n) => (Some(*n), &[][..]),
+
+            ImportKind::Namespace(n, list) | ImportKind::Both(n, list) => (Some(*n), &list[..]),
+
+            ImportKind::Named(list) | ImportKind::TypeOnly(list) => (None, &list[..]),
+        };
+        let held = crate::shapes::module_aliases(&module);
+
+        for spec in names {
+            let name = text(spec.name);
+
+            if let Some(alias) = held.iter().find(|a| a.name == name) {
+                push(&module, alias, text(spec.alias.unwrap_or(spec.name)));
+            }
+        }
+
+        if let Some(local) = local {
+            locals.push((module, text(local), held));
+        }
+    }
+
+    for (module, local, held) in locals {
+        for alias in held.iter() {
+            push(&module, alias, format!("{local}.{}", alias.name));
+        }
+    }
+}
+
 impl crate::EmitOptions {
     /// Everything the emit reads from the modules a source imports:
     /// types, enums, private fields, attributes, macros, plain modules,
@@ -2445,10 +2720,12 @@ impl crate::EmitOptions {
         self.import_types = import_types(source, from, aliases);
         self.import_enums = import_enums(source, from, aliases);
         self.import_remotes = import_remotes(source, from, aliases);
+        self.import_messages = import_messages(source, from, aliases);
         self.import_privates = import_privates(source, from, aliases);
         self.import_callables = import_callables(source, from, aliases);
         self.import_struct_fields = import_struct_fields(source, from, aliases);
         self.import_field_types = import_field_types(source, from, aliases);
+        self.import_alias_values = import_alias_values(source, from, aliases);
         self.import_struct_ctors = import_struct_ctors(source, from, aliases);
         self.import_private_views = import_private_views(source, from, aliases);
         self.import_attributes = import_attributes(source, from, aliases);
@@ -2764,6 +3041,8 @@ pub fn type_only_exports(from: &Path, spec: &str) -> Option<(PathBuf, Vec<TypeEx
 
             Stmt::Remote(d) if d.exported => return None,
 
+            Stmt::Message(d) if d.exported => return None,
+
             Stmt::Namespace(d) if d.exported => return None,
 
             Stmt::Macro(d) if d.exported => return None,
@@ -2862,6 +3141,7 @@ pub fn exported_names(source: &str) -> Vec<String> {
             Stmt::Class(d) if d.exported => out.push(text(d.name)),
             Stmt::TypeAlias(d) if d.exported => out.push(text(d.name)),
             Stmt::Remote(d) if d.exported => out.push(text(d.name)),
+            Stmt::Message(d) if d.exported => out.push(text(d.name)),
             Stmt::Macro(d) if d.exported => out.push(text(d.name)),
             Stmt::LocalFunction(d) if d.exported => out.push(text(d.name)),
             Stmt::Namespace(d) if d.exported => out.push(text(d.name)),
@@ -2968,6 +3248,7 @@ pub fn exports_values(source: &str) -> bool {
         Stmt::Trait(d) => d.exported,
         Stmt::Class(d) => d.exported,
         Stmt::Remote(d) => d.exported,
+        Stmt::Message(d) => d.exported,
         Stmt::Macro(d) => d.exported,
         Stmt::Attribute(d) => d.exported,
         Stmt::Function(d) => d.exported,
@@ -3867,6 +4148,39 @@ pub fn normalize(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    /// A session's reads hold a text and a probe until the session
+    /// clears them; the next read after a clear goes to the disk.
+    #[test]
+    fn reads_hold_until_cleared() {
+        let dir = std::env::temp_dir().join(format!("alloy-reads-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("m.luau");
+        let later = dir.join("later.luau");
+        std::fs::write(&file, "return 1\n").unwrap();
+
+        let reads = std::sync::Arc::new(super::Reads::default());
+        let read = || {
+            super::with_reads(&reads, || {
+                (
+                    super::disk_text(&file).unwrap(),
+                    super::resolve("./later", &file, &[]).is_some(),
+                )
+            })
+        };
+
+        assert_eq!(read(), ("return 1\n".to_string(), false));
+
+        std::fs::write(&file, "return 2\n").unwrap();
+        std::fs::write(&later, "return 3\n").unwrap();
+        assert_eq!(read(), ("return 1\n".to_string(), false));
+
+        reads.clear();
+        assert_eq!(read(), ("return 2\n".to_string(), true));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A module of types and interfaces lists them apart, in the file's
     /// order; one value in it, or a return, makes it an ordinary module.
     #[test]
@@ -4789,6 +5103,66 @@ mod tests {
             out.ship.contains("slots = { Big = { { fields = { { \"n\", \"f64\" } }, struct = \"shared/inner.aly:Inner\" } } }"),
             "{}",
             out.ship
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An imported alias of a std generic is a second spelling of its
+    /// value, as an alias of the file is. `new HashMap()` under `Lists`
+    /// from `./a` wrote no arguments, and flux reported `Expected this
+    /// to be 'Lists', but got 'HashMap'`. A value that names a type of
+    /// its module cannot be written here, so the empty constructor casts
+    /// to the alias instead.
+    #[test]
+    fn an_imported_alias_gives_its_constructor_the_arguments() {
+        let dir = std::env::temp_dir().join(format!("alloy-alias-args-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("a.aly"),
+            "import { HashMap, Set, Queue } from '@alloy/std/collections'\n\nexport struct Cell as\n    n: number\nend\n\nexport type Lists = HashMap<number, { number }>\nexport type Seen = Set<string>\nexport type Rows = number[]\nexport type Jobs = Queue<number>\nexport type Grid = HashMap<number, Cell>\nexport type Slot<T> = HashMap<number, T>\n",
+        )
+        .expect("a.aly");
+        let from = dir.join("b.aly");
+        let src = "import { HashMap, Set, Queue } from '@alloy/std/collections'\nimport { type Lists, type Seen, type Rows, type Jobs as Work, type Grid } from './a'\nimport * as a from './a'\n\nconst lists: Lists = new HashMap()\nconst seen: Seen = Set.new()\nconst rows: Rows = Array.new()\nconst work: Work = Queue.new()\nconst star: a.Lists = HashMap.new()\nconst grid: Grid = HashMap.new()\nconst from: Grid = HashMap.from({})\n\nlocal function make(): Lists\n    return HashMap.new()\nend\n\nprint(lists, seen, rows, work, star, grid, from, make())\n";
+        let options = crate::EmitOptions {
+            check: true,
+            ..crate::EmitOptions::default().imports(src, &from, &[])
+        };
+        let out = crate::compile_with(src, &options).expect("compile");
+
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+        for want in [
+            "const lists: Lists = __alloy.HashMap.new<<number, { number }>>()",
+            "const seen: Seen = __alloy.Set.new<<string>>()",
+            "const rows: Rows = __alloy.Array.new<<number>>()",
+            "const work: Work = __alloy.Queue.new<<number>>()",
+            "const star: a.Lists = __alloy.HashMap.new<<number, { number }>>()",
+            "const grid: Grid = ((__alloy.HashMap.new() :: any) :: Grid)",
+            "const from: Grid = __alloy.HashMap.from({})",
+            "return __alloy.HashMap.new<<number, { number }>>()",
+        ] {
+            assert!(out.check.contains(want), "{want}\n{}", out.check);
+        }
+
+        // The ship artifact carries no types.
+        let shipped = crate::compile_with(
+            src,
+            &crate::EmitOptions {
+                check: false,
+                ..options
+            },
+        )
+        .expect("compile");
+        assert!(!shipped.ship.contains(":: Grid"), "{}", shipped.ship);
+
+        // A generic alias names its parameters, so it gives nothing.
+        let values = import_alias_values(src, &from, &[]);
+        assert!(
+            !values.iter().any(|(n, _)| n.ends_with("Slot")),
+            "{values:?}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -688,7 +688,7 @@ mod tests {
 
         let index = index(false);
 
-        assert!(index.contains("Errors\n    AlloyError"), "{index}");
+        assert!(index.contains("Errors\n    ActorError"), "{index}");
     }
 
     /// The docs site reads the JSON, so every kind the index lists

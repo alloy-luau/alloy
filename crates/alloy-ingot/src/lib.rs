@@ -41,6 +41,7 @@
 //! {"op": "lint", ...}      // reply {"ok": true, "findings": [{"span": [2, 9], "lint": "x", "message": "..."}]}
 //! {"op": "format", ...}    // reply {"ok": true, "edits": [...]}
 //! {"op": "hover", ..., "offset": 12}      // reply {"ok": true, "hover": {"contents": "md", "span": [10, 14]}}
+//!                                         // or {"ok": true, "hover": {"roblox": {"class": "ScreenGui", "member": "DisplayOrder"}, "span": [10, 14], "note": "md"}}
 //! {"op": "complete", ..., "offset": 12}   // reply {"ok": true, "items": [{"label": "x"}], "incomplete": false, "merge": false}
 //! {"op": "actions", ..., "span": [0, 4]}  // reply {"ok": true, "actions": [{"title": "t", "edits": [...]}]}
 //! {"op": "colors", ...}                   // reply {"ok": true, "colors": [{"span": [3, 13], "red": 1, "green": 0, "blue": 0, "alpha": 1}]}
@@ -185,12 +186,29 @@ impl Finding {
     }
 }
 
-/// A hover answer: markdown, and the span it describes.
+/// A hover answer: markdown, and the span it describes. An answer with
+/// `roblox` names a Roblox class or member instead. The host then writes
+/// the hover it gives that class or member, with `note` under it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hover {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub contents: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub span: Option<(u32, u32)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roblox: Option<RobloxMember>,
+    /// Markdown under the Roblox hover.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// A Roblox class, or one member of it: `ScreenGui`, or
+/// `ScreenGui.DisplayOrder`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RobloxMember {
+    pub class: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member: Option<String>,
 }
 
 impl Hover {
@@ -198,11 +216,40 @@ impl Hover {
         Self {
             contents: contents.into(),
             span: None,
+            roblox: None,
+            note: None,
+        }
+    }
+
+    /// The host's hover for a Roblox class, or for a member of it.
+    /// `contents` names the class or member, for a host older than
+    /// `roblox`, which shows `contents` alone.
+    pub fn roblox(class: impl Into<String>, member: Option<&str>) -> Self {
+        let class = class.into();
+        let name = match member {
+            Some(m) => format!("`{class}.{m}`"),
+
+            None => format!("`{class}`"),
+        };
+
+        Self {
+            roblox: Some(RobloxMember {
+                class,
+                member: member.map(str::to_string),
+            }),
+            ..Self::new(name)
         }
     }
 
     pub fn over(mut self, span: (u32, u32)) -> Self {
         self.span = Some(span);
+
+        self
+    }
+
+    /// Markdown the host writes under a Roblox hover.
+    pub fn note(mut self, note: impl Into<String>) -> Self {
+        self.note = Some(note.into());
 
         self
     }
@@ -862,6 +909,29 @@ mod tests {
         assert_eq!(
             value(r#"{"op":"hover","path":"a.aly","source":"local abc","offset":7}"#),
             serde_json::json!({ "ok": true, "hover": { "contents": "word `abc`", "span": [6, 9] } })
+        );
+    }
+
+    #[test]
+    fn a_roblox_hover_round_trips() {
+        let hover = Hover::roblox("ScreenGui", Some("DisplayOrder"))
+            .over((6, 19))
+            .note("Set by `<meta>`.");
+        let text = serde_json::to_value(&hover).unwrap();
+
+        assert_eq!(
+            text,
+            serde_json::json!({
+                "contents": "`ScreenGui.DisplayOrder`",
+                "roblox": { "class": "ScreenGui", "member": "DisplayOrder" },
+                "span": [6, 19],
+                "note": "Set by `<meta>`.",
+            })
+        );
+        assert_eq!(serde_json::from_value::<Hover>(text).unwrap(), hover);
+        assert_eq!(
+            serde_json::to_value(Hover::roblox("ScreenGui", None)).unwrap(),
+            serde_json::json!({ "contents": "`ScreenGui`", "roblox": { "class": "ScreenGui" } })
         );
     }
 

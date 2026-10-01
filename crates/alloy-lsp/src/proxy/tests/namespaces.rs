@@ -202,7 +202,7 @@ fn an_exported_namespace_hovers_at_the_import() {
         .find(|d| d.name == "Geom.Point")
         .expect("the member declaration");
     assert!(
-        point.hover.contains("struct Geom.Point as"),
+        point.hover.contains("struct Geom.Point\n"),
         "{}",
         point.hover
     );
@@ -317,8 +317,8 @@ fn a_namespaced_struct_names_itself_over_a_shape_match() {
     let at = USER.rfind("v1.x").expect("the field") + 3;
 
     assert_eq!(
-        used_field_hover(&st, doc, at, at + 1).as_deref(),
-        Some("```alloy\nx: number\n```\nA field of `struct Ns.T`.")
+        used_field_hover(&st, doc, at, at + 1),
+        Some(super::hover::shaped("Ns.T", "public x: number", ""))
     );
 
     let doc = &st.docs["file:///alias.aly"];

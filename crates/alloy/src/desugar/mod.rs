@@ -27,6 +27,7 @@ use alloy_syntax::lexer::{Tok, TokKind};
 
 use crate::render::{NewlineInGenerated, Renderer, SpanMap};
 
+mod actors;
 pub(crate) mod attributes;
 mod awaits;
 pub(crate) mod contracts;
@@ -128,6 +129,12 @@ pub struct EmitOptions {
     /// Render the test artifact: a `@test` function stays in the output
     /// as a local, unregistered, for `alloy test` to call by name.
     pub tests: bool,
+    /// For a module of the test build: the require of the test shim,
+    /// and the module's path in the modules folder. lest's VM resolves
+    /// a `require` only while a spec loads, so a scoped import gives its
+    /// require to the shim's `later`, and the spec loads the module
+    /// before its load ends (LANG_BUGS 120).
+    pub late_requires: Option<(String, String)>,
     /// The project configures a test runner, `[test] lest`. Without one
     /// `$expect` has nothing to call, so it reports.
     pub test_runner: bool,
@@ -143,6 +150,9 @@ pub struct EmitOptions {
     /// binds, with whether the client and the server fire each one. See
     /// `crate::modules::import_remotes`.
     pub import_remotes: Vec<(String, (bool, bool))>,
+    /// The messages the imported modules declare, by the name this file
+    /// binds. See `crate::modules::import_messages`.
+    pub import_messages: Vec<(String, MessageSig)>,
     /// Per imported trait, the names of its default methods, so an
     /// `impl Trait for S` here flattens them in as a local trait's would.
     pub import_trait_defaults: Vec<(String, Vec<String>)>,
@@ -173,6 +183,11 @@ pub struct EmitOptions {
     /// does. A field's constructor takes the arguments the type names,
     /// as in the module. See `crate::modules::import_field_types`.
     pub import_field_types: Vec<(String, Vec<crate::declarations::FieldText>)>,
+    /// Per type alias an imported module exports, by the name this file
+    /// binds: its value, and whether this file can write that value.
+    /// A constructor under the alias takes the value's arguments, as
+    /// under an alias of this file. See `crate::modules::import_alias_values`.
+    pub import_alias_values: Vec<(String, (String, bool))>,
     /// Per struct an imported module declares that writes a
     /// constructor, the name of that `new` or `New`. A report of
     /// `Box(1)` reads it, so it names the constructor. See
@@ -230,6 +245,49 @@ pub struct EmitOptions {
     pub new_solver: bool,
 }
 
+/// What a call of a message reads off its declaration, in the file
+/// that declares it and in a file that imports it.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MessageSig {
+    /// The declared name, which is the topic.
+    pub topic: String,
+    /// `as parallel`: the handler binds in the parallel phase.
+    pub parallel: bool,
+    /// How many parameters the declaration writes, `...` counted.
+    pub params: usize,
+    /// Whether the last parameter is `...`.
+    pub vararg: bool,
+    /// The parameters of `reply(...)`, each as written, when the
+    /// message declares one.
+    pub reply: Option<Vec<String>>,
+}
+
+impl MessageSig {
+    /// The signature of one declaration.
+    pub fn of(m: &alloy_syntax::ast::MessageDecl, src: &str, toks: &[Tok]) -> MessageSig {
+        let param = |p: &alloy_syntax::ast::Param| {
+            let name = p.name.text(src, toks);
+
+            match p.ty {
+                Some(ty) => format!("{name}: {}", expressions::one_line(ty.text(src, toks))),
+
+                None => name.to_string(),
+            }
+        };
+
+        MessageSig {
+            topic: m.name.text(src, toks).to_string(),
+            parallel: m.parallel.is_some(),
+            params: m.params.len(),
+            vararg: m.params.last().is_some_and(|p| p.is_vararg),
+            reply: m
+                .reply
+                .as_ref()
+                .map(|(_, ps)| ps.iter().map(param).collect()),
+        }
+    }
+}
+
 /// One field of a struct or an interface, as the prescan keeps it.
 #[derive(Debug, Clone)]
 struct FieldType {
@@ -284,6 +342,7 @@ pub struct ContractGap {
     pub indent: u32,
 }
 
+pub use actors::{ParallelMove, parallel_move};
 pub use attributes::signature_ret_type;
 pub use contracts::{element_type, is_string_union};
 pub use statements::{names_a_future, pattern_type, signature_with_pattern_types};
@@ -437,10 +496,12 @@ impl Default for EmitOptions {
             thresholds: crate::lint::Thresholds::default(),
             generated: Vec::new(),
             tests: false,
+            late_requires: None,
             test_runner: true,
             import_types: Vec::new(),
             import_enums: Vec::new(),
             import_remotes: Vec::new(),
+            import_messages: Vec::new(),
             import_trait_defaults: Vec::new(),
             import_trait_methods: Vec::new(),
             import_result_asyncs: Vec::new(),
@@ -448,6 +509,7 @@ impl Default for EmitOptions {
             import_callables: Vec::new(),
             import_struct_fields: Vec::new(),
             import_field_types: Vec::new(),
+            import_alias_values: Vec::new(),
             import_struct_ctors: Vec::new(),
             import_private_views: Vec::new(),
             plain_modules: Vec::new(),
@@ -654,7 +716,11 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         remote_sides: options.import_remotes.iter().cloned().collect(),
         remote_shadows: Vec::new(),
         remote_aliases: HashMap::new(),
+        messages: options.import_messages.iter().cloned().collect(),
+        message_shadows: Vec::new(),
+        parallel_writers: HashMap::new(),
         own_names: top_level_names(src, toks, chunk),
+        table_exports: HashSet::new(),
         exports: Vec::new(),
         has_default_export: false,
         enums: HashMap::from([(
@@ -798,6 +864,10 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     d.check_duplicate_decls(&chunk.block);
     d.check_exports(&chunk.block);
 
+    if !options.definitions && options.macro_depth == 0 {
+        d.table_exports = table_exports(src, toks, chunk, d.own_names.len());
+    }
+
     // Names that later statements route through, gathered up front.
     d.prescan(&chunk.block);
     d.scan_hoisted(&chunk.block);
@@ -805,6 +875,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     d.scan_plain_tables(&chunk.block);
     d.scan_reduce_inserts(&chunk.block);
     d.note_remote_sides(&chunk.block);
+    d.note_messages(&chunk.block);
     d.scan_static_checks(&chunk.block);
     d.check_await_spots(&chunk.block);
 
@@ -875,6 +946,10 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
 
     if d.uses_module_value {
         d.generate(insert_at, MODULE_VALUE);
+    }
+
+    if !d.table_exports.is_empty() {
+        d.generate(insert_at, &format!("local {EXPORTS_TABLE} = {{}} "));
     }
 
     for kind in d.mapped_used.clone() {
@@ -983,6 +1058,8 @@ pub fn bound_names(src: &str, toks: &[Tok], stmt: &Stmt) -> Vec<String> {
 
         Stmt::Remote(d) => vec![text(d.name)],
 
+        Stmt::Message(d) => vec![text(d.name)],
+
         Stmt::Macro(d) => vec![text(d.name)],
 
         Stmt::Attribute(d) => vec![text(d.name)],
@@ -1043,6 +1120,10 @@ pub(crate) fn top_level_names(src: &str, toks: &[Tok], chunk: &Chunk) -> HashSet
             }
 
             Stmt::Remote(d) => {
+                out.insert(text(d.name));
+            }
+
+            Stmt::Message(d) => {
                 out.insert(text(d.name));
             }
 
@@ -1366,8 +1447,22 @@ struct Desugar<'s> {
     /// Each remote a local holds, `const vote = Net.Vote`, keyed by the
     /// token that declares the local and the path through it.
     remote_aliases: HashMap<(usize, String), (bool, bool)>,
+    /// Every message this file reaches, by the path it writes: its own
+    /// and the imported ones.
+    messages: HashMap<String, MessageSig>,
+    /// The locals, parameters, and loop variables named like the head
+    /// of a message path, with the tokens each one holds.
+    message_shadows: Vec<crate::naming::ScopedBinding>,
+    /// The functions of this file that write an instance, by the path a
+    /// call writes, with the first write each holds. A `parallel` block
+    /// refuses a call to one.
+    parallel_writers: HashMap<String, String>,
     /// Every name the top level of this file binds.
     own_names: HashSet<String>,
+    /// The exported values that live on the `__exports` table instead
+    /// of in a local each. Empty for a module under the budget of
+    /// locals; see `EXPORTS_TABLE_AT`.
+    table_exports: HashSet<String>,
     /// Names the module exports, as `name = value` pairs for the table.
     exports: Vec<(String, String)>,
     /// `export default` was seen.
@@ -2128,6 +2223,8 @@ pub(crate) fn stmt_children(s: &Stmt) -> Vec<Child<'_>> {
 
         Stmt::Do(d) => vec![Child::Block(&d.block)],
 
+        Stmt::Parallel(p) => vec![Child::Block(&p.block)],
+
         Stmt::While(w) => {
             let mut v = cond_children(&w.cond);
             v.push(Child::Block(&w.block));
@@ -2220,6 +2317,12 @@ pub(crate) fn stmt_children(s: &Stmt) -> Vec<Child<'_>> {
             .filter_map(|p| p.default.as_ref().map(Child::Expr))
             .collect(),
 
+        Stmt::Message(m) => m
+            .params
+            .iter()
+            .filter_map(|p| p.default.as_ref().map(Child::Expr))
+            .collect(),
+
         Stmt::Macro(m) => {
             let mut v = vec![Child::Block(&m.body)];
 
@@ -2291,9 +2394,37 @@ fn stmts_non_value_spans(stmts: &[Stmt], out: &mut Vec<TokSpan>) {
         }
 
         match bare {
+            // A definition is meta code: no line of it runs.
             Stmt::TypeAlias(t) => out.push(t.span),
 
+            Stmt::Declare(d) => out.push(d.span),
+
             Stmt::Struct(d) => out.extend(d.fields.iter().flat_map(|f| [f.name, f.ty])),
+
+            Stmt::Interface(d) => out.extend(d.fields.iter().flat_map(|f| [f.name, f.ty])),
+
+            // A parameter list without a body declares names and types.
+            // `message A(f: number)` binds `f` and reads no `f` above.
+            Stmt::Message(m) => {
+                let reply = m.reply.iter().flat_map(|(_, r)| r);
+
+                head_spans(m.span, m.params.iter().chain(reply), out);
+            }
+
+            Stmt::Remote(r) => head_spans(r.span, r.params.iter(), out),
+
+            Stmt::Attribute(a) => head_spans(a.span, a.params.iter(), out),
+
+            Stmt::Trait(t) => {
+                for m in &t.methods {
+                    let head = TokSpan {
+                        start: m.span.start,
+                        end: m.signature.end,
+                    };
+
+                    head_spans(head, m.params.iter(), out);
+                }
+            }
 
             Stmt::Enum(d) => out.extend(
                 d.variants
@@ -2318,6 +2449,31 @@ fn stmts_non_value_spans(stmts: &[Stmt], out: &mut Vec<TokSpan>) {
             child_non_value_spans(c, out);
         }
     }
+}
+
+/// The spans of a declaration head around its parameter defaults. The
+/// words, names, and types read no value. A default is an expression,
+/// so a default stays a use.
+fn head_spans<'a>(
+    head: TokSpan,
+    params: impl Iterator<Item = &'a alloy_syntax::ast::Param>,
+    out: &mut Vec<TokSpan>,
+) {
+    let mut at = head.start;
+
+    for d in params.filter_map(|p| p.default.as_ref()) {
+        let span = d.span();
+        out.push(TokSpan {
+            start: at,
+            end: span.start,
+        });
+        at = span.end;
+    }
+
+    out.push(TokSpan {
+        start: at,
+        end: head.end,
+    });
 }
 
 fn child_non_value_spans(c: Child<'_>, out: &mut Vec<TokSpan>) {
@@ -2390,6 +2546,50 @@ fn for_needs_rewrite(f: &GenericFor) -> bool {
     f.filter.is_some() || f.vars.iter().any(|v| v.destructure.is_some())
 }
 
+/// The table that holds the exported values of a module past the budget
+/// of locals.
+pub(crate) const EXPORTS_TABLE: &str = "__exports";
+
+/*
+How many names the top level of a module may bind before its exported
+values move onto one table. Luau holds at most 200 locals in one
+function, the chunk included, and a module past that does not load: a
+constants file of 219 `export const` failed in Studio (LANG_BUGS 107).
+The emit adds locals of its own at the top level, the runtime, a require
+per module and a temp per hoist, so the budget keeps 50 in hand. A module
+under it compiles as before.
+*/
+pub(crate) const EXPORTS_TABLE_AT: usize = 150;
+
+/// The exported values of a module that move onto the exports table:
+/// each `export const` and `export local` of one plain name and one
+/// value, when the top level binds more names than the budget.
+fn table_exports(src: &str, toks: &[Tok], chunk: &Chunk, bound: usize) -> HashSet<String> {
+    if bound <= EXPORTS_TABLE_AT {
+        return HashSet::new();
+    }
+
+    chunk
+        .block
+        .stmts
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::Local(l)
+                if l.exported
+                    && l.attrs.is_empty()
+                    && l.names.len() == 1
+                    && l.values.len() == 1
+                    && l.names[0].destructure.is_none()
+                    && !local_needs_rewrite(l) =>
+            {
+                Some(l.names[0].name.text(src, toks).to_string())
+            }
+
+            _ => None,
+        })
+        .collect()
+}
+
 fn local_needs_rewrite(l: &Local) -> bool {
     l.names.iter().any(|b| b.destructure.is_some())
         || (l.values.len() == 1
@@ -2421,7 +2621,9 @@ fn stmt_needs_desugar(s: &Stmt) -> bool {
 
         Stmt::Local(l) if local_needs_rewrite(l) => return true,
 
-        Stmt::Delete { .. } | Stmt::Destroy { .. } | Stmt::After(_) => return true,
+        Stmt::Delete { .. } | Stmt::Destroy { .. } | Stmt::After(_) | Stmt::Parallel(_) => {
+            return true;
+        }
 
         Stmt::Function(f) if function_needs_rewrite(&f.body) => return true,
 
@@ -2440,6 +2642,7 @@ fn stmt_needs_desugar(s: &Stmt) -> bool {
         | Stmt::Trait(_)
         | Stmt::Interface(_)
         | Stmt::Remote(_)
+        | Stmt::Message(_)
         | Stmt::Attribute(_)
         // `class` has no lowering yet. The render reports it and blanks
         // the block, and it only runs when the walk reaches it.
@@ -3594,19 +3797,44 @@ impl<'s> Desugar<'s> {
 
     /// Whether an import here requires its module on the first line. A
     /// spec runs under lest, and its native backend resolves a `require`
-    /// only while the spec loads. An import in a test runs later.
+    /// only while the spec loads. An import in a test runs later, and so
+    /// does a scoped import in a module of the test build.
     fn require_at_head(&self) -> bool {
-        self.options.tests && !self.at_top_level()
+        (self.options.tests || self.options.late_requires.is_some()) && !self.at_top_level()
     }
 
     /// `require(path)`, or the temp that the first line of a spec binds
     /// to it. See `require_at_head`.
+    ///
+    /// A module of the test build cannot require at its head: that loads
+    /// the module early, and a scoped import often breaks a cycle of
+    /// requires. The shim gives the temp a stand-in that loads the
+    /// module when it is read, and the spec puts the module itself in
+    /// the temp at the end of its load.
     pub(crate) fn require_text(&mut self, path: &str) -> String {
         if !self.require_at_head() {
             return format!("require({path})");
         }
 
         let name = self.next_import_temp();
+
+        // The loader takes `require` as a parameter: the shim hands it a
+        // require that reads the path from the module, wherever the
+        // spec is.
+        if let Some((shim, owner)) = self
+            .options
+            .late_requires
+            .as_ref()
+            .filter(|_| !self.options.tests)
+        {
+            let (shim, owner) = (luau_string(shim), luau_string(owner));
+            self.head_requires.push(format!(
+                "local {name}; {name} = require({shim}).later({owner}, function(require) return require({path}) end, function(m) {name} = m end) "
+            ));
+
+            return name;
+        }
+
         self.head_requires
             .push(format!("local {name} = require({path}) "));
 

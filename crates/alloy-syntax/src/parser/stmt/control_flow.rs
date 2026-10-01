@@ -69,7 +69,9 @@ impl<'a> Parser<'a> {
 
         self.expect("in")?;
         let exprs = self.expr_list()?;
-        let filter = if self.at("where") && self.infix_word_here() {
+        // `do` closes the header, so `where` before it is the filter on
+        // either side of a line break.
+        let filter = if self.at("where") {
             self.bump();
 
             Some(self.expr()?)
@@ -154,7 +156,10 @@ impl<'a> Parser<'a> {
             break;
         }
 
-        let filter = if self.at("where") && self.infix_word_here() {
+        // The header goes on to `then` or `do`, so `where` here is the
+        // filter wherever its line breaks: a local named `where` could not
+        // stand after the value.
+        let filter = if self.at("where") {
             self.bump();
 
             Some(self.expr()?)

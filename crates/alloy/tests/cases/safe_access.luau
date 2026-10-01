@@ -20,4 +20,4 @@ _1 = (if t == nil then nil else t.x) if _1 ~= nil then _1:m() end
 do (if cb == nil then error("cb is nil") else cb)(1) end
 local function inner(q)
 	local _1 = (if q == nil then nil else q.a) return (if _1 == nil then nil else _1.b)
-end
+end return nil

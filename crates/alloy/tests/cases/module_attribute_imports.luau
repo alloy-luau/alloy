@@ -5,4 +5,4 @@ local _m1 = require("./theme") local tagged = _m1.tagged
 local _m2 = require("./theme") local tag, swatch = _m2.tagged, _m2.swatch
 local All = require("./theme") local other = All.swatch
 
-print(tagged, tag, swatch, All, other)
+print(tagged, tag, swatch, All, other) return nil

@@ -108,4 +108,12 @@ describe("test registry", function()
 	end)
 end)
 
+describe("coalesce", function()
+	it("takes the default for nil alone", function()
+		expect(alloy.coalesce(nil, 3)).toBe(3)
+		expect(alloy.coalesce(false, true)).toBe(false)
+		expect(alloy.coalesce(0, 3)).toBe(0)
+	end)
+end)
+
 return nil

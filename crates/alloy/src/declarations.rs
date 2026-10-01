@@ -229,29 +229,17 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
     let text = |span: TokSpan| span.text_or_empty(src, toks);
     let stmts = &parsed.chunk.block.stmts;
 
-    // Target -> (traits, methods), from every impl in the file. A
-    // method reads as the line an author would write for it, so a
-    // struct hovers the way a namespace does.
-    let mut impls: HashMap<&str, (Vec<&str>, Vec<String>)> = HashMap::new();
+    // Target -> the traits every impl of the file meets. The hover of a
+    // struct or an enum shows the type alone; the hover of an `impl`
+    // header adds the methods, see `impl_blocks`.
+    let mut impls: HashMap<&str, Vec<&str>> = HashMap::new();
 
     for stmt in stmts {
         if let Stmt::Impl(i) = stmt {
             let entry = impls.entry(text(i.target)).or_default();
 
             if let Some(t) = i.trait_name {
-                entry.0.push(text(t));
-            }
-
-            for m in &i.methods {
-                // A private method is out of reach for every reader of
-                // the hover, and completion already leaves it out.
-                if m.visibility.is_some_and(|v| text(v) == "private") {
-                    continue;
-                }
-
-                if let Some(line) = method_signature(src, toks, m) {
-                    entry.1.push(line);
-                }
+                entry.push(text(t));
             }
         }
     }
@@ -352,15 +340,11 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
             _ => 0,
         };
         let (name, mut lines) = match stmt {
-            Stmt::Struct(d) => {
-                let name = text(d.name);
-                let generics = d.generics.map(text).unwrap_or("");
-                let mut lines = vec![format!("{}struct {name}{generics}", export(d.exported))];
-                lines.extend(d.fields.iter().map(|f| format!("    {}", text(f.span))));
-                lines.push("end".to_string());
+            Stmt::Struct(_) | Stmt::Enum(_) => match type_shape_of(src, toks, stmt) {
+                Some(shape) => (shape.name, shape.lines(&[])),
 
-                (name, lines)
-            }
+                None => continue,
+            },
 
             Stmt::Interface(d) => {
                 let name = text(d.name);
@@ -377,16 +361,6 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
                     export(d.exported)
                 )];
                 lines.extend(d.fields.iter().map(|f| format!("    {}", text(f.span))));
-                lines.push("end".to_string());
-
-                (name, lines)
-            }
-
-            Stmt::Enum(d) => {
-                let name = text(d.name);
-                let generics = d.generics.map(text).unwrap_or("");
-                let mut lines = vec![format!("{}enum {name}{generics}", export(d.exported))];
-                lines.extend(d.variants.iter().map(|v| format!("    {}", text(v.span))));
                 lines.push("end".to_string());
 
                 (name, lines)
@@ -476,27 +450,11 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
         // Interfaces and traits have no impl blocks of their own.
         let mut notes = std::mem::take(&mut notes_first);
 
-        if let Some((traits, methods)) = impls.get(name) {
-            if !traits.is_empty() {
-                let list: Vec<String> = traits.iter().map(|t| format!("`{t}`")).collect();
-                notes.push(format!("Implements {}.", list.join(", ")));
-            }
-
-            // The methods stand in a block of their own, under the
-            // declaration. A method is no field, so a body the source
-            // left empty reads empty here too.
-            if !methods.is_empty() {
-                let generics = lines
-                    .first()
-                    .map(|l| l.strip_suffix(" as").unwrap_or(l))
-                    .and_then(|l| l.split_once(name))
-                    .map_or(String::new(), |(_, tail)| tail.to_string());
-
-                lines.push(String::new());
-                lines.push(format!("impl {name}{generics}"));
-                lines.extend(methods.iter().map(|line| format!("    {line}")));
-                lines.push("end".to_string());
-            }
+        if let Some(traits) = impls.get(name)
+            && !traits.is_empty()
+        {
+            let list: Vec<String> = traits.iter().map(|t| format!("`{t}`")).collect();
+            notes.push(format!("Implements {}.", list.join(", ")));
         }
 
         lines.insert(0, "```alloy".to_string());
@@ -544,6 +502,131 @@ pub fn summaries(src: &str, definitions: bool) -> Vec<Declaration> {
     }
 
     out
+}
+
+/// A struct or an enum as a hover writes it: the head the source wrote,
+/// then one line per field or variant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeShape<'a> {
+    pub name: &'a str,
+    /// `struct Foo<T>`, with `export` where the source wrote it.
+    pub head: String,
+    /// One line per field, its visibility on the left, `public` where
+    /// the source wrote none; or one line per variant.
+    pub members: Vec<String>,
+    /// The doc comment above the declaration.
+    pub doc: Option<String>,
+}
+
+impl TypeShape<'_> {
+    /*
+    The code lines of the hover: the head, the members, then `methods`,
+    and `end`. With nothing to list the head stands alone, since an
+    empty block says less than no block.
+    */
+    pub fn lines(&self, methods: &[String]) -> Vec<String> {
+        let mut lines = vec![self.head.clone()];
+
+        if self.members.is_empty() && methods.is_empty() {
+            return lines;
+        }
+
+        lines.extend(
+            self.members
+                .iter()
+                .chain(methods)
+                .map(|m| format!("    {m}")),
+        );
+        lines.push("end".to_string());
+
+        lines
+    }
+}
+
+/// The struct or the enum a source declares at its top level as `name`.
+pub fn type_shape<'a>(src: &'a str, name: &str) -> Option<TypeShape<'a>> {
+    if !src.contains(name) {
+        return None;
+    }
+
+    let parsed = alloy_syntax::parse_lenient(src, Default::default()).ok()?;
+    let toks = &parsed.lexed.toks;
+
+    parsed
+        .chunk
+        .block
+        .stmts
+        .iter()
+        .filter_map(|s| type_shape_of(src, toks, s.under_default()))
+        .find(|shape| shape.name == name)
+}
+
+fn type_shape_of<'a>(
+    src: &'a str,
+    toks: &[alloy_syntax::lexer::Tok],
+    stmt: &Stmt,
+) -> Option<TypeShape<'a>> {
+    let text = |span: TokSpan| span.text_or_empty(src, toks);
+    let export = |exported: bool| if exported { "export " } else { "" };
+    let start_of = |span: TokSpan| toks[span.start as usize].start as usize;
+
+    match stmt {
+        Stmt::Struct(d) => {
+            let generics = d.generics.map(text).unwrap_or("");
+            let members = d
+                .fields
+                .iter()
+                .map(|f| {
+                    // `@u8 private hp: number`: an attribute stands first,
+                    // as the source writes it.
+                    let attrs: String = f
+                        .attributes
+                        .iter()
+                        .map(|a| format!("{} ", text(a.span)))
+                        .collect();
+                    let visibility = f.visibility.map_or("public", text);
+                    let modifier = f
+                        .modifier
+                        .map_or(String::new(), |m| format!("{} ", text(m)));
+                    let default = f
+                        .default
+                        .as_ref()
+                        .map_or(String::new(), |d| format!(" = {}", text(d.span())));
+
+                    format!(
+                        "{attrs}{visibility} {modifier}{}: {}{default}",
+                        text(f.name),
+                        text(f.ty)
+                    )
+                })
+                .collect();
+
+            Some(TypeShape {
+                name: text(d.name),
+                head: format!("{}struct {}{generics}", export(d.exported), text(d.name)),
+                members,
+                doc: doc_before(src, start_of(d.span)),
+            })
+        }
+
+        Stmt::Enum(d) => Some(TypeShape {
+            name: text(d.name),
+            head: format!(
+                "{}enum {}{}",
+                export(d.exported),
+                text(d.name),
+                d.generics.map(text).unwrap_or("")
+            ),
+            members: d
+                .variants
+                .iter()
+                .map(|v| text(v.span).to_string())
+                .collect(),
+            doc: doc_before(src, start_of(d.span)),
+        }),
+
+        _ => None,
+    }
 }
 
 /// The hover entries of one namespace: the header with its members
@@ -604,6 +687,22 @@ fn namespace_summaries(
             Stmt::Function(_) | Stmt::LocalFunction(_) => {
                 shown.lines().next().unwrap_or(&shown).to_string()
             }
+
+            // A struct or an enum reads as one at the top level does,
+            // under the path: `struct Geo.Vec2` and its fields, each
+            // with its visibility.
+            stmt @ (Stmt::Struct(_) | Stmt::Enum(_)) => match type_shape_of(src, toks, stmt) {
+                Some(mut shape) => {
+                    shape.head =
+                        shape
+                            .head
+                            .replacen(&format!(" {word}"), &format!(" {path}.{word}"), 1);
+
+                    shape.lines(&[]).join("\n")
+                }
+
+                None => dedent(&shown),
+            },
 
             _ => dedent(&shown),
         };
@@ -1009,6 +1108,25 @@ fn member_signature(
         Stmt::Macro(d) => format!("macro {}({})", text(d.name), params_of(&d.params)),
 
         Stmt::Attribute(d) => format!("attribute {}({})", text(d.name), params_of(&d.params)),
+
+        Stmt::Message(d) => {
+            let reply = match &d.reply {
+                Some((_, ps)) => format!(" reply({})", params_of(ps)),
+
+                None => String::new(),
+            };
+            let tail = if d.parallel.is_some() {
+                " as parallel"
+            } else {
+                ""
+            };
+
+            format!(
+                "message {}({}){reply}{tail}",
+                text(d.name),
+                params_of(&d.params)
+            )
+        }
 
         Stmt::Remote(d) => {
             let word = match d.is_function {
@@ -1451,6 +1569,9 @@ end
         );
     }
 
+    /// A struct hovers as the struct alone: each field with its
+    /// visibility, `public` where the source wrote none, and no method of
+    /// its impls. The traits of its impls follow as a note.
     #[test]
     fn struct_with_impls() {
         let src = "export struct Vec2 as\n    x: number\n    y: number = 0\nend\nimpl Vec2 as\n    function len(self) end\nend\nimpl Display for Vec2 as\n    function to_string(self) end\nend\n";
@@ -1459,7 +1580,7 @@ end
         assert_eq!(d[0].name, "Vec2");
         assert_eq!(
             d[0].hover,
-            "```alloy\nexport struct Vec2\n    x: number\n    y: number = 0\nend\n\nimpl Vec2\n    public function len(self)\n    public function to_string(self)\nend\n```\n\nImplements `Display`."
+            "```alloy\nexport struct Vec2\n    public x: number\n    public y: number = 0\nend\n```\n\nImplements `Display`."
         );
     }
 
@@ -1551,7 +1672,7 @@ end
         let vec2 = d.iter().find(|x| x.name == "Math.Vec2").unwrap();
         assert_eq!(
             vec2.hover,
-            "```alloy\nstruct Math.Vec2 as\n    x: number\nend\n```"
+            "```alloy\nstruct Math.Vec2\n    public x: number\nend\n```"
         );
 
         let e = d.iter().find(|x| x.name == "Math.E").unwrap();
@@ -2358,9 +2479,43 @@ pub fn struct_field_types(src: &str) -> Vec<(String, Vec<FieldText>)> {
     };
     let toks = &parsed.lexed.toks;
     let stmts = &parsed.chunk.block.stmts;
-    let mut own = crate::desugar::top_level_names(src, toks, &parsed.chunk);
+    let names_own = owned_names(src, toks, &parsed.chunk);
+    let mut structs = Vec::new();
 
     for stmt in stmts {
+        struct_fields_of(src, toks, stmt, "", &mut structs);
+    }
+
+    structs
+        .into_iter()
+        .map(|(name, fields)| {
+            let typed = fields
+                .into_iter()
+                .filter(|(_, _, _, ty)| !ty.is_empty())
+                .map(|(f, _, _, ty)| {
+                    let portable = !names_own(&ty);
+
+                    (f, ty, portable)
+                })
+                .collect();
+
+            (name, typed)
+        })
+        .collect()
+}
+
+/// A test of whether a type text names something the source binds: a
+/// type, an import, or a namespace. Such a name may mean nothing in another
+/// file. A std type that an import of the std binds is the ambient
+/// one, so another file can write it.
+fn owned_names(
+    src: &str,
+    toks: &[alloy_syntax::lexer::Tok],
+    chunk: &alloy_syntax::ast::Chunk,
+) -> impl Fn(&str) -> bool {
+    let mut own = crate::desugar::top_level_names(src, toks, chunk);
+
+    for stmt in &chunk.block.stmts {
         match stmt.under_default() {
             Stmt::Namespace(n) => {
                 own.insert(n.name.text(src, toks).to_string());
@@ -2380,33 +2535,43 @@ pub fn struct_field_types(src: &str) -> Vec<(String, Vec<FieldText>)> {
         }
     }
 
-    let mut structs = Vec::new();
-
-    for stmt in stmts {
-        struct_fields_of(src, toks, stmt, "", &mut structs);
-    }
-
-    let names_own = |ty: &str| {
+    move |ty: &str| {
         ty.split(|c: char| !(c.is_alphanumeric() || c == '_'))
             .any(|word| own.contains(word))
+    }
+}
+
+/// Every type alias a source exports, with its value on one line and
+/// whether another file can write that value the way the source does.
+/// A constructor under the alias in a file that imports it then takes
+/// the value's type arguments, as under an alias of the file's own. A
+/// generic alias gives nothing, since its value names its parameters.
+pub fn type_alias_values(src: &str) -> Vec<(String, (String, bool))> {
+    let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
+        return Vec::new();
     };
+    let toks = &parsed.lexed.toks;
+    let names_own = owned_names(src, toks, &parsed.chunk);
+    let mut out = Vec::new();
 
-    structs
-        .into_iter()
-        .map(|(name, fields)| {
-            let typed = fields
-                .into_iter()
-                .filter(|(_, _, _, ty)| !ty.is_empty())
-                .map(|(f, _, _, ty)| {
-                    let portable = !names_own(&ty);
+    for stmt in &parsed.chunk.block.stmts {
+        let Stmt::TypeAlias(t) = stmt.under_default() else {
+            continue;
+        };
+        let Some((head, value)) = t.span.text(src, toks).split_once('=') else {
+            continue;
+        };
 
-                    (f, ty, portable)
-                })
-                .collect();
+        if !t.exported || head.contains('<') {
+            continue;
+        }
 
-            (name, typed)
-        })
-        .collect()
+        let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+        let portable = !names_own(&value);
+        out.push((t.name.text(src, toks).to_string(), (value, portable)));
+    }
+
+    out
 }
 
 /// `Readonly<Profile>`, `Partial<Profile>`, or `Sink<Profile>`.

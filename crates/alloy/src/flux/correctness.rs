@@ -54,12 +54,8 @@ impl<'s> Scan<'s> {
             let Some(v_end) = self.same_path(c, i, i + 1) else {
                 continue;
             };
-            let ends = v_end >= self.toks.len()
-                || CLOSERS.contains(&self.t(v_end))
-                || self.at(v_end, ";")
-                || self.line_of(v_end) != self.line_of(v_end - 1);
-
-            if !ends {
+            // A `,` or a `}` ends a table field, which is no statement.
+            if !self.statement_ends_at(v_end) {
                 continue;
             }
 
@@ -257,11 +253,14 @@ impl<'s> Scan<'s> {
     /// ternary with the same value on both sides.
     fn identical_branches(&self, out: &mut Vec<Lint>) {
         for i in 0..self.toks.len() {
+            // `??` lexes as two `?`, and the second opens no ternary.
             if self.at(i, "?")
+                && self.prev(i) != "?"
                 && !self.at(i + 1, "(")
                 && let Some(a_end) = self.expr_end(i + 1)
                 && self.at(a_end, ":")
                 && let Some(b_end) = self.expr_end(a_end + 1)
+                && self.value_ends_at(b_end)
                 && self.texts(i + 1, a_end) == self.texts(a_end + 1, b_end)
             {
                 let a = self.slice(i + 1, a_end);
@@ -450,15 +449,32 @@ impl<'s> Scan<'s> {
     /// Reports if a name carries a `: boolean?` annotation anywhere in
     /// the file. Three states need the comparison.
     fn declared_optional_boolean(&self, name: &str) -> bool {
+        // A field reads through its declaration: `flight.wet` is the
+        // `wet: boolean? = nil` of a struct, where `== false` tells
+        // false from "no value yet" (LANG_BUGS 103).
+        let name = name
+            .rsplit_once(['.', ':'])
+            .map_or(name, |(_, field)| field)
+            .trim_start_matches('?');
+
         if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
             return false;
         }
 
-        (0..self.toks.len().saturating_sub(3)).any(|j| {
-            self.t(j) == name
-                && self.t(j + 1) == ":"
-                && self.t(j + 2) == "boolean"
-                && self.t(j + 3) == "?"
+        (0..self.toks.len().saturating_sub(2)).any(|j| {
+            if self.t(j) != name || self.t(j + 1) != ":" {
+                return false;
+            }
+
+            // The annotation up to its end or its line's end: a field
+            // with no default ends at the newline, not at a token.
+            let line = self.line_of(j);
+            let words: Vec<&str> = (j + 2..self.annotation_end(j + 2))
+                .take_while(|&k| self.line_of(k) == line)
+                .map(|k| self.t(k))
+                .collect();
+
+            words.contains(&"boolean") && words.iter().any(|w| matches!(*w, "?" | "nil"))
         })
     }
 
@@ -498,10 +514,10 @@ impl<'s> Scan<'s> {
         j
     }
 
-    /// Every name the file annotates, with whether its type ends in
-    /// `?`. Reads `local`, `const`, and the parameters of a function.
-    /// A field of a record type binds nothing, so it stays out.
-    fn annotated_bindings(&self) -> Vec<(&'s str, bool)> {
+    /// The token of each name the file annotates, with whether its type
+    /// ends in `?`. Reads `local`, `const`, and the parameters of a
+    /// function. A field of a record type binds nothing, so it stays out.
+    fn annotated_bindings(&self) -> Vec<(usize, bool)> {
         let mut out = Vec::new();
 
         for i in 0..self.toks.len() {
@@ -542,7 +558,7 @@ impl<'s> Scan<'s> {
                 match self.at(j + 1, ":") {
                     true => {
                         let end = self.annotation_end(j + 2);
-                        out.push((self.t(j), end > j + 2 && self.at(end - 1, "?")));
+                        out.push((j, end > j + 2 && self.at(end - 1, "?")));
                         j = end;
                     }
 
@@ -558,27 +574,6 @@ impl<'s> Scan<'s> {
         }
 
         out
-    }
-
-    /// Whether every annotation the file gives `name` has no `?`.
-    /// False when the file annotates it nowhere: a type nobody wrote is
-    /// no ground for a diagnostic.
-    fn never_optional(&self, name: &str, bindings: &[(&'s str, bool)]) -> bool {
-        let mut seen = false;
-
-        for (bound, optional) in bindings {
-            if *bound != name {
-                continue;
-            }
-
-            if *optional {
-                return false;
-            }
-
-            seen = true;
-        }
-
-        seen
     }
 
     /// `p!` and `p?[k]` where `p` carries a type with no `?`. The
@@ -613,7 +608,15 @@ impl<'s> Scan<'s> {
 
             let name = self.t(i - 1);
 
-            if !self.never_optional(name, &bindings) {
+            // The declaration that the name reads decides. A parameter
+            // `ring: buffer` says nothing about a later `local ring =
+            // t.ring`. A type nobody wrote is no ground for a
+            // diagnostic, and the checker may still read `T?` there.
+            let typed = self
+                .binding_at(i - 1)
+                .is_some_and(|d| bindings.contains(&(d, false)));
+
+            if !typed {
                 continue;
             }
 
@@ -775,12 +778,7 @@ impl<'s> Scan<'s> {
                 continue;
             }
 
-            let after = v_end + 2;
-            let closes = after >= self.toks.len()
-                || CLOSERS.contains(&self.t(after))
-                || self.line_of(after) != self.line_of(after - 1);
-
-            if !closes {
+            if !self.statement_ends_at(v_end + 2) {
                 continue;
             }
 
@@ -839,12 +837,7 @@ impl<'s> Scan<'s> {
                 continue;
             }
 
-            let after = x + 3;
-            let closes = after >= self.toks.len()
-                || CLOSERS.contains(&self.t(after))
-                || self.line_of(after) != self.line_of(after - 1);
-
-            if !closes {
+            if !self.statement_ends_at(x + 3) {
                 continue;
             }
 
@@ -1478,6 +1471,20 @@ mod tests {
             names("local function two(c: boolean): boolean\n    return c == true\nend\n"),
             vec!["bool_comparison"]
         );
+
+        // A field declared optional reads the same way, with or without
+        // a default, and so does `boolean | nil` (LANG_BUGS 103).
+        for field in ["wet: boolean? = nil", "wet: boolean?", "wet: boolean | nil"] {
+            let src = format!(
+                "struct Flight as\n    {field}\n    n: number\nend\n\nlocal function entered(flight: Flight, wet: boolean): boolean\n    return flight.wet == false and wet\nend\n\nprint(entered)\n"
+            );
+            assert_eq!(names(&src), Vec::<&str>::new(), "{field}");
+        }
+
+        // A plain boolean field still reports, and the `?` of the next
+        // line's field is not its own.
+        let plain = "struct Flight as\n    wet: boolean\n    seen: number?\nend\n\nlocal function dry(flight: Flight): boolean\n    return flight.wet == false\nend\n\nprint(dry)\n";
+        assert_eq!(names(plain), vec!["bool_comparison"]);
     }
 
     /// The receiver decides which struct a member belongs to: a field
@@ -1894,6 +1901,128 @@ mod tests {
         assert_eq!(
             fixed("for i = 1, #t do\n    local v = t[i]\n    print(i, v)\nend\n"),
             "for i, v in t do\n    print(i, v)\nend\n"
+        );
+    }
+
+    /// The declaration that a name reads gives its type. A parameter
+    /// `ring: buffer` once made a later `local ring` with no annotation
+    /// never nil. The checker still typed it `buffer?`, so neither form
+    /// of the call passed.
+    #[test]
+    fn an_assert_reads_the_binding_in_scope() {
+        let src = "local function fill(ring: buffer) -> ()\n    print(ring)\nend\n\nlocal function draw(t: { ring: buffer? }) -> ()\n    local ring = t.ring\n\n    if ring == nil then\n        ring = buffer.create(4)\n    end\n\n    fill(ring!)\nend\n\ndraw({})\n";
+        assert!(!names(src).contains(&"needless_assert"), "{src}");
+
+        // An optional outside, and a parameter with no `?` inside.
+        let src = "local ring: buffer? = nil\n\nlocal function fill(ring: buffer) -> ()\n    print(ring!)\nend\n\nfill(ring!)\n";
+        assert_eq!(names(src), vec!["needless_assert"]);
+    }
+
+    /// The `:` of a ternary ends its first branch. It once read as a
+    /// method call, so `c ? a : a` drew nothing. The second `?` of `??`
+    /// opens no ternary.
+    #[test]
+    fn a_ternary_reads_its_own_colon() {
+        for src in [
+            "local x = c ? a : a\nprint(x)\n",
+            "local x = c ? a.b : a.b\nprint(x)\n",
+        ] {
+            assert_eq!(names(src), vec!["identical_branches"], "{src}");
+        }
+
+        for src in [
+            "local x = c ? a ?? b : b\nprint(x)\n",
+            "local x = c ? f(b) ?? b : b\nprint(x)\n",
+        ] {
+            assert!(!names(src).contains(&"identical_branches"), "{src}");
+        }
+    }
+
+    /// A ternary's `:` before a name lexes as the `:` of a method call.
+    /// `open ? not solid(t) : t == want` once read as
+    /// `not (solid(t):t) == want`, and `--fix` inverted both branches.
+    #[test]
+    fn a_not_in_a_ternary_branch_is_not_misplaced() {
+        let src = "export function right(open: boolean, solid: (number) -> boolean, tile: number, want: number) -> boolean\n    return open ? not solid(tile) : tile == want\nend\n";
+        assert!(!names(src).contains(&"misplaced_not"), "{src}");
+        assert_eq!(fixed(src), src);
+
+        // A `not` before a comparison inside a branch still fires, and
+        // the rewrite stops at the branch.
+        assert_eq!(
+            fixed("local x = c ? not a == b : d\nprint(x)\n"),
+            "local x = c ? a ~= b : d\nprint(x)\n"
+        );
+        assert_eq!(
+            fixed("local x = c ? d : not a == b\nprint(x)\n"),
+            "local x = c ? d : a ~= b\nprint(x)\n"
+        );
+        // A method call keeps its `:`.
+        assert_eq!(
+            fixed("if not a:m() == b then end\n"),
+            "if a:m() ~= b then end\n"
+        );
+    }
+
+    /// The else branch of a ternary runs to the end of the value. The
+    /// lint once stopped at the first operand, so `c ? 1 : 1 - x` read
+    /// as two equal branches.
+    #[test]
+    fn a_ternary_compares_whole_branches() {
+        for src in [
+            "local x = c ? 1 : 1 - y\nprint(x)\n",
+            "t.a = s ? 1 : 1 - g.y * k\n",
+            "local x = c ? a : a .. b\nprint(x)\n",
+            "local x = c ? 1 : 1\n    + y\nprint(x)\n",
+        ] {
+            assert!(!names(src).contains(&"identical_branches"), "{src}");
+        }
+
+        for src in [
+            "local x = c ? 1 : 1\nprint(x)\n",
+            "print(c ? 1 : 1)\n",
+            "local x = c ? 1 : 1 print(x)\n",
+        ] {
+            assert_eq!(names(src), vec!["identical_branches"], "{src}");
+        }
+    }
+
+    /// `fmt` breaks a long ternary over lines with `?` and `:` first.
+    /// The line break once ended the `return`, so the rewrite dropped
+    /// the ternary.
+    #[test]
+    fn a_return_over_lines_takes_no_local_rewrite() {
+        let src = "export function label(read: () -> { n: number }?) -> string\n    const bar = read()\n\n    return bar\n        ? string.format('%d', bar.n)\n        : ''\nend\n";
+        assert!(!names(src).contains(&"local_then_return"), "{src}");
+
+        let src = "local function g()\n    local out = a\n    return out\n        or b\nend\n";
+        assert!(!names(src).contains(&"local_then_return"), "{src}");
+
+        assert_eq!(
+            fixed("local function g()\n    const bar = f()\n    return bar\nend\n"),
+            "local function g()\n    return (f())\nend\n"
+        );
+    }
+
+    /// `fmt` lays a long `x = x or { ... }` out with `or` first on the
+    /// next line. The line break once ended the value at `x`.
+    #[test]
+    fn an_assignment_over_lines_is_not_to_itself() {
+        let src = "export const held: { [string]: { number } } = {}\n\nexport function fill() -> ()\n    held.list = held.list\n        or {\n            1,\n            2,\n        }\nend\n";
+        assert!(!names(src).contains(&"self_assignment"), "{src}");
+        assert!(!names("x = x\n    .. y\n").contains(&"self_assignment"));
+
+        // A field of a table is no assignment.
+        assert_eq!(
+            names("local cx = 1\nprint({\n    cx = cx,\n    cy = 2,\n})\nprint({ cx = cx })\n"),
+            Vec::<&str>::new()
+        );
+
+        assert_eq!(names("x = x\nprint(x)\n"), vec!["self_assignment"]);
+        assert_eq!(names("x = x print(x)\n"), vec!["self_assignment"]);
+        assert_eq!(
+            names("if c then\n    a.b = a.b\nend\n"),
+            vec!["self_assignment"]
         );
     }
 }

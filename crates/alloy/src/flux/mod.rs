@@ -38,6 +38,7 @@ pub(crate) fn run(s: &Scan) -> Vec<Lint> {
     s.raw_pcall(&mut out);
     s.raw_require(&mut out);
     s.manual_class(&mut out);
+    s.prefer_new(&mut out);
     s.explicit_any(&mut out);
     s.array_long_string(&mut out);
     out
@@ -142,7 +143,7 @@ impl<'s> Scan<'s> {
                 continue;
             };
 
-            if !(matches!(self.t(q_end), "." | ":") && self.is_name(q_end + 1)) {
+            if !self.member_at(q_end) {
                 i += 1;
 
                 continue;
@@ -265,14 +266,7 @@ impl<'s> Scan<'s> {
             let Some(b_end) = self.expr_end(a_end + 1) else {
                 continue;
             };
-            let boundary = b_end >= self.toks.len()
-                || matches!(
-                    self.t(b_end),
-                    ")" | "," | "]" | "}" | "end" | "then" | "else" | "do"
-                )
-                || self.line_of(b_end) != self.line_of(b_end - 1);
-
-            if !boundary {
+            if !self.value_ends_at(b_end) {
                 continue;
             }
 
@@ -895,6 +889,153 @@ impl<'s> Scan<'s> {
         }
     }
 
+    /// `X.new(...)` is `new X(...)`, and `X.new<<A>>(...)` is
+    /// `new X<<A>>(...)`. The fix writes the head alone, so the type
+    /// arguments, the arguments and a chain after them keep their bytes.
+    fn prefer_new(&self, out: &mut Vec<Lint>) {
+        // A `typeof(...)` can stand in a type, where `new` is no word.
+        let typeofs: Vec<(usize, usize)> = (0..self.toks.len())
+            .filter(|&k| self.at(k, "typeof") && self.at(k + 1, "("))
+            .filter_map(|k| Some((k, self.matching(k + 1)?)))
+            .collect();
+        let mut decided: std::collections::HashMap<&str, bool> = Default::default();
+
+        for i in 0..self.toks.len() {
+            let Some(end) = self.path_end(i) else {
+                continue;
+            };
+
+            // The `.` before `new` ends the type path.
+            if end < i + 3 || !self.at(end - 1, "new") || self.generated_at(i) {
+                continue;
+            }
+
+            let dot = end - 2;
+            let type_like = (i..dot)
+                .step_by(2)
+                .all(|k| self.t(k).starts_with(|c: char| c.is_ascii_uppercase()));
+            // A path after these tokens is part of a longer one, a macro,
+            // an attribute, or a declaration: `a->B.new`, `function M.new`.
+            let joined = matches!(
+                self.prev(i),
+                "." | "->" | "=>" | "::" | "$" | "@" | "function" | "new"
+            ) || (self.prev(i) == ":" && !self.ternary_colons.contains(&(i - 1)));
+
+            if !type_like || joined || self.comment_between(i, end - 1) {
+                continue;
+            }
+
+            let Some(open) = self.after_type_args(end) else {
+                continue;
+            };
+
+            if !self.at(open, "(") || self.line_of(open) != self.line_of(end - 1) {
+                continue;
+            }
+
+            let Some(close) = self.matching(open) else {
+                continue;
+            };
+
+            // `new X(a) { ... }` sets fields; `X.new(a) { ... }` calls
+            // the result with a table.
+            if self.at(close + 1, "{") || typeofs.iter().any(|&(a, b)| a < i && i < b) {
+                continue;
+            }
+
+            let path = self.slice(i, dot);
+            let targs = if open == end { "" } else { "<<...>>" };
+            let last = self.t(dot - 1);
+            let owner = self.enclosing_owner(i);
+            // `new X()` with no arguments inside the impl of `X` builds
+            // the raw value, where `X.new()` calls the constructor.
+            let raw = close == open + 1 && (owner == Some(last) || last == "Self");
+            let last = if last == "Self" {
+                owner.unwrap_or(last)
+            } else {
+                last
+            };
+            let otherwise = *decided
+                .entry(last)
+                .or_insert_with(|| self.new_builds_otherwise(last));
+
+            if raw || otherwise {
+                continue;
+            }
+
+            self.lint(
+                out,
+                "prefer_new",
+                i,
+                end - 1,
+                format!("`{path}.new{targs}(...)` is `new {path}{targs}(...)`"),
+                Some(format!("new {path}")),
+            );
+        }
+    }
+
+    /// The token after the `<<...>>` at `at`, or `at` when none opens
+    /// there. `None` when the list does not close.
+    fn after_type_args(&self, at: usize) -> Option<usize> {
+        if !(self.at(at, "<") && self.at(at + 1, "<")) {
+            return Some(at);
+        }
+
+        let mut depth = 0i32;
+
+        for k in at..self.toks.len() {
+            match self.t(k) {
+                "<" => depth += 1,
+
+                ">" => depth -= 1,
+
+                _ => {}
+            }
+
+            if depth == 0 {
+                return Some(k + 1);
+            }
+        }
+
+        None
+    }
+
+    /// Whether `new X(...)` would build otherwise than `X.new(...)`, for
+    /// a name `X` this file declares or implements:
+    /// - an enum, a trait, an interface, an attribute, or a remote
+    ///   draws an error under `new`;
+    /// - an impl that writes `New` makes `new` call it;
+    /// - a struct of this file with no `new` in its impl has only the
+    ///   raw `.new`, and `new` asks for the fields form.
+    fn new_builds_otherwise(&self, name: &str) -> bool {
+        let mut is_struct = false;
+
+        for k in 0..self.toks.len() {
+            if self.t(k) != name || !self.is_name(k) {
+                continue;
+            }
+
+            match self.prev(k) {
+                "enum" | "trait" | "interface" | "attribute" | "remote" => return true,
+
+                "struct" => is_struct = true,
+
+                _ => {}
+            }
+        }
+
+        let ctors: Vec<&str> = (0..self.toks.len())
+            .filter(|&k| {
+                self.at(k, "function")
+                    && matches!(self.t(k + 1), "new" | "New")
+                    && self.enclosing_owner(k) == Some(name)
+            })
+            .map(|k| self.t(k + 1))
+            .collect();
+
+        ctors.contains(&"New") || (is_struct && !ctors.contains(&"new"))
+    }
+
     /// `[[1, 2], [3, 4]]`: Alloy wrote a nested array this way before
     /// `[[` became Luau's long string again, and the old spelling now
     /// builds a string in silence.
@@ -1054,6 +1195,22 @@ mod tests {
         assert_eq!(
             fixed("local n = p and p.Name or \"x\"\n"),
             "local n = p and p.Name or \"x\"\n"
+        );
+
+        // A ternary's `:` is no method call: `a and a : b` guards nothing.
+        let src = "local n = c ? a and a : b\nprint(n)\n";
+        assert_eq!(names(src), Vec::<&str>::new());
+    }
+
+    /// The value after `or` runs to its end, past a line break. A
+    /// rewrite that stops at the break leaves the rest outside it.
+    #[test]
+    fn and_or_over_lines_reads_the_whole_value() {
+        let src = "local n = c and 1 or b\n    or d\nprint(n)\n";
+        assert_eq!(fixed(src), src);
+        assert_eq!(
+            fixed("local n = c and 1 or b\nprint(n)\n"),
+            "local n = c ? 1 : b\nprint(n)\n"
         );
     }
 
@@ -1266,6 +1423,142 @@ mod tests {
                 .map(|l| l.name)
                 .collect::<Vec<_>>(),
             vec!["explicit_any"]
+        );
+    }
+
+    /// The source with the `prefer_new` rewrites alone.
+    fn new_fixed(src: &str) -> String {
+        let only: Vec<crate::Lint> = lints(src)
+            .into_iter()
+            .filter(|l| l.name == "prefer_new")
+            .collect();
+
+        fixed_by(src, &only)
+    }
+
+    /// `new X(...)` emits the `X.new(...)` it replaces, and both heads
+    /// are the same length, so the Luau and the diagnostics match to
+    /// the byte.
+    fn assert_same_luau(src: &str, fixed: &str) {
+        let (was, now) = (crate::compile(src).unwrap(), crate::compile(fixed).unwrap());
+
+        assert_eq!(was.ship, now.ship, "{fixed}");
+        assert_eq!(was.diagnostics, now.diagnostics, "{fixed}");
+    }
+
+    #[test]
+    fn a_constructor_call_becomes_new() {
+        let box_struct = "struct Box as\n    n: number\nend\n\nimpl Box\n    function new(n: number): Box\n        return new Box { n = n }\n    end\n\n    function copy(self): Box\n        return Box.new(self.n)\n    end\nend\n\nprint(Box.new(1))\n";
+
+        for (src, want) in [
+            (
+                "local v = Vector3.new(1, 2, 3)\n",
+                "local v = new Vector3(1, 2, 3)\n",
+            ),
+            (
+                "import { HashMap } from \"@alloy/std/collections\"\nlocal m = HashMap.new<<number, { BasePart }>>()\n",
+                "import { HashMap } from \"@alloy/std/collections\"\nlocal m = new HashMap<<number, { BasePart }>>()\n",
+            ),
+            (
+                "local r = Net.Route.new(\"hit\")\n",
+                "local r = new Net.Route(\"hit\")\n",
+            ),
+            (
+                "local p = Instance.new('Part')\n",
+                "local p = new Instance('Part')\n",
+            ),
+            (
+                "local x = CFrame.new(0, 1, 0):Inverse().Position\n",
+                "local x = new CFrame(0, 1, 0):Inverse().Position\n",
+            ),
+            (
+                "local v = ok ? Vector2.new(1, 0) : Vector2.new(0, 1)\n",
+                "local v = ok ? new Vector2(1, 0) : new Vector2(0, 1)\n",
+            ),
+            (
+                "print(`at {Vector3.new(1, 2, 3)}`)\n",
+                "print(`at {new Vector3(1, 2, 3)}`)\n",
+            ),
+            (
+                "local v = Vector3.new(\n    1, -- x\n    2\n)\n",
+                "local v = new Vector3(\n    1, -- x\n    2\n)\n",
+            ),
+            (
+                "return UDim2.new(1, 0, 1, 0)\n",
+                "return new UDim2(1, 0, 1, 0)\n",
+            ),
+            (box_struct, &box_struct.replace("Box.new(", "new Box(")),
+        ] {
+            assert_eq!(new_fixed(src), want, "{src}");
+            assert_same_luau(src, want);
+        }
+    }
+
+    /// A call the rewrite cannot keep the same stays: a lowercase name
+    /// may hold no class, and `new` reads a table after the call as
+    /// fields and a type path in `typeof` as a type.
+    #[test]
+    fn a_call_new_would_change_draws_no_prefer_new() {
+        for src in [
+            "local a = t.new()\n",
+            "local a = self.new(1)\n",
+            "local a = c.HashMap.new()\n",
+            "local make = Vector3.new\n",
+            "local a = Vector3:new()\n",
+            "local a = Color3.New(1, 1, 1)\n",
+            "local a = \"Vector3.new(1)\"\n",
+            "-- Vector3.new(1)\nlocal a = 1\n",
+            "--[[ Vector3.new(1) ]]\nlocal a = 1\n",
+            "local a: typeof(Vector3.new(1)) = b\n",
+            "local a = workspace->Model.new(1)\n",
+            "local a = Maker.new(1) { x = 1 }\n",
+            "local a = Maker.new \"x\"\n",
+            "local a = Maker.new { x = 1 }\n",
+            "function Maker.new(x)\n    return x\nend\n",
+            // `new` on an enum is an error.
+            "enum Dir as Up, Down end\n\nimpl Dir\n    function new(): Dir\n        return Dir.Up\n    end\nend\n\nprint(Dir.new())\n",
+            // No `new` in the impl: `new P(...)` asks for the fields.
+            "struct P as\n    x: number\nend\n\nprint(P.new({ x = 1 }))\n",
+            // `new P(...)` calls the `New` the impl writes.
+            "struct P as\n    x: number\nend\n\nimpl P\n    function New(x: number): P\n        return new P { x = x }\n    end\nend\n\nprint(P.new({ x = 1 }))\n",
+            // `new Box()` in the impl of `Box` builds the raw value.
+            "struct Box as\n    n: number = 0\nend\n\nimpl Box\n    function new(): Box\n        return new Box {}\n    end\n\n    function fresh(): Box\n        return Box.new()\n    end\nend\n",
+        ] {
+            assert!(
+                !lints(src).iter().any(|l| l.name == "prefer_new"),
+                "{src}: {:?}",
+                lints(src)
+            );
+        }
+
+        // A definitions file runs no lint.
+        let options = crate::EmitOptions {
+            definitions: true,
+            ..crate::EmitOptions::default()
+        };
+        let got = crate::compile_with("declare Thing: { v: Vector3 }\n", &options).unwrap();
+        assert!(got.lints.is_empty(), "{:?}", got.lints);
+    }
+
+    /// `alloy flux --fix` over a file of mixed calls: the result parses,
+    /// compiles to the same Luau, and draws no second round.
+    #[test]
+    fn the_prefer_new_fix_round_trips() {
+        let src = "local part = Instance.new('Part')\npart.Size = Vector3.new(4, 1, 2)\npart.CFrame = CFrame.new(0, 5, 0) * CFrame.Angles(0, math.pi, 0)\nlocal colors = ColorSequence.new({\n    ColorSequenceKeypoint.new(0, Color3.new(1, 0, 0)),\n    ColorSequenceKeypoint.new(1, Color3.fromRGB(0, 0, 255)),\n})\nlocal rng = Random.new(7):NextNumber()\nlocal scale = t.new(1)\nprint(part, colors, rng, scale, `{UDim.new(0, 8)}`)\n";
+        let (fixed, n) = crate::lint::apply_fixes(
+            src,
+            &lints(src)
+                .into_iter()
+                .filter(|l| l.name == "prefer_new")
+                .collect::<Vec<_>>(),
+        );
+
+        assert_eq!(n, 9);
+        assert!(alloy_syntax::parse_one(&fixed).is_ok(), "{fixed}");
+        assert_same_luau(src, &fixed);
+        assert!(
+            !lints(&fixed).iter().any(|l| l.name == "prefer_new"),
+            "{fixed}"
         );
     }
 

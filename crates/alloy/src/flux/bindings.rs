@@ -72,7 +72,7 @@ impl<'s> Scan<'s> {
 
     /// The struct a token sits in: the target of the `struct` or `impl`
     /// block that encloses it.
-    fn enclosing_owner(&self, j: usize) -> Option<&'s str> {
+    pub(crate) fn enclosing_owner(&self, j: usize) -> Option<&'s str> {
         let mut best: Option<(usize, &'s str)> = None;
 
         for (i, e) in self.st.ends.iter().enumerate() {
@@ -513,7 +513,7 @@ impl<'s> Scan<'s> {
     /// are dropped in silence. The count is exact for a function the
     /// file or an imported module declares once with a fixed list: a
     /// plain name, `M.f`, a static, a method on a value the file types,
-    /// and a function in a local table.
+    /// a function in a local table, and the constructor `new W(a)` calls.
     pub(crate) fn argument_count(&self, out: &mut Vec<Lint>) {
         let own = self.callables();
         let find = |key: &str| {
@@ -522,12 +522,19 @@ impl<'s> Scan<'s> {
                 .find(|(k, _)| k == key)
                 .and_then(|(_, c)| c.params)
         };
+        // A word such as the `reply` of a message head is a keyword
+        // there, and calls nothing.
+        let keyword = |i: usize| {
+            alloy_syntax::contextual::is_contextual(self.t(i))
+                && alloy_syntax::contextual::keyword_at(self.src, self.toks, i)
+        };
 
         for i in 0..self.toks.len() {
             if !self.is_name(i)
+                || keyword(i)
                 || matches!(
                     self.prev(i),
-                    "." | ":" | "?." | "?:" | "function" | "local" | "const"
+                    "." | ":" | "?." | "?:" | "function" | "local" | "const" | "message" | "remote"
                 )
             {
                 continue;
@@ -536,7 +543,21 @@ impl<'s> Scan<'s> {
             let Some(end) = self.path_end(i) else {
                 continue;
             };
-            let (key, open, colon) = if self.at(end, "(") {
+            let ctor = self.prev(i) == "new";
+            let (key, open, colon) = if ctor {
+                // `new W(a)` calls the constructor, `W.new` or `W.New`.
+                let Some(open) = self.after_type_args(end).filter(|&o| self.at(o, "(")) else {
+                    continue;
+                };
+                let path = self.slice(i, end);
+                let key = ["new", "New"]
+                    .map(|c| format!("{path}.{c}"))
+                    .into_iter()
+                    .find(|k| find(k).is_some())
+                    .unwrap_or_default();
+
+                (key, open, false)
+            } else if self.at(end, "(") {
                 // A parameter of that name is some other value.
                 if end > i + 1
                     && self
@@ -579,14 +600,18 @@ impl<'s> Scan<'s> {
             }
 
             let word = |n: usize| if n == 1 { "argument" } else { "arguments" };
+            let callee = if ctor {
+                key.as_str()
+            } else {
+                self.slice(i, open)
+            };
             self.lint(
                 out,
                 "argument_count",
                 i,
                 close,
                 format!(
-                    "`{}` takes {takes} {}; this call passes {given}",
-                    self.slice(i, open),
+                    "`{callee}` takes {takes} {}; this call passes {given}",
                     word(takes)
                 ),
                 None,

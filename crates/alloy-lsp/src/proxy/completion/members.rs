@@ -311,6 +311,20 @@ impl State {
         };
         let labels: HashSet<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
 
+        // A message carries these four. `on` and `once` bind on the
+        // Actor of the script, so a file with no `.actor.` infix has
+        // `fire` alone to call.
+        if ["topic", "fire", "on", "once"]
+            .iter()
+            .all(|l| labels.contains(l))
+        {
+            if !alloy::directives::is_actor(uri) {
+                items.retain(|i| !matches!(i["label"].as_str(), Some("on" | "once")));
+            }
+
+            return;
+        }
+
         // Every remote carries these two; no other value in the
         // language does.
         if !(labels.contains("spec") && labels.contains("instance")) {

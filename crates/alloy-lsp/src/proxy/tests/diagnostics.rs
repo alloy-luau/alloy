@@ -1386,7 +1386,9 @@ fn a_config_file_reports_its_keys_and_its_load() {
 /// action goes; an edit over the author's own text stays.
 #[test]
 pub(crate) fn a_child_edit_over_generated_text_is_dropped() {
-    let src = "local function describe(n: number): string\n  return match n with\n    case 1 then \"one\"\n    default \"many\"\n  end\nend\nlocal a = describe(2)\n";
+    // The module's `return nil` follows the last token, so the call
+    // under test is not on the last line.
+    let src = "local function describe(n: number): string\n  return match n with\n    case 1 then \"one\"\n    default \"many\"\n  end\nend\nlocal a = describe(2)\nprint(a)\n";
     let (mut st, uri) = one_file(src);
     let shadow_uri = "file:///m/t.luau";
     st.shadows.insert(shadow_uri.to_string(), uri.to_string());

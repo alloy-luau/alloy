@@ -38,4 +38,4 @@ end
 type Self = typeof(Provider)
 local held: Self = Provider
 held:Reset()
-print(held:Bump(2), Provider.helper(1), Klass, Rebound, Written)
+print(held:Bump(2), Provider.helper(1), Klass, Rebound, Written) return nil

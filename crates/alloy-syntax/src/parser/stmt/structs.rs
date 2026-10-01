@@ -514,6 +514,92 @@ impl<'a> Parser<'a> {
         }))
     }
 
+    /*
+    `message Name(params)`, then `reply(params)`, then `as parallel`,
+    each optional, in that order. The declaration ends on its line, as a
+    remote does, so a failed header skips to the end of the line.
+    */
+    pub(super) fn message_decl(
+        &mut self,
+        start: usize,
+        attributes: Vec<Attr>,
+        exported: bool,
+    ) -> Result<Stmt, ParseError> {
+        self.expect("message")?;
+
+        match self.message_tail(start, attributes, exported) {
+            Err(e) if self.lenient => {
+                self.report_at(e.offset, &e.message);
+
+                while !self.at_end() && !self.newline_before_pos() {
+                    self.bump();
+                }
+
+                Ok(Stmt::Error(TokSpan::new(start, self.pos)))
+            }
+
+            other => other,
+        }
+    }
+
+    /// The message after its keyword: the name, the parameters, the
+    /// `reply(...)` of the answer, and the `as parallel` that binds the
+    /// handler in the parallel phase.
+    fn message_tail(
+        &mut self,
+        start: usize,
+        attributes: Vec<Attr>,
+        exported: bool,
+    ) -> Result<Stmt, ParseError> {
+        let name = self.expect_name()?;
+        let params = self.param_list()?;
+        let reply = match self.reply_follows() {
+            true => {
+                let word = TokSpan::new(self.bump(), self.pos);
+
+                Some((word, self.param_list()?))
+            }
+
+            false => None,
+        };
+        let parallel = match self.at("as") && !self.newline_before_pos() {
+            true => {
+                self.bump();
+
+                if !self.at("parallel") {
+                    return Err(self.err(
+                        "a message takes `reply(...)` and then `as parallel` after its parameters, or nothing",
+                    ));
+                }
+
+                Some(TokSpan::new(self.bump(), self.pos))
+            }
+
+            false => None,
+        };
+
+        // `as parallel` binds the handler, and `reply` belongs to the
+        // channel, so the header reads params, reply, phase.
+        if parallel.is_some() && self.reply_follows() {
+            return Err(self.err("a message writes `reply(...)` before `as parallel`"));
+        }
+
+        Ok(Stmt::Message(MessageDecl {
+            attributes,
+            exported,
+            name,
+            params,
+            reply,
+            parallel,
+            span: TokSpan::new(start, self.pos),
+        }))
+    }
+
+    /// Reports if `reply(` follows on the line of a message header.
+    fn reply_follows(&self) -> bool {
+        self.at("reply") && !self.newline_before_pos() && self.text_at(1) == "("
+    }
+
     /// `macro name(params) {stat} [exp] end`.
     pub(super) fn macro_decl(&mut self, start: usize, exported: bool) -> Result<Stmt, ParseError> {
         let open = self.pos;

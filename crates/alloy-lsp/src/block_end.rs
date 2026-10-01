@@ -135,6 +135,8 @@ fn open_blocks(src: &str, until: usize) -> Vec<(u32, usize)> {
     let mut line = 0u32;
     let mut read = 0usize;
     let mut depth = 0i32;
+    // The depth of the stack each open `if` sits at.
+    let mut if_at: Vec<usize> = Vec::new();
 
     for i in 0..toks.len() {
         let at = toks[i].start as usize;
@@ -147,7 +149,13 @@ fn open_blocks(src: &str, until: usize) -> Vec<(u32, usize)> {
         line += breaks;
         read = at;
 
-        if i == 0 || (breaks > 0 && depth <= 0) {
+        // A header broken at `where`, `and` or `or` goes on, on either
+        // side of the break.
+        let carried = i > 0
+            && (matches!(text(i), "where" | "and" | "or")
+                || matches!(text(i - 1), "where" | "and" | "or"));
+
+        if i == 0 || (breaks > 0 && depth <= 0 && !carried) {
             head_at = i;
             head = text(i);
 
@@ -219,6 +227,12 @@ fn open_blocks(src: &str, until: usize) -> Vec<(u32, usize)> {
                 stack.push((line, at));
             }
 
+            // The `do` of a loop whose header runs over lines closes the
+            // header, and the `end` takes the column of the loop's word.
+            "do" if matches!(head, "for" | "while" | "after") => {
+                stack.push((line, toks[head_at].start as usize));
+            }
+
             "do" | "repeat" => {
                 stack.push((line, at));
             }
@@ -251,10 +265,27 @@ fn open_blocks(src: &str, until: usize) -> Vec<(u32, usize)> {
                     | "??"
             ) =>
             {
-                stack.push((line, at));
+                // The body opens at the `then`, which sets the line. Enter
+                // before it goes on with the header and wants no `end`.
+                stack.push((u32::MAX, at));
+                if_at.push(stack.len());
+            }
+
+            // An `if` opens its body at the `then`, on the line of the
+            // `if` or, for a header that runs over lines, `if const n = x`
+            // and then `where n > 0 then`, on a later one. Enter there is
+            // the Enter that wants the `end`, at the column of the `if`.
+            "then" if if_at.last() == Some(&stack.len()) => {
+                if let Some(top) = stack.last_mut() {
+                    top.0 = line;
+                }
             }
 
             "end" | "until" => {
+                if if_at.last() == Some(&stack.len()) {
+                    if_at.pop();
+                }
+
                 stack.pop();
             }
 
@@ -388,6 +419,28 @@ mod tests {
         ] {
             assert_eq!(needs_end(src, line).as_deref(), Some(want), "{src:?}");
         }
+    }
+
+    /// An `if` whose header breaks, with `where` or `and` on the next
+    /// line, opens its body at the `then`, so Enter there wants the `end`
+    /// at the column of the `if`. A `for` or `while` opens at its `do`.
+    #[test]
+    fn a_broken_header_wants_its_end_after_then_or_do() {
+        for (src, line, want) in [
+            ("if const n = held\n    where n > 0 then\n", 1, ""),
+            ("  if const n = held where\n      n > 0 then\n", 1, "  "),
+            ("if a\n    and b then\n", 1, ""),
+            ("for _, p in parts\n    where p > 1 do\n", 1, ""),
+            ("while local k = held\n    where k > 5 do\n", 1, ""),
+        ] {
+            assert_eq!(needs_end(src, line).as_deref(), Some(want), "{src:?}");
+        }
+
+        // The line of the `if` itself opens nothing yet.
+        assert_eq!(
+            needs_end("if const n = held\n    where n > 0 then\n", 0),
+            None
+        );
     }
 
     /// The `end` of the opener is there already: the next line back at

@@ -576,6 +576,22 @@ pub fn complete(offset: u32) -> String {
                 }
             }
 
+            Context::ParallelDo { prefix } => {
+                let from = offset - prefix.len();
+                items.push(word("do", "keyword", Some("Opens the block that runs in the parallel phase.".to_string()), from));
+            }
+
+            Context::MessageTail { prefix, after_as, replied } => {
+                let from = offset - prefix.len();
+
+                if !after_as && !replied {
+                    items.push(word("reply", "keyword", Some("The answer the handler sends back with `respond`.".to_string()), from));
+                }
+
+                let label = if *after_as { "parallel" } else { "as parallel" };
+                items.push(word(label, "keyword", Some("Binds the handler in the parallel phase.".to_string()), from));
+            }
+
             Context::ImportStar => {
                 items.push(word("as", "keyword", Some("The name the module takes here.".to_string()), offset));
             }
@@ -946,6 +962,7 @@ pub fn fold(text: &str) -> String {
             interfaces: s.interfaces.clone(),
             namespaces: alloy::declarations::namespace_names(&s.source),
             tables: alloy::tables::plain_tables(&s.source),
+            aliases: Vec::new(),
         };
         let mut out = text.to_string();
 

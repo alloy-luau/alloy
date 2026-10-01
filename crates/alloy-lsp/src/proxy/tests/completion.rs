@@ -430,9 +430,9 @@ pub(crate) fn a_dot_after_a_std_name_lists_the_std_members() {
     assert_eq!(labels, ["new", "from"], "the statics of HashMap");
     assert_eq!(
         result[0]["detail"],
-        json!("HashMap.new<K, V>(): HashMap<K, V>")
+        json!("HashMap.new<K, V>(t: { [K]: V }?): HashMap<K, V>")
     );
-    assert_eq!(result[0]["insertText"], json!("new()"));
+    assert_eq!(result[0]["insertText"], json!("new(${1:t})$0"));
     assert!(
         result[0]["documentation"]["value"]
             .as_str()

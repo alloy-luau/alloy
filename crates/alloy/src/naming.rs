@@ -641,6 +641,17 @@ impl<'a> Walk<'a> {
                 self.params(&r.params, None);
             }
 
+            // A message's name is its topic string, so it keeps the
+            // lint alone, as a remote does.
+            Stmt::Message(m) => {
+                self.declare(Some(Kind::Remote), m.name, Reach::None);
+                self.params(&m.params, None);
+
+                if let Some((_, reply)) = &m.reply {
+                    self.params(reply, None);
+                }
+            }
+
             Stmt::Attribute(a) => {
                 self.declare(Some(Kind::Attribute), a.name, Reach::None);
                 self.params(&a.params, None);
@@ -1327,16 +1338,7 @@ pub(crate) type ScopedBinding = (String, usize, Option<Vec<(usize, usize)>>);
 /// the walk does not know, such as a name a pattern binds, and a
 /// reader takes it to hold every token.
 pub(crate) fn scoped_bindings(src: &str, toks: &[Tok], block: &Block) -> Vec<ScopedBinding> {
-    let mut w = Walk {
-        src,
-        toks,
-        decls: Vec::new(),
-        roles: vec![Role::Unknown; toks.len()],
-        exported: Vec::new(),
-        const_locals: HashSet::new(),
-        promoted: Vec::new(),
-    };
-    w.block(&block.stmts, toks.len(), true, false);
+    let w = walked(src, toks, block);
 
     let imports: HashSet<usize> = block
         .stmts
@@ -1374,6 +1376,34 @@ pub(crate) fn scoped_bindings(src: &str, toks: &[Tok], block: &Block) -> Vec<Sco
 
             (w.text(d.tok).to_string(), d.tok, reach)
         })
+        .collect()
+}
+
+/// The walk over a whole file.
+fn walked<'a>(src: &'a str, toks: &'a [Tok], block: &'a Block) -> Walk<'a> {
+    let mut w = Walk {
+        src,
+        toks,
+        decls: Vec::new(),
+        roles: vec![Role::Unknown; toks.len()],
+        exported: Vec::new(),
+        const_locals: HashSet::new(),
+        promoted: Vec::new(),
+    };
+    w.block(&block.stmts, toks.len(), true, false);
+
+    w
+}
+
+/// The identifier tokens that name something a value owns, a field, a
+/// method, a key or a variant, and read no binding.
+pub(crate) fn member_tokens(src: &str, toks: &[Tok], block: &Block) -> HashSet<usize> {
+    walked(src, toks, block)
+        .roles
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| **r == Role::Member)
+        .map(|(i, _)| i)
         .collect()
 }
 

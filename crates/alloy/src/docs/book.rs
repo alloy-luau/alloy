@@ -137,6 +137,12 @@ pub const BOOK: &[Section] = &[
         key: Some("@test"),
     },
     Section {
+        number: "3.15",
+        id: "parallel",
+        title: "Parallel Luau",
+        key: Some("parallel"),
+    },
+    Section {
         number: "4",
         id: "strict",
         title: "Strict by default",

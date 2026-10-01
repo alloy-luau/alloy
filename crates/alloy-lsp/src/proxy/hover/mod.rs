@@ -14,10 +14,13 @@ pub(crate) use declarations::{
 pub(crate) use fields::{
     declared_field_hover, declared_field_owner, declared_parameter_hover,
     declared_type_parameters_of, enclosing_brace, field_key, foreign_method_hover,
-    function_name_of, literal_key, literal_key_path, name_solver_local, name_solver_struct,
-    receiver_type, record_entry, remote_parameter_hover, used_field_hover, used_field_owner,
+    function_name_of, literal_key, literal_key_path, member_hover, name_solver_local,
+    name_solver_struct, owner_line, receiver_type, record_entry, remote_parameter_hover,
+    used_field_hover, used_field_owner,
 };
 pub(crate) use members::{attach_std_member_docs, std_member_hover, std_receiver};
+#[cfg(test)]
+pub(crate) use modules::remote_hover;
 pub(crate) use modules::{import_spec, module_hover, remote_spec, service_hover};
 
 #[cfg(test)]
@@ -25,13 +28,14 @@ pub(crate) use modules::{import_spec, module_hover, remote_spec, service_hover};
 pub(crate) use modules::{shadows_an_import, star_module_hover, std_import_hover};
 pub(crate) use restyle::group_len;
 pub(crate) use restyle::{
-    bind_hover_receiver, close_empty_packs, close_item_packs, declared_annotation, declared_head,
-    declared_signature, dedupe_item_details, drop_bound_intersections, empty_parameter_names,
-    fold_std_shapes, invents_a_type, is_byte_count, keep_annotation, lowers_a_block, member_doc,
-    name_by_declaration, name_method_doc, name_method_receiver, name_self_receiver,
-    name_solver_variable, name_trait_method, names_a_key, narrowed_field,
-    prefer_constructed_struct, restates_itself, restore_struct_arguments, restyle_hover,
-    restyle_signatures, source_type, std_generic, unlocal_parameter,
+    arrow_heads, bind_hover_receiver, close_empty_packs, close_item_packs, declared_annotation,
+    declared_head, declared_signature, dedupe_item_details, drop_bound_intersections, drop_bounds,
+    empty_parameter_names, fold_std_shapes, invents_a_type, is_byte_count, keep_annotation,
+    lowers_a_block, member_doc, method_doc, method_line, method_member_hover, name_by_declaration,
+    name_method_doc, name_method_receiver, name_self_receiver, name_solver_variable,
+    name_trait_method, names_a_key, narrowed_field, prefer_constructed_struct, prefer_origin_alias,
+    restates_itself, restore_struct_arguments, restyle_hover, restyle_signatures, source_type,
+    std_generic, type_bounds, unlocal_parameter, with_return_arrows,
 };
 
 use super::completion::{lands_on_member, member_position, sep_of};
@@ -547,8 +551,25 @@ impl Server {
                         _ => (None, None),
                     };
 
-                    markup::hover(&spot, &bound, member.as_ref(), from.as_deref())
-                        .unwrap_or(Value::Null)
+                    // A property of a Roblox tag hovers the way the member
+                    // does after `gui.`: its type and the engine's text.
+                    let roblox = match &spot {
+                        markup::Spot::Attribute { class, name }
+                            if alloy::luaux::roblox::is_class(class)
+                                && !alloy::alx::FREE_PROPS.contains(&name.as_str()) =>
+                        {
+                            st.roblox_hover(class, Some(name))
+                        }
+
+                        _ => None,
+                    };
+
+                    match roblox {
+                        Some(text) => json!({ "contents": { "kind": "markdown", "value": text } }),
+
+                        None => markup::hover(&spot, &bound, member.as_ref(), from.as_deref())
+                            .unwrap_or(Value::Null),
+                    }
                 }
 
                 None => return false,
@@ -569,6 +590,42 @@ impl Server {
 }
 
 impl State {
+    /// The hover of a Roblox class, as a `<Class>` tag gives it, or of a
+    /// property of it, as `gui.DisplayOrder` gives it: the class, the
+    /// member with its type, and the text of the API docs. `None` for a
+    /// name that is not a Roblox class or a property of one.
+    pub(crate) fn roblox_hover(&self, class: &str, member: Option<&str>) -> Option<String> {
+        use alloy::luaux::roblox;
+
+        if !roblox::is_class(class) {
+            return None;
+        }
+
+        let Some(member) = member else {
+            let tag = markup::Spot::Tag {
+                name: class.to_string(),
+            };
+            let value = markup::hover(&tag, &HashSet::new(), None, None)?;
+
+            return value["contents"]["value"].as_str().map(str::to_string);
+        };
+
+        if !roblox::has_property(class, member) {
+            return None;
+        }
+
+        let line = match alloy::roblox_props::property_type(class, member) {
+            Some(ty) => format!("{member}: {}", super::completion::readable_type(ty)),
+
+            None => member.to_string(),
+        };
+        let doc = self
+            .roblox_doc(class, member)
+            .or_else(|| roblox::is_deprecated_on(class, member).then(|| "Deprecated.".to_string()));
+
+        Some(member_hover(class, &line, doc.as_deref()))
+    }
+
     /// The completion items inside `.alx` markup at a byte offset, or
     /// `None` off markup. `as_class` completes an attribute slot as that
     /// Roblox class, for a tag an ingot rewrites into it.

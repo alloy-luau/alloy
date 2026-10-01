@@ -5,4 +5,4 @@ local util = require("./util")
 local Util = require("./util")
 local _m1 = require("./util") local helper = _m1.helper
 
-print(util, Util, helper)
+print(util, Util, helper) return nil

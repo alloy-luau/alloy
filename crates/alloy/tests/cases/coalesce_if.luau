@@ -20,4 +20,4 @@ local function two(v: number?): number
 	if v == nil then v = 5 print("set") end
 	return (if v == nil then 6 else v)
 end
-print(eq(nil), falsy(nil), branch(nil), spread(nil), two(nil))
+print(eq(nil), falsy(nil), branch(nil), spread(nil), two(nil)) return nil

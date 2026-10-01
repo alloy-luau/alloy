@@ -103,20 +103,36 @@ impl<'s> Formatter<'s> {
         }
     }
 
+    /// Whether the `do` at `i` ends the header of a `for` or a `while`.
+    ///
+    /// A line break does not end a header. The condition can open its
+    /// own line, a line can end at `in`, a `where` test can break at its
+    /// `and`, and a bracket group can break. The walk stopped at a line
+    /// break before, so the `do` opened a second block, and each line
+    /// below the loop moved one step in (LANG_BUGS 106, 121, 132). Now
+    /// only a token that ends a header or a block stops the walk.
     fn for_header_before(&self, i: usize) -> bool {
         let mut j = i;
-        // A newline inside a bracket group is the group's. A header whose
-        // group broke goes on past it, so its `do` opens no second block.
         let mut depth = 0usize;
 
         while j > 0 {
             j -= 1;
             let t = &self.items[j];
 
-            if !t.is_comment() && closes(&t.text) {
+            if t.is_comment() {
+                continue;
+            }
+
+            if closes(&t.text) {
                 depth += 1;
-            } else if !t.is_comment() && opens(&t.text) {
-                depth = depth.saturating_sub(1);
+            } else if opens(&t.text) {
+                // The `do` is inside this group, so a loop outside the
+                // group does not own it.
+                if depth == 0 {
+                    return false;
+                }
+
+                depth -= 1;
             }
 
             if depth > 0 {
@@ -127,7 +143,7 @@ impl<'s> Formatter<'s> {
                 return true;
             }
 
-            if t.newlines_before > 0 || t.is("do") || t.is("then") || t.is("end") {
+            if t.is("do") || t.is("then") || t.is("end") {
                 return false;
             }
         }
@@ -278,6 +294,10 @@ impl<'s> Formatter<'s> {
         // expression that opened inside its group, so the `)` of a call
         // in a branch leaves the `if` open.
         let mut brackets = 0usize;
+        // The item that opened each open body, and each body with its
+        // opener and its closer once it closes.
+        let mut owners: Vec<usize> = Vec::new();
+        let mut bodies: Vec<(usize, usize)> = Vec::new();
 
         for i in 0..self.items.len() {
             let it = &self.items[i];
@@ -348,6 +368,7 @@ impl<'s> Formatter<'s> {
                         )
                     ) {
                         stack.pop();
+                        bodies.extend(owners.pop().map(|k| (k, i)));
                     }
 
                     depths[i] = level(&stack);
@@ -356,6 +377,7 @@ impl<'s> Formatter<'s> {
                 "until" => {
                     if stack.last() == Some(&Frame::Block) {
                         stack.pop();
+                        bodies.extend(owners.pop().map(|k| (k, i)));
                     }
 
                     depths[i] = level(&stack);
@@ -371,6 +393,7 @@ impl<'s> Formatter<'s> {
                     if let_else {
                         depths[i] = level(&stack);
                         stack.push(Frame::Block);
+                        owners.push(i);
                     } else if in_expr_if(&stack) || (mid_line && self.line_has_before(i, "if")) {
                         // A `then` or `else` that opens a line inside an
                         // `if` expression continues it, one level in for
@@ -421,6 +444,12 @@ impl<'s> Formatter<'s> {
                             0
                         };
 
+                    // A loop's `do` that opens a line goes back under its
+                    // `for` or `while`, as `then` goes back under `if`.
+                    if text == "do" && it.newlines_before > 0 && !self.starts_block(i) {
+                        depths[i] = depths[i].saturating_sub(1);
+                    }
+
                     if text == "if"
                         && ((prev.is_some_and(expression_context)
                             && !(self.first_on_line(i)
@@ -431,10 +460,13 @@ impl<'s> Formatter<'s> {
                         stack.push(Frame::ExprIf(brackets, false));
                     } else if text == "match" && !it.name_here && self.starts_block(i) {
                         stack.push(Frame::Match);
+                        owners.push(i);
                     } else if text == "trait" && self.starts_block(i) {
                         stack.push(Frame::Trait);
+                        owners.push(i);
                     } else if text == "attribute" && self.starts_block(i) {
                         stack.push(Frame::Contract);
+                        owners.push(i);
                     } else if stack.last() == Some(&Frame::Contract) {
                         // Every word of a `requires` clause sits on one
                         // line, so nothing inside a contract body opens.
@@ -448,6 +480,7 @@ impl<'s> Formatter<'s> {
                             signature[i] = true;
                         } else {
                             stack.push(Frame::Block);
+                            owners.push(i);
                         }
                     } else {
                         let opens_block = self.is_loop_head(i)
@@ -462,17 +495,48 @@ impl<'s> Formatter<'s> {
 
                         if opens_block && declared {
                             stack.push(Frame::Class);
+                            owners.push(i);
                         } else if opens_block {
                             stack.push(Frame::Block);
+                            owners.push(i);
                         }
                     }
                 }
             }
         }
 
+        /*
+        A body that opens on a line that continues the one above, as the
+        `function` of `: run(function(...)` in a broken ternary, takes
+        that line's extra level. Without it the body sat at the level of
+        the continuation line and its `end` at the statement's, so each
+        read as a line of something else (LANG_BUGS 101).
+        */
+        for (k, end) in bodies {
+            let mut first = k;
+
+            while !self.first_on_line(first) {
+                first -= 1;
+            }
+
+            let split_condition = self.cond_line.get(first).copied().unwrap_or(false);
+
+            if self.continues_at(first) && !split_condition {
+                for d in &mut depths[k + 1..=end] {
+                    *d += 1;
+                }
+            }
+        }
+
+        // A comment takes the level of the code after it. Before an `end`
+        // or an `until`, it ends the body of the block and keeps the
+        // body's level. It took the level of the `end` before, so it read
+        // as a comment after the block (LANG_BUGS 122).
         for i in 0..self.items.len() {
             if self.items[i].is_comment()
                 && let Some(n) = self.next_code(i)
+                && !self.items[n].is("end")
+                && !self.items[n].is("until")
             {
                 depths[i] = depths[n];
             }
@@ -851,9 +915,9 @@ impl<'s> Formatter<'s> {
 
     /// Whether the parentheses from `open` to `close` hug what they hold:
     /// one table, `f({ ... })`, a parameter typed by one, `(props: { ...
-    /// })`, or one parenthesized value, `push((<Frame />))`. The inner
-    /// group breaks inside them, so they take no lines of brackets of
-    /// their own.
+    /// })`, one array, `f([ ... ])`, or one parenthesized value,
+    /// `push((<Frame />))`. The inner group breaks inside them, so they
+    /// take no lines of brackets of their own.
     fn hugs(&self, open: usize, close: usize) -> bool {
         if !matches!(self.items[open].text.as_str(), "(" | "?(") || close <= open + 1 {
             return false;
@@ -872,6 +936,10 @@ impl<'s> Formatter<'s> {
             }),
 
             ")" if !inner.is_comment() => inner_open == open + 1 && self.items[inner_open].is("("),
+
+            // An index closes with `]` too, `f(t[k])`, but its `[` never
+            // follows the `(` directly.
+            "]" if !inner.is_comment() => inner_open == open + 1 && self.items[inner_open].is("["),
 
             _ => false,
         }
@@ -1399,32 +1467,45 @@ impl<'s> Formatter<'s> {
 
     // --- the binary chain ------------------------------------------------------------
 
-    /// Breaks every chain of binary operators the last render left on one
-    /// line past `column_width`, before each operator of the chain. True
+    /// Breaks a chain of binary operators on each line the last render
+    /// left past `column_width`, before each operator of the chain. True
     /// when one broke, so the caller renders again. An `if` expression
-    /// around the chain breaks first, and a chain inside the operands
-    /// waits for the next pass, as with `force_long_expr_ifs`.
+    /// around the chain breaks first, as with `force_long_expr_ifs`.
+    ///
+    /// One chain breaks on a line in a pass, and the other chains on the
+    /// line wait for the next render: the break can make the line fit.
+    /// The chain inside the fewest bracket groups breaks first, so a
+    /// chain inside the operands, or inside a call on the line, waits. Two
+    /// chains broke in one pass before: the call around the inner one
+    /// then broke, and a second run joined the call again (LANG_BUGS 124).
     ///
     /// The condition of an `if` statement first takes a line of its own,
     /// between the `if` and the `then`. It breaks at its operators only
     /// when that line is too long too.
     pub(crate) fn force_long_chains(&mut self) -> bool {
-        let mut changed = false;
-        // The last item of the last chain that broke in this pass.
-        let mut broke_until = 0;
+        let groups_around = |i: usize| {
+            std::iter::successors(self.enclosing_open(i), |&o| self.enclosing_open(o)).count()
+        };
+        let mut long: Vec<usize> = (0..self.chains.len())
+            .filter(|&c| {
+                let (first, last) = (self.chains[c].first, self.chains[c].last);
+                let line = self.at_line[first];
 
-        for c in 0..self.chains.len() {
-            let (first, last) = (self.chains[c].first, self.chains[c].last);
+                !self.hole[first]
+                    && !self.held[first]
+                    && self.at_line[last] == line
+                    && self.code_width(line, last) > self.options.column_width
+            })
+            .collect();
+        // A stable sort keeps an outer chain before the chains inside it.
+        long.sort_by_cached_key(|&c| groups_around(self.chains[c].first));
+        let mut broke = std::collections::HashSet::new();
 
-            if (changed && first <= broke_until) || self.hole[first] || self.held[first] {
-                continue;
-            }
-
+        for c in long {
+            let first = self.chains[c].first;
             let line = self.at_line[first];
 
-            if self.at_line[last] != line
-                || self.code_width(line, last) <= self.options.column_width
-            {
+            if broke.contains(&line) {
                 continue;
             }
 
@@ -1443,11 +1524,10 @@ impl<'s> Formatter<'s> {
                 self.items[b].newlines_before = self.items[b].newlines_before.max(1);
             }
 
-            broke_until = last;
-            changed = true;
+            broke.insert(line);
         }
 
-        changed
+        !broke.is_empty()
     }
 
     /// The width of output line `line` without the line comment that ends

@@ -297,7 +297,7 @@ fn file_shapes(
     let derives_of = |attributes: &[alloy_syntax::ast::Attr]| -> Vec<String> {
         attributes
             .iter()
-            .filter(|a| a.name.map(&text).as_deref() == Some("derive"))
+            .filter(|a| a.name.map(text).as_deref() == Some("derive"))
             .flat_map(|a| a.args.iter().map(|x| text(x.span())))
             // `serde.Serialize` through a star import of the std.
             .map(|d: String| match d.rsplit_once('.') {
@@ -360,7 +360,7 @@ fn file_shapes(
             .filter(|f| {
                 !f.attributes
                     .iter()
-                    .any(|a| a.name.map(&text).as_deref() == Some("skip"))
+                    .any(|a| a.name.map(text).as_deref() == Some("skip"))
             })
             .map(|f| crate::WireField {
                 name: text(f.name),

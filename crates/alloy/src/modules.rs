@@ -2331,7 +2331,7 @@ pub fn import_macros(
             let Some(m) = found.iter().find(|m| m.name == name && !m.hidden) else {
                 continue;
             };
-            let local = sp.alias.map(&text).unwrap_or(name);
+            let local = sp.alias.map(text).unwrap_or(name);
 
             if !out.iter().any(|had| had.name == local) {
                 out.push(crate::MacroSource {

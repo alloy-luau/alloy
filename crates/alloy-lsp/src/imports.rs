@@ -171,7 +171,7 @@ pub fn exports_of(src: &str, is_alx: bool) -> Vec<Export> {
                 for spec in &e.specs {
                     let name = spec
                         .alias
-                        .map(&name_of)
+                        .map(name_of)
                         .unwrap_or_else(|| name_of(spec.name));
                     push(name, e.type_only || spec.is_type, false, false, 6);
                 }

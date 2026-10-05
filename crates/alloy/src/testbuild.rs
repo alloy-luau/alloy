@@ -764,9 +764,9 @@ fn write_modules(
     let (shapes, wire_scopes) = crate::build::struct_shapes(&sources, &input, &aliases);
 
     // Each module compiles and writes on its own, so they run on every
-    // core, under one `Reads` for the modules they import. On one
+    // core, under the run's `Reads` for the modules they import. On one
     // thread the 1070 modules of Strata took minutes.
-    let reads = std::sync::Arc::new(crate::modules::Reads::default());
+    let reads = crate::modules::current_reads().unwrap_or_default();
     let compile = |path: &PathBuf| -> std::io::Result<Option<(PathBuf, String)>> {
         let rel = path.strip_prefix(&input).unwrap_or(path).to_path_buf();
 

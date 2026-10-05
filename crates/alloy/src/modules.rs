@@ -107,6 +107,12 @@ pub fn with_reads<R>(reads: &std::sync::Arc<Reads>, f: impl FnOnce() -> R) -> R 
     f()
 }
 
+/// The `Reads` of this thread, so work it hands to other threads reads
+/// through the same table.
+pub fn current_reads() -> Option<std::sync::Arc<Reads>> {
+    READS.with(|r| r.borrow().clone())
+}
+
 /// `read` of `key`, from the build's `Reads` when this thread has one.
 fn remembered<T: Clone>(
     table: impl Fn(&Reads) -> &RwLock<HashMap<PathBuf, T>>,

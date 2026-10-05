@@ -763,18 +763,22 @@ fn write_modules(
     // clones and serializes through its own derives in a test as well.
     let (shapes, wire_scopes) = crate::build::struct_shapes(&sources, &input, &aliases);
 
-    for path in sources {
-        let rel = path.strip_prefix(&input).unwrap_or(&path).to_path_buf();
+    // Each module compiles and writes on its own, so they run on every
+    // core, under one `Reads` for the modules they import. On one
+    // thread the 1070 modules of Strata took minutes.
+    let reads = std::sync::Arc::new(crate::modules::Reads::default());
+    let compile = |path: &PathBuf| -> std::io::Result<Option<(PathBuf, String)>> {
+        let rel = path.strip_prefix(&input).unwrap_or(path).to_path_buf();
 
         if exclude.is_match(&rel) {
-            continue;
+            return Ok(None);
         }
 
         let Some(rel_out) = crate::build::output_for(&rel) else {
-            continue;
+            return Ok(None);
         };
         let module_rel = modules.join(&rel_out);
-        let source = std::fs::read_to_string(&path)?;
+        let source = std::fs::read_to_string(path)?;
         let source_rel = config.build.input.join(&rel);
         let options = EmitOptions {
             file_name: source_rel.to_string_lossy().into_owned(),
@@ -795,7 +799,9 @@ fn write_modules(
                         .replace('\\', "/"),
                 )
             }),
-            ..EmitOptions::default().imports(&source, &path, &aliases)
+            // A test reads the ship artifact alone.
+            ship_only: true,
+            ..EmitOptions::default().imports(&source, path, &aliases)
         };
         let compiled = crate::compile_file(
             &source_rel.to_string_lossy(),
@@ -821,10 +827,18 @@ fn write_modules(
                 }
 
                 std::fs::write(target, text)?;
+
+                Ok(None)
             }
 
-            Err(e) => failures.push((rel, e.to_string())),
+            Err(e) => Ok(Some((rel, e.to_string()))),
         }
+    };
+
+    for found in crate::build::par_map(&sources, |path| {
+        crate::modules::with_reads(&reads, || compile(path))
+    }) {
+        failures.extend(found?);
     }
 
     let mut plain = Vec::new();

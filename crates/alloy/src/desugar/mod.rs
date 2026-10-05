@@ -101,6 +101,11 @@ pub struct EmitOptions {
     /// the target type, so the analyzer types both. The ship artifact
     /// routes the call through the dispatcher instead.
     pub check: bool,
+    /// A build that writes the ship artifact alone: the check render
+    /// and the lints, which only `check`, `flux` and the editor read,
+    /// are skipped. A file with an `--@alloy-expect-error` still lints,
+    /// since a lint meets that directive.
+    pub ship_only: bool,
     /// Extensions declared anywhere in the project, so a call by one of
     /// their names routes through the dispatcher in every file, not only
     /// in the file that declares the impl.
@@ -489,6 +494,7 @@ impl Default for EmitOptions {
             shapes: Vec::new(),
             wire_scopes: Vec::new(),
             check: false,
+            ship_only: false,
             extensions: Vec::new(),
             std_globals: crate::std_names::Globals::All,
             foreign_impls: Vec::new(),

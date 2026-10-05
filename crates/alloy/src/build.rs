@@ -171,10 +171,10 @@ pub fn struct_shapes(
             .replace('\\', "/")
     };
 
-    for path in sources {
-        let Ok(src) = crate::modules::disk_text(path) else {
-            continue;
-        };
+    // Each source reads and parses on its own, so they run on every
+    // core: 2.2 s of a Strata build of 1070 files ran here on one.
+    let found = par_map(sources, |path| {
+        let src = crate::modules::disk_text(path).ok()?;
         // The key holds all the result reads: the text, the base, the
         // aliases, and the file each import names now.
         let key = {
@@ -194,7 +194,8 @@ pub fn struct_shapes(
                 .filter(|(k, _)| *k == key)
                 .map(|(_, own)| own.clone())
         });
-        let own = match held {
+
+        match held {
             Some(own) => own,
 
             None => {
@@ -206,12 +207,12 @@ pub fn struct_shapes(
 
                 own
             }
-        };
-
-        if let Some((own, scope)) = own {
-            shapes.extend(own);
-            scopes.push(scope);
         }
+    });
+
+    for (own, scope) in found.into_iter().flatten() {
+        shapes.extend(own);
+        scopes.push(scope);
     }
 
     (shapes, scopes)
@@ -780,6 +781,9 @@ fn run_inner(
             std_require,
             ship_std_require,
             ambient_names: ambient_names.clone(),
+            // `alloy build` and `alloy test` read neither the lints nor
+            // the check artifact: 17 s of CPU of a Strata build.
+            ship_only: write && !keep && build.artifact == crate::config::Artifact::Ship,
             ..base_options.clone().imports(&source, path, &module_aliases)
         };
 
@@ -2053,7 +2057,7 @@ struct Prepared {
 /// slow file holds up one thread. A thread that does not start leaves
 /// its share to the others, so a target with no threads maps on the
 /// caller's own.
-fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+pub(crate) fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
     let next = std::sync::atomic::AtomicUsize::new(0);
     let work = || {
         let mut done = Vec::new();

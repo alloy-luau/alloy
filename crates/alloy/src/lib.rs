@@ -187,7 +187,7 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
     // map's consumer.
     let mut check = rendered.text.clone();
 
-    if !options.check {
+    if !options.check && !options.ship_only {
         let check_options = EmitOptions {
             check: true,
             ..options.clone()
@@ -312,7 +312,11 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
     diagnostics.sort_by_key(|d| d.start);
     diagnostics.dedup_by(|a, b| a.start == b.start && a.message == b.message);
 
-    let mut lints = lint::run(src, &parsed.lexed.toks, &parsed.chunk, options);
+    let mut lints = match options.ship_only && !scanned.expects_any() {
+        true => Vec::new(),
+
+        false => lint::run(src, &parsed.lexed.toks, &parsed.chunk, options),
+    };
     lints.extend(rendered.lints);
 
     // `[emit] wait_timeout` gives `=>` a limit, so the rewrite of an

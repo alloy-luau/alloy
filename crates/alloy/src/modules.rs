@@ -61,6 +61,8 @@ such as a test beside the build, reads the disk as before.
 pub struct Reads {
     texts: RwLock<HashMap<PathBuf, Result<String, std::io::ErrorKind>>>,
     files: RwLock<HashMap<PathBuf, bool>>,
+    /// What one reader found in one module, by `DeclKey` (`shared`).
+    decls: RwLock<HashMap<DeclKey, std::sync::Arc<dyn std::any::Any + Send + Sync>>>,
     /// Moves on each `clear`. A read that started before a clear keeps
     /// its answer out of the table, since the disk may have changed
     /// under it.
@@ -70,7 +72,9 @@ pub struct Reads {
 impl Reads {
     /// Forgets every text and probe, so the next read goes to the disk.
     pub fn clear(&self) {
-        let (Ok(mut texts), Ok(mut files)) = (self.texts.write(), self.files.write()) else {
+        let (Ok(mut texts), Ok(mut files), Ok(mut decls)) =
+            (self.texts.write(), self.files.write(), self.decls.write())
+        else {
             return;
         };
 
@@ -78,6 +82,7 @@ impl Reads {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         texts.clear();
         files.clear();
+        decls.clear();
     }
 }
 
@@ -1140,9 +1145,22 @@ fn module_types(path: &Path, aliases: &[(String, PathBuf)], depth: u8) -> Vec<St
     let Ok(source) = module_text(path) else {
         return Vec::new();
     };
-    let mut out = exported_types(&source);
 
-    if let Some(entry) = returned_type(&source, &out) {
+    shared("module_types", path, depth, &source, aliases, || {
+        module_types_read(path, &source, aliases, depth)
+    })
+}
+
+/// `module_types` with no table.
+fn module_types_read(
+    path: &Path,
+    source: &str,
+    aliases: &[(String, PathBuf)],
+    depth: u8,
+) -> Vec<String> {
+    let mut out = exported_types(source);
+
+    if let Some(entry) = returned_type(source, &out) {
         out.push(entry);
     }
 
@@ -1175,7 +1193,7 @@ fn module_types(path: &Path, aliases: &[(String, PathBuf)], depth: u8) -> Vec<St
             })
             .clone()
     };
-    let (named, stars) = passes(&source);
+    let (named, stars) = passes(source);
 
     // A module passed on whole sends each type out under one flat name,
     // `Leaf_Box`, and the export table holds no value of that name.
@@ -1476,7 +1494,7 @@ pub(crate) fn star_locals(
 
 /// Every declaration of one kind that the modules a source imports
 /// make, module by module, in import order. A module reads once.
-fn module_decls<T: Clone>(
+fn module_decls<T: Clone + Send + Sync + 'static>(
     source: &str,
     from: &Path,
     aliases: &[(String, PathBuf)],
@@ -1487,7 +1505,7 @@ fn module_decls<T: Clone>(
 
 /// `module_decls` with a reader that takes the path of each module, for
 /// a declaration that reads the module's own imports.
-fn module_decls_at<T: Clone>(
+fn module_decls_at<T: Clone + Send + Sync + 'static>(
     source: &str,
     from: &Path,
     aliases: &[(String, PathBuf)],
@@ -1528,11 +1546,85 @@ passes `Geo` on as `G` passes `G.Vec` too. A module that a barrel
 passes on whole, `import * as Leaf` then `export { Leaf }`, reads the
 same way: `Leaf.Vec`.
 */
-fn sent_decls<T: Clone>(
+fn sent_decls<T: Clone + Send + Sync + 'static, F: Fn(&Path, &str) -> Vec<(String, T)>>(
     path: &Path,
     text: &str,
     aliases: &[(String, PathBuf)],
-    read: &impl Fn(&Path, &str) -> Vec<(String, T)>,
+    read: &F,
+    depth: u8,
+) -> Vec<(String, T)> {
+    // The reader is a closure, and its type names the reader.
+    shared(
+        std::any::type_name::<F>(),
+        path,
+        depth,
+        text,
+        aliases,
+        || sent_decls_read(path, text, aliases, read, depth),
+    )
+}
+
+/// A shared reader's key in `Reads`: the reader, the module, the barrel
+/// depth, and a hash of the module's text and the project's aliases.
+type DeclKey = (&'static str, PathBuf, u8, u64);
+
+/*
+What `read` finds in the module at `path`, from the `Reads` of this
+thread when it has one. Each source asks some twenty readers about each
+module it imports, so a module that many sources import was read once
+per source and reader: 125 s of the 170 s a Strata build of 1070 files
+spent. `reader` names the reader, so two readers in one function would
+share a name. The text and the aliases go in by hash, so an edited
+buffer or another project's aliases read again.
+*/
+fn shared<V: Clone + Send + Sync + 'static>(
+    reader: &'static str,
+    path: &Path,
+    depth: u8,
+    text: &str,
+    aliases: &[(String, PathBuf)],
+    read: impl FnOnce() -> V,
+) -> V {
+    let Some(reads) = READS.with(|r| r.borrow().clone()) else {
+        return read();
+    };
+    let key: DeclKey = (reader, path.to_path_buf(), depth, {
+        use std::hash::{Hash, Hasher};
+
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut h);
+        aliases.hash(&mut h);
+        h.finish()
+    });
+    let held = reads
+        .decls
+        .read()
+        .ok()
+        .and_then(|d| d.get(&key).cloned())
+        .and_then(|v| v.downcast::<V>().ok());
+
+    if let Some(held) = held {
+        return (*held).clone();
+    }
+
+    let generation = reads.generation.load(std::sync::atomic::Ordering::SeqCst);
+    let value = read();
+
+    if let Ok(mut d) = reads.decls.write()
+        && reads.generation.load(std::sync::atomic::Ordering::SeqCst) == generation
+    {
+        d.insert(key, std::sync::Arc::new(value.clone()));
+    }
+
+    value
+}
+
+/// `sent_decls` with no table: the reader runs on the text.
+fn sent_decls_read<T: Clone + Send + Sync + 'static, F: Fn(&Path, &str) -> Vec<(String, T)>>(
+    path: &Path,
+    text: &str,
+    aliases: &[(String, PathBuf)],
+    read: &F,
     depth: u8,
 ) -> Vec<(String, T)> {
     let mut out = read(path, text);
@@ -2361,13 +2453,26 @@ fn sent_macros(path: &Path, aliases: &[(String, PathBuf)], depth: u8) -> Vec<cra
     let Ok(text) = module_text(path) else {
         return Vec::new();
     };
-    let mut out = module_macros(&text);
+
+    shared("sent_macros", path, depth, &text, aliases, || {
+        sent_macros_read(path, &text, aliases, depth)
+    })
+}
+
+/// `sent_macros` with no table.
+fn sent_macros_read(
+    path: &Path,
+    text: &str,
+    aliases: &[(String, PathBuf)],
+    depth: u8,
+) -> Vec<crate::MacroSource> {
+    let mut out = module_macros(text);
 
     if depth == 0 {
         return out;
     }
 
-    for (name, exported, spec) in reexports(&text) {
+    for (name, exported, spec) in reexports(text) {
         let Some(target) = resolve(&spec, path, aliases).filter(|t| t != path) else {
             continue;
         };
@@ -3632,7 +3737,7 @@ pub fn import_problems(
                 .entry(target.clone())
                 .or_insert_with(|| {
                     module_text(&target)
-                        .map(|t| Surface::of(&t))
+                        .map(|t| shared("surface", &target, 0, &t, aliases, || Surface::of(&t)))
                         .unwrap_or_default()
                 })
                 .clone();
@@ -3867,7 +3972,7 @@ pub fn import_problems(
                 .entry(target.clone())
                 .or_insert_with(|| {
                     module_text(target)
-                        .map(|t| Surface::of(&t))
+                        .map(|t| shared("surface", target, 0, &t, aliases, || Surface::of(&t)))
                         .unwrap_or_default()
                 })
                 .clone(),
@@ -4177,6 +4282,40 @@ mod tests {
 
         reads.clear();
         assert_eq!(read(), ("return 2\n".to_string(), true));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What each reader finds in an imported module is shared under a
+    /// `Reads`, and the shared answer is the one a read with no table
+    /// gives, through a barrel too, on the first read and on a later one.
+    #[test]
+    fn the_shared_readers_answer_as_a_fresh_read_does() {
+        let dir = std::env::temp_dir().join(format!("alloy-shared-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("shapes.aly"),
+            "export struct Point\n  x: number\n  y: number\nend\n\nexport enum Shade\n  Light\n  Dark\nend\n\nexport type Pair = { number }\n\nexport function area(p: Point): number\n  return p.x * p.y\nend\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("index.aly"),
+            "export { Point, Shade } from './shapes'\n",
+        )
+        .unwrap();
+        let main = dir.join("main.aly");
+        let src = "import { Point, Shade, area } from './shapes'\nimport { Point as P2 } from './index'\nprint(Point, Shade, area, P2)\n";
+        let options = || crate::EmitOptions::default().imports(src, &main, &[]);
+
+        let fresh = options();
+        let reads = std::sync::Arc::new(super::Reads::default());
+        let first = super::with_reads(&reads, options);
+        let again = super::with_reads(&reads, options);
+
+        assert!(!fresh.import_enums.is_empty() && !fresh.import_callables.is_empty());
+        assert_eq!(first, fresh);
+        assert_eq!(again, fresh);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

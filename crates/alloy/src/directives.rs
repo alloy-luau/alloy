@@ -746,6 +746,11 @@ impl Directives {
         last(name).or_else(|| last(group))
     }
 
+    /// Whether the file holds an `--@alloy-expect-error`.
+    pub fn expects_any(&self) -> bool {
+        !self.expected.is_empty()
+    }
+
     /// Whether the line is one an `--@alloy-expect-error` covers.
     pub fn expects(&self, line: usize) -> bool {
         self.expected.contains_key(&line)

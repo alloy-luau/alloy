@@ -33,7 +33,7 @@ pub fn remap(data: &[u64], doc: &Doc, types: &[String], modifiers: &[String]) ->
     let callable = [type_index(types, "function"), type_index(types, "method")];
     let property = type_index(types, "property");
 
-    for t in data.chunks_exact(5) {
+    for t in data.as_chunks::<5>().0 {
         let (dl, ds, len, kind, mods) = (t[0], t[1], t[2], t[3], t[4]);
         line += dl;
         start = if dl > 0 { ds } else { start + ds };
@@ -1096,7 +1096,7 @@ mod tests {
         let out = remap(&[], &doc, &types, &[]);
         let mut place = (0u64, 0u64);
 
-        for chunk in out.chunks_exact(5) {
+        for chunk in out.as_chunks::<5>().0 {
             if chunk[0] > 0 {
                 place = (place.0 + chunk[0], chunk[1]);
             } else {
@@ -1418,7 +1418,7 @@ mod tests {
         let mut drawn: Vec<(&str, u32, u32)> = Vec::new();
         let (mut line, mut column) = (0u32, 0u32);
 
-        for t in out.chunks_exact(5) {
+        for t in out.as_chunks::<5>().0 {
             line += t[0] as u32;
             column = match t[0] > 0 {
                 true => t[1] as u32,
@@ -1635,7 +1635,7 @@ mod tests {
         let kind_at = |line: u64, column: u64| {
             let (mut l, mut c) = (0, 0);
 
-            out.chunks_exact(5).find_map(|t| {
+            out.as_chunks::<5>().0.iter().find_map(|t| {
                 l += t[0];
                 c = if t[0] > 0 { t[1] } else { c + t[1] };
 

@@ -247,10 +247,10 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
                 }
 
                 "then" => {
-                    if let Some(f) = stack.last_mut() {
-                        if f.kind == Kind::IfHead {
-                            f.kind = Kind::IfBody;
-                        }
+                    if let Some(f) = stack.last_mut()
+                        && f.kind == Kind::IfHead
+                    {
+                        f.kind = Kind::IfBody;
                     }
                 }
 

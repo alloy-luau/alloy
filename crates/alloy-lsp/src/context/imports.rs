@@ -14,7 +14,7 @@ pub(crate) fn import_spec(src: &str, line_start: usize, offset: usize) -> Option
     if text.is_empty() {
         let quotes: Vec<usize> = before.match_indices(['"', '\'']).map(|(i, _)| i).collect();
 
-        if quotes.len() >= 2 && quotes.len() % 2 == 0 {
+        if quotes.len() >= 2 && quotes.len().is_multiple_of(2) {
             let open = quotes[quotes.len() - 2];
             let head = before[..open].trim_end();
 

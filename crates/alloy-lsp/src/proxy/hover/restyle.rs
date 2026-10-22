@@ -1119,7 +1119,7 @@ pub(crate) fn names_a_key(doc: &Doc, line: u32, character: u32) -> bool {
     let line_start = doc.source[..start].rfind('\n').map_or(0, |i| i + 1);
     let head = &doc.source[line_start..start];
 
-    head.matches('"').count() % 2 == 0 && head.matches('\'').count() % 2 == 0
+    head.matches('"').count().is_multiple_of(2) && head.matches('\'').count().is_multiple_of(2)
 }
 
 /// The three parts of a function head after its name: the type

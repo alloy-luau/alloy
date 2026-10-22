@@ -205,12 +205,12 @@ fn new(name: &str) -> ExitCode {
     ];
 
     for (path, text) in files {
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                fail(&format!("cannot create {}: {e}", parent.display()));
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            fail(&format!("cannot create {}: {e}", parent.display()));
 
-                return ExitCode::FAILURE;
-            }
+            return ExitCode::FAILURE;
         }
 
         if let Err(e) = std::fs::write(&path, text) {

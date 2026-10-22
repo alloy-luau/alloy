@@ -4126,12 +4126,21 @@ impl<'s> Desugar<'s> {
         // names it binds.
         match &f.filter {
             Some(c) => {
+                // A hoist of the filter reads the loop's names, so it goes
+                // after `do`, where the loop has bound them, and not in
+                // front of the loop (LANG_BUGS 91).
+                let outer = std::mem::take(&mut self.hoists);
                 let cond = self.render_to_string(c);
+                let hoists = std::mem::replace(&mut self.hoists, outer);
                 let where_tok = self.toks[c.span().start as usize - 1];
                 self.copy(cursor, where_tok.start);
                 self.copy(do_start, do_end);
                 self.write_pieces(do_end, &prologue);
-                self.generate(do_end, &format!(" if not ({cond}) then continue end"));
+
+                // Each hoist writes its own trailing space.
+                self.generate(do_end, " ");
+                self.write_hoists(hoists, true);
+                self.generate(do_end, &format!("if not ({cond}) then continue end"));
             }
 
             None => {

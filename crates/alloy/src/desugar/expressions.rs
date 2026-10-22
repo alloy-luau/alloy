@@ -272,6 +272,10 @@ impl<'s> Desugar<'s> {
     `{ unknown }` refused `Array<number | string>` (LANG_BUGS 143). So a
     literal that a typed binding holds passes the element type of the
     annotation to `Array.from`.
+
+    A `return` takes the return type of its function the same way:
+    `return [ entry ]` after a test of `entry.name` made an Array of the
+    refined `entry`, and `{ Entry }` refused it (LANG_BUGS 147).
     */
     pub(crate) fn note_array_elems(&mut self, stmt: &Stmt) {
         let (ty, value) = match stmt {
@@ -285,6 +289,20 @@ impl<'s> Desugar<'s> {
                 };
 
                 (self.text_of(t).to_string(), &l.values[0])
+            }
+
+            // A `return` in a `try do` block leaves the block, and a value
+            // block's last value is the block's.
+            Stmt::Return(r)
+                if r.values.len() == 1
+                    && !r.value_only
+                    && matches!(self.try_targets.last(), Some(None)) =>
+            {
+                let Some(Some(t)) = self.ret_types.last() else {
+                    return;
+                };
+
+                (t.clone(), &r.values[0])
             }
 
             _ => return,

@@ -3842,7 +3842,7 @@ mod tests {
 
         assert!(
             out.check
-                .contains("Array.from({(Kind.Slide(1) :: Kind), Kind.Idle})"),
+                .contains("Array.from<<Kind>>({(Kind.Slide(1) :: Kind), Kind.Idle})"),
             "{}",
             out.check
         );

@@ -674,6 +674,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         field_expected: HashMap::new(),
         field_casts: HashMap::new(),
         variant_casts: HashMap::new(),
+        array_elems: HashMap::new(),
         value_sink: None,
         for_header: 0,
         child_cast: None,
@@ -1361,6 +1362,9 @@ struct Desugar<'s> {
     /// The items of a list literal that construct a variant, by
     /// address, with the enum the check artifact casts each one to.
     variant_casts: HashMap<usize, String>,
+    /// The array literals that take their element type from where they
+    /// stand, by address, with that type; see `note_array_elems`.
+    array_elems: HashMap<usize, String>,
     /// The text a value-only `return` writes in front of its value: `s = `
     /// in an arm of `local s = match`, `return ` for a value block. None
     /// writes `return `.

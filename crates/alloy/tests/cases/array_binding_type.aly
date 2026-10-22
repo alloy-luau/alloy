@@ -1,0 +1,8 @@
+-- A list literal takes the element type of its binding in the check
+-- artifact, since Luau infers it from the items alone (LANG_BUGS 143).
+const A: number = 1
+const B: string = 'b'
+
+export const LIST: { unknown } = [ A, B ]
+export const PAIR: (number | string)[] = [ A, B ]
+export const LOOSE = [ A, B ]

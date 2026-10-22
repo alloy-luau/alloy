@@ -623,6 +623,11 @@ impl<'s> Desugar<'s> {
         }
 
         self.expected_payload = self.annotated_async_block(stmt);
+
+        if self.options.check {
+            self.note_array_elems(stmt);
+        }
+
         // Render the statement into a side buffer first, so the hoists it
         // asks for can go in front of it on the same line.
         let saved_hoists = std::mem::take(&mut self.hoists);

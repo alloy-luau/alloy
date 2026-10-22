@@ -1,0 +1,11 @@
+-- The check artifact reads a field once, since the checker types a
+-- second read of a map's field as `~nil` (LANG_BUGS 139).
+export function field(t: { [string]: number }) -> number
+  const n = t.a ?? 0
+
+  return n + 1
+end
+
+export function lazy(t: { [string]: number }, on: boolean) -> boolean
+  return on and (t.a ?? 0) > 1
+end

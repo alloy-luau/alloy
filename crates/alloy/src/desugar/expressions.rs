@@ -946,6 +946,15 @@ impl<'s> Desugar<'s> {
         let anchor = self.byte_start(span);
 
         /*
+        The checker types the second read of a map's field as `~nil`:
+        `t.a ?? 0` on `{ [string]: number }` came out `~nil`, and `t['a']`,
+        which reads once into a temp, came out `number` (LANG_BUGS 139).
+        So the check artifact reads a field once too. In place, a temp
+        needs a closure, and the field takes the runtime's `coalesce`.
+        */
+        let field = self.options.check && self.is_simple(lhs) && reads_field(lhs);
+
+        /*
         In place, the hoist of the left side becomes a closure around the
         operand, and Luau forgets inside it that a local assigned again
         above was tested for nil (LANG_BUGS 104). A literal or a name on
@@ -953,7 +962,7 @@ impl<'s> Desugar<'s> {
         `coalesce` takes both sides as arguments, and no closure forms.
         */
         if self.in_place
-            && !self.is_simple(lhs)
+            && (!self.is_simple(lhs) || field)
             && matches!(
                 rhs,
                 Expr::Name(_)
@@ -980,7 +989,7 @@ impl<'s> Desugar<'s> {
         // and the hovers inside them land on the text the author wrote.
         // A simple left side is copied at its first read; the second
         // read is generated.
-        let (first, left) = match self.is_simple(lhs) {
+        let (first, left) = match self.is_simple(lhs) && !(field && !self.in_place) {
             true => {
                 let side = self.render_to_side(lhs);
                 let text = side.text().to_string();
@@ -2577,6 +2586,20 @@ impl<'s> Desugar<'s> {
         let parts = self.chain_parts(e);
 
         self.guarded(&parts.guards, &parts.inner)
+    }
+}
+
+/// Whether `e` reads a field: `t.a`, or `(t.a)`.
+fn reads_field(e: &Expr) -> bool {
+    match e {
+        Expr::Index {
+            key: IndexKey::Field(_),
+            ..
+        } => true,
+
+        Expr::Paren { inner, .. } => reads_field(inner),
+
+        _ => false,
     }
 }
 

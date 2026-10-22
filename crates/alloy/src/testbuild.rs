@@ -652,8 +652,12 @@ fn unread_import_parts(
         _ => {}
     }
 
+    // `import type { A, B }` marks each name a type, and no `type` stands
+    // before the name: the cut took the `{` (LANG_BUGS 151).
+    let own_word = !matches!(i.kind, ImportKind::TypeOnly(_));
+
     for s in specs.iter().filter(|s| !read(s)) {
-        let first = s.name.start - u32::from(s.is_type) - u32::from(s.is_attribute);
+        let first = s.name.start - u32::from(s.is_type && own_word) - u32::from(s.is_attribute);
         let end = bound(s).end + u32::from(text(bound(s).end) == ",");
         cuts.push(range(first, end));
     }
@@ -2143,6 +2147,20 @@ end
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(count, 1);
         assert!(text.contains("local function tick("), "{text}");
+    }
+
+    /// A test that reached one name of `import type { A, B }` cut the
+    /// other name with the `{`, and the spec did not parse (LANG_BUGS
+    /// 151).
+    #[test]
+    fn a_type_import_keeps_its_brace() {
+        let src = "import type { A, B } from './defs'\nimport type { C, D } from './defs'\n\nexport type Holder = { a: A, d: D }\n\nexport function f(b: B, c: C) -> number\n  return b.b + c.c\nend\n\n@test\nfunction f_reads_b() -> ()\n  $assert_eq(f({ b = 2 }, { c = 1 }), 3)\nend\n";
+        let out = sliced(src).unwrap();
+
+        assert!(out.contains("import type {    B } from './defs'"), "{out}");
+        assert!(out.contains("import type { C,   } from './defs'"), "{out}");
+        let compiled = crate::compile(&out).unwrap();
+        assert!(compiled.diagnostics.is_empty(), "{out}");
     }
 
     /// A test that reached a type of a mixed import kept the whole

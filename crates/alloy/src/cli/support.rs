@@ -124,9 +124,6 @@ fn flags_of(command: &str) -> Option<Vec<&'static str>> {
         "init" => vec!["--interactive", "--yes", "--non-interactive"],
         "self" => vec!["--dir", "--version", "--dry-run"],
         "ingot" => vec!["--lint", "--output", "--format", "--hover", "--complete"],
-        "add" => vec![],
-        "install" => vec!["--locked"],
-        "publish" => vec!["--dry-run"],
 
         _ => return None,
     };

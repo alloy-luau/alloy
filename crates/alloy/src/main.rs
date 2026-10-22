@@ -130,6 +130,10 @@ fn run() -> ExitCode {
 
         Some("publish") => cli::ember::publish(&args[1..]),
 
+        // Every other ember command, `alloy yank` and the like. Ember
+        // answers `--help` for these in Alloy's colours.
+        Some(name) if cli::ember::COMMANDS.contains(&name) => cli::ember::run(&args),
+
         Some(other) => {
             fail(&format!("unknown command `{other}`"));
             usage()

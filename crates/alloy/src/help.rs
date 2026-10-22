@@ -27,6 +27,15 @@ Commands:
   add <package>   Add an ember package to ember.toml, then install
   install         Install what ember.toml asks for
   publish         Build, then publish the package to ember
+  yank            Hide a published version from new installs
+  deprecate       Mark a package, or one version, as deprecated
+  run [script]    Run a script from ember.toml, or list them
+  tool            Add, remove, or list the project's tools
+  patch           Edit a dependency's source and keep the edit
+  index           Manage the package indices
+  cache           Manage ember's caches
+  studio          Open this project's place in Roblox Studio
+  execute, x      Run an executable from a GitHub release
   migrate         Rewrite alloy.toml as .config.aly
   ingot           Scaffold, inspect, or run an extension
   self            Install, update, or remove the binaries
@@ -92,7 +101,8 @@ Usage: alloy add <scope/name>[@<version>]...
 Writes each package into the [dependencies] of ember.toml, then installs.
 The version is a requirement such as ^1.2; without one, the latest
 release. Ember does the work, so the packages, the lockfile, and the
-store are the same ones `embr add` writes.
+store are the same ones `embr add` writes. With an ember flag, such as
+--index or --alias, the command passes to ember's add as it is.
 ";
 
 pub const INSTALL_TEXT: &str = "\
@@ -100,8 +110,12 @@ Usage: alloy install [options]
 
 Installs what ember.toml asks for, the same install `embr install` runs.
 
+Each Alloy package then builds again from its .aly, .alx, and .d.aly
+sources with this alloy.
+
 Options:
   --locked              Install exactly what ember.lock records
+  --refresh             Fetch the indices and archives again
 ";
 
 pub const PUBLISH_TEXT: &str = "\

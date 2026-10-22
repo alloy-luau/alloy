@@ -1,0 +1,20 @@
+-- A list literal inside a typed list literal takes the inner element
+-- type. `Piece[][]` gives each inner literal `Piece`. Without it, an inner
+-- literal took the type of its rows, and the invariant list refused it.
+type Piece = { key: string, width: number, flip: boolean? }
+
+const SETS: Piece[][] = [
+  [
+    { key = 'a', width = 1, flip = false },
+    { key = 'b', width = 3 },
+  ],
+  [
+    { key = 'c', width = 2 },
+  ],
+]
+
+export function rows(wide: boolean) -> { { Piece }? }
+  return [ wide ? [ { key = 'd', width = 4 } ] : [ { key = 'e', width = 1, flip = true } ] ]
+end
+
+export default SETS

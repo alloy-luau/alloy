@@ -307,15 +307,37 @@ impl<'s> Desugar<'s> {
 
             _ => return,
         };
-        let Some(elem) = array_elem(self.alias_value(&ty)).map(str::to_string) else {
-            return;
-        };
-        let elem = self.lower_type(&elem);
         let mut literals = Vec::new();
         array_literals(value, &mut literals);
+        self.note_list_type(&ty, &literals);
+    }
 
-        for at in literals {
-            self.array_elems.insert(at, elem.clone());
+    /*
+    Gives each literal the element type of the list type `ty`, and each
+    list literal among their items the element type of that, down every
+    level. An inner literal with no type inferred a narrower item type, and
+    `Piece[][]` refused `Array<{ key: string }>` in place of `Piece[]`.
+    */
+    fn note_list_type(&mut self, ty: &str, literals: &[&Expr]) {
+        let Some(raw) = array_elem(self.alias_value(ty)).map(str::to_string) else {
+            return;
+        };
+        let elem = self.lower_type(&raw);
+        let mut inner = Vec::new();
+
+        for e in literals {
+            self.array_elems
+                .insert(std::ptr::from_ref(*e) as usize, elem.clone());
+
+            if let Expr::Array { items, .. } = e {
+                for item in items {
+                    array_literals(item, &mut inner);
+                }
+            }
+        }
+
+        if !inner.is_empty() {
+            self.note_list_type(&raw, &inner);
         }
     }
 
@@ -2697,11 +2719,11 @@ fn array_elem(ty: &str) -> Option<&str> {
     (!elem.trim().is_empty()).then(|| elem.trim())
 }
 
-/// The addresses of the array literals that `e` gives as its value: `e`
-/// itself, or a branch of a ternary or an `if` expression.
-fn array_literals(e: &Expr, out: &mut Vec<usize>) {
+/// The array literals that `e` gives as its value: `e` itself, or a
+/// branch of a ternary or an `if` expression.
+fn array_literals<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
     match e {
-        Expr::Array { .. } => out.push(std::ptr::from_ref(e) as usize),
+        Expr::Array { .. } => out.push(e),
 
         Expr::Paren { inner, .. } => array_literals(inner, out),
 

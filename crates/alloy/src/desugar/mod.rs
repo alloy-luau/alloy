@@ -3885,6 +3885,22 @@ impl<'s> Desugar<'s> {
         self.hoist_rendered(rendered, anchor)
     }
 
+    /// `hoist`, into a new local each time, never a temp that a later
+    /// statement assigns again. See `coalesce`.
+    fn hoist_new(&mut self, e: &Expr) -> String {
+        let anchor = self.byte_start(e.span());
+        let rendered = self.render_hoisted(|d| d.render_to_side(e));
+        self.bump_temp();
+        let name = format!("_{}", self.temp_next);
+        self.hoists.push(Hoist::Fresh {
+            name: name.clone(),
+            value: HoistValue::Rendered(rendered),
+            anchor,
+        });
+
+        name
+    }
+
     /// Renders a value that a hoist takes. The hoists run in order in
     /// front of the statement, so what the value calls or reads is not
     /// an earlier part of the statement for a later hoist.

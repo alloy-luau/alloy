@@ -997,6 +997,12 @@ impl<'s> Desugar<'s> {
                 (Some(side), text)
             }
 
+            // Luau gives a local the type of its first value, so a temp
+            // that a later `??` assigns again kept the first one's type:
+            // `{ number }` refused `{ string }` (LANG_BUGS 144). The check
+            // artifact gives each `??` a local of its own.
+            false if self.options.check => (None, self.hoist_new(lhs)),
+
             false => (None, self.hoist(lhs)),
         };
 

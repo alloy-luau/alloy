@@ -968,6 +968,35 @@ local Enum = setmetatable({}, {
 })
 
 -- ---------------------------------------------------------------------------
+-- Font: a family with a weight and a style. A module constant can make
+-- one, so a spec that loads the module needs it (LANG_BUGS 136).
+-- ---------------------------------------------------------------------------
+
+local Font = {}
+Font.__index = Font
+
+function Font.new(family, weight, style)
+	local self = {
+		Family = family,
+		Weight = weight or Enum.FontWeight.Regular,
+		Style = style or Enum.FontStyle.Normal,
+	}
+	return mark(table.freeze(setmetatable(self, Font)), "Font")
+end
+
+function Font.fromName(name, weight, style)
+	return Font.new(`rbxasset://fonts/families/{name}.json`, weight, style)
+end
+
+function Font.fromId(id, weight, style)
+	return Font.new(`rbxassetid://{id}`, weight, style)
+end
+
+function Font.__eq(a, b)
+	return a.Family == b.Family and a.Weight == b.Weight and a.Style == b.Style
+end
+
+-- ---------------------------------------------------------------------------
 -- Signals and Instances: a tree that parents, finds, and destroys.
 -- ---------------------------------------------------------------------------
 
@@ -1468,6 +1497,7 @@ local doubles = {
 	UDim2 = UDim2,
 	NumberRange = NumberRange,
 	Rect = Rect,
+	Font = Font,
 	Random = Random,
 	Enum = Enum,
 	Instance = Instance,

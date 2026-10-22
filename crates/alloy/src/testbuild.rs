@@ -1626,6 +1626,29 @@ mod tests {
         assert!(text.contains("1 passed"), "{text}");
     }
 
+    /// A module whose constant makes a `Font` failed to load in a test
+    /// of another module, since the shim had no `Font` (LANG_BUGS 136).
+    #[test]
+    fn a_module_that_makes_a_font_loads_in_a_test() {
+        let Some(text) = lest_run(
+            "shim-font",
+            &[
+                (
+                    "src/look.aly",
+                    "export const FACE = new Font('rbxasset://fonts/families/PatrickHand.json')\nexport const SIZE = 14\n",
+                ),
+                (
+                    "src/bar.aly",
+                    "import { FACE, SIZE } from './look'\n\n@test\nfunction the_font_loads() -> ()\n  $assert_eq(SIZE, 14)\n  $assert_eq(typeof(FACE), 'Font')\n  $assert_eq(FACE.Weight, Enum.FontWeight.Regular)\n  $assert_eq(FACE, Font.fromName('PatrickHand'))\nend\n",
+                ),
+            ],
+        ) else {
+            return;
+        };
+
+        assert!(text.contains("1 passed"), "{text}");
+    }
+
     #[test]
     fn a_module_near_the_local_limit_loads_in_a_test() {
         // Luau folds a local that holds a constant, and such a local

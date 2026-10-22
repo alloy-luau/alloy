@@ -1563,6 +1563,15 @@ mod tests {
         assert_eq!(fmt("print(t[1], #t)\n"), "print(t[1], #t)\n");
     }
 
+    /// The space between a `!` and the `:` of a ternary went: `flip ?
+    /// t.a!: t.b` (LANG_BUGS 140). The colon keeps what the source wrote,
+    /// as after any other operand, and a method call stays tight.
+    #[test]
+    fn an_assert_keeps_the_space_before_a_ternary_colon() {
+        let src = "local s = flip ? t.a! : t.b\nlocal n = t.a!:upper()\n";
+        assert_eq!(fmt(src), src);
+    }
+
     #[test]
     fn a_table_that_fits_stays_on_one_line_and_one_that_does_not_breaks() {
         assert_eq!(

@@ -149,10 +149,10 @@ impl<'s> Formatter<'s> {
             return false;
         }
 
-        // The postfix assert binds to what follows: `x!.y`, `f!(1)`.
-        if bt == "!"
-            || (at == "!" && matches!(bt, "." | "(" | "[" | ":" | "?." | "?:" | "?(" | "?["))
-        {
+        // The postfix assert binds to what follows: `x!.y`, `f!(1)`. A
+        // `:` after it is a method call or the `:` of a ternary, so the
+        // colon rule below keeps what the source wrote (LANG_BUGS 140).
+        if bt == "!" || (at == "!" && matches!(bt, "." | "(" | "[" | "?." | "?:" | "?(" | "?[")) {
             return false;
         }
 

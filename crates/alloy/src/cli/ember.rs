@@ -72,10 +72,11 @@ fn install_and_build(locked: bool) -> ExitCode {
     build_alloy_packages()
 }
 
-/// An Alloy package ships its .aly and .alx sources beside the Luau its
-/// publisher built. An Alloy project builds every one again from those
-/// sources with this compiler, so the project runs code from the Alloy
-/// it reads, not from another compiler version.
+/// An Alloy package ships its .aly, .alx, and .d.aly sources beside the
+/// Luau its publisher built. An Alloy project builds every one again from
+/// those sources with this compiler, so the project runs code from the
+/// Alloy it reads, not from another compiler version. The build checks the
+/// package's .d.aly declarations too, since they sit under its own `in`.
 fn build_alloy_packages() -> ExitCode {
     let installed = match embr::api::installed() {
         Ok(installed) => installed,

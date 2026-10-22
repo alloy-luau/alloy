@@ -12,7 +12,7 @@ use std::process::ExitCode;
 
 use alloy::config;
 
-use crate::cli::init_plan::{Answers, Kind, Manager, Runner, plan, presets};
+use crate::cli::init_plan::{Answers, Guide, Kind, Manager, Runner, plan, presets};
 use crate::fail;
 use crate::ui::{self, Painter};
 
@@ -277,7 +277,9 @@ fn ask(dir: &Path) -> Result<Option<Answers>, String> {
     let Some(fast) = answered(
         Confirm::new("Use the recommended setup?")
             .with_default(true)
-            .with_help_message("a game, ember, lest, the `temper` preset, and strict mode")
+            .with_help_message(
+                "a game, ember, lest, the `temper` preset, strict mode, and an AGENTS.md",
+            )
             .prompt(),
     )?
     else {
@@ -368,6 +370,20 @@ fn ask(dir: &Path) -> Result<Option<Answers>, String> {
         return Ok(None);
     };
 
+    let Some(guide) = answered(
+        Select::new(
+            "Agent guide?",
+            vec![Guide::Agents, Guide::Claude, Guide::Both, Guide::None],
+        )
+        .with_help_message(
+            "a file that explains Alloy to a coding agent; a file already there stays as it is",
+        )
+        .prompt(),
+    )?
+    else {
+        return Ok(None);
+    };
+
     let name = match name.trim() {
         "" => folder,
 
@@ -381,6 +397,7 @@ fn ask(dir: &Path) -> Result<Option<Answers>, String> {
         runner,
         preset,
         strict,
+        guide,
         has_luau_config: luau,
         recommended: false,
     }))
@@ -657,6 +674,11 @@ mod tests {
         assert!(dir.join("src/client").is_dir());
         assert_eq!(config.project.name, folder_name(&dir));
 
+        // The agent guide: AGENTS.md alone.
+        let guide = std::fs::read_to_string(dir.join("AGENTS.md")).expect("AGENTS.md");
+        assert!(guide.contains("strict superset of Luau"), "{guide}");
+        assert!(!dir.join("CLAUDE.md").exists());
+
         // A second run refuses, as the plain path does.
         let before = std::fs::read_to_string(dir.join("alloy.toml")).expect("alloy.toml");
         let _ = recommended_init(&dir);
@@ -686,6 +708,7 @@ mod tests {
             runner: Runner::None,
             preset,
             strict: false,
+            guide: Guide::None,
             has_luau_config: false,
             recommended: false,
         };
@@ -714,6 +737,29 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.join(".gitignore")).expect(".gitignore"),
             "mine\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A guide already in the folder stays as it is, and the other
+    /// guide of `both` is still written.
+    #[test]
+    fn an_existing_guide_is_left_as_it_is() {
+        let dir = temp("guide");
+        std::fs::write(dir.join("AGENTS.md"), "mine\n").expect("the file");
+
+        let mut answers = Answers::recommended("starfall", false);
+        answers.guide = Guide::Both;
+        let _ = write_plan(&dir, &answers, &Painter::for_stdout());
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join("AGENTS.md")).expect("AGENTS.md"),
+            "mine\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("CLAUDE.md")).expect("CLAUDE.md"),
+            crate::cli::init_plan::agent_guide(&answers)
         );
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -17,7 +17,7 @@ pub use members::{
     member_markdown, member_names, member_owner, member_spot, members, split_member, type_head,
     type_markdown, type_signature, value_head,
 };
-pub use table::{TABLE, keys_with_prefix, lookup};
+pub use table::{STYLE, TABLE, keys_with_prefix, lookup};
 
 /// The kinds a diagnostic prints, each with the book section that
 /// explains it. `alloy doc <kind>` opens the section, so every kind
@@ -580,6 +580,39 @@ mod tests {
                         .join("; ")
                 );
             }
+        }
+    }
+
+    /// Every block of the style article compiles. A Luau block shows
+    /// the old form, which Alloy reads too, and an Alloy block shows the
+    /// form to write. `alloy init` copies the article into the agent
+    /// guide, so a broken example reaches every new project.
+    #[test]
+    fn every_style_example_compiles() {
+        let blocks: Vec<&str> = super::STYLE
+            .split("```")
+            .skip(1)
+            .step_by(2)
+            .filter_map(|b| {
+                b.strip_prefix("alloy\n")
+                    .or_else(|| b.strip_prefix("luau\n"))
+            })
+            .collect();
+
+        assert!(blocks.len() > 10, "{} blocks", blocks.len());
+
+        for block in blocks {
+            let out =
+                crate::compile(block).unwrap_or_else(|e| panic!("{}\n{block}", e.located(block)));
+
+            assert!(
+                out.diagnostics.is_empty(),
+                "{block}\n{:?}",
+                out.diagnostics
+                    .iter()
+                    .map(|d| d.message.clone())
+                    .collect::<Vec<_>>()
+            );
         }
     }
 

@@ -16,7 +16,7 @@ use crate::ui::{self, BOLD, RESET};
 type Pick = fn(&str) -> bool;
 
 /// The groups of the index, by key shape.
-const GROUPS: &[(&str, Pick)] = &[
+pub(crate) const GROUPS: &[(&str, Pick)] = &[
     ("Articles", |k| k.starts_with("topic:")),
     ("Lints", |k| k.starts_with(ALX_PREFIX)),
     ("Keywords", |k| {
@@ -73,7 +73,7 @@ pub(crate) fn run(args: &[String]) -> ExitCode {
 /// The page of one lint, as Markdown: the name, the group, the level
 /// it starts at, the summary, and the detail. `alloy doc <lint>` renders
 /// it, and `--json` ships the same text.
-fn lint_markdown(l: &alloy::lint::LintInfo) -> String {
+pub(crate) fn lint_markdown(l: &alloy::lint::LintInfo) -> String {
     let level = match (l.default, l.group) {
         // `print` is ordinary in Luau, so this one sits out of what
         // `strict` raises.
@@ -100,11 +100,7 @@ fn json() -> String {
     let entries: Vec<serde_json::Value> = TABLE
         .iter()
         .map(|(key, text)| {
-            let group = GROUPS
-                .iter()
-                .find(|(_, pick)| pick(key))
-                .map(|(title, _)| *title)
-                .unwrap_or("Other");
+            let group = group_of(key);
 
             let members: Vec<serde_json::Value> = docs::members(key)
                 .iter()
@@ -182,6 +178,54 @@ fn json() -> String {
     serde_json::to_string_pretty(&value).unwrap_or_default() + "\n"
 }
 
+/// The group of a table key: the first group whose shape it has.
+pub(crate) fn group_of(key: &str) -> &'static str {
+    GROUPS
+        .iter()
+        .find(|(_, pick)| pick(key))
+        .map(|(title, _)| *title)
+        .unwrap_or("Other")
+}
+
+/// The table entry a topic names: the key as written, then the
+/// article, the attribute, the intrinsic, and the derive of that name.
+fn entry(topic: &str) -> Option<(&'static str, &'static str)> {
+    ["", "topic:", "@", "$", "derive:"]
+        .iter()
+        .find_map(|prefix| {
+            let key = format!("{prefix}{topic}");
+
+            TABLE.iter().find(|(k, _)| *k == key).copied()
+        })
+}
+
+/// One topic as Markdown, for `alloy mcp`: the text `page` renders for
+/// a lint, a member of a std type, or an entry of the table.
+pub(crate) fn markdown(topic: &str) -> Option<String> {
+    if let Some(l) = LINTS.iter().find(|l| l.name == topic) {
+        return Some(lint_markdown(l));
+    }
+
+    if let Some((owner, m)) = docs::split_member(topic) {
+        return Some(format!(
+            "# {}\n\n{}",
+            member_head(owner, m),
+            docs::member_markdown(m)
+        ));
+    }
+
+    let (key, text) = entry(topic)?;
+    let shown = key.strip_prefix("topic:").unwrap_or(key);
+    let signature = docs::type_signature(key)
+        .map(|s| format!("```alloy\n{s}\n```\n"))
+        .unwrap_or_default();
+
+    Some(format!(
+        "# {shown}\n\n{signature}{text}\n{}",
+        member_markdown(key)
+    ))
+}
+
 /// Starts the ingots of the nearest project, so their lints register.
 fn load_project_ingots() {
     if let Some(path) = alloy::config::Config::find(std::path::Path::new("."))
@@ -241,8 +285,12 @@ fn page(topic: &str, color: bool) -> Option<String> {
         }
     }
 
-    // A group: its lints.
-    if let Some(group) = Group::from_name(topic) {
+    // A group: its lints. An article of the same name wins, so
+    // `alloy doc style` is the style article, and `alloy doc lints`
+    // lists the style group.
+    if let Some(group) = Group::from_name(topic)
+        && docs::lookup(&format!("topic:{topic}")).is_none()
+    {
         let mut out = format!("**{}**\n{}\n\n", group.name(), group.summary());
 
         for l in LINTS.iter().filter(|l| l.group == group) {
@@ -266,40 +314,37 @@ fn page(topic: &str, color: bool) -> Option<String> {
         return Some(member_page(owner, m, color));
     }
 
-    let keys = [
-        topic.to_string(),
-        format!("topic:{topic}"),
-        format!("@{topic}"),
-        format!("${topic}"),
-        format!("derive:{topic}"),
-    ];
+    let (key, text) = entry(topic)?;
+    let shown = key.strip_prefix("topic:").unwrap_or(key);
+    let head = if color {
+        format!("{BOLD}{shown}{RESET}\n")
+    } else {
+        format!("{shown}\n")
+    };
 
-    for key in keys {
-        if let Some(text) = docs::lookup(&key) {
-            let shown = key.strip_prefix("topic:").unwrap_or(&key);
-            let head = if color {
-                format!("{BOLD}{shown}{RESET}\n")
-            } else {
-                format!("{shown}\n")
-            };
+    // A std type heads its page with the type it names.
+    let signature = docs::type_signature(key)
+        .map(|s| render(&format!("```alloy\n{s}\n```"), color))
+        .unwrap_or_default();
 
-            // A std type heads its page with the type it names.
-            let signature = docs::type_signature(&key)
-                .map(|s| render(&format!("```alloy\n{s}\n```"), color))
-                .unwrap_or_default();
-
-            return Some(
-                format!("{head}{signature}{}", render(text, color)) + &member_sections(&key, color),
-            );
-        }
-    }
-
-    None
+    Some(format!("{head}{signature}{}", render(text, color)) + &member_sections(key, color))
 }
 
-/// The member sections of a std entry: the statics, then the methods,
-/// then the plain members, each with its signature, doc, and example.
+/// The member sections of a std entry, rendered for the terminal.
 fn member_sections(key: &str, color: bool) -> String {
+    let md = member_markdown(key);
+
+    if md.is_empty() {
+        String::new()
+    } else {
+        render(&md, color)
+    }
+}
+
+/// The member sections of a std entry as Markdown: the statics, then
+/// the methods, then the plain members, each with its signature, doc,
+/// and example. An entry with no members has none.
+fn member_markdown(key: &str) -> String {
     let members = docs::members(key);
 
     if members.is_empty() {
@@ -327,7 +372,7 @@ fn member_sections(key: &str, color: bool) -> String {
     md.push_str(&format!(
         "`alloy doc {key}:<member>` prints one on its own.\n"
     ));
-    render(&md, color)
+    md
 }
 
 /// A member as a page names it: `HashMap:get`, `HashMap.new`. A plain

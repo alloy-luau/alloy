@@ -71,6 +71,46 @@ impl std::fmt::Display for Runner {
     }
 }
 
+/// The agent guide: a file that explains Alloy to a coding agent.
+/// AGENTS.md is the name most agents read, and Claude Code reads
+/// CLAUDE.md.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Guide {
+    Agents,
+    Claude,
+    Both,
+    None,
+}
+
+impl std::fmt::Display for Guide {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Guide::Agents => f.write_str("AGENTS.md: the file most coding agents read"),
+
+            Guide::Claude => f.write_str("CLAUDE.md: the file Claude Code reads"),
+
+            Guide::Both => f.write_str("both: the same guide in AGENTS.md and CLAUDE.md"),
+
+            Guide::None => f.write_str("none: no agent guide"),
+        }
+    }
+}
+
+impl Guide {
+    /// The files of the choice. Each one holds the same guide.
+    pub(crate) fn files(self) -> &'static [&'static str] {
+        match self {
+            Guide::Agents => &["AGENTS.md"],
+
+            Guide::Claude => &["CLAUDE.md"],
+
+            Guide::Both => &["AGENTS.md", "CLAUDE.md"],
+
+            Guide::None => &[],
+        }
+    }
+}
+
 /// `anneal`: soft. The formatter's own layout, every lint off but the
 /// ones that name broken code, and nothing pedantic.
 pub(crate) const ANNEAL: &str = "\
@@ -269,6 +309,8 @@ pub(crate) struct Answers {
     pub preset: Preset,
     /// Strict mode in the Luau configuration the wizard writes.
     pub strict: bool,
+    /// The agent guide, AGENTS.md or CLAUDE.md, the wizard writes.
+    pub guide: Guide,
     /// The folder already has a `.config.luau` or a `.luaurc`, so the
     /// wizard edits that file instead of writing one.
     pub has_luau_config: bool,
@@ -279,8 +321,9 @@ pub(crate) struct Answers {
 
 impl Answers {
     /// The recommended setup: a game, since that is the common case on
-    /// Roblox, ember, lest, `temper`, and strict mode. The first confirm
-    /// of the wizard writes exactly this, and so does `--yes`.
+    /// Roblox, ember, lest, `temper`, strict mode, and an AGENTS.md. The
+    /// first confirm of the wizard writes exactly this, and so does
+    /// `--yes`.
     pub fn recommended(name: &str, has_luau_config: bool) -> Self {
         Self {
             kind: Kind::Game,
@@ -289,6 +332,7 @@ impl Answers {
             runner: Runner::Lest,
             preset: temper(),
             strict: true,
+            guide: Guide::Agents,
             has_luau_config,
             recommended: true,
         }
@@ -331,6 +375,100 @@ const EMBER_TOML: &str = "\
 [indices]
 wally = \"https://github.com/UpliftGames/wally-index\"
 ";
+
+/// The agent guide. `{layout}`, `{commands}`, and `{style}` take the
+/// parts that depend on the answers.
+const AGENT_GUIDE: &str = include_str!("agents.md");
+
+/// The text of the agent guide for one set of answers. The style
+/// section is the article `alloy doc style` prints, so the two cannot
+/// drift.
+pub(crate) fn agent_guide(a: &Answers) -> String {
+    AGENT_GUIDE
+        .replace("{layout}", &guide_layout(a))
+        .replace("{commands}", &guide_commands(a))
+        .replace("{style}", &guide_style())
+}
+
+/// The folders and files of the project, as `alloy.toml` and the
+/// answers set them.
+fn guide_layout(a: &Answers) -> String {
+    let mut out = String::new();
+
+    if a.kind == Kind::Game {
+        out.push_str("- `src` holds the sources: `src/client`, `src/server`, and `src/shared`.\n");
+        out.push_str("- `build` holds the Luau that `alloy build` writes. Git ignores it.\n");
+    } else {
+        out.push_str("- `src` holds the sources.\n");
+        out.push_str("- `build` holds the Luau that `alloy build` writes.\n");
+    }
+
+    out.push_str("- `tests` holds the specs that `alloy test` writes.\n");
+    out.push_str(
+        "- The Luau configuration, `.config.luau` or `.luaurc`, sets the language mode and the `@alloy` alias.\n",
+    );
+
+    if a.manager == Manager::Ember {
+        out.push_str("- `ember.toml` lists the packages.\n");
+    }
+
+    if a.kind == Kind::Game {
+        out.push_str(
+            "\nThe `[mount]` table says where each folder lands in the DataModel:\n\n```toml\n",
+        );
+        out.push_str(GAME_MOUNTS);
+        out.push_str("```\n");
+    }
+
+    out.trim_end().to_string()
+}
+
+/// The commands an agent runs in this project.
+fn guide_commands(a: &Answers) -> String {
+    let mut out = String::from(
+        "- `alloy build` compiles every source to Luau under `build`. `alloy build -W` builds again after each change.\n\
+         - `alloy check` compiles every source and writes nothing. It reports the errors and the lints.\n\
+         - `alloy flux` runs the full analysis: the compile, the type check of luau-lsp, and the lints. Run it before you finish a change. `alloy flux --fix` applies the rewrites that keep the program the same.\n\
+         - `alloy fmt` formats the sources in place. `alloy fmt --check` writes nothing and fails when a file would change.\n",
+    );
+
+    out.push_str(if a.runner == Runner::Lest {
+        "- `alloy test --run` writes a lest spec for each `@test` function, then runs the suite.\n"
+    } else {
+        "- `alloy test` writes a lest spec for each `@test` function. No runner runs them in this project.\n"
+    });
+    out.push_str("- `alloy doc <topic>` explains a keyword, an operator, a lint, or an article.\n");
+
+    if a.manager == Manager::Ember {
+        out.push_str(
+            "- `embr add <scope/name>` adds a package to `ember.toml`. `embr install` installs the packages. `embr publish` publishes a package to the registry.\n",
+        );
+    }
+
+    out.trim_end().to_string()
+}
+
+/// The style article as a section of the guide. The title goes, since
+/// the section has a heading of its own, and each bold line that heads
+/// a part becomes a heading one level down.
+fn guide_style() -> String {
+    let body = alloy::docs::STYLE
+        .split_once("\n\n")
+        .map_or(alloy::docs::STYLE, |(_, rest)| rest);
+
+    body.lines()
+        .map(
+            |line| match line.strip_prefix("**").and_then(|l| l.strip_suffix("**")) {
+                Some(heading) if !heading.contains("**") => format!("### {heading}"),
+
+                _ => line.to_string(),
+            },
+        )
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_string()
+}
 
 /// The `alloy.toml` of one set of answers. The preset supplies the
 /// `[fmt]` and `[lint]` tables; every other table holds a default, as
@@ -443,6 +581,12 @@ pub(crate) fn plan(a: &Answers) -> Plan {
         Manager::None => {}
     }
 
+    let guide = agent_guide(a);
+
+    for name in a.guide.files() {
+        plan.files.push((PathBuf::from(name), guide.clone()));
+    }
+
     if a.runner == Runner::None {
         plan.notes.push(
             "`[test] lest = false`: `alloy test` still writes a spec per @test, and no runner runs them"
@@ -456,7 +600,7 @@ pub(crate) fn plan(a: &Answers) -> Plan {
     // answered rather than leaving the author to guess.
     if a.recommended {
         plan.notes.push(
-            "the recommended setup answered every question: a game, ember, lest, the `temper` preset, and strict mode"
+            "the recommended setup answered every question: a game, ember, lest, the `temper` preset, strict mode, and an AGENTS.md"
                 .to_string(),
         );
         plan.last = Some(
@@ -497,6 +641,7 @@ mod tests {
             runner,
             preset,
             strict: true,
+            guide: Guide::None,
             has_luau_config: false,
             recommended: false,
         }
@@ -778,6 +923,8 @@ mod tests {
         assert!(config.test.lest);
         assert!(written(&p, "ember.toml").is_some());
         assert!(written(&p, ".gitignore").is_some());
+        assert_eq!(written(&p, "AGENTS.md"), Some(agent_guide(&a)));
+        assert!(written(&p, "CLAUDE.md").is_none());
 
         assert!(
             p.notes.iter().any(|n| n.contains("a game, ember, lest")),
@@ -796,6 +943,82 @@ mod tests {
         let asked = plan(&answers(Kind::Game, Manager::Ember, Runner::Lest, "temper"));
         assert!(asked.last.is_none());
         assert!(!asked.notes.iter().any(|n| n.contains("recommended setup")));
+    }
+
+    /// Each guide answer writes its files, and both hold one text.
+    #[test]
+    fn each_guide_answer_writes_its_files() {
+        let mut a = answers(Kind::Game, Manager::Ember, Runner::Lest, "temper");
+        let names = |p: &Plan| -> Vec<String> {
+            p.files
+                .iter()
+                .map(|(path, _)| path.display().to_string())
+                .filter(|n| n.ends_with(".md"))
+                .collect()
+        };
+
+        for (guide, files) in [
+            (Guide::Agents, vec!["AGENTS.md"]),
+            (Guide::Claude, vec!["CLAUDE.md"]),
+            (Guide::Both, vec!["AGENTS.md", "CLAUDE.md"]),
+            (Guide::None, vec![]),
+        ] {
+            a.guide = guide;
+            let p = plan(&a);
+
+            assert_eq!(names(&p), files, "{guide:?}");
+
+            for file in files {
+                assert_eq!(written(&p, file), Some(agent_guide(&a)), "{file}");
+            }
+        }
+    }
+
+    /// The guide says what Alloy is, the layout and the commands the
+    /// answers give, the style article whole, and how to look a topic
+    /// up. Its template leaves no slot unfilled.
+    #[test]
+    fn the_guide_follows_the_answers() {
+        let game = agent_guide(&answers(Kind::Game, Manager::Ember, Runner::Lest, "temper"));
+
+        assert!(game.contains("strict superset of Luau"), "{game}");
+        assert!(game.contains(GAME_MOUNTS), "{game}");
+        assert!(game.contains("`alloy test --run`"), "{game}");
+        assert!(game.contains("`embr publish`"), "{game}");
+        assert!(game.contains("claude mcp add alloy -- alloy mcp"), "{game}");
+
+        for command in ["build", "check", "flux", "fmt", "doc <topic>"] {
+            assert!(game.contains(&format!("`alloy {command}`")), "{command}");
+        }
+
+        // The style article, with its bold part titles as headings.
+        assert!(
+            game.contains("\n## Style\n\nAlloy code must read as Alloy"),
+            "{game}"
+        );
+        assert!(game.contains("\n### File kinds\n"), "{game}");
+        assert!(game.contains("\n### Syntax\n"), "{game}");
+        assert!(game.contains("\n### Layout\n"), "{game}");
+        assert!(
+            game.contains("const origin = new Vector3(0, 10, 0)"),
+            "{game}"
+        );
+        assert!(!game.contains("**Writing Alloy"), "{game}");
+
+        for slot in ["{layout}", "{commands}", "{style}"] {
+            assert!(!game.contains(slot), "{slot} is left in the guide");
+        }
+
+        let package = agent_guide(&answers(
+            Kind::Package,
+            Manager::None,
+            Runner::None,
+            "temper",
+        ));
+
+        assert!(!package.contains("[mount]"), "{package}");
+        assert!(!package.contains("embr"), "{package}");
+        assert!(package.contains("No runner runs them"), "{package}");
     }
 
     /// A preset file is named by its file name and holds the two

@@ -104,6 +104,10 @@ fn run() -> ExitCode {
         Some("init") if wants_help(&args) => command_help(help::INIT_TEXT),
         Some("init") => cli::init::init(&args[1..]),
 
+        Some("mcp") if wants_help(&args) => command_help(help::MCP_TEXT),
+
+        Some("mcp") => cli::mcp::run(),
+
         Some("migrate") if wants_help(&args) => command_help(help::MIGRATE_TEXT),
 
         Some("migrate") => cli::migrate::migrate(&args[1..]),

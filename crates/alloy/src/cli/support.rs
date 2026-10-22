@@ -122,6 +122,7 @@ fn flags_of(command: &str) -> Option<Vec<&'static str>> {
         "fmt" => vec!["--check", "--config"],
         "doc" => vec!["--json"],
         "init" => vec!["--interactive", "--yes", "--non-interactive"],
+        "mcp" => vec![],
         "self" => vec!["--dir", "--version", "--dry-run"],
         "ingot" => vec!["--lint", "--output", "--format", "--hover", "--complete"],
 

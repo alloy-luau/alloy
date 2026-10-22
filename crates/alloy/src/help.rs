@@ -26,6 +26,7 @@ Commands:
   init            Write alloy.toml and one Luau config (.config.luau)
   migrate         Rewrite alloy.toml as .config.aly
   ingot           Scaffold, inspect, or run an extension
+  mcp             Serve the docs to a coding agent over MCP
   self            Install, update, or remove the binaries
   help            Show this screen
 
@@ -93,12 +94,17 @@ gains only the mode and the alias it lacks. An existing alloy.toml is
 never overwritten.
 
 `alloy init` in a terminal opens the wizard. Its first question offers
-the recommended setup: a game, ember, lest, the temper preset, and
-strict mode. Answer no and it asks six questions, each one already on
-the recommended answer: the kind of project, its name, the package
-manager, the test runner, the style preset, and the language mode. It
-writes nothing until every question is answered, and ctrl-c leaves the
-folder as it was.
+the recommended setup: a game, ember, lest, the temper preset, strict
+mode, and an AGENTS.md. Answer no and it asks seven questions, each one
+already on the recommended answer: the kind of project, its name, the
+package manager, the test runner, the style preset, the language mode,
+and the agent guide. It writes nothing until every question is
+answered, and ctrl-c leaves the folder as it was.
+
+The agent guide explains Alloy to a coding agent: the layout, the
+commands, the rules of `alloy doc style`, and `alloy mcp`. The wizard
+writes it as AGENTS.md, CLAUDE.md, both, or neither, and never
+overwrites a guide that is already there.
 
 A script, a pipe and a CI job have no terminal to answer with, so they
 get the plain path and the two bare files, exactly as before. Pass
@@ -116,6 +122,26 @@ The wizard lists three style presets, anneal, temper, and forge, plus
 every preset file in ~/.alloy/presets and .alloy/presets. A preset is a
 TOML file holding a [fmt] table and a [lint] table, and its file name is
 the name shown. `alloy doc init` explains all of it.
+";
+
+pub const MCP_TEXT: &str = "\
+Usage: alloy mcp
+
+Serves the Alloy docs to a coding agent over MCP, the Model Context
+Protocol. The agent starts the server and talks to it over stdio:
+JSON-RPC 2.0, one message per line. Only protocol messages go to
+stdout. The text is the text of `alloy doc`.
+
+Tools:
+  search_docs     Rank the topics by a query; each hit has a snippet
+  read_doc        Print one topic as markdown, as `alloy doc` has it
+  list_topics     List every topic, by group
+  style_guide     Print the style article, `alloy doc style`
+
+Register it with Claude Code:
+  claude mcp add alloy -- alloy mcp
+
+Another MCP client takes the command `alloy mcp`, with no arguments.
 ";
 
 pub const BUILD_TEXT: &str = "\
@@ -380,7 +406,7 @@ mod tests {
         let help = render(false);
 
         for name in [
-            "build", "check", "flux", "lint", "fmt", "test", "doc", "init", "self",
+            "build", "check", "flux", "lint", "fmt", "test", "doc", "init", "mcp", "self",
         ] {
             assert!(help.contains(name), "{name} is missing");
         }

@@ -2,6 +2,8 @@
 !README.md
 !LICENSE.MD
 !CONTRIBUTING.md
+# The text the binary embeds with include_str!
+!crates/alloy/src/**/*.md
 
 # Rust
 target/

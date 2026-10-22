@@ -858,7 +858,15 @@ impl<'s> Formatter<'s> {
         let closer = self.items[close].text.clone();
         let expand = !elements.is_empty()
             && !self.hugs(open, close)
-            && self.should_expand(elements, *magic_comma, hard, open, close);
+            && !self.hugs_last_table(open, elements, hard)
+            && self.should_expand(
+                elements,
+                *magic_comma,
+                hard,
+                open,
+                close,
+                self.line.chars().count(),
+            );
         self.line.push_str(&opener);
 
         if !expand {
@@ -961,8 +969,49 @@ impl<'s> Formatter<'s> {
         }
     }
 
+    /// Whether the call at `open` hugs its last argument, a table that
+    /// breaks anyway: `register('fly', {`, the fields, then `})`. fmt put
+    /// each argument on a line of its own (LANG_BUGS 96). StyLua hugs a
+    /// table it keeps open. A table that fits on a line of its own keeps
+    /// that line, so a second run reads the same layout. The line must
+    /// hold the call up to the `{`, and a preserving run keeps a call
+    /// the author opened.
+    fn hugs_last_table(
+        &self,
+        open: usize,
+        elements: &[(Vec<Node>, Option<usize>)],
+        hard: &[bool],
+    ) -> bool {
+        let [_, .., (last, _)] = elements else {
+            return false;
+        };
+        let [
+            Node::Group {
+                open: table,
+                close: table_close,
+                elements: fields,
+                magic_comma,
+            },
+        ] = last.as_slice()
+        else {
+            return false;
+        };
+        let table = *table;
+        let head: usize = (open + 1..=table).map(|k| self.spaced_width(k)).sum();
+        let own_line = self.indent(self.line_level + 1).chars().count();
+
+        matches!(self.items[open].text.as_str(), "(" | "?(")
+            && self.items[table].is("{")
+            && (self.options.recommended || self.items[open + 1].newlines_before == 0)
+            && !(open + 1..table).any(|k| hard[k] || self.items[k].is_comment())
+            && self.line.chars().count() + self.items[open].width() + head
+                <= self.options.column_width
+            && self.should_expand(fields, *magic_comma, hard, table, *table_close, own_line)
+    }
+
     /// Whether a group breaks: a magic trailing comma, a comment among
-    /// its elements, or a flat rendering that runs past the width.
+    /// its elements, or a flat rendering that runs past the width. The
+    /// opener lands at `column`.
     fn should_expand(
         &self,
         elements: &[(Vec<Node>, Option<usize>)],
@@ -970,6 +1019,7 @@ impl<'s> Formatter<'s> {
         hard: &[bool],
         open: usize,
         close: usize,
+        column: usize,
     ) -> bool {
         if self.hole[open] {
             return false;
@@ -1049,7 +1099,7 @@ impl<'s> Formatter<'s> {
             width += self.tail_width(close, hard);
         }
 
-        self.line.chars().count() + width > self.options.column_width
+        column + width > self.options.column_width
     }
 
     /// The width the line holds past the closer at `close`, up to the

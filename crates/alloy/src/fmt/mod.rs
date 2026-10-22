@@ -2358,6 +2358,32 @@ const deeper = HashMap.new<<string, HashMap<string, Pair<number, string>[]>[]>>(
         );
     }
 
+    /// A table that is the last of several arguments, and that breaks
+    /// anyway, hugs the call. fmt put each argument on a line of its own,
+    /// one level in (LANG_BUGS 96). A table that fits on a line of its
+    /// own keeps that line, as in StyLua, and so does a call whose line
+    /// cannot hold the arguments up to the `{`.
+    #[test]
+    fn a_last_table_argument_that_breaks_hugs_the_call() {
+        let hugged = "conch.register('fly', {\n  description = 'Flight on or off',\n  permissions = DEV_ONLY,\n  arguments = function() -> () end,\n  callback = function() -> () end,\n})\n";
+        stable(hugged, hugged);
+        stable(
+            "conch.register(\n  'fly',\n  {\n    description = 'Flight on or off',\n    permissions = DEV_ONLY,\n    arguments = function() -> () end,\n    callback = function() -> () end,\n  }\n)\n",
+            hugged,
+        );
+        // Too wide for a line of its own, the table breaks and hugs in
+        // one run, so a second run changes nothing.
+        stable(
+            "conch.register('fly', { description = 'Flight on or off', permissions = DEV_ONLY, arguments = function() -> () end, callback = function() -> () end })\n",
+            hugged,
+        );
+
+        let fits = "table.insert(\n  walkers,\n  { doors = new SmartDoors {}, body = new Vector2(x, 98), way = 0, stops = 0, trail = [] }\n)\n";
+        stable(fits, fits);
+        let long_head = "local x = some_really_long_function_name_here(\n  first_argument_long_name,\n  second_argument_long_name_here,\n  {\n    a = 1,\n  }\n)\n";
+        stable(long_head, long_head);
+    }
+
     /// Each line of a split `if` condition sits one level under the
     /// `if`, and `then` goes back under the `if`. fmt put each `or` line
     /// one level deeper than the first operand, and `then` one level in.

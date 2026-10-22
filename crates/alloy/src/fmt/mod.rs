@@ -1702,6 +1702,18 @@ mod tests {
         assert_eq!(format(&once).unwrap(), once);
     }
 
+    /// A block comment over a table field kept its own line, but the
+    /// field joined its `]]` (LANG_BUGS 93, 138). The field starts the
+    /// next line, as a statement under a block comment does.
+    #[test]
+    fn a_field_under_a_block_comment_keeps_its_line() {
+        let src = "export const NOTES: { [string]: number } = {\n  --[[\n    The first note.\n  ]]\n  a = 1,\n  --- The second note.\n  b = 2,\n}\n";
+        stable(src, src);
+
+        let rows = "local rows = {\n  --[[ The first row. ]]\n  { 1 },\n}\n";
+        stable(rows, rows);
+    }
+
     #[test]
     fn a_magic_trailing_comma_keeps_a_group_expanded() {
         let src = "local t = {\n  a = 1,\n  b = 2,\n}\n";

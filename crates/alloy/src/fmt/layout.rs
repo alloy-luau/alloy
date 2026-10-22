@@ -733,9 +733,9 @@ impl<'s> Formatter<'s> {
     // --- hard breaks ------------------------------------------------------------------
 
     /// Which items start a new line no matter what: a newline in the
-    /// source outside any bracket group, a comment on its own line, or a
-    /// newline inside a block that opened inside the group, which is a
-    /// callback's body.
+    /// source outside any bracket group, a comment on its own line, the
+    /// code on the line after a comment, or a newline inside a block that
+    /// opened inside the group, which is a callback's body.
     pub(crate) fn hard_breaks(&self, tree: &[Node]) -> Vec<bool> {
         let mut hard = vec![false; self.items.len()];
         self.mark_hard(tree, &mut hard, false, 0);
@@ -749,6 +749,10 @@ impl<'s> Formatter<'s> {
     }
 
     fn mark_hard(&self, nodes: &[Node], hard: &mut [bool], in_group: bool, mut block_depth: i32) {
+        // A block comment ends on a line of its own too, so the field
+        // under one joined its `]]` (LANG_BUGS 93, 138).
+        let after_comment = |i: usize| i > 0 && self.items[i - 1].is_comment();
+
         for n in nodes {
             match n {
                 Node::Item(i) => {
@@ -756,7 +760,10 @@ impl<'s> Formatter<'s> {
 
                     if self.forced[*i]
                         || (it.newlines_before > 0
-                            && (!in_group || block_depth > 0 || it.is_comment()))
+                            && (!in_group
+                                || block_depth > 0
+                                || it.is_comment()
+                                || after_comment(*i)))
                     {
                         hard[*i] = true;
                     }
@@ -768,7 +775,8 @@ impl<'s> Formatter<'s> {
                     let it = &self.items[*open];
 
                     if self.forced[*open]
-                        || (it.newlines_before > 0 && (!in_group || block_depth > 0))
+                        || (it.newlines_before > 0
+                            && (!in_group || block_depth > 0 || after_comment(*open)))
                     {
                         hard[*open] = true;
                     }

@@ -1521,6 +1521,28 @@ mod tests {
         assert_eq!(fmt(old), fixed);
     }
 
+    /// A chain that broke inside an `if` expression ended it, so the
+    /// `else` after a broken `elseif` fell to column 0 (LANG_BUGS 149).
+    /// The lines of the chain sit one step past the branch, and `else`
+    /// stays under `elseif`.
+    #[test]
+    fn a_chain_broken_in_an_if_expression_keeps_the_else_in_the_if() {
+        let src = "export function rate_text(source: Drop) -> string\n  return if source.every > 0\n    then `Every {source.every} kills`\n    elseif source.deep ~= source.chance then `{chance_text(source.chance)} to {chance_text(source.deep)}`\n    else chance_text(source.chance)\nend\n";
+        let want = "export function rate_text(source: Drop) -> string\n  return if source.every > 0\n    then `Every {source.every} kills`\n    elseif source.deep\n      ~= source.chance then `{chance_text(source.chance)} to {chance_text(source.deep)}`\n    else chance_text(source.chance)\nend\n";
+        stable(src, want);
+
+        // A long condition breaks the same way, before the first `then`.
+        let (a, b) = ("a".repeat(40), "b".repeat(50));
+        stable(
+            &format!(
+                "local function f(): number\n  return if {a} and {b} and c then 1 else 2\nend\n"
+            ),
+            &format!(
+                "local function f(): number\n  return if {a}\n      and {b}\n      and c\n    then 1\n    else 2\nend\n"
+            ),
+        );
+    }
+
     /// A nest of long `if` expressions breaks one level per pass, and
     /// each level indents under the one around it. The render loop
     /// stopped after three passes with its lines cleared, so a deeper

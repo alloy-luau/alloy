@@ -317,10 +317,13 @@ impl<'s> Formatter<'s> {
             let prev = self.prev_code(i).map(|p| self.items[p].text.as_str());
 
             // A line that opens the body of a branch continues the `if`
-            // expression, so it sits one level in like the `else` does.
+            // expression, so it sits one level in like the `else` does. So
+            // does a line of a chain inside it, which then takes its step:
+            // `elseif a` and `~= b then c`. That line ended the `if`, and
+            // the `else` fell to the statement's level (LANG_BUGS 149).
             let opens_expr_branch = it.newlines_before > 0
                 && in_expr_if(&stack)
-                && matches!(prev, Some("then") | Some("else"));
+                && (matches!(prev, Some("then") | Some("else")) || self.continues_at(i));
 
             // A `then`, `else`, or `elseif` that opens a line continues
             // the `if` expression above it; any other token ends it.

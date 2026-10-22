@@ -1775,6 +1775,38 @@ mod tests {
         );
     }
 
+    /// A field or an index among the targets of one assignment. The walk
+    /// over the targets read names alone, so `best, box.goal = 1, 2`
+    /// did not write `best`, and `prefer_const` asked for a `const`.
+    #[test]
+    fn a_multiple_assignment_with_a_field_writes_each_name() {
+        let lines = |src: &str| -> Vec<usize> {
+            crate::compile(src)
+                .unwrap()
+                .lints
+                .into_iter()
+                .filter(|l| l.name == "prefer_const")
+                .map(|l| src[..l.start as usize].matches('\n').count() + 1)
+                .collect()
+        };
+
+        for targets in [
+            "best, box.goal",
+            "box.goal, best",
+            "box[1], best",
+            "best, box[1]",
+        ] {
+            let src = format!(
+                "local function f(box: {{ goal: number }})\n    local best = 0\n    {targets} = 1, 2\n    print(best)\nend\nprint(f)\n"
+            );
+
+            assert_eq!(lines(&src), Vec::<usize>::new(), "{src}");
+        }
+
+        // A call among the names is no list of targets.
+        assert_eq!(lines("local x = 1\nprint(f(a), x)\nprint(x)\n"), [1]);
+    }
+
     /// One name given a body twice: the second replaces the first, and
     /// the checker's `DuplicateFunction` gives way to this one.
     #[test]

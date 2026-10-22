@@ -1462,11 +1462,15 @@ impl<'s> Scan<'s> {
                 return false;
             }
 
-            // The rest of a list of targets, then the operator.
+            // The rest of a list of targets, then the operator. A target
+            // can be a field or an index: `x, t.n = 1, 2`.
             let mut k = j + 1;
 
-            while self.at(k, ",") && self.is_name(k + 1) {
-                k += 2;
+            while self.at(k, ",")
+                && self.is_name(k + 1)
+                && let Some(end) = self.expr_end(k + 1)
+            {
+                k = end;
             }
 
             if !self.assigns_at(k) || !self.reads_binding(n, j) {
@@ -1479,8 +1483,11 @@ impl<'s> Scan<'s> {
             // the write on the line of the `function`.
             let mut first = j;
 
-            while first >= 2 && self.at(first - 1, ",") && self.is_name(first - 2) {
-                first -= 2;
+            while first >= 1
+                && self.at(first - 1, ",")
+                && let Some(start) = self.target_start_before(first - 1)
+            {
+                first = start;
             }
 
             let after_expression = first > 0
@@ -1497,6 +1504,39 @@ impl<'s> Scan<'s> {
             (self.statement_start(first) || after_expression)
                 && !matches!(self.prev(first), "local" | "const")
         })
+    }
+
+    /// The first token of the assignment target that ends at the `,` at
+    /// `comma`: `a`, `a.b`, `a[k]` or `f().x`. `None` when the tokens
+    /// before the comma are no such target.
+    fn target_start_before(&self, comma: usize) -> Option<usize> {
+        let mut depth = 0i32;
+
+        for k in (0..comma).rev() {
+            match self.t(k) {
+                ")" | "]" | "}" => depth += 1,
+
+                "(" | "[" | "{" => depth -= 1,
+
+                // A bracket holds any expression, but outside one a target
+                // holds only names and dots.
+                "." => {}
+
+                _ if depth == 0 && !self.is_name(k) => return None,
+
+                _ => {}
+            }
+
+            if depth < 0 {
+                return None;
+            }
+
+            if depth == 0 && self.is_name(k) && self.prev(k) != "." {
+                return Some(k);
+            }
+        }
+
+        None
     }
 
     /// Whether the declaration at `i` sends its name out of the file:

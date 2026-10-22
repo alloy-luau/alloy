@@ -1922,6 +1922,24 @@ const deeper = HashMap.new<<string, HashMap<string, Pair<number, string>[]>[]>>(
         );
     }
 
+    /// `class` as a name in a body opened a block, so each line below it
+    /// took one more indent, to the end of the file (LANG_BUGS 153). A
+    /// class opens only where a statement starts.
+    #[test]
+    fn a_name_class_in_a_body_opens_no_block() {
+        let want = "export function check(of: string, class: string?): number\n  if of ~= class then\n    return 1\n  end\n\n  for _, class in [ of ] do\n    print(class)\n  end\n\n  return 0\nend\n\nexport function after(): number\n  return 1\nend\n";
+        stable(want, want);
+
+        // The block structure the lints read agrees.
+        let toks = lex(want).unwrap().toks;
+        let steps = structure::structure(want, &toks).steps;
+        assert!(
+            toks.iter()
+                .zip(&steps)
+                .all(|(t, s)| t.text(want) != "class" || s.opens == 0)
+        );
+    }
+
     /// A method of a declared class has no body. After a field, the
     /// layout read one and indented the `end` and every line below.
     #[test]

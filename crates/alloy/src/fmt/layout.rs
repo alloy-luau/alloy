@@ -82,19 +82,24 @@ impl<'s> Formatter<'s> {
                         || self.attributes_open_line(i))
             }
 
-            // `class Name` opens a body, as the structure pass reads
-            // it; a class used as a name, `class = 1`, opens nothing.
+            // `class Name` opens a body where a statement starts, as the
+            // parser reads it. A class used as a name opens nothing:
+            // `class = 1`, or `if of ~= class then` (LANG_BUGS 153).
             "class" => {
                 prev == Some("declare")
-                    || self.next_code(i).is_some_and(|n| {
-                        self.items[n].is_ident()
-                            && !self.next_code(n).is_some_and(|m| {
-                                matches!(
-                                    self.items[m].text.as_str(),
-                                    "=" | "(" | "." | ":" | "[" | ","
-                                )
-                            })
-                    })
+                    || (self.first_on_line(i)
+                        || matches!(prev, Some("export" | "open" | "public" | "private"))
+                        || self.attributes_open_line(i))
+                        && self.next_code(i).is_some_and(|n| {
+                            self.items[n].is_ident()
+                                && !self.items[n].is_keyword_here()
+                                && !self.next_code(n).is_some_and(|m| {
+                                    matches!(
+                                        self.items[m].text.as_str(),
+                                        "=" | "(" | "." | ":" | "[" | ","
+                                    )
+                                })
+                        })
             }
 
             "with" => self.line_has_before(i, "declare"),

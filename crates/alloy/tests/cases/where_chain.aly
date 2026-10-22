@@ -1,0 +1,17 @@
+-- A `where` before `;` tests its own binding, and the next binding runs
+-- only when that test holds (LANG_BUGS 90).
+export function held(root: Instance) -> number
+  if const a = root:FindFirstChild('A') where a is Frame; const b = a:FindFirstChild('B') then
+    return 1
+  end
+
+  return 0
+end
+
+export function pair(t: { [string]: number }) -> number
+  if const a = t.a where a > 0; const b = t.b where b > a then
+    return a + b
+  end
+
+  return 0
+end

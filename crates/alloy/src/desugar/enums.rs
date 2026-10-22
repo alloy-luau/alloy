@@ -2737,6 +2737,17 @@ impl<'s> Desugar<'s> {
                 }
             });
             decls.push(decl);
+
+            // `where` before `;` tests this binding, so the next binding
+            // runs only when the test holds.
+            if let Some(f) = &b.filter {
+                let map = self.bind_map(&binds);
+                self.renames.push(map);
+                let text = self.render_to_string(f);
+                self.renames.pop();
+                tests.push(format!("({text})"));
+                prior.push(format!("({text})"));
+            }
         }
 
         let mut test = tests.join(" and ");
@@ -3831,7 +3842,7 @@ mod tests {
 
         assert!(
             out.check
-                .contains("Array.from({(Kind.Slide(1) :: Kind), Kind.Idle})"),
+                .contains("Array.from<<Kind>>({(Kind.Slide(1) :: Kind), Kind.Idle})"),
             "{}",
             out.check
         );

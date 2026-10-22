@@ -674,6 +674,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         field_expected: HashMap::new(),
         field_casts: HashMap::new(),
         variant_casts: HashMap::new(),
+        array_elems: HashMap::new(),
         value_sink: None,
         for_header: 0,
         child_cast: None,
@@ -1361,6 +1362,9 @@ struct Desugar<'s> {
     /// The items of a list literal that construct a variant, by
     /// address, with the enum the check artifact casts each one to.
     variant_casts: HashMap<usize, String>,
+    /// The array literals that take their element type from where they
+    /// stand, by address, with that type; see `note_array_elems`.
+    array_elems: HashMap<usize, String>,
     /// The text a value-only `return` writes in front of its value: `s = `
     /// in an arm of `local s = match`, `return ` for a value block. None
     /// writes `return `.
@@ -1991,7 +1995,11 @@ fn cond_children(c: &Cond) -> Vec<Child<'_>> {
         Cond::Local {
             bindings, filter, ..
         } => {
-            let mut v: Vec<Child<'_>> = bindings.iter().map(|b| Child::Expr(&b.value)).collect();
+            let mut v: Vec<Child<'_>> = bindings
+                .iter()
+                .flat_map(|b| std::iter::once(&b.value).chain(&b.filter))
+                .map(Child::Expr)
+                .collect();
 
             if let Some(f) = filter {
                 v.push(Child::Expr(f));
@@ -2485,6 +2493,21 @@ fn head_spans<'a>(
 fn child_non_value_spans(c: Child<'_>, out: &mut Vec<TokSpan>) {
     match c {
         Child::Expr(e) => {
+            // `(t :: { shots: number })`: a type inside an expression reads
+            // no value either (LANG_BUGS 141).
+            match e {
+                Expr::TypeAssert { ty, .. } | Expr::Satisfies { ty, .. } => out.push(*ty),
+
+                Expr::Call {
+                    type_args: Some(t), ..
+                }
+                | Expr::New {
+                    type_args: Some(t), ..
+                } => out.push(*t),
+
+                _ => {}
+            }
+
             for c in expr_children(e) {
                 child_non_value_spans(c, out);
             }
@@ -3864,6 +3887,22 @@ impl<'s> Desugar<'s> {
         let rendered = self.render_hoisted(|d| d.render_to_side(e));
 
         self.hoist_rendered(rendered, anchor)
+    }
+
+    /// `hoist`, into a new local each time, never a temp that a later
+    /// statement assigns again. See `coalesce`.
+    fn hoist_new(&mut self, e: &Expr) -> String {
+        let anchor = self.byte_start(e.span());
+        let rendered = self.render_hoisted(|d| d.render_to_side(e));
+        self.bump_temp();
+        let name = format!("_{}", self.temp_next);
+        self.hoists.push(Hoist::Fresh {
+            name: name.clone(),
+            value: HoistValue::Rendered(rendered),
+            anchor,
+        });
+
+        name
     }
 
     /// Renders a value that a hoist takes. The hoists run in order in

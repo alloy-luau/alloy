@@ -1,0 +1,16 @@
+-- A returned list literal takes the element type of the return type in
+-- the check artifact. A test of a field refines the item, and a list is
+-- invariant (LANG_BUGS 147).
+export type Entry = { name: string }
+
+export function listed(entry: Entry) -> { Entry }
+  return entry.name == '' ? [] : [ entry ]
+end
+
+export function guarded(entry: Entry) -> Entry[]
+  if entry.name == '' then
+    return []
+  end
+
+  return [ entry ]
+end

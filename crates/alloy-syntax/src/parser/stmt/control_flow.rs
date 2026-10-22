@@ -107,6 +107,7 @@ impl<'a> Parser<'a> {
         }
 
         let mut bindings = Vec::new();
+        let filter;
 
         loop {
             let is_const = self.at("const");
@@ -139,33 +140,44 @@ impl<'a> Parser<'a> {
 
             self.expect("=")?;
             let value = self.expr()?;
+
+            // The header goes on to `then` or `do`, so `where` here is a
+            // filter wherever its line breaks: a local named `where` could
+            // not stand after the value.
+            let test = match self.eat("where") {
+                true => Some(self.expr()?),
+
+                false => None,
+            };
+
+            // A `where` before `;` tests its own binding, and the next
+            // binding runs only when it holds.
+            if self.at(";") && matches!(self.text_at(1), "local" | "const") {
+                bindings.push(CondBinding {
+                    is_const,
+                    pattern,
+                    ty,
+                    rest,
+                    value,
+                    filter: test,
+                });
+                self.bump();
+
+                continue;
+            }
+
             bindings.push(CondBinding {
                 is_const,
                 pattern,
                 ty,
                 rest,
                 value,
+                filter: None,
             });
-
-            if self.at(";") && matches!(self.text_at(1), "local" | "const") {
-                self.bump();
-
-                continue;
-            }
+            filter = test;
 
             break;
         }
-
-        // The header goes on to `then` or `do`, so `where` here is the
-        // filter wherever its line breaks: a local named `where` could not
-        // stand after the value.
-        let filter = if self.at("where") {
-            self.bump();
-
-            Some(self.expr()?)
-        } else {
-            None
-        };
 
         Ok(Cond::Local {
             negated,

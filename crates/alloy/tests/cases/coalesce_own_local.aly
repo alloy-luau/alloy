@@ -1,0 +1,8 @@
+-- In the check artifact each `??` reads into a local of its own, since
+-- a reused temp keeps the type of its first value (LANG_BUGS 144).
+export function both(counts: { [string]: { number } }, names: { [string]: { string } }, key: string) -> number
+  const some: { number } = counts[key] ?? {}
+  const words: { string } = names[key] ?? {}
+
+  return #some + #words
+end

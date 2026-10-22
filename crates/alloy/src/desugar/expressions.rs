@@ -1,7 +1,9 @@
 //! Expression lowering, including postfix chains and `new`/table
 //! construction.
 
-use alloy_syntax::ast::{Block, CallArgs, ChildName, Cond, Expr, IndexKey, TableField, TokSpan};
+use alloy_syntax::ast::{
+    Block, CallArgs, ChildName, Cond, Expr, IndexKey, Stmt, TableField, TokSpan,
+};
 
 use crate::roblox_classes::{DATATYPES, INSTANCE_CLASSES};
 
@@ -261,6 +263,59 @@ impl<'s> Desugar<'s> {
                 self.variant_casts
                     .insert(std::ptr::from_ref(item) as usize, ty);
             }
+        }
+    }
+
+    /*
+    `const xs: { unknown } = [ a, b ]` in the check artifact. `Array.from`
+    infers its element type from the items, and a list is invariant:
+    `{ unknown }` refused `Array<number | string>` (LANG_BUGS 143). So a
+    literal that a typed binding holds passes the element type of the
+    annotation to `Array.from`.
+
+    A `return` takes the return type of its function the same way:
+    `return [ entry ]` after a test of `entry.name` made an Array of the
+    refined `entry`, and `{ Entry }` refused it (LANG_BUGS 147).
+    */
+    pub(crate) fn note_array_elems(&mut self, stmt: &Stmt) {
+        let (ty, value) = match stmt {
+            Stmt::Local(l)
+                if l.names.len() == 1
+                    && l.values.len() == 1
+                    && l.names[0].destructure.is_none() =>
+            {
+                let Some(t) = l.names[0].ty else {
+                    return;
+                };
+
+                (self.text_of(t).to_string(), &l.values[0])
+            }
+
+            // A `return` in a `try do` block leaves the block, and a value
+            // block's last value is the block's.
+            Stmt::Return(r)
+                if r.values.len() == 1
+                    && !r.value_only
+                    && matches!(self.try_targets.last(), Some(None)) =>
+            {
+                let Some(Some(t)) = self.ret_types.last() else {
+                    return;
+                };
+
+                (t.clone(), &r.values[0])
+            }
+
+            _ => return,
+        };
+        let Some(elem) = array_elem(self.alias_value(&ty)).map(str::to_string) else {
+            return;
+        };
+        let elem = self.lower_type(&elem);
+        let mut literals = Vec::new();
+        array_literals(value, &mut literals);
+
+        for at in literals {
+            self.array_elems.insert(at, elem.clone());
         }
     }
 
@@ -558,11 +613,22 @@ impl<'s> Desugar<'s> {
                 // an array. An annotation on the left still wins: `any`
                 // accepts every element type.
                 let cast = self.options.check && items.is_empty();
+                // Any other literal takes the element type of where it
+                // stands; see `note_array_elems`.
+                let elem = match cast {
+                    true => String::new(),
+
+                    false => self
+                        .array_elems
+                        .get(&(std::ptr::from_ref(e) as usize))
+                        .map(|t| format!("<<{t}>>"))
+                        .unwrap_or_default(),
+                };
                 let std = self.std();
                 let open_text = if cast {
                     format!("({std}.Array.from({{")
                 } else {
-                    format!("{std}.Array.from({{")
+                    format!("{std}.Array.from{elem}({{")
                 };
                 self.generate(anchor, &open_text);
                 let open = self.toks[span.start as usize].end;
@@ -946,6 +1012,15 @@ impl<'s> Desugar<'s> {
         let anchor = self.byte_start(span);
 
         /*
+        The checker types the second read of a map's field as `~nil`:
+        `t.a ?? 0` on `{ [string]: number }` came out `~nil`, and `t['a']`,
+        which reads once into a temp, came out `number` (LANG_BUGS 139).
+        So the check artifact reads a field once too. In place, a temp
+        needs a closure, and the field takes the runtime's `coalesce`.
+        */
+        let field = self.options.check && self.is_simple(lhs) && reads_field(lhs);
+
+        /*
         In place, the hoist of the left side becomes a closure around the
         operand, and Luau forgets inside it that a local assigned again
         above was tested for nil (LANG_BUGS 104). A literal or a name on
@@ -953,7 +1028,7 @@ impl<'s> Desugar<'s> {
         `coalesce` takes both sides as arguments, and no closure forms.
         */
         if self.in_place
-            && !self.is_simple(lhs)
+            && (!self.is_simple(lhs) || field)
             && matches!(
                 rhs,
                 Expr::Name(_)
@@ -980,13 +1055,19 @@ impl<'s> Desugar<'s> {
         // and the hovers inside them land on the text the author wrote.
         // A simple left side is copied at its first read; the second
         // read is generated.
-        let (first, left) = match self.is_simple(lhs) {
+        let (first, left) = match self.is_simple(lhs) && !(field && !self.in_place) {
             true => {
                 let side = self.render_to_side(lhs);
                 let text = side.text().to_string();
 
                 (Some(side), text)
             }
+
+            // Luau gives a local the type of its first value, so a temp
+            // that a later `??` assigns again kept the first one's type:
+            // `{ number }` refused `{ string }` (LANG_BUGS 144). The check
+            // artifact gives each `??` a local of its own.
+            false if self.options.check => (None, self.hoist_new(lhs)),
 
             false => (None, self.hoist(lhs)),
         };
@@ -2577,6 +2658,89 @@ impl<'s> Desugar<'s> {
         let parts = self.chain_parts(e);
 
         self.guarded(&parts.guards, &parts.inner)
+    }
+}
+
+/// The element type of a list type: `T` of `{ T }`, `T[]`, `Array<T>`,
+/// and of each one made optional. `None` for any other type.
+fn array_elem(ty: &str) -> Option<&str> {
+    let ty = ty.trim();
+    let ty = ty.strip_suffix('?').unwrap_or(ty).trim();
+
+    if split_top_level(ty, '|').len() > 1 || split_top_level(ty, '&').len() > 1 {
+        return None;
+    }
+
+    let elem = match ty.strip_prefix('{').and_then(|t| t.strip_suffix('}')) {
+        // `{ x: T }` is a record, `{ [K]: V }` a map, and `{ read T }`
+        // a list that only reads.
+        Some(inner) => {
+            let inner = inner.trim();
+
+            if split_top_level(inner, ':').len() > 1
+                || split_top_level(inner, ',').len() > 1
+                || inner.starts_with("read ")
+            {
+                return None;
+            }
+
+            inner
+        }
+
+        None => match ty.strip_suffix("[]") {
+            Some(inner) => inner,
+
+            None => ty.strip_prefix("Array<")?.strip_suffix('>')?,
+        },
+    };
+
+    (!elem.trim().is_empty()).then(|| elem.trim())
+}
+
+/// The addresses of the array literals that `e` gives as its value: `e`
+/// itself, or a branch of a ternary or an `if` expression.
+fn array_literals(e: &Expr, out: &mut Vec<usize>) {
+    match e {
+        Expr::Array { .. } => out.push(std::ptr::from_ref(e) as usize),
+
+        Expr::Paren { inner, .. } => array_literals(inner, out),
+
+        Expr::Ternary {
+            then_value,
+            else_value,
+            ..
+        } => {
+            array_literals(then_value, out);
+            array_literals(else_value, out);
+        }
+
+        Expr::IfElse {
+            branches,
+            else_value,
+            ..
+        } => {
+            for (_, v) in branches {
+                array_literals(v, out);
+            }
+
+            array_literals(else_value, out);
+        }
+
+        _ => {}
+    }
+}
+
+/// Whether `e` reads a field: `t.a`, or `(t.a)`.
+fn reads_field(e: &Expr) -> bool {
+    match e {
+        Expr::Index {
+            key: IndexKey::Field(_),
+            ..
+        } => true,
+
+        Expr::Paren { inner, .. } => reads_field(inner),
+
+        _ => false,
     }
 }
 

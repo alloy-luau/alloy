@@ -36,7 +36,7 @@ dirs = "6"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # ember's library, for alloy add, install, and publish. The rev pins the
 # ember PR until embr 0.7.0 is on crates.io; the version replaces it then.
-embr = { git = "https://github.com/ember-luau/ember", rev = "88b9a201aa11eceff2a9cdf62f342ee9c47bbf90" }
+embr = { git = "https://github.com/ember-luau/ember", rev = "1c126d9b260faf83112629b72c95b1499ca41b30" }
 terminal_size = "0.4"
 # The prompts of `alloy init --interactive`. Pinned: the wizard styles
 # itself with the crate's render config, which moves between releases.

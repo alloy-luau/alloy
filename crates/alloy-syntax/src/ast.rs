@@ -768,6 +768,10 @@ pub struct CondBinding {
     /// f()`, and the test reads the first alone.
     pub rest: Vec<(TokSpan, Option<TokSpan>)>,
     pub value: Expr,
+    /// `if const a = x where a is Frame; const b = a.B then`: the test
+    /// of this binding, which runs before the next binding. The `where`
+    /// of the last binding is the filter of the whole condition.
+    pub filter: Option<Expr>,
 }
 
 /// `local a, b: T = x, y` or its `const` form.

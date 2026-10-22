@@ -1991,7 +1991,11 @@ fn cond_children(c: &Cond) -> Vec<Child<'_>> {
         Cond::Local {
             bindings, filter, ..
         } => {
-            let mut v: Vec<Child<'_>> = bindings.iter().map(|b| Child::Expr(&b.value)).collect();
+            let mut v: Vec<Child<'_>> = bindings
+                .iter()
+                .flat_map(|b| std::iter::once(&b.value).chain(&b.filter))
+                .map(Child::Expr)
+                .collect();
 
             if let Some(f) = filter {
                 v.push(Child::Expr(f));

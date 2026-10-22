@@ -2489,6 +2489,21 @@ fn head_spans<'a>(
 fn child_non_value_spans(c: Child<'_>, out: &mut Vec<TokSpan>) {
     match c {
         Child::Expr(e) => {
+            // `(t :: { shots: number })`: a type inside an expression reads
+            // no value either (LANG_BUGS 141).
+            match e {
+                Expr::TypeAssert { ty, .. } | Expr::Satisfies { ty, .. } => out.push(*ty),
+
+                Expr::Call {
+                    type_args: Some(t), ..
+                }
+                | Expr::New {
+                    type_args: Some(t), ..
+                } => out.push(*t),
+
+                _ => {}
+            }
+
             for c in expr_children(e) {
                 child_non_value_spans(c, out);
             }

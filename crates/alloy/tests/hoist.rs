@@ -377,3 +377,25 @@ fn a_parameter_list_without_a_body_reads_no_name() {
         vec!["`g` is declared below this use; move the function above it".to_string()]
     );
 }
+
+/// A type inside an expression reads no name: the field `shots` of a
+/// cast's table type counted as a use of the function `shots` below it
+/// (LANG_BUGS 141). A value in the cast stays a use.
+#[test]
+fn a_type_inside_an_expression_reads_no_name() {
+    let src = "const t: unknown = { shots = 1 }\n\nconst n = (t :: { shots: number }).shots\nconst m = (t satisfies { shots: unknown })\n\nlocal function shots() -> number\n    return n\nend\n\nexport default shots\n";
+    let out = compile(src);
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+    let src =
+        "const n = (shots() :: number)\n\nlocal function shots() -> number\n    return 1\nend\n";
+    let messages: Vec<String> = compile(src)
+        .diagnostics
+        .iter()
+        .map(|d| d.message.clone())
+        .collect();
+    assert_eq!(
+        messages,
+        vec!["`shots` is declared below this use; move the function above it".to_string()]
+    );
+}

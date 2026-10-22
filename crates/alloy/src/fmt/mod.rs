@@ -1521,6 +1521,28 @@ mod tests {
         assert_eq!(fmt(old), fixed);
     }
 
+    /// A chain that broke inside an `if` expression ended it, so the
+    /// `else` after a broken `elseif` fell to column 0 (LANG_BUGS 149).
+    /// The lines of the chain sit one step past the branch, and `else`
+    /// stays under `elseif`.
+    #[test]
+    fn a_chain_broken_in_an_if_expression_keeps_the_else_in_the_if() {
+        let src = "export function rate_text(source: Drop) -> string\n  return if source.every > 0\n    then `Every {source.every} kills`\n    elseif source.deep ~= source.chance then `{chance_text(source.chance)} to {chance_text(source.deep)}`\n    else chance_text(source.chance)\nend\n";
+        let want = "export function rate_text(source: Drop) -> string\n  return if source.every > 0\n    then `Every {source.every} kills`\n    elseif source.deep\n      ~= source.chance then `{chance_text(source.chance)} to {chance_text(source.deep)}`\n    else chance_text(source.chance)\nend\n";
+        stable(src, want);
+
+        // A long condition breaks the same way, before the first `then`.
+        let (a, b) = ("a".repeat(40), "b".repeat(50));
+        stable(
+            &format!(
+                "local function f(): number\n  return if {a} and {b} and c then 1 else 2\nend\n"
+            ),
+            &format!(
+                "local function f(): number\n  return if {a}\n      and {b}\n      and c\n    then 1\n    else 2\nend\n"
+            ),
+        );
+    }
+
     /// A nest of long `if` expressions breaks one level per pass, and
     /// each level indents under the one around it. The render loop
     /// stopped after three passes with its lines cleared, so a deeper
@@ -1561,6 +1583,15 @@ mod tests {
         assert_eq!(fmt("local s = c ? a : b\n"), "local s = c ? a : b\n");
         assert_eq!(fmt("local xs = [1,2]\n"), "local xs = [ 1, 2 ]\n");
         assert_eq!(fmt("print(t[1], #t)\n"), "print(t[1], #t)\n");
+    }
+
+    /// The space between a `!` and the `:` of a ternary went: `flip ?
+    /// t.a!: t.b` (LANG_BUGS 140). The colon keeps what the source wrote,
+    /// as after any other operand, and a method call stays tight.
+    #[test]
+    fn an_assert_keeps_the_space_before_a_ternary_colon() {
+        let src = "local s = flip ? t.a! : t.b\nlocal n = t.a!:upper()\n";
+        assert_eq!(fmt(src), src);
     }
 
     #[test]
@@ -1691,6 +1722,18 @@ mod tests {
             "local t = {\n  a = 1,\n  b = 2, -- two\n}\nlocal u = {\n  a = 1,\n  -- note\n}\nlocal v = {\n  -- only\n}\n"
         );
         assert_eq!(format(&once).unwrap(), once);
+    }
+
+    /// A block comment over a table field kept its own line, but the
+    /// field joined its `]]` (LANG_BUGS 93, 138). The field starts the
+    /// next line, as a statement under a block comment does.
+    #[test]
+    fn a_field_under_a_block_comment_keeps_its_line() {
+        let src = "export const NOTES: { [string]: number } = {\n  --[[\n    The first note.\n  ]]\n  a = 1,\n  --- The second note.\n  b = 2,\n}\n";
+        stable(src, src);
+
+        let rows = "local rows = {\n  --[[ The first row. ]]\n  { 1 },\n}\n";
+        stable(rows, rows);
     }
 
     #[test]
@@ -1919,6 +1962,24 @@ const deeper = HashMap.new<<string, HashMap<string, Pair<number, string>[]>[]>>(
         assert_eq!(
             fmt("local class = 1\nprint(class)\n"),
             "local class = 1\nprint(class)\n"
+        );
+    }
+
+    /// `class` as a name in a body opened a block, so each line below it
+    /// took one more indent, to the end of the file (LANG_BUGS 153). A
+    /// class opens only where a statement starts.
+    #[test]
+    fn a_name_class_in_a_body_opens_no_block() {
+        let want = "export function check(of: string, class: string?): number\n  if of ~= class then\n    return 1\n  end\n\n  for _, class in [ of ] do\n    print(class)\n  end\n\n  return 0\nend\n\nexport function after(): number\n  return 1\nend\n";
+        stable(want, want);
+
+        // The block structure the lints read agrees.
+        let toks = lex(want).unwrap().toks;
+        let steps = structure::structure(want, &toks).steps;
+        assert!(
+            toks.iter()
+                .zip(&steps)
+                .all(|(t, s)| t.text(want) != "class" || s.opens == 0)
         );
     }
 
@@ -2295,6 +2356,32 @@ const deeper = HashMap.new<<string, HashMap<string, Pair<number, string>[]>[]>>(
             &format!("copy({{ {fields} }}, second_argument_here)\n"),
             &format!("copy(\n  {{ {fields} }},\n  second_argument_here\n)\n"),
         );
+    }
+
+    /// A table that is the last of several arguments, and that breaks
+    /// anyway, hugs the call. fmt put each argument on a line of its own,
+    /// one level in (LANG_BUGS 96). A table that fits on a line of its
+    /// own keeps that line, as in StyLua, and so does a call whose line
+    /// cannot hold the arguments up to the `{`.
+    #[test]
+    fn a_last_table_argument_that_breaks_hugs_the_call() {
+        let hugged = "conch.register('fly', {\n  description = 'Flight on or off',\n  permissions = DEV_ONLY,\n  arguments = function() -> () end,\n  callback = function() -> () end,\n})\n";
+        stable(hugged, hugged);
+        stable(
+            "conch.register(\n  'fly',\n  {\n    description = 'Flight on or off',\n    permissions = DEV_ONLY,\n    arguments = function() -> () end,\n    callback = function() -> () end,\n  }\n)\n",
+            hugged,
+        );
+        // Too wide for a line of its own, the table breaks and hugs in
+        // one run, so a second run changes nothing.
+        stable(
+            "conch.register('fly', { description = 'Flight on or off', permissions = DEV_ONLY, arguments = function() -> () end, callback = function() -> () end })\n",
+            hugged,
+        );
+
+        let fits = "table.insert(\n  walkers,\n  { doors = new SmartDoors {}, body = new Vector2(x, 98), way = 0, stops = 0, trail = [] }\n)\n";
+        stable(fits, fits);
+        let long_head = "local x = some_really_long_function_name_here(\n  first_argument_long_name,\n  second_argument_long_name_here,\n  {\n    a = 1,\n  }\n)\n";
+        stable(long_head, long_head);
     }
 
     /// Each line of a split `if` condition sits one level under the

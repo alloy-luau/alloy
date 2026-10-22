@@ -121,6 +121,18 @@ impl<'a> Scanner<'a> {
             }
         }
 
+        // A name right after a whole type ends it. A return type has no
+        // closer, so `-> ()` ran on into the body, and the `<` of a tag in
+        // `parts:push(<Label />)` read as a type (LANG_BUGS 145).
+        if self.type_context == Some(self.depth)
+            && token.kind == TokenKind::Name
+            && self
+                .previous
+                .is_some_and(|p| can_end_type(&p, p.text(self.src)))
+        {
+            self.type_context = None;
+        }
+
         if token.kind == TokenKind::Name && STATEMENT_KEYWORDS.contains(&text) {
             self.in_type_declaration = false;
             self.type_context = None;
@@ -342,6 +354,16 @@ fn can_end_expression(token: &Token, text: &str) -> bool {
             debug_assert!(false, "trivia should be filtered before classification");
             false
         }
+    }
+}
+
+/// Whether a token can be the last token of a type: a name, a string
+/// singleton, a closer, or the `?` of an optional.
+fn can_end_type(token: &Token, text: &str) -> bool {
+    match token.kind {
+        TokenKind::Name | TokenKind::Str => true,
+        TokenKind::Symbol => matches!(text, ")" | "]" | "}" | "?"),
+        _ => false,
     }
 }
 
@@ -572,6 +594,15 @@ mod tests {
         );
         assert_eq!(count("f(a :: T, <Frame/>)"), 1);
         assert_eq!(count("local t = { a = 1 :: number, b = <Frame/> }"), 1);
+    }
+
+    #[test]
+    fn type_context_ends_at_the_body_after_a_return_type() {
+        assert_eq!(count("local function f(): ()\n  t:push(<Frame/>)\nend"), 1);
+        assert_eq!(
+            count("local function f() -> string?\n  t:push(<Frame/>)\nend"),
+            1
+        );
     }
 
     #[test]

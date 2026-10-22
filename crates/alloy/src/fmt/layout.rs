@@ -82,19 +82,24 @@ impl<'s> Formatter<'s> {
                         || self.attributes_open_line(i))
             }
 
-            // `class Name` opens a body, as the structure pass reads
-            // it; a class used as a name, `class = 1`, opens nothing.
+            // `class Name` opens a body where a statement starts, as the
+            // parser reads it. A class used as a name opens nothing:
+            // `class = 1`, or `if of ~= class then` (LANG_BUGS 153).
             "class" => {
                 prev == Some("declare")
-                    || self.next_code(i).is_some_and(|n| {
-                        self.items[n].is_ident()
-                            && !self.next_code(n).is_some_and(|m| {
-                                matches!(
-                                    self.items[m].text.as_str(),
-                                    "=" | "(" | "." | ":" | "[" | ","
-                                )
-                            })
-                    })
+                    || (self.first_on_line(i)
+                        || matches!(prev, Some("export" | "open" | "public" | "private"))
+                        || self.attributes_open_line(i))
+                        && self.next_code(i).is_some_and(|n| {
+                            self.items[n].is_ident()
+                                && !self.items[n].is_keyword_here()
+                                && !self.next_code(n).is_some_and(|m| {
+                                    matches!(
+                                        self.items[m].text.as_str(),
+                                        "=" | "(" | "." | ":" | "[" | ","
+                                    )
+                                })
+                        })
             }
 
             "with" => self.line_has_before(i, "declare"),
@@ -312,10 +317,13 @@ impl<'s> Formatter<'s> {
             let prev = self.prev_code(i).map(|p| self.items[p].text.as_str());
 
             // A line that opens the body of a branch continues the `if`
-            // expression, so it sits one level in like the `else` does.
+            // expression, so it sits one level in like the `else` does. So
+            // does a line of a chain inside it, which then takes its step:
+            // `elseif a` and `~= b then c`. That line ended the `if`, and
+            // the `else` fell to the statement's level (LANG_BUGS 149).
             let opens_expr_branch = it.newlines_before > 0
                 && in_expr_if(&stack)
-                && matches!(prev, Some("then") | Some("else"));
+                && (matches!(prev, Some("then") | Some("else")) || self.continues_at(i));
 
             // A `then`, `else`, or `elseif` that opens a line continues
             // the `if` expression above it; any other token ends it.
@@ -728,9 +736,9 @@ impl<'s> Formatter<'s> {
     // --- hard breaks ------------------------------------------------------------------
 
     /// Which items start a new line no matter what: a newline in the
-    /// source outside any bracket group, a comment on its own line, or a
-    /// newline inside a block that opened inside the group, which is a
-    /// callback's body.
+    /// source outside any bracket group, a comment on its own line, the
+    /// code on the line after a comment, or a newline inside a block that
+    /// opened inside the group, which is a callback's body.
     pub(crate) fn hard_breaks(&self, tree: &[Node]) -> Vec<bool> {
         let mut hard = vec![false; self.items.len()];
         self.mark_hard(tree, &mut hard, false, 0);
@@ -744,6 +752,10 @@ impl<'s> Formatter<'s> {
     }
 
     fn mark_hard(&self, nodes: &[Node], hard: &mut [bool], in_group: bool, mut block_depth: i32) {
+        // A block comment ends on a line of its own too, so the field
+        // under one joined its `]]` (LANG_BUGS 93, 138).
+        let after_comment = |i: usize| i > 0 && self.items[i - 1].is_comment();
+
         for n in nodes {
             match n {
                 Node::Item(i) => {
@@ -751,7 +763,10 @@ impl<'s> Formatter<'s> {
 
                     if self.forced[*i]
                         || (it.newlines_before > 0
-                            && (!in_group || block_depth > 0 || it.is_comment()))
+                            && (!in_group
+                                || block_depth > 0
+                                || it.is_comment()
+                                || after_comment(*i)))
                     {
                         hard[*i] = true;
                     }
@@ -763,7 +778,8 @@ impl<'s> Formatter<'s> {
                     let it = &self.items[*open];
 
                     if self.forced[*open]
-                        || (it.newlines_before > 0 && (!in_group || block_depth > 0))
+                        || (it.newlines_before > 0
+                            && (!in_group || block_depth > 0 || after_comment(*open)))
                     {
                         hard[*open] = true;
                     }
@@ -842,7 +858,15 @@ impl<'s> Formatter<'s> {
         let closer = self.items[close].text.clone();
         let expand = !elements.is_empty()
             && !self.hugs(open, close)
-            && self.should_expand(elements, *magic_comma, hard, open, close);
+            && !self.hugs_last_table(open, elements, hard)
+            && self.should_expand(
+                elements,
+                *magic_comma,
+                hard,
+                open,
+                close,
+                self.line.chars().count(),
+            );
         self.line.push_str(&opener);
 
         if !expand {
@@ -945,8 +969,49 @@ impl<'s> Formatter<'s> {
         }
     }
 
+    /// Whether the call at `open` hugs its last argument, a table that
+    /// breaks anyway: `register('fly', {`, the fields, then `})`. fmt put
+    /// each argument on a line of its own (LANG_BUGS 96). StyLua hugs a
+    /// table it keeps open. A table that fits on a line of its own keeps
+    /// that line, so a second run reads the same layout. The line must
+    /// hold the call up to the `{`, and a preserving run keeps a call
+    /// the author opened.
+    fn hugs_last_table(
+        &self,
+        open: usize,
+        elements: &[(Vec<Node>, Option<usize>)],
+        hard: &[bool],
+    ) -> bool {
+        let [_, .., (last, _)] = elements else {
+            return false;
+        };
+        let [
+            Node::Group {
+                open: table,
+                close: table_close,
+                elements: fields,
+                magic_comma,
+            },
+        ] = last.as_slice()
+        else {
+            return false;
+        };
+        let table = *table;
+        let head: usize = (open + 1..=table).map(|k| self.spaced_width(k)).sum();
+        let own_line = self.indent(self.line_level + 1).chars().count();
+
+        matches!(self.items[open].text.as_str(), "(" | "?(")
+            && self.items[table].is("{")
+            && (self.options.recommended || self.items[open + 1].newlines_before == 0)
+            && !(open + 1..table).any(|k| hard[k] || self.items[k].is_comment())
+            && self.line.chars().count() + self.items[open].width() + head
+                <= self.options.column_width
+            && self.should_expand(fields, *magic_comma, hard, table, *table_close, own_line)
+    }
+
     /// Whether a group breaks: a magic trailing comma, a comment among
-    /// its elements, or a flat rendering that runs past the width.
+    /// its elements, or a flat rendering that runs past the width. The
+    /// opener lands at `column`.
     fn should_expand(
         &self,
         elements: &[(Vec<Node>, Option<usize>)],
@@ -954,6 +1019,7 @@ impl<'s> Formatter<'s> {
         hard: &[bool],
         open: usize,
         close: usize,
+        column: usize,
     ) -> bool {
         if self.hole[open] {
             return false;
@@ -1033,7 +1099,7 @@ impl<'s> Formatter<'s> {
             width += self.tail_width(close, hard);
         }
 
-        self.line.chars().count() + width > self.options.column_width
+        column + width > self.options.column_width
     }
 
     /// The width the line holds past the closer at `close`, up to the

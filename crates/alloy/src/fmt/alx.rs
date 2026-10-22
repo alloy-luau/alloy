@@ -840,6 +840,19 @@ mod tests {
         assert_eq!(fmt(&out), out);
     }
 
+    /// A tag in a function that returns `()` read as a type. The return
+    /// type ran on into the body, so fmt skipped the file as one that
+    /// does not parse (LANG_BUGS 145).
+    #[test]
+    fn markup_after_a_return_type_formats() {
+        for ret in ["-> ()", "-> string"] {
+            let src = format!(
+                "export function Bar() -> Instance\n  local parts: Instance[] = []\n\n  local function add_word(text: string) {ret}\n    parts:push(<TextLabel Text={{text}} />)\n  end\n\n  add_word('a')\n\n  return <Frame>{{parts}}</Frame>\nend\n"
+            );
+            assert_eq!(format_alx_file(&src, &FmtConfig::default()).unwrap(), src);
+        }
+    }
+
     #[test]
     fn children_go_on_their_own_lines() {
         let src = "return (\n  <Frame>\n    <UICorner />\n    <TextLabel>{a}</TextLabel>\n  </Frame>\n)\n";

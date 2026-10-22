@@ -310,9 +310,14 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
                     push(&mut stack, Kind::Block, 1, &mut opens, &mut closes);
                 }
 
+                // A class opens where a statement starts, so `if of ~= class
+                // then` opens nothing (LANG_BUGS 153).
                 "class" => {
                     let declares = prev == Some("declare")
-                        || (next.is_some_and(is_name)
+                        || ((first_on_line(src, toks, i)
+                            || matches!(prev, Some("export" | "open" | "public" | "private"))
+                            || after_attributes(src, toks, i))
+                            && next.is_some_and(|n| is_name(n) && !super::is_keyword(n))
                             && !matches!(
                                 toks.get(i + 2).map(|n| n.text(src)),
                                 Some("=" | "(" | "." | ":" | "[" | ",")

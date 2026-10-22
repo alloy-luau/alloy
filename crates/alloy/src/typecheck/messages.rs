@@ -1885,6 +1885,14 @@ fn struct_field_report(
         });
     }
 
+    // The struct declares the field, so the checker lost it after a test
+    // narrowed the value: two tests of `mob.body` leave a `mob` without
+    // `pose` (LANG_BUGS 137). "No field" would contradict the list after
+    // it, so the checker's own report stays.
+    if fields.iter().any(|(n, _)| n == key) {
+        return None;
+    }
+
     // A member the source does write belongs to a report of its own; a
     // list of the others would not help.
     // A key the class table has not got keeps the checker's own report:
@@ -2596,6 +2604,19 @@ mod tests {
         assert_eq!(
             got.message,
             "`Point` has no field `nothing`; its fields are `x` and `y`"
+        );
+    }
+
+    /// Two tests of a nested field narrow the value to a type that hides
+    /// a field the struct declares. The report said the field was missing
+    /// and then listed it (LANG_BUGS 137).
+    #[test]
+    fn a_declared_field_is_never_missing() {
+        let source = "struct Mob as\n    body: number\n    pose: number\nend\nlocal m = new Mob { body = 1, pose = 2 }\nprint(m.pose)\n";
+        let shapes = crate::declarations::shapes(source);
+
+        assert!(
+            resite_report("Type 'Mob' does not have key 'pose'", &shapes, source, 6, 7).is_none()
         );
     }
 

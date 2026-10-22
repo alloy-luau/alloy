@@ -601,8 +601,9 @@ impl<'s> Scan<'s> {
             }
 
             // `?` alone is the ternary; the bracket after it makes the
-            // safe index.
-            if guard == "?" && !self.at(i + 1, "[") {
+            // safe index. The parser fuses the two only when they touch,
+            // so `c ? [1] : [2]` is a ternary with an array arm.
+            if guard == "?" && (!self.at(i + 1, "[") || self.end(i) != self.start(i + 1)) {
                 continue;
             }
 
@@ -947,6 +948,13 @@ mod tests {
             names("local n: number = 1\nlocal s = n > 0 ? \"up\" : \"down\"\nprint(s)\n"),
             Vec::<&str>::new()
         );
+        // A space after the `?` makes a ternary whose arm is an array,
+        // not a `?[`.
+        for arm in ["[ 'a', 'b' ] : [ 'a' ]", "[] : [ 1 ]"] {
+            let src = format!("local function f(dead: boolean)\n    return dead ? {arm}\nend\n");
+
+            assert_eq!(names(&src), Vec::<&str>::new(), "{src}");
+        }
         // A record field of a type is no binding: `name` there says
         // nothing about the local the assert reads.
         assert_eq!(

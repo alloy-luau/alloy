@@ -28,9 +28,9 @@ impl std::fmt::Display for Kind {
     }
 }
 
-/// The package manager the project uses. Alloy runs none of them and
-/// depends on none of them; it writes the manifest it can and names the
-/// command the author runs.
+/// The package manager the project uses. Alloy runs ember itself, through
+/// `alloy add` and `alloy install`; for pesde and wally it writes no
+/// manifest and names the command the author runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Manager {
     Ember,
@@ -320,11 +320,11 @@ shared = [\"src/shared\", \"@game/ReplicatedStorage/Shared\"]
 ";
 
 /// The `ember.toml` the wizard writes, in the shape of the manifest in
-/// `examples/test`. The manifest carries no dependency yet; `embr add`
+/// `examples/test`. The manifest carries no dependency yet; `alloy add`
 /// writes the first one.
 const EMBER_TOML: &str = "\
 # Manifest for this project. See https://luaupm.com/docs
-# Add dependencies with `embr add <scope/name>`, then run `embr install`.
+# Add dependencies with `alloy add <scope/name>`; it installs them too.
 
 [dependencies]
 
@@ -422,7 +422,7 @@ pub(crate) fn plan(a: &Answers) -> Plan {
         Manager::Ember => {
             plan.files
                 .push((PathBuf::from("ember.toml"), EMBER_TOML.to_string()));
-            plan.next.push("embr add <scope/name>".to_string());
+            plan.next.push("alloy add <scope/name>".to_string());
         }
 
         // Alloy does not know the shape of either manifest, so it
@@ -661,7 +661,7 @@ mod tests {
         assert_eq!(
             ember.next,
             vec![
-                "embr add <scope/name>".to_string(),
+                "alloy add <scope/name>".to_string(),
                 "alloy build".to_string()
             ]
         );

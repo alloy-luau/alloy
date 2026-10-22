@@ -118,6 +118,18 @@ fn run() -> ExitCode {
 
         Some("ingot") => cli::ingot::run(&args[1..]),
 
+        Some("add") if wants_help(&args) => command_help(help::ADD_TEXT),
+
+        Some("add") => cli::ember::add(&args[1..]),
+
+        Some("install") if wants_help(&args) => command_help(help::INSTALL_TEXT),
+
+        Some("install") => cli::ember::install(&args[1..]),
+
+        Some("publish") if wants_help(&args) => command_help(help::PUBLISH_TEXT),
+
+        Some("publish") => cli::ember::publish(&args[1..]),
+
         Some(other) => {
             fail(&format!("unknown command `{other}`"));
             usage()

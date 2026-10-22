@@ -24,6 +24,9 @@ Commands:
   test [file]     Write a lest spec per source with a @test; --run runs it
   doc [topic]     Explain a keyword, an operator, a lint, an article
   init            Write alloy.toml and one Luau config (.config.luau)
+  add <package>   Add an ember package to ember.toml, then install
+  install         Install what ember.toml asks for
+  publish         Build, then publish the package to ember
   migrate         Rewrite alloy.toml as .config.aly
   ingot           Scaffold, inspect, or run an extension
   self            Install, update, or remove the binaries
@@ -81,6 +84,36 @@ Options of run:
   --hover <byte>  Ask for the hover at a byte offset
   --complete <byte>
                   Ask for the completions at a byte offset
+";
+
+pub const ADD_TEXT: &str = "\
+Usage: alloy add <scope/name>[@<version>]...
+
+Writes each package into the [dependencies] of ember.toml, then installs.
+The version is a requirement such as ^1.2; without one, the latest
+release. Ember does the work, so the packages, the lockfile, and the
+store are the same ones `embr add` writes.
+";
+
+pub const INSTALL_TEXT: &str = "\
+Usage: alloy install [options]
+
+Installs what ember.toml asks for, the same install `embr install` runs.
+
+Options:
+  --locked              Install exactly what ember.lock records
+";
+
+pub const PUBLISH_TEXT: &str = "\
+Usage: alloy publish [options]
+
+Publishes the package that ember.toml names to the ember registry. With
+language = \"alloy\" under [target], this alloy builds first, and `main`
+must name the built .luau file. The package ships the sources and the
+output, so a plain Luau project can use it with its types.
+
+Options:
+  --dry-run             List what would ship, and upload nothing
 ";
 
 pub const INIT_TEXT: &str = "\

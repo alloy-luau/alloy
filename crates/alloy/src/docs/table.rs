@@ -421,7 +421,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "@ratelimit",
-        "```\n@ratelimit(count: number, seconds: number)\n```\nA per-player token bucket on the server, for client-to-server remotes.",
+        "```\n@ratelimit(count: number, seconds: number)\n```\nA per-player token bucket on the server, for client-to-server remotes. Each message counts once, however many `on` handlers listen, and a player's bucket goes when the player leaves.",
     ),
     (
         "@timeout",

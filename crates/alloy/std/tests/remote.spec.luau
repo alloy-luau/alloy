@@ -167,4 +167,55 @@ describe("remote on a server", function()
 		expect(#seen).toBe(1)
 		expect(seen[1]).toBe(5)
 	end)
+
+	it("charges a message once, however many handlers listen", function()
+		local leave = server_world()
+		local remote = event("Limited", { ratelimit = { 3, 60 } })
+		local first, second, limited = 0, 0, 0
+		remote.on(function()
+			first += 1
+		end)
+		remote.on(function()
+			second += 1
+		end)
+		remote.on_ratelimited(function()
+			limited += 1
+		end)
+		expect(#remote.instance.connections).toBe(1)
+		local a, b = { Name = "a" }, { Name = "b" }
+		for _ = 1, 4 do
+			remote.instance.deliver(a, 1)
+		end
+		-- Three pass to both handlers; the fourth is over the limit.
+		expect(first).toBe(3)
+		expect(second).toBe(3)
+		expect(limited).toBe(1)
+		-- Another sender has a bucket of its own.
+		remote.instance.deliver(b, 1)
+		expect(first).toBe(4)
+		-- A player who leaves takes the bucket along.
+		leave(a)
+		remote.instance.deliver(a, 1)
+		leave_world()
+		expect(first).toBe(5)
+		expect(second).toBe(5)
+	end)
+
+	it("keeps the other handlers when one disconnects", function()
+		server_world()
+		local remote = event("Shared", {})
+		local first, second = 0, 0
+		local connection = remote.on(function()
+			first += 1
+		end)
+		remote.on(function()
+			second += 1
+		end)
+		remote.instance.deliver({}, 1)
+		connection:Disconnect()
+		remote.instance.deliver({}, 1)
+		leave_world()
+		expect(first).toBe(1)
+		expect(second).toBe(2)
+	end)
 end)

@@ -4073,10 +4073,12 @@ function alloy.remote(spec: any): Remote
 	local validate = attrs.validate and attrs.validate[1]
 	-- `@timeout(seconds)`: a call that gets no answer in time rejects.
 	local timeout = attrs.timeout and attrs.timeout[1]
-	-- One bucket per player, dropped when the player is collected.
+	-- One bucket per player, dropped when the player leaves (see `bind`).
+	-- The keys are strong: a weak key drops when the engine collects the
+	-- Player's Lua object, and a player could then start a new bucket.
 	-- Both bindings open before `allowed`, which reads them: declared
 	-- after it, they would be two names and `allowed` would index nil.
-	local buckets = setmetatable({}, { __mode = "k" })
+	local buckets = {}
 	local on_limited = nil
 
 	local function allowed(player)
@@ -4239,6 +4241,15 @@ function alloy.remote(spec: any): Remote
 		remote.instance = inst
 
 		if run_service():IsServer() then
+			if limiter then
+				game:GetService("Players").PlayerRemoving:Connect(function(player)
+					buckets[player] = nil
+				end)
+			end
+			-- The `on` handlers of an event share one engine connection, so
+			-- a message charges the sender's bucket once, not once a handler.
+			local listeners = {}
+			local listening = nil
 			function remote.fire(player, ...)
 				local out = outgoing(...)
 				inst:FireClient(player, table.unpack(out, 1, out.n))
@@ -4273,15 +4284,39 @@ function alloy.remote(spec: any): Remote
 					end
 					return
 				end
-				return inst.OnServerEvent:Connect(function(player, ...)
-					if not allowed(player) then
+				table.insert(listeners, handler)
+				if listening == nil then
+					listening = inst.OnServerEvent:Connect(function(player, ...)
+						if not allowed(player) then
+							return
+						end
+						-- Each handler decodes its own copy, as it did with a
+						-- connection of its own, and runs in its own thread, so
+						-- an error in one does not stop the next.
+						for _, listener in table.clone(listeners) do
+							local args = incoming(...)
+							if args ~= nil and valid(player, args) then
+								task_lib.spawn(listener, player, table.unpack(args, 1, args.n))
+							end
+						end
+					end)
+				end
+				local connection = { Connected = true }
+				function connection.Disconnect()
+					if not connection.Connected then
 						return
 					end
-					local args = incoming(...)
-					if args ~= nil and valid(player, args) then
-						handler(player, table.unpack(args, 1, args.n))
+					connection.Connected = false
+					local at = table.find(listeners, handler)
+					if at then
+						table.remove(listeners, at)
 					end
-				end)
+					if #listeners == 0 and listening ~= nil then
+						listening:Disconnect()
+						listening = nil
+					end
+				end
+				return connection
 			end
 			function remote.on_ratelimited(handler)
 				on_limited = handler

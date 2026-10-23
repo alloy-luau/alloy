@@ -349,10 +349,7 @@ impl<'s> Desugar<'s> {
             };
         }
 
-        let arg_texts: Vec<String> = args
-            .iter()
-            .map(|a| self.text_of(a.span()).to_string())
-            .collect();
+        let arg_texts: Vec<String> = args.iter().map(|a| self.arg_source(a)).collect();
         let mut subst: HashMap<&str, String> = HashMap::new();
 
         for (i, p) in m.params.iter().enumerate() {
@@ -616,6 +613,44 @@ impl<'s> Desugar<'s> {
         self.diagnose(span, &message);
 
         false
+    }
+
+    /// The source text of a macro argument, with each name that the
+    /// renderer renames written as it renders: the temp of a condition,
+    /// a namespace member, an export on the exports table. A fragment
+    /// compiles on its own and sees no renames, so a bare `x` there reads
+    /// the source local, which `while const x = f() where $matches(x, P)`
+    /// has not bound yet. A name inside a nested function stays as
+    /// written, since that function can bind its own.
+    fn arg_source(&self, arg: &Expr) -> String {
+        let start = self.byte_start(arg.span());
+        let mut text = self.text_of(arg.span()).to_string();
+        let mut names = Vec::new();
+        let mut stack = vec![arg];
+
+        while let Some(e) = stack.pop() {
+            if let Expr::Name(span) = e
+                && let Some(path) = self.renamed(self.text_of(*span))
+            {
+                let from = (self.byte_start(*span) - start) as usize;
+                let to = (self.byte_end(*span) - start) as usize;
+                names.push((from, to, path));
+            }
+
+            for child in super::expr_children(e) {
+                if let super::Child::Expr(c) = child {
+                    stack.push(c);
+                }
+            }
+        }
+
+        // From the end, so each range still points at its name.
+        names.sort_by_key(|a| std::cmp::Reverse(a.0));
+        for (from, to, path) in names {
+            text.replace_range(from..to, &path);
+        }
+
+        text
     }
 
     /// Compiles a piece of Alloy on its own and splices the Luau in: the
@@ -908,9 +943,12 @@ impl<'s> Desugar<'s> {
             // boolean. The pattern is the second argument's text, read
             // by the match parser.
             ("matches", 2) => {
+                // The pattern stays as written: its names bind, they
+                // do not read.
                 let nested = format!(
                     "return match {} with case {} then true default false end",
-                    sources[0], sources[1]
+                    self.arg_source(&args[0]),
+                    sources[1]
                 );
 
                 self.compile_fragment(&nested, at, true)

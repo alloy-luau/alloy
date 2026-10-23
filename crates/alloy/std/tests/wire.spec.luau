@@ -124,6 +124,33 @@ describe("wire", function()
 		end).toThrow("string runs past the packet")
 	end)
 
+	it("refuses a packet longer than its layout", function()
+		-- One spare byte after each shape: flat, nested, and an array.
+		local layouts = {
+			{ { "u8", "u16" }, { 7, 300 } },
+			{ { { fields = { { "hp", "u16" }, { "name", "str" } } } }, { { hp = 9, name = "ok" } } },
+			{ { { item = "u8", array = true }, "bool" }, { { 1, 2, 3 }, true } },
+		}
+		for _, case in layouts do
+			local layout, args = case[1], case[2]
+			local buf, rest = wire.pack(layout, args, "T")
+			-- The exact packet still reads back.
+			expect(wire.unpack(layout, buf, rest).n).toBe(#layout)
+			local long = buffer.create(buffer.len(buf) + 1)
+			buffer.copy(long, 0, buf)
+			expect(function()
+				wire.unpack(layout, long, rest)
+			end).toThrow("packet runs past its layout")
+		end
+		-- A value beside the buffer that the layout has no place for.
+		local buf, rest = wire.pack({ "any", "u8" }, { "x", 4 }, "T")
+		expect(function()
+			wire.unpack({ "any", "u8" }, buf, { n = rest.n + 1, rest[1], "extra" })
+		end).toThrow("values run past the layout")
+		-- A packet short of a fixed width raises too.
+		expect(pcall(wire.unpack, { "u32" }, buffer.create(2), { n = 0 })).toBe(false)
+	end)
+
 	it("checks and restores a payload that crossed as a table", function()
 		local Stats = {}
 		Stats.__index = Stats

@@ -1,0 +1,19 @@
+-- `$matches` and a macro in `where` read the bound value, not the name before it binds.
+local items: Result<number, string>[] = [Ok(1), Ok(2), Err("stop")]
+local i = 0
+local function next_item(): Result<number, string>?
+    i += 1
+    return items[i]
+end
+
+macro ok(v) $matches(v, Ok(_)) end
+
+local runs = 0
+while const x = next_item() where $matches(x, Ok(_)) do
+    runs += 1
+end
+
+if const a = next_item() where $ok(a); const b = next_item() where $matches(b, Ok(_)) then
+    print(a, b)
+end
+print(runs)

@@ -224,20 +224,8 @@ impl<'s> Scan<'s> {
         (j >= 1 && matches!(self.prev(j), "local" | "const")).then(|| j - 1)
     }
 
-    /// The `if` of a guard whose binding is the `local` or `const` at
-    /// `k`: `if not local x = f() then`, or a later binding of the same
-    /// condition after a `;`.
     fn guard_if(&self, k: usize) -> Option<usize> {
-        match self.prev(k) {
-            "not" if k >= 2 && self.at(k - 2, "if") => Some(k - 2),
-
-            ";" => (0..k - 1)
-                .rev()
-                .find(|&j| matches!(self.t(j), "local" | "const"))
-                .and_then(|j| self.guard_if(j)),
-
-            _ => None,
-        }
+        guard_if(&|i| self.t(i), k)
     }
 
     /// The token that ends the block a declaration at `d` stands in: the
@@ -912,4 +900,24 @@ impl<'s> Scan<'s> {
 
         out
     }
+}
+
+/// The `if` of a guard whose binding is the `local` or `const` at token
+/// `k`: `if not local x = f() then`, or a later binding of the same
+/// condition after a `;`. A guard binds past its `end`, for the rest of
+/// the block that holds the `if`. `text` reads a token. The flux scan
+/// and the compiler's `const` check both ask this, so they agree.
+pub(crate) fn guard_if<'a>(text: &dyn Fn(usize) -> &'a str, k: usize) -> Option<usize> {
+    if k >= 2 && text(k - 1) == "not" && text(k - 2) == "if" {
+        return Some(k - 2);
+    }
+
+    if k >= 1 && text(k - 1) == ";" {
+        return (0..k - 1)
+            .rev()
+            .find(|&j| matches!(text(j), "local" | "const"))
+            .and_then(|j| guard_if(text, j));
+    }
+
+    None
 }

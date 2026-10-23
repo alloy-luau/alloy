@@ -918,6 +918,58 @@ mod tests {
         );
     }
 
+    /// A condition binds its names too. `if const t = f() then` holds
+    /// `t` in the block, and a guard, `if not const t = f() then return
+    /// end`, holds it for the rest of the block that holds the `if`. The
+    /// check bound neither, so each reassignment here compiled.
+    #[test]
+    fn a_const_of_a_condition_is_checked() {
+        let error = "`t` is a `const`; its value is set once and a reassignment is an error";
+        let f = "local function f(): { n: number }? return { n = 0 } end\n";
+        let run = |body: &str| format!("{f}local function run()\n{body}    print(t)\nend\nrun()\n");
+
+        // In the block of a plain condition.
+        assert_eq!(
+            messages(&format!(
+                "{f}if const t = f() then\n    t = {{ n = 2 }}\n    print(t)\nend\n"
+            )),
+            vec![error]
+        );
+        // After a guard, and inside it.
+        assert_eq!(
+            messages(&run(
+                "    if not const t = f() then return end\n    t = { n = 2 }\n"
+            )),
+            vec![error]
+        );
+        assert_eq!(
+            messages(&run(
+                "    if not const t = f() then\n        t = nil\n        return\n    end\n"
+            )),
+            vec![error]
+        );
+        // A later binding of a stacked guard.
+        assert_eq!(
+            messages(&run(
+                "    if not local a = f(); const t = f() then return end\n    t = a\n"
+            )),
+            vec![error]
+        );
+        // A guard `local` is free, and a plain condition ends at its `end`.
+        assert!(
+            messages(&run(
+                "    if not local t = f() then return end\n    t = { n = 2 }\n"
+            ))
+            .is_empty()
+        );
+        assert!(
+            messages(&format!(
+                "{f}local t = {{ n = 0 }}\nif const t = f() then print(t) end\nt = {{ n = 1 }}\nprint(t)\n"
+            ))
+            .is_empty()
+        );
+    }
+
     /// A statement under a `return` used to end the block early, so the
     /// function's own `end` read as a stray one and two syntax errors
     /// landed on the wrong lines.

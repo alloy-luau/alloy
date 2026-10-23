@@ -514,7 +514,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Suspicious,
         default: Level::Warn,
         summary: "a write to an exported `local` inside a function",
-        detail: "A module returns its exports as a table built when it loads, and an import copies each value into a local of the importer. `export local count = 0` sends out the number 0, not the variable. A write at the top level runs before the module returns, so the table takes it. A write inside a function runs later and never reaches an importer, which keeps the value it read when it loaded. Export a function that returns the value, or keep the value in a table and write its fields: `export local state = { count = 0 }` and `state.count += 1`. An importer holds that table, so it reads every write. Keep the table in a `local` that no line assigns again. A `const` freezes its value by convention, so `const_mutation` reports each write into it, and `prefer_const` leaves alone a `local` whose fields change. A `local` member of a namespace stays live through accessors and draws no report.",
+        detail: "A module returns its exports as a table built when it loads, and an import copies each value into a local of the importer. `export local count = 0` sends out the number 0, not the variable. A write at the top level runs before the module returns, so the table takes it. A write inside a function runs later and never reaches an importer, which keeps the value it read when it loaded. Export a function that returns the value, or keep the value in a table and write its fields: `export local state = { count = 0 }` and `state.count += 1`. An importer holds that table, so it reads every write. Keep the table in a `local` that no line assigns again. A `const` freezes its value by convention, so `const_mutation` reports each field or index write into it, and `prefer_const` leaves alone a `local` whose fields change. A `local` member of a namespace stays live through accessors and draws no report.",
     },
     LintInfo {
         name: "deprecated_call",
@@ -620,7 +620,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Style,
         default: Level::Warn,
         summary: "a `local` that nothing assigns again",
-        detail: "`local x = v` with no later `x = ...` holds one value, and `const x = v` says so: a write added later is a compile error instead of a quiet change. A local whose value the file writes into, with `t.x = 1` or with a call such as `t:push(v)` in any expression, stays `local`, so `prefer_const` and `const_mutation` never disagree. `alloy flux --fix` writes `const`, and so does `alloy fmt` unless `[fmt] prefer_const = false`.",
+        detail: "`local x = v` with no later `x = ...` holds one value, and `const x = v` says so: a write added later is a compile error instead of a quiet change. A local whose value the file writes into, with `t.x = 1` or `t[k] = v`, stays `local`. `const_mutation` reads the same field and index writes, so a `const` that this lint asks for never draws `const_mutation`, and a `local` that would draw it as a `const` never draws this lint. A guard, `if not local x = f() then return end`, binds `x` for the rest of the block, and a write after it counts. A call of a std writer method such as `t:push(v)`, in any expression, also keeps a local `local`. `alloy flux --fix` writes `const`, and so does `alloy fmt` unless `[fmt] prefer_const = false`.",
     },
     LintInfo {
         name: "redundant_as",
@@ -876,7 +876,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Pedantic,
         default: Level::Allow,
         summary: "a write into the value a `const` holds",
-        detail: "Pedantic. `const` freezes the binding, not the value: `const LIMITS = { hp = 100 }` still allows `LIMITS.hp = 1`, and `NAMES:push(x)` still grows the array. The lint reports a field assignment, an index assignment, and a call of a method that changes the value, so a name written as a constant reads as one.",
+        detail: "Pedantic. `const` freezes the binding, not the value: `const LIMITS = { hp = 100 }` still allows `LIMITS.hp = 1`, and `NAMES:push(x)` still grows the array. The lint reports a field assignment and an index assignment, so a name written as a constant reads as one. It does not judge a method call: a name such as `set` or `push` does not say whether the method writes, so `NAMES:push(x)` passes. A guard, `if not const x = f() then return end`, binds `x` for the rest of the block, and the lint reads the writes after it.",
     },
     LintInfo {
         name: "missing_doc",

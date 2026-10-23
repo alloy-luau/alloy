@@ -208,10 +208,37 @@ impl<'s> Scan<'s> {
         }
     }
 
+    /// The `local` or `const` that declares the name at `d`, or `d` when
+    /// it is that word. A name later in a list, `local a, b`, counts.
+    fn declaring_word(&self, d: usize) -> Option<usize> {
+        if matches!(self.t(d), "local" | "const") {
+            return Some(d);
+        }
+
+        let mut j = d;
+
+        while j >= 2 && self.prev(j) == "," && self.is_name(j - 2) {
+            j -= 2;
+        }
+
+        (j >= 1 && matches!(self.prev(j), "local" | "const")).then(|| j - 1)
+    }
+
+    fn guard_if(&self, k: usize) -> Option<usize> {
+        guard_if(&|i| self.t(i), k)
+    }
+
     /// The token that ends the block a declaration at `d` stands in: the
     /// first later token that closes its level, such as the `end` of a
     /// `do` or the `else` of an `if`. At the top level, the token count.
     pub(crate) fn scope_end(&self, d: usize) -> usize {
+        // A guard binds past its `end`: `if not local x = f() then return
+        // end` leaves `x` in scope for the rest of the block that holds
+        // the `if`. A write after the guard is a write to `x`.
+        if let Some(guard) = self.declaring_word(d).and_then(|k| self.guard_if(k)) {
+            return self.scope_end(guard);
+        }
+
         let level = self.st.steps[d].depth_before;
 
         (d + 1..self.toks.len())
@@ -873,4 +900,24 @@ impl<'s> Scan<'s> {
 
         out
     }
+}
+
+/// The `if` of a guard whose binding is the `local` or `const` at token
+/// `k`: `if not local x = f() then`, or a later binding of the same
+/// condition after a `;`. A guard binds past its `end`, for the rest of
+/// the block that holds the `if`. `text` reads a token. The flux scan
+/// and the compiler's `const` check both ask this, so they agree.
+pub(crate) fn guard_if<'a>(text: &dyn Fn(usize) -> &'a str, k: usize) -> Option<usize> {
+    if k >= 2 && text(k - 1) == "not" && text(k - 2) == "if" {
+        return Some(k - 2);
+    }
+
+    if k >= 1 && text(k - 1) == ";" {
+        return (0..k - 1)
+            .rev()
+            .find(|&j| matches!(text(j), "local" | "const"))
+            .and_then(|j| guard_if(text, j));
+    }
+
+    None
 }

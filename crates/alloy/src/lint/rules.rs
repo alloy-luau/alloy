@@ -374,7 +374,76 @@ impl ConstWalk<'_> {
                 self.children(crate::desugar::stmt_children(s.under_default()));
             }
 
+            Stmt::If(iff) => {
+                for (cond, body) in &iff.branches {
+                    self.cond(cond, body);
+                }
+
+                if let Some(b) = &iff.else_block {
+                    self.block(b);
+                }
+            }
+
+            Stmt::While(w) => self.cond(&w.cond, &w.block),
+
             other => self.children(crate::desugar::stmt_children(other)),
+        }
+    }
+
+    /// A condition and the block it opens. The names a condition binds
+    /// live in that block, and a guard's live on after the `end`:
+    /// `if not const t = f() then return end` keeps `t` for the rest of
+    /// the block that holds the `if`. `guard_if` draws that line for the
+    /// flux scan too.
+    fn cond(&mut self, cond: &alloy_syntax::ast::Cond, body: &alloy_syntax::ast::Block) {
+        use crate::desugar::Child;
+        use alloy_syntax::ast::Cond;
+
+        let Cond::Local {
+            bindings, filter, ..
+        } = cond
+        else {
+            if let Cond::Expr(e) = cond {
+                self.children(vec![Child::Expr(e)]);
+            }
+            self.block(body);
+            return;
+        };
+
+        let text = |i: usize| self.toks.get(i).map_or("", |t| t.text(self.src));
+        let guard = bindings.iter().any(|b| {
+            let k = (b.pattern.span().start as usize).wrapping_sub(1);
+            matches!(text(k), "local" | "const") && crate::flux::scan::guard_if(&text, k).is_some()
+        });
+
+        if !guard {
+            self.scopes.push(Vec::new());
+        }
+
+        for b in bindings {
+            self.children(vec![Child::Expr(&b.value)]);
+
+            for n in crate::desugar::statements::pattern_binds(&b.pattern) {
+                self.bind(n, b.is_const);
+            }
+
+            for (n, _) in &b.rest {
+                self.bind(*n, b.is_const);
+            }
+
+            if let Some(f) = &b.filter {
+                self.children(vec![Child::Expr(f)]);
+            }
+        }
+
+        if let Some(f) = filter {
+            self.children(vec![Child::Expr(f)]);
+        }
+
+        self.block(body);
+
+        if !guard {
+            self.scopes.pop();
         }
     }
 }

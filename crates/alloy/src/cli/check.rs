@@ -2,7 +2,9 @@
 
 use std::process::ExitCode;
 
-use crate::cli::lint_support::{lint_context, lint_files, print_lints};
+use crate::cli::lint_support::{
+    lint_config_for, lint_context, lint_files, print_lints, split_level_flags,
+};
 use crate::cli::support::{
     apply_build_options, is_source, positionals, print_diagnostics, project,
 };
@@ -10,7 +12,10 @@ use crate::ui::{self, Painter};
 use crate::{fail, usage};
 
 pub(crate) fn check(args: &[String]) -> ExitCode {
-    let positional = positionals(args);
+    // `-W style` and `--deny name` set a level for this run. Their
+    // value is no file, so they leave the arguments first.
+    let (flags, rest) = split_level_flags(args);
+    let positional = positionals(&rest);
 
     if !positional.is_empty() {
         for file in &positional {
@@ -30,6 +35,7 @@ pub(crate) fn check(args: &[String]) -> ExitCode {
         return lint_files("check", &positional, &lint_config, &args);
     }
 
+    let args = &rest[..];
     let (root, mut config) = match project(args) {
         Ok(p) => p,
 
@@ -52,7 +58,8 @@ pub(crate) fn check(args: &[String]) -> ExitCode {
     let p = Painter::for_stderr();
     let input = root.join(&config.build.input);
     print_diagnostics(&input, &report.diagnostics, &report.failures);
-    let (warnings, denied) = print_lints(&input, &report.lints, &config.lint, args);
+    let lint_config = lint_config_for(&config, &flags, args);
+    let (warnings, denied) = print_lints(&input, &report.lints, &lint_config, args);
     let counts = p.summary(&[
         (report.written.len(), "files", ui::DIM),
         // A compile that stopped leaves a failure, not a diagnostic; it

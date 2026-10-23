@@ -10,10 +10,12 @@ use super::Callable;
 use super::scan::Scan;
 use crate::lint::Lint;
 
-/// The std methods that change the value they are called on. `const`
-/// freezes the binding, so a call of one of these on a constant is the
-/// write the keyword did not stop.
-const MUTATING_METHODS: &[&str] = &[
+/// Std methods that write into the value they are called on. Only
+/// `prefer_const` reads this list, and only to stay quiet: a `local`
+/// that calls one stays `local`. `const_mutation` never judges a call,
+/// because a name does not say whether a method writes. The list reads
+/// names, not types; a scan with types can ask the method instead.
+const WRITER_NAMES: &[&str] = &[
     "push",
     "pop",
     "insert",
@@ -28,12 +30,6 @@ const MUTATING_METHODS: &[&str] = &[
     "extend",
     "get_or_insert",
 ];
-
-/// A write into the value a name holds, as `value_write` reads it.
-enum ValueWrite<'s> {
-    Assign,
-    Method(&'s str),
-}
 
 impl<'s> Scan<'s> {
     /// The private members of each struct in the file: `(member, struct)`
@@ -933,9 +929,10 @@ impl<'s> Scan<'s> {
         above.trim_start().starts_with("@cfg")
     }
 
-    /// A write into the value a `const` holds: `X.field = v`, `X[k] = v`,
-    /// or a call of a method that changes it. `const` freezes the
-    /// binding alone, which the keyword does not say.
+    /// A write into the value a `const` holds: `X.field = v` or
+    /// `X[k] = v`. `const` freezes the binding alone, which the keyword
+    /// does not say. A method call is not judged: its name does not say
+    /// whether it writes, and this scan has no types to ask.
     pub(crate) fn const_mutation(&self, out: &mut Vec<Lint>) {
         // Each const name with the token that declares it. A write reaches
         // the const only inside its block and past any nearer binding of
@@ -971,10 +968,9 @@ impl<'s> Scan<'s> {
                 continue;
             }
 
-            let name = self.t(i);
-
-            match self.value_write(i) {
-                Some(ValueWrite::Assign) => self.lint(
+            if self.writes_value(i) {
+                let name = self.t(i);
+                self.lint(
                     out,
                     "const_mutation",
                     i,
@@ -983,20 +979,7 @@ impl<'s> Scan<'s> {
                         "`{name}` is a `const`; the binding is fixed and this writes into its value"
                     ),
                     None,
-                ),
-
-                Some(ValueWrite::Method(method)) => self.lint(
-                    out,
-                    "const_mutation",
-                    i,
-                    i + 2,
-                    format!(
-                        "`{name}` is a `const`; `{method}` changes the value the binding holds"
-                    ),
-                    None,
-                ),
-
-                None => {}
+                );
             }
         }
     }
@@ -1008,34 +991,32 @@ impl<'s> Scan<'s> {
         n < j && j < self.scope_end(n) && self.binding_at(j).is_none_or(|d| d <= n)
     }
 
-    /// How the statement at the name `i` writes into the value the name
-    /// holds: `X.a.b = v`, `X[k] = v`, and `X.n += 1` assign into it,
-    /// `X:push(v)` calls a method that changes it. The binding itself
-    /// stands.
-    fn value_write(&self, i: usize) -> Option<ValueWrite<'s>> {
-        // A method call changes the value wherever it stands, so
-        // `local r = bag:add(s)` writes into `bag` as `bag:add(s)` does.
-        if !matches!(self.prev(i), "." | ":" | "?." | "?:")
-            && self.at(i + 1, ":")
-            && MUTATING_METHODS.contains(&self.t(i + 2))
-            && self.is_member(i + 2)
-        {
-            return Some(ValueWrite::Method(self.t(i + 2)));
-        }
-
+    /// Whether the statement at the name `i` writes into the value the
+    /// name holds: `X.a.b = v`, `X[k] = v`, or `X.n += 1`. The binding
+    /// itself stands. `const_mutation` and `prefer_const` both ask this,
+    /// so a `local` that `prefer_const` would make a `const` never draws
+    /// `const_mutation`.
+    fn writes_value(&self, i: usize) -> bool {
         if !self.statement_start(i) {
-            return None;
+            return false;
         }
 
-        let assigned = match self.path_end(i) {
+        match self.path_end(i) {
             Some(end) if end > i + 1 && self.assigns_at(end) => true,
 
             _ => {
                 self.at(i + 1, "[") && self.matching(i + 1).is_some_and(|c| self.assigns_at(c + 1))
             }
-        };
+        }
+    }
 
-        assigned.then_some(ValueWrite::Assign)
+    /// Whether the name at `i` calls a method that `WRITER_NAMES` lists,
+    /// wherever the call stands: `local r = bag:add(s)` counts.
+    fn calls_writer(&self, i: usize) -> bool {
+        !matches!(self.prev(i), "." | ":" | "?." | "?:")
+            && self.at(i + 1, ":")
+            && WRITER_NAMES.contains(&self.t(i + 2))
+            && self.is_member(i + 2)
     }
 
     /// Whether token `k` assigns: `=`, a compound operator such as `+=`
@@ -1424,7 +1405,7 @@ impl<'s> Scan<'s> {
                         || (n + 1..self.toks.len()).any(|j| {
                             self.t(j) == self.t(n)
                                 && !self.is_member(j)
-                                && self.value_write(j).is_some()
+                                && (self.writes_value(j) || self.calls_writer(j))
                                 && self.reads_binding(n, j)
                         })
                 })

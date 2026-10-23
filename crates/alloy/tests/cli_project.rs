@@ -36,6 +36,38 @@ const TOML: &str = "[build]\nin = \"src\"\nout = \"build\"\n";
 /// An exported struct with no comment above it: one warning, no error.
 const WARNS: &str = "export struct Box\n    value: number\nend\nprint(Box)\n";
 
+/// `-W`, `-A`, and `-D` set a lint's level for one run, in their long
+/// forms too. `alloy check` read the name after the flag as a file and
+/// printed the usage note, though `lint` and `flux` took the flags.
+#[test]
+fn a_level_flag_reaches_the_lint_in_every_lint_command() {
+    let root = project("level-flags", TOML, WARNS);
+
+    for command in ["check", "lint", "flux"] {
+        let extra: &[&str] = if command == "flux" {
+            &["--no-typecheck"]
+        } else {
+            &[]
+        };
+
+        for (flag, code, summary) in [
+            ("-D", 1, "1 denied"),
+            ("--deny", 1, "1 denied"),
+            ("-A", 0, "0 warnings"),
+            ("--allow", 0, "0 warnings"),
+            ("-W", 0, "1 warnings"),
+        ] {
+            let args = [&[command, flag, "missing_doc"][..], extra].concat();
+            let (status, stderr) = run(&root, &args);
+            assert!(!stderr.contains("usage:"), "{args:?}: {stderr}");
+            assert_eq!(status, code, "{args:?}: {stderr}");
+            assert!(stderr.contains(summary), "{args:?}: {stderr}");
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn deny_warnings_fails_the_project_check() {
     let root = project("deny", TOML, WARNS);

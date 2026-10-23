@@ -3962,6 +3962,15 @@ function wire.unpack(layout: { any }, buf: buffer, rest: { any }): { any }
 	for i, node in nodes do
 		args[i], at, ri = wire_read(node, buf, at, rest, ri)
 	end
+	-- The packer writes the layout and nothing more, so bytes or values
+	-- past it mark a forged packet. A short packet already raises in the
+	-- reads above. Fewer values is no error: a trailing nil can drop.
+	if at ~= buffer.len(buf) then
+		error("wire: the packet runs past its layout", 0)
+	end
+	if ri <= rest.n then
+		error("wire: values run past the layout", 0)
+	end
 	return args
 end
 

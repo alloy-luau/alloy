@@ -66,3 +66,105 @@ describe("remote", function()
 		expect(#down.calls).toBe(1)
 	end)
 end)
+
+-- A server with just enough engine for a remote: the services the
+-- runtime asks for, and a RemoteEvent whose `deliver` plays one client
+-- fire to every connection, as the engine does.
+local function server_world()
+	local function new_instance(class)
+		local self = { ClassName = class, kids = {} }
+		function self:FindFirstChild(name)
+			return self.kids[name]
+		end
+		local connections = {}
+		self.OnServerEvent = {
+			Connect = function(_, fn)
+				table.insert(connections, fn)
+				return {
+					Disconnect = function()
+						table.remove(connections, table.find(connections, fn))
+					end,
+				}
+			end,
+		}
+		self.connections = connections
+		function self.deliver(player, ...)
+			for _, fn in table.clone(connections) do
+				fn(player, ...)
+			end
+		end
+		return setmetatable(self, {
+			__newindex = function(t, k, v)
+				rawset(t, k, v)
+				if k == "Parent" and v ~= nil then
+					v.kids[rawget(t, "Name")] = t
+				end
+			end,
+		})
+	end
+	local leaving = {}
+	local services = {
+		RunService = {
+			IsServer = function()
+				return true
+			end,
+		},
+		ReplicatedStorage = new_instance("ReplicatedStorage"),
+		Players = {
+			PlayerRemoving = {
+				Connect = function(_, fn)
+					table.insert(leaving, fn)
+				end,
+			},
+		},
+	}
+	_G.game = {
+		GetService = function(_, name)
+			return services[name]
+		end,
+	}
+	_G.Instance = { new = new_instance }
+	return function(player)
+		for _, fn in leaving do
+			fn(player)
+		end
+	end
+end
+
+local function leave_world()
+	_G.game = nil
+	_G.Instance = nil
+end
+
+local function event(name, attrs, wire)
+	return alloy.remote({
+		name = name,
+		kind = "event",
+		from_client = true,
+		from_server = false,
+		params = { "n" },
+		defaults = {},
+		attrs = attrs,
+		wire = wire,
+	})
+end
+
+describe("remote on a server", function()
+	it("drops a packed packet longer than its layout", function()
+		server_world()
+		local seen = {}
+		local remote = event("Packed", {}, { "u8" })
+		remote.on(function(_, n)
+			table.insert(seen, n)
+		end)
+		local good = buffer.create(1)
+		buffer.writeu8(good, 0, 5)
+		local long = buffer.create(2)
+		buffer.writeu8(long, 0, 6)
+		remote.instance.deliver({}, good)
+		remote.instance.deliver({}, long)
+		leave_world()
+		expect(#seen).toBe(1)
+		expect(seen[1]).toBe(5)
+	end)
+end)

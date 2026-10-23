@@ -249,7 +249,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     (
         "where",
-        "```\nfor x in xs where cond do\nfor _, { x, y } in points where x > 0 do\nif local x = f() where cond then\nwhile local job = queue:pop() where job.ready do\ncase n where n > 5 then\n```\nA filter on a loop or a conditional binding, and the guard of a `match` arm. In a loop it emits `if not (cond) then continue end` on the `do` line, and the condition sees the loop\'s names, destructured ones included; on `if local` and `while local` the binding holds only when the condition does. Bindings chain with `;`, `if local p = a; local c = p.Character then`, each seen by the next, and `if not local x = f() then return end` is the guard form, with `x` in scope after it.",
+        "```\nfor x in xs where cond do\nfor _, { x, y } in points where x > 0 do\nif local x = f() where cond then\nwhile local job = queue:pop() where job.ready do\ncase n where n > 5 then\n```\nA filter on a loop or a conditional binding, and the guard of a `match` arm. In a loop it emits `if not (cond) then continue end` on the `do` line, and the condition sees the loop\'s names, destructured ones included; on `if local` and `while local` the binding holds only when the condition does. Bindings chain with `;`, `if local p = a; local c = p.Character then`, each seen by the next. Each binding of a chain can take its own `where`, `if const a = x where a is Frame; const b = a.B then`, and the next binding runs only when it holds; the `where` of the last binding filters the whole condition. `if not local x = f() then return end` is the guard form, with `x` in scope after it.",
     ),
     (
         "satisfies",

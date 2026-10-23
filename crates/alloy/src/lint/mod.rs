@@ -620,7 +620,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Style,
         default: Level::Warn,
         summary: "a `local` that nothing assigns again",
-        detail: "`local x = v` with no later `x = ...` holds one value, and `const x = v` says so: a write added later is a compile error instead of a quiet change. A local whose value the file writes into, with `t.x = 1` or with a call such as `t:push(v)` in any expression, stays `local`, so `prefer_const` and `const_mutation` never disagree. `alloy flux --fix` writes `const`, and so does `alloy fmt` unless `[fmt] prefer_const = false`.",
+        detail: "`local x = v` with no later `x = ...` holds one value, and `const x = v` says so: a write added later is a compile error instead of a quiet change. A local whose value the file writes into, with `t.x = 1` or `t[k] = v`, stays `local`, so `prefer_const` and `const_mutation` never disagree. A guard, `if not local x = f() then return end`, binds `x` for the rest of the block, and a write after it counts. A call of a std writer method such as `t:push(v)`, in any expression, also keeps a local `local`. `alloy flux --fix` writes `const`, and so does `alloy fmt` unless `[fmt] prefer_const = false`.",
     },
     LintInfo {
         name: "redundant_as",
@@ -876,7 +876,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Pedantic,
         default: Level::Allow,
         summary: "a write into the value a `const` holds",
-        detail: "Pedantic. `const` freezes the binding, not the value: `const LIMITS = { hp = 100 }` still allows `LIMITS.hp = 1`, and `NAMES:push(x)` still grows the array. The lint reports a field assignment, an index assignment, and a call of a method that changes the value, so a name written as a constant reads as one.",
+        detail: "Pedantic. `const` freezes the binding, not the value: `const LIMITS = { hp = 100 }` still allows `LIMITS.hp = 1`, and `NAMES:push(x)` still grows the array. The lint reports a field assignment and an index assignment, so a name written as a constant reads as one. It does not judge a method call: a name such as `set` or `push` does not say whether the method writes, so `NAMES:push(x)` passes. A guard, `if not const x = f() then return end`, binds `x` for the rest of the block, and the lint reads the writes after it.",
     },
     LintInfo {
         name: "missing_doc",

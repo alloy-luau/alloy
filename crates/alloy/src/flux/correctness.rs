@@ -1593,7 +1593,9 @@ mod tests {
     }
 
     /// `const` freezes the binding, not the value. The pedantic lint
-    /// says so on a field write, an index write, and a mutating call.
+    /// says so on a field write and an index write. A method call is
+    /// not judged by its name: `push` here, or a `set` that returns a
+    /// new value, may not write at all.
     #[test]
     fn a_write_into_a_const_value_fires() {
         let pedantic = |src: &str| -> Vec<&'static str> {
@@ -1609,7 +1611,13 @@ mod tests {
         );
         assert_eq!(
             pedantic("const NAMES = [ \"ana\" ]\nNAMES:push(\"bo\")\nprint(NAMES)\n"),
-            vec!["const_mutation"]
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            pedantic(
+                "struct Bag\n    n: number\nend\nimpl Bag\n    function set(self, v: number): Bag\n        return Bag { n = v }\n    end\nend\nconst b = Bag { n = 1 }\nprint(b:set(2))\n"
+            ),
+            Vec::<&str>::new()
         );
         assert_eq!(
             pedantic("const T = { a = 1 }\nT[\"a\"] = 2\nprint(T)\n"),
@@ -1722,9 +1730,86 @@ mod tests {
         );
     }
 
-    /// A method that changes the value writes into it in any expression.
-    /// `bag:add(s)` kept `bag` a `local`, but `local r = bag:add(s)` drew
-    /// `prefer_const`, and `const_mutation` saw only the statement.
+    /// `if not local t = f() then return end` binds `t` for the rest of
+    /// the block. A write after the guard is a write to `t`: it kept
+    /// `prefer_const` quiet only inside the `if`, and `const_mutation`
+    /// never saw it.
+    #[test]
+    fn a_guard_binding_reaches_past_its_end() {
+        let count = |src: &str, lint: &str| -> usize {
+            crate::compile(src)
+                .unwrap()
+                .lints
+                .iter()
+                .filter(|l| l.name == lint)
+                .count()
+        };
+        let guard = |word: &str, after: &str| -> String {
+            format!(
+                "local function f(): {{ n: number }}? return {{ n = 0 }} end\nlocal function run()\n    if not {word} t = f() then return end\n{after}    print(t)\nend\nrun()\n"
+            )
+        };
+
+        // A field write after the guard keeps the `local`, and fires on a `const`.
+        assert_eq!(count(&guard("local", "    t.n = 1\n"), "prefer_const"), 0);
+        assert_eq!(count(&guard("const", "    t.n = 1\n"), "const_mutation"), 1);
+        // A new value after the guard keeps the `local` too.
+        assert_eq!(
+            count(&guard("local", "    t = { n = 2 }\n"), "prefer_const"),
+            0
+        );
+        // With no write, the `local` reads as a `const`, and the `const` is quiet.
+        assert_eq!(count(&guard("local", ""), "prefer_const"), 1);
+        assert_eq!(count(&guard("const", ""), "const_mutation"), 0);
+        // A plain `if local` still binds inside the `if` alone: the write
+        // after it reaches the outer `t`, which stays a `local`, and the
+        // `if local` reads as a `const`, on line 3.
+        let plain = "local function f(): { n: number }? return { n = 0 } end\nlocal t = { n = 0 }\nif local t = f() then\n    print(t)\nend\nt.n = 2\nprint(t)\n";
+        let lines: Vec<usize> = crate::compile(plain)
+            .unwrap()
+            .lints
+            .iter()
+            .filter(|l| l.name == "prefer_const")
+            .map(|l| plain[..l.start as usize].matches('\n').count() + 1)
+            .collect();
+        assert_eq!(lines, [3]);
+    }
+
+    /// `prefer_const` and `const_mutation` never disagree: once every
+    /// `prefer_const` fix is in, no `const_mutation` fires.
+    #[test]
+    fn prefer_const_never_makes_a_const_mutation() {
+        let f = "local function f(): { n: number }? return { n = 0 } end\n";
+        for body in [
+            "local t = {}\nt.n = 1\nprint(t)\n",
+            "local t = {}\nt[\"k\"] = 1\nprint(t)\n",
+            "local t = {}\nif not ready() then t.n = 1 end\nprint(t)\n",
+            "local function run()\n    if not local t = f() then return end\n    t.n = 1\n    print(t)\nend\nrun()\n",
+            "local function run()\n    if not local t = f(); local u = { n = 1 } then return end\n    u.n = 2\n    print(t, u)\nend\nrun()\n",
+            "local t = {}\nt:push(1)\nprint(t)\n",
+            "local b = { n = 1 }\nlocal function g() b.n = 2 end\ng()\nprint(b)\n",
+        ] {
+            let src = format!("{f}{body}");
+            let lints = crate::compile(&src).unwrap().lints;
+            let fixes: Vec<_> = lints
+                .into_iter()
+                .filter(|l| l.name == "prefer_const")
+                .collect();
+            let fixed = crate::lint::apply_fixes(&src, &fixes).0;
+            let mutations: Vec<_> = crate::compile(&fixed)
+                .unwrap()
+                .lints
+                .into_iter()
+                .filter(|l| l.name == "const_mutation")
+                .map(|l| l.message)
+                .collect();
+            assert!(mutations.is_empty(), "{fixed}\n{mutations:?}");
+        }
+    }
+
+    /// A std writer method keeps a `local` a `local` in any expression:
+    /// `bag:add(s)` did, but `local r = bag:add(s)` drew `prefer_const`.
+    /// `const_mutation` judges no call, so a `const` with one is quiet.
     #[test]
     fn a_method_call_writes_into_the_value_in_any_expression() {
         let lines = |src: &str, lint: &str| -> Vec<usize> {
@@ -1743,7 +1828,7 @@ mod tests {
                 "const B = {}\nlocal r = B:push(1)\nB:push(2)\nprint(r, B:len())\n",
                 "const_mutation"
             ),
-            [2, 3]
+            Vec::<usize>::new()
         );
     }
 

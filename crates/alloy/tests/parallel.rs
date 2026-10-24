@@ -91,6 +91,146 @@ fn a_write_through_an_unknown_value_stays_quiet() {
     assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
 }
 
+/// Each source, alone in a file, gives one report that holds `want`.
+fn refuses(cases: &[(&str, &str)]) {
+    for (src, want) in cases {
+        let got = messages(&compile(src));
+
+        assert!(
+            got.len() == 1 && got[0].contains(want),
+            "{src}\nwant one report with {want:?}, got {got:#?}"
+        );
+    }
+}
+
+/// A cast, a lookup method, `->`, and a field of an Instance give an
+/// Instance, so a write through one reports.
+#[test]
+fn a_cast_or_a_lookup_names_an_instance() {
+    refuses(&[
+        (
+            "local x = workspace:FindFirstChild(\"A\") :: BasePart\nparallel do\n    x.Anchored = true\nend\n",
+            "cannot write `x.Anchored`",
+        ),
+        (
+            "local ws = game:GetService(\"Workspace\")\nparallel do\n    ws.Gravity = 1\nend\n",
+            "cannot write `ws.Gravity`",
+        ),
+        (
+            "parallel do\n    local m = workspace->Map\n    m.Name = \"x\"\nend\n",
+            "cannot write `m.Name`",
+        ),
+        (
+            "parallel do\n    game.Workspace.Gravity = 1\nend\n",
+            "cannot write `game.Workspace.Gravity`",
+        ),
+    ]);
+}
+
+/// The values of a table typed `{ T }` or `{ [K]: T }` of an Instance
+/// class are Instances, by index and in a loop.
+#[test]
+fn a_table_of_instances_types_its_values() {
+    refuses(&[
+        (
+            "local parts: { BasePart } = {}\nparallel do\n    for _, p in parts do\n        p.Anchored = true\n    end\nend\n",
+            "cannot write `p.Anchored`",
+        ),
+        (
+            "local parts: { BasePart } = {}\nparallel do\n    for _, p in ipairs(parts) do\n        p.Anchored = true\n    end\nend\n",
+            "cannot write `p.Anchored`",
+        ),
+        (
+            "local byName: { [string]: Part } = {}\nparallel do\n    for _, p in pairs(byName) do\n        p.Anchored = true\n    end\nend\n",
+            "cannot write `p.Anchored`",
+        ),
+        (
+            "local parts: { BasePart } = {}\nparallel do\n    for i = 1, #parts do\n        parts[i].Anchored = true\n    end\nend\n",
+            "cannot write `parts[i].Anchored`",
+        ),
+        (
+            "parallel do\n    for _, c in workspace:GetChildren() do\n        c.Name = \"x\"\n    end\nend\n",
+            "cannot write `c.Name`",
+        ),
+    ]);
+}
+
+/// `Destroy` and `Clone` refuse with a dot as with a colon.
+#[test]
+fn destroy_and_clone_refuse_in_either_spelling() {
+    refuses(&[
+        (
+            "local part: BasePart = workspace.Baseplate\nparallel do\n    part.Destroy(part)\nend\n",
+            "cannot call `part.Destroy(part)`",
+        ),
+        (
+            "local part: BasePart = workspace.Baseplate\nparallel do\n    local c = part.Clone(part)\nend\n",
+            "cannot call `part.Clone(part)`",
+        ),
+    ]);
+}
+
+/// A struct field typed with an Instance class is an Instance, and a
+/// method of a struct of this file is followed like a function.
+#[test]
+fn a_struct_field_or_method_is_followed() {
+    refuses(&[
+        (
+            "struct Holder\n    part: BasePart\nend\nlocal h = new Holder { part = workspace.Baseplate }\nparallel do\n    h.part.Anchored = true\nend\n",
+            "cannot write `h.part.Anchored`",
+        ),
+        (
+            "struct Spawner\nend\nimpl Spawner\n    function make(self)\n        return Instance.new(\"Part\")\n    end\nend\nlocal s = new Spawner {}\nparallel do\n    s:make()\nend\n",
+            "cannot call `s:make()`, which writes `Instance.new`",
+        ),
+        (
+            "struct Spawner\nend\nimpl Spawner\n    function make(self)\n        return Instance.new(\"Part\")\n    end\n    function run(self)\n        self:make()\n    end\nend\nlocal s = new Spawner {}\nparallel do\n    s:run()\nend\n",
+            "cannot call `s:run()`, which calls `self:make()`, which writes `Instance.new`",
+        ),
+    ]);
+}
+
+/// A function of this file that calls a writer writes too, at any depth.
+#[test]
+fn a_writer_is_followed_at_any_depth() {
+    refuses(&[
+        (
+            "local function a(p: BasePart)\n    p:Destroy()\nend\nlocal function b(p: BasePart)\n    a(p)\nend\nlocal part: BasePart = workspace.Baseplate\nparallel do\n    b(part)\nend\n",
+            "cannot call `b`, which calls `a`, which writes `p:Destroy()`",
+        ),
+        (
+            "local function make()\n    local function inner()\n        return Instance.new(\"Part\")\n    end\n    return inner()\nend\nparallel do\n    make()\nend\n",
+            "cannot call `make`, which calls `inner`, which writes `Instance.new`",
+        ),
+    ]);
+}
+
+/// A parameter of an `as parallel` handler takes the type its message
+/// declares.
+#[test]
+fn a_parallel_handler_types_its_parameters_from_the_message() {
+    refuses(&[(
+        "message Fallen(parts: { BasePart }) as parallel\nFallen.on(function(parts)\n    parts[1].Anchored = true\nend)\n",
+        "the parallel handler of `Fallen` cannot write `parts[1].Anchored`",
+    )]);
+}
+
+/// A name bound inside the block, or a parameter of a function, hides
+/// an outer name of the same spelling, so its writes stay quiet.
+#[test]
+fn a_name_bound_in_the_block_hides_the_outer_one() {
+    for src in [
+        "local part: BasePart = workspace.Baseplate\nparallel do\n    local part = { Anchored = 1 }\n    part.Anchored = 2\nend\n",
+        "local part: BasePart = workspace.Baseplate\nlocal list = { { Anchored = 1 } }\nparallel do\n    for _, part in list do\n        part.Anchored = 2\n    end\nend\n",
+        "local part: BasePart = workspace.Baseplate\nlocal function set(part)\n    part.Anchored = 1\nend\nparallel do\n    set({})\nend\n",
+        "local parts: { BasePart } = {}\nparallel do\n    parts.n = 1\nend\n",
+    ] {
+        let out = compile(src);
+
+        assert!(out.diagnostics.is_empty(), "{src}\n{:?}", out.diagnostics);
+    }
+}
+
 /// `parallel` stays a name wherever it does not open a block.
 #[test]
 fn parallel_is_still_a_name() {

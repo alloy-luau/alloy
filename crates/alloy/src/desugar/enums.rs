@@ -2538,6 +2538,20 @@ impl<'s> Desugar<'s> {
             }
 
             Some(block) => {
+                // The names hold after the `else` only when it leaves.
+                // A block that falls through runs the code below with
+                // no match, and the names read the wrong payload.
+                if !self.block_leaves(block) {
+                    let at = if block.span.is_empty() {
+                        p.span.end - 2
+                    } else {
+                        block.span.start - 1
+                    };
+                    self.diagnose(
+                        TokSpan { start: at, end: at + 1 },
+                        "the `else` of a pattern `local` must leave the block: end it with `return`, `break`, `continue`, or `error(...)`, because the names hold no value after it",
+                    );
+                }
                 self.generate(anchor, &format!("if not ({test}) then"));
                 let else_tok = self.toks[block.span.start as usize - 1];
                 let else_tok = if block.span.is_empty() {
@@ -4514,5 +4528,39 @@ mod tests {
                 "this match is not exhaustive: `Hit` has no arm for `Miss`; add it or a `default` arm"
             ]
         );
+    }
+
+    /// A let-else whose `else` falls through runs the code after it with
+    /// no match: the names read the wrong payload. The `else` must leave.
+    #[test]
+    fn a_let_else_must_leave() {
+        let get = "local function get(n: number)\n    return if n > 0 then Ok(n) else Err(\"none\")\nend\n";
+        let leaves = [
+            "local function f()\n    local Ok(v) = get(0) else\n        return\n    end\n    print(v)\nend\nf()\n",
+            "local Ok(v) = get(0) else\n    error(\"no value\")\nend\nprint(v)\n",
+            "local function f(x: boolean)\n    local Ok(v) = get(0) else\n        if x then return else error(\"x\") end\n    end\n    print(v)\nend\nf(true)\n",
+            "local function f()\n    local Ok(v) = get(0) else\n        do\n            return\n        end\n    end\n    print(v)\nend\nf()\n",
+            "for i = 1, 3 do\n    local Ok(v) = get(i) else\n        break\n    end\n    print(v)\nend\n",
+            "for i = 1, 3 do\n    local Ok(v) = get(i) else\n        continue\n    end\n    print(v)\nend\n",
+        ];
+        for body in leaves {
+            assert!(messages(&format!("{get}{body}")).is_empty(), "{body}");
+        }
+
+        let falls = [
+            "local Ok(v) = get(0) else\n    print(\"x\")\nend\nprint(v)\n",
+            "local Ok(v) = get(0) else end\nprint(v)\n",
+            "local function f(x: boolean)\n    local Ok(v) = get(0) else\n        if x then return end\n    end\n    print(v)\nend\nf(true)\n",
+            "local function f()\n    local Ok(v) = get(0) else\n        for i = 1, 2 do\n            break\n        end\n    end\n    print(v)\nend\nf()\n",
+            "const Ok(v) = get(0) else\n    print(\"x\")\nend\nprint(v)\n",
+        ];
+        for body in falls {
+            let found = messages(&format!("{get}{body}"));
+            assert!(
+                found.len() == 1
+                    && found[0].starts_with("the `else` of a pattern `local` must leave"),
+                "{body}\n{found:?}"
+            );
+        }
     }
 }

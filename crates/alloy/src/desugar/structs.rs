@@ -3309,19 +3309,37 @@ impl<'s> Desugar<'s> {
         None
     }
 
-    /// Whether a block ends in a statement that leaves it: a return, a
-    /// break, a continue, or an `error` call.
+    /// Whether control never reaches the end of `block`: its last
+    /// statement is a return, a break, a continue, an `error` call, or
+    /// an `if`, `do`, or `match` whose every path leaves. A loop does
+    /// not count, since its own `break` ends the loop, not the block.
     pub(crate) fn block_leaves(&self, block: &Block) -> bool {
-        match block.stmts.last() {
-            Some(Stmt::Return(_) | Stmt::Break(_) | Stmt::Continue(_)) => true,
+        let Some(last) = block.stmts.iter().rfind(|s| !matches!(s, Stmt::Empty(_))) else {
+            return false;
+        };
 
-            Some(Stmt::Call(
+        match last {
+            Stmt::Return(_) | Stmt::Break(_) | Stmt::Continue(_) => true,
+
+            Stmt::Call(
                 Expr::Call {
                     func, method: None, ..
                 },
                 _,
-            )) => {
+            ) => {
                 matches!(&**func, Expr::Name(n) if self.text_of(*n) == "error")
+            }
+
+            Stmt::Do(d) => self.block_leaves(&d.block),
+
+            Stmt::If(i) => {
+                i.else_block.as_ref().is_some_and(|b| self.block_leaves(b))
+                    && i.branches.iter().all(|(_, b)| self.block_leaves(b))
+            }
+
+            Stmt::Match(m) => {
+                m.default.as_ref().is_some_and(|b| self.block_leaves(b))
+                    && m.arms.iter().all(|a| self.block_leaves(&a.block))
             }
 
             _ => false,

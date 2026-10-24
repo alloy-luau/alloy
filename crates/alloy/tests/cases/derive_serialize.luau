@@ -1,11 +1,11 @@
-local __alloy = require("@alloy") local Point = {} Point.__index = Point setmetatable(Point, { __call = function(_, f) if f.cache == nil then f.cache = 0 end return setmetatable(f, Point) end }) function Point.new(f) return Point(f) end
+local __alloy = require("@alloy") local Point = {} Point.__index = Point
 
 
 
 
 
 
- type Point = typeof(setmetatable({} :: { x: number, name: string, cache: number }, Point)) function Point.to_table(self) return { x = self.x, label = self.name } end function Point.serialize(self) return Point.to_table(self) end function Point.from_table(t) return Point({ x = t.x, name = t.label }) end function Point.clone(self) return setmetatable(table.clone(self), Point) end Point.__tostring = function(s) return __alloy.show_struct("Point", s, { "x", "name", "cache" }) end __alloy.attrs(Point, { own = {}, fields = { name = { rename = { "label" } }, cache = { skip = {} } } })
+ type Point = typeof(setmetatable({} :: { x: number, name: string, cache: number }, Point)) setmetatable(Point, { __call = function(_, f: { x: number, name: string, cache: number? }): Point if f.cache == nil then local _cache: number = 0 f.cache = _cache end return ((setmetatable(f, Point) :: any) :: Point) end }) function Point.new(f: { x: number, name: string, cache: number? }): Point return Point(f) end function Point.to_table(self) return { x = self.x, label = self.name } end function Point.serialize(self) return Point.to_table(self) end function Point.from_table(t) return Point({ x = t.x, name = t.label }) end function Point.clone(self) return setmetatable(table.clone(self), Point) end Point.__tostring = function(s) return __alloy.show_struct("Point", s, { "x", "name", "cache" }) end __alloy.attrs(Point, { own = {}, fields = { name = { rename = { "label" } }, cache = { skip = {} } } })
 
 local function to_data<T>(v: (T & __alloy.Serialize)): any
 	return v:serialize()

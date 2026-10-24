@@ -924,6 +924,7 @@ fn run_inner(
                 input: &absolute(&input),
                 root,
                 tree: Some(&tree),
+                aliases: &module_aliases,
             },
             &compiled.imports,
             &compiled.data_refs,
@@ -1350,6 +1351,8 @@ pub struct Site<'a> {
     /// The tree of the project, when the run reads one: a mount of the
     /// other project's output gives the require its place.
     pub tree: Option<&'a crate::project::Tree>,
+    /// The aliases of the project, for an import through one.
+    pub aliases: &'a [(String, PathBuf)],
 }
 
 /// What the imports of one source that leave `in` came to.
@@ -1370,6 +1373,30 @@ pub struct Outside {
 }
 
 impl Outside {
+    /// Records the require of `key`: the path from the output file to
+    /// `dep_out`, and its place when a mount of this project holds it.
+    fn route(&mut self, key: &str, site: &Site, dep_out: &Path) {
+        let from_dir = site.out_file.parent().unwrap_or(Path::new("/"));
+        self.rewrites.push((
+            key.to_string(),
+            relative(from_dir, &dep_out.with_extension("")),
+        ));
+
+        // The output from the root, `lib/build/lib.luau` inside it or
+        // `../Lib/build/lib.luau` beside it.
+        let shown = relative(&absolute(site.root), dep_out);
+        let from_root = Path::new(&shown);
+        let from_root = from_root.strip_prefix(".").unwrap_or(from_root);
+
+        if let Some(place) = site
+            .tree
+            .and_then(|t| crate::project::instance_path(t, from_root))
+        {
+            self.places
+                .push((key.to_string(), format!("@game/{}", place.join("/"))));
+        }
+    }
+
     /// The require one spec that leaves `in` becomes: the place a mount
     /// gives, else the path on disk. `placed` is false for the check
     /// artifact of a project an import leads into, which sits outside
@@ -1408,16 +1435,18 @@ impl Deps {
             let spec = &r.path;
             // The emit writes a data require without its extension.
             let key = crate::data::strip_spec(spec);
+            // An import through an alias goes on for a package link alone.
+            let aliased = !(spec.starts_with("./") || spec.starts_with("../"));
+            let format = crate::data::Format::of(spec);
 
-            if !(spec.starts_with("./") || spec.starts_with("../"))
-                || out.rewrites.iter().any(|(s, _)| s == key)
-            {
+            if (aliased && format.is_some()) || out.rewrites.iter().any(|(s, _)| s == key) {
                 continue;
             }
 
-            let format = crate::data::Format::of(spec);
             let target = match format {
                 Some(_) => Some(normalize_path(&base.join(spec))).filter(|p| p.is_file()),
+
+                None if aliased => crate::modules::resolve(spec, site.from, site.aliases),
 
                 None => crate::modules::resolve(spec, site.from, &[]),
             };
@@ -1430,6 +1459,18 @@ impl Deps {
             let alloy = target.extension().is_some_and(|e| e == "aly" || e == "alx");
 
             if target.starts_with(site.input) || !(alloy || format.is_some()) {
+                continue;
+            }
+
+            if let Some(luau) = self.package_link(site, &target, keep) {
+                if !aliased {
+                    out.route(key, site, &luau);
+                }
+
+                continue;
+            }
+
+            if aliased {
                 continue;
             }
 
@@ -1490,28 +1531,60 @@ impl Deps {
                 }
             }
 
-            let from_dir = site.out_file.parent().unwrap_or(Path::new("/"));
-            out.rewrites.push((
-                key.to_string(),
-                relative(from_dir, &dep_out.with_extension("")),
-            ));
-
-            // The output from the root, `lib/build/lib.luau` inside it or
-            // `../Lib/build/lib.luau` beside it.
-            let shown = relative(&absolute(site.root), &dep_out);
-            let from_root = Path::new(&shown);
-            let from_root = from_root.strip_prefix(".").unwrap_or(from_root);
-
-            if let Some(place) = site
-                .tree
-                .and_then(|t| crate::project::instance_path(t, from_root))
-            {
-                out.places
-                    .push((key.to_string(), format!("@game/{}", place.join("/"))));
-            }
+            out.route(key, site, &dep_out);
         }
 
         out
+    }
+
+    /// The `.luau` beside `target` when `target` is a package link: an
+    /// `.aly` of this project outside its `in`, with a `.luau` of the
+    /// same name beside it, as `embr install` writes them. The import
+    /// requires the `.luau`. With `keep`, each project that the link
+    /// re-exports from builds too. Flux then checks the import against
+    /// that project's check artifacts, not against its published Luau.
+    fn package_link(&mut self, site: &Site, target: &Path, keep: bool) -> Option<PathBuf> {
+        let luau = target.with_extension("luau");
+        let holder = target.parent().and_then(Config::find)?;
+        let own = holder
+            .parent()
+            .is_some_and(|h| absolute(h) == absolute(site.root));
+
+        if !own || !luau.is_file() || target.extension().is_none_or(|e| e != "aly") {
+            return None;
+        }
+
+        let text = match keep {
+            true => std::fs::read_to_string(target).unwrap_or_default(),
+
+            false => String::new(),
+        };
+
+        for spec in crate::modules::import_specs(&text) {
+            let Some(root) = crate::modules::resolve(&spec, target, site.aliases)
+                .filter(|p| p.extension().is_some_and(|e| e == "aly" || e == "alx"))
+                .and_then(|p| Some(p.parent().and_then(Config::find)?.parent()?.to_path_buf()))
+            else {
+                continue;
+            };
+            let first = !self.done.contains_key(&absolute(&root));
+
+            // A package that does not build keeps the Luau it shipped, as
+            // `embr install` does. The check reads that Luau, and a note
+            // says why.
+            if let Err(e) = self.project(&root, false, true)
+                && first
+            {
+                let top = self.stack.first().cloned().unwrap_or_default();
+                self.notes.push(format!(
+                    "{}: the project at {} does not build, so the type check reads its published Luau: {e}",
+                    relative(&top, target),
+                    relative(&top, &root)
+                ));
+            }
+        }
+
+        Some(luau)
     }
 
     /// The project at `root`, built once.
@@ -1653,6 +1726,7 @@ pub fn file_outside(
         },
     };
 
+    let aliases = crate::modules::aliases(&root, &crate::project::Tree::load(&root, &config));
     // The file's project starts the stack, as a project build does.
     let mut deps = Deps::default();
     deps.stack.push(absolute(&root));
@@ -1664,6 +1738,7 @@ pub fn file_outside(
             input: &input,
             root: &root,
             tree: None,
+            aliases: &aliases,
         },
         imports,
         data_refs,

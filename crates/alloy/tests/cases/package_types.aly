@@ -1,0 +1,54 @@
+-- The types of a package, as a Luau project that installs it reads them.
+export trait Named
+    function name(self): string
+end
+
+export struct Point
+    x: number
+    y: number = 0
+end
+
+impl Named for Point
+    function name(self): string
+        return `({self.x}, {self.y})`
+    end
+end
+
+export struct Vec2 as x: number, y: number end
+
+impl Vec2
+    function new(x: number, y: number): Vec2
+        return new Vec2 { x = x, y = y }
+    end
+end
+
+export enum Color as Red, Green end
+
+export enum Opt<T>
+    None
+    Some(T)
+end
+
+export enum Tree<T>
+    Leaf(T)
+    Node(Tree<T>, Tree<T>)
+end
+
+export struct Grid
+    rows: { number }
+end
+
+impl Grid
+    function row(self, x: number): number?
+        return self.rows[x]
+    end
+
+    function shift(self, r: number): number
+        return r + #self.rows
+    end
+
+    function top(self, x: number): number
+        const r = self:row(x)
+        return if r then self:shift(r) else 0
+    end
+end

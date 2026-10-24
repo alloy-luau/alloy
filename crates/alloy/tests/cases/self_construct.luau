@@ -1,4 +1,4 @@
-local __alloy = require("@alloy") local Plain = {} Plain.__index = Plain setmetatable(Plain, { __call = function(_, f)  return setmetatable(f, Plain) end }) function Plain.new(f) return Plain(f) end type Plain = typeof(setmetatable({} :: {  }, Plain)) Plain.__tostring = function(s) return __alloy.show_struct("Plain", s, {  }) end
+local __alloy = require("@alloy") local Plain = {} Plain.__index = Plain type Plain = typeof(setmetatable({} :: {  }, Plain)) setmetatable(Plain, { __call = function(_, f: {  }): Plain  return ((setmetatable(f, Plain) :: any) :: Plain) end }) Plain.__tostring = function(s) return __alloy.show_struct("Plain", s, {  }) end
 
 do
 	function Plain.new(): Plain
@@ -6,9 +6,9 @@ do
 	end
 end
 
-local Marked = {} Marked.__index = Marked setmetatable(Marked, { __call = function(_, f) if f.field == nil then f.field = 0 end return setmetatable(f, Marked) end }) function Marked.new(f) return Marked(f) end
+local Marked = {} Marked.__index = Marked
 
- type Marked = typeof(setmetatable({} :: { field: number }, Marked)) Marked.__tostring = function(s) return __alloy.show_struct("Marked", s, { "field" }) end
+ type Marked = typeof(setmetatable({} :: { field: number }, Marked)) setmetatable(Marked, { __call = function(_, f: { field: number? }): Marked if f.field == nil then local _field: number = 0 f.field = _field end return ((setmetatable(f, Marked) :: any) :: Marked) end }) Marked.__tostring = function(s) return __alloy.show_struct("Marked", s, { "field" }) end
 
 do
 	function Marked.new(): Marked
@@ -24,9 +24,9 @@ do
 	end
 end
 
-local Held = {} Held.__index = Held setmetatable(Held, { __call = function(_, f) if f.items == nil then f.items = __alloy.Array.from({}) end return setmetatable(f, Held) end }) function Held.new(f) return Held(f) end
+local Held = {} Held.__index = Held
 
- type Held<T> = typeof(setmetatable({} :: { items: __alloy.Array<T> }, Held)) Held.__tostring = function(s) return __alloy.show_struct("Held", s, { "items" }) end
+ type Held<T> = typeof(setmetatable({} :: { items: __alloy.Array<T> }, Held)) setmetatable(Held, { __call = function<T>(_, f: { items: __alloy.Array<T>? }): Held<T> if f.items == nil then local _items: __alloy.Array<T> = __alloy.Array.from({}) f.items = _items end return ((setmetatable(f, Held) :: any) :: Held<T>) end }) Held.__tostring = function(s) return __alloy.show_struct("Held", s, { "items" }) end
 
 do
 	function Held.new<T>(): Held<T>

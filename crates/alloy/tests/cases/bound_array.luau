@@ -2,12 +2,12 @@ local __alloy = require("@alloy") local Sized = {} type Sized = { read size: (se
 
 
 
-local Bag = {} Bag.__index = Bag setmetatable(Bag, { __call = function(_, f)  return setmetatable(f, Bag) end }) function Bag.new(f) return Bag(f) end
+local Bag = {} Bag.__index = Bag
 
- type Bag = typeof(setmetatable({} :: { items: __alloy.Array<string> }, Bag)) Bag.__tostring = function(s) return __alloy.show_struct("Bag", s, { "items" }) end
+ type Bag = typeof(setmetatable({} :: { items: __alloy.Array<string> }, Bag)) setmetatable(Bag, { __call = function(_, f: { items: __alloy.Array<string> }): Bag  return ((setmetatable(f, Bag) :: any) :: Bag) end }) function Bag.new(f: { items: __alloy.Array<string> }): Bag return Bag(f) end Bag.__tostring = function(s) return __alloy.show_struct("Bag", s, { "items" }) end
 
 do
-	function Bag.size(self): number
+	function Bag.size(self: Bag): number
 		return self.items:len()
 	end
 end

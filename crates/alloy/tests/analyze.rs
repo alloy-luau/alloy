@@ -1506,7 +1506,7 @@ fn an_is_test_narrows_the_expression_it_guards() {
         "{}",
         out.check
     );
-    assert!(!out.ship.contains(":: P)"), "{}", out.ship);
+    assert!(!out.ship.contains("(v :: any) :: P)"), "{}", out.ship);
     analyze(&good, "is-in-expression-good");
 
     let bad = format!(
@@ -1800,6 +1800,107 @@ fn a_cycle_of_type_imports_type_checks() {
 
     assert_eq!(errors.len(), 1, "{errors:?}");
     assert!(errors[0].starts_with("b.aly:11 "), "{errors:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A Luau project that installs an Alloy package reads the types of the
+/// ship artifact. The constructors were untyped there, and the class
+/// table carried its metatable into the alias. `Point.new { }` was then
+/// no `Point`, a `Point` no `Named`, `Color.Red` a `string`, and
+/// `Opt.Some(1)` no `Opt<number>`. An untyped `self` was generic, and
+/// `grid:top(1)` found no type for it. Each correct use now checks, and
+/// each wrong one still reports.
+#[test]
+fn a_luau_project_reads_the_ship_types_of_a_package() {
+    let dir = std::env::temp_dir().join(format!("alloy-ship-types-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"out\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/geometry.aly"),
+        include_str!("cases/package_types.aly"),
+    )
+    .unwrap();
+
+    let config = alloy::config::Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::build::run_project(&dir, &config).unwrap();
+    assert!(report.is_clean(), "{:?}", report.diagnostics);
+
+    let head = "--!strict\nlocal g = require(\"./geometry\")\n";
+    std::fs::write(
+        dir.join("out/good.luau"),
+        format!(
+            "{head}local p: g.Point = g.Point.new({{ x = 3 }})\n\
+             local q: g.Point = g.Point({{ x = 1, y = 2 }})\n\
+             local n: g.Named = p\n\
+             local v: g.Vec2 = g.Vec2.new(1, 2)\n\
+             local c: g.Color = g.Color.Red\n\
+             local none: g.Opt<number> = g.Opt.None\n\
+             local some: g.Opt<number> = g.Opt.Some(1)\n\
+             local leaf: g.Tree<number> = g.Tree.Leaf(1)\n\
+             local node: g.Tree<number> = g.Tree.Node(leaf, g.Tree.Leaf(2))\n\
+             local grid: g.Grid = g.Grid.new({{ rows = {{ 1 }} }})\n\
+             local top: number = grid:top(1)\n\
+             print(p:name(), q, n, v, c, none, some, node, top)\n"
+        ),
+    )
+    .unwrap();
+    // One mistake a line, from line 3 on.
+    std::fs::write(
+        dir.join("out/bad.luau"),
+        format!(
+            "{head}local p: g.Point = g.Point.new({{ x = \"3\" }})\n\
+             local v: g.Vec2 = g.Vec2.new({{ x = 1, y = 2 }})\n\
+             local c: g.Color = \"Blue\"\n\
+             local some: g.Opt<number> = g.Opt.Some(\"1\")\n\
+             local leaf: g.Tree<number> = g.Tree.Leaf(\"1\")\n\
+             local z: number = p.z\n\
+             print(v, c, some, leaf, z)\n"
+        ),
+    )
+    .unwrap();
+
+    let run = Command::new("luau-lsp")
+        .arg("analyze")
+        .arg("--platform=standard")
+        .arg("--flag:LuauSolverV2=true")
+        .arg(dir.join("out/good.luau"))
+        .arg(dir.join("out/bad.luau"))
+        .output();
+
+    let Ok(run) = run else {
+        eprintln!("skipped: luau-lsp is not installed");
+
+        return;
+    };
+
+    let text =
+        String::from_utf8_lossy(&run.stdout).into_owned() + &String::from_utf8_lossy(&run.stderr);
+    let errors = |file: &str| -> Vec<usize> {
+        let mut lines: Vec<usize> = text
+            .lines()
+            .filter(|l| l.contains(file) && l.contains("TypeError"))
+            .filter_map(|l| {
+                l.split_once(&format!("{file}("))?
+                    .1
+                    .split(',')
+                    .next()?
+                    .parse()
+                    .ok()
+            })
+            .collect();
+        lines.dedup();
+
+        lines
+    };
+
+    assert_eq!(errors("good.luau"), Vec::<usize>::new(), "{text}");
+    assert_eq!(errors("bad.luau"), vec![3, 4, 5, 6, 7, 8], "{text}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

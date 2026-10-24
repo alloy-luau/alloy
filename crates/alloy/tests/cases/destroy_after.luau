@@ -1,9 +1,9 @@
-local __alloy = require("@alloy") local Timer = {} Timer.__index = Timer setmetatable(Timer, { __call = function(_, f)  return setmetatable(f, Timer) end }) function Timer.new(f) return Timer(f) end
+local __alloy = require("@alloy") local Timer = {} Timer.__index = Timer
 
- type Timer = typeof(setmetatable({} :: { left: number }, Timer)) Timer.__tostring = function(s) return __alloy.show_struct("Timer", s, { "left" }) end
+ type Timer = typeof(setmetatable({} :: { left: number }, Timer)) setmetatable(Timer, { __call = function(_, f: { left: number }): Timer  return ((setmetatable(f, Timer) :: any) :: Timer) end }) function Timer.new(f: { left: number }): Timer return Timer(f) end Timer.__tostring = function(s) return __alloy.show_struct("Timer", s, { "left" }) end
 
 do
-    function Timer.destroy(self)
+    function Timer.destroy(self: Timer)
         self.left = 0
     end
 end

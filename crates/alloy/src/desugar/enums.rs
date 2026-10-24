@@ -224,12 +224,14 @@ impl<'s> Desugar<'s> {
                 // The checker widens a string field to `string`; the cast
                 // to the enum keeps `Ok(Zone.Spawn)` a `Result<Zone, _>`.
                 let (_, args) = variant_arguments(&alias_generics, &[]);
+                // The ship artifact casts too: a Luau project that
+                // installs the package reads `Color.Red` as a `Color`.
                 let value = if plain {
                     format!("((\"{vname}\" :: any) :: {name}{args})")
-                } else if self.options.check {
+                } else if alias_generics.is_empty() {
                     format!("(\"{vname}\" :: {name})")
                 } else {
-                    format!("\"{vname}\"")
+                    format!("(\"{vname}\" :: {name}{args})")
                 };
                 self.generate(vs, &format!("{name}.{vname} = {value}"));
                 types.push(if plain {
@@ -239,7 +241,6 @@ impl<'s> Desugar<'s> {
                 });
                 unit_tests.push(format!("v == \"{vname}\""));
             } else {
-                let params: Vec<String> = (1..=v.payload.len()).map(|i| format!("_{i}")).collect();
                 let fields: Vec<String> = (1..=v.payload.len())
                     .map(|i| format!("_{i} = _{i}"))
                     .collect();
@@ -277,20 +278,36 @@ impl<'s> Desugar<'s> {
                     let (generics, args) = variant_arguments(&alias_generics, &field_types);
 
                     (generics, field_types.join(", "), format!(": {name}{args}"))
-                } else if self.options.check {
+                } else {
+                    // A generic enum's slot that names the enum stays
+                    // untyped here: the solver finds no `T` through the
+                    // metatable alias, so `Tree.Node(a, b)` would fail.
+                    // The result still types the slot.
+                    let own = self.text_of(e.name);
+                    let generic = !alias_generics.is_empty();
+                    let params: Vec<String> = field_types
+                        .iter()
+                        .enumerate()
+                        .map(|(i, f)| match generic && names_word(f, own) {
+                            true => format!("_{}", i + 1),
+
+                            false => f.clone(),
+                        })
+                        .collect();
+
                     (
                         fn_generics.clone(),
-                        field_types.join(", "),
+                        params.join(", "),
                         format!(": {variant_type}"),
                     )
-                } else {
-                    (fn_generics.clone(), params.join(", "), String::new())
                 };
+                // The ship artifact types the constructor as well, for a
+                // Luau project that installs the package. The cast keeps
+                // the tag a literal: the checker widens it to `string`.
                 let value = format!(
-                    "setmetatable({{ tag = \"{vname}\", {} }}, {name})",
+                    "(setmetatable({{ tag = \"{vname}\", {} }}, {name}) :: any)",
                     fields.join(", ")
                 );
-                let value = self.any_cast(&value);
                 self.generate(
                     vs,
                     &format!(
@@ -3366,14 +3383,20 @@ mod tests {
             "{}",
             out.check
         );
+        // The ship artifact types the constructor by the variant, for a
+        // Luau project that installs the package.
         assert!(
             out.ship.contains(
-                "function Opt.Some<T>(_1) return setmetatable({ tag = \"Some\", _1 = _1 }, Opt) end"
+                "function Opt.Some<T>(_1: T): typeof(setmetatable({} :: { tag: \"Some\", _1: T }, Opt)) return (setmetatable({ tag = \"Some\", _1 = _1 }, Opt) :: any) end"
             ),
             "{}",
             out.ship
         );
-        assert!(out.ship.contains("Opt.Nil = \"Nil\""), "{}", out.ship);
+        assert!(
+            out.ship.contains("Opt.Nil = (\"Nil\" :: Opt<any>)"),
+            "{}",
+            out.ship
+        );
     }
 
     /// A default belongs to the alias alone. A constructor names the
@@ -3837,9 +3860,12 @@ mod tests {
             "{}",
             out.check
         );
-        // The ship artifact keeps the untyped constructor.
+        // The ship artifact types it the same way, for a Luau project
+        // that installs the package.
         assert!(
-            out.ship.contains("function Shape.Rect(_1, _2) return"),
+            out.ship.contains(
+                "function Shape.Rect(_1: number, _2: number): typeof(setmetatable({} :: { tag: \"Rect\", _1: number, _2: number }, Shape))"
+            ),
             "{}",
             out.ship
         );
@@ -3883,7 +3909,7 @@ mod tests {
             out.check
         );
         // The ship artifact reads the scrutinee where it stands.
-        assert!(!out.ship.contains(":: Shape"), "{}", out.ship);
+        assert!(!out.ship.contains("(s) :: Shape"), "{}", out.ship);
     }
 
     #[test]

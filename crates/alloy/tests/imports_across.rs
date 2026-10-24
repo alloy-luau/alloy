@@ -316,6 +316,134 @@ fn flux_sees_the_other_project_and_types_the_import() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// A project with an installed Alloy package, as `embr install` lays it
+/// out: the package's own project under `packages/luau/.ember/geo`, and
+/// beside it a `.luau` link file and an `.aly` link that re-exports the
+/// sources. The package's `build` holds Luau from an older compiler,
+/// with no types on its constructors.
+fn installed_package(name: &str) -> PathBuf {
+    let dir = workspace(name, &["app"]);
+    let root = dir.join("app");
+    let links = root.join("packages/luau");
+    let geo = links.join(".ember/geo");
+    fs::create_dir_all(geo.join("src")).unwrap();
+    fs::create_dir_all(geo.join("build")).unwrap();
+    fs::write(geo.join("alloy.toml"), TOML).unwrap();
+    fs::write(
+        geo.join("src/init.aly"),
+        "export struct Point as\n    x: number\n    y: number\nend\n\nexport enum Color as Red, Blue end\n",
+    )
+    .unwrap();
+    fs::write(geo.join("build/init.luau"), PUBLISHED).unwrap();
+    fs::write(
+        links.join("geo.luau"),
+        "local module = require(\"./.ember/geo/build\")\nexport type Point = module.Point\nexport type Color = module.Color\nreturn module\n",
+    )
+    .unwrap();
+    fs::write(
+        links.join("geo.aly"),
+        "export { Point, Color } from \"./.ember/geo/src\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join(".luaurc"),
+        "{ \"aliases\": { \"packages\": \"./packages/luau\" } }\n",
+    )
+    .unwrap();
+
+    dir
+}
+
+/// The Luau of `geo` that alloy 0.1.2 published.
+const PUBLISHED: &str = "local Point = {} Point.__index = Point setmetatable(Point, { __call = function(_, f) return setmetatable(f, Point) end }) function Point.new(f) return Point(f) end\nexport type Point = typeof(setmetatable({} :: { x: number, y: number }, Point))\nlocal Color = {} Color.Red = \"Red\" Color.Blue = \"Blue\"\nexport type Color = \"Red\" | \"Blue\"\nreturn { Point = Point, Color = Color }\n";
+
+/// Flux checks an import of an installed package against the check
+/// artifacts of the package's sources. It read the published Luau, and
+/// reported `new Point { }` as a missing `__new` and `Color.Red` as a
+/// `string`.
+#[test]
+fn flux_types_an_installed_package_by_its_sources() {
+    let dir = installed_package("package-flux");
+    let root = dir.join("app");
+    fs::write(
+        root.join("src/main.aly"),
+        "import { Point, Color } from '@packages/geo'\n\nconst p = new Point { x = 3, y = 4 }\nconst c: Color = Color.Red\nconst bad: Color = 'Green'\nprint(p.x, c, bad)\n",
+    )
+    .unwrap();
+
+    let config = Config::load(&root.join("alloy.toml")).unwrap();
+    let report = alloy::build::flux_project(&root, &config).unwrap();
+
+    assert!(report.is_clean(), "{:?}", messages(&report));
+    assert!(
+        report
+            .dep_artifacts
+            .iter()
+            .any(|(p, text)| p.ends_with("geo/build/init.luau") && text.contains("__new")),
+        "{:?}",
+        report
+            .dep_artifacts
+            .iter()
+            .map(|(p, _)| p)
+            .collect::<Vec<_>>()
+    );
+
+    if alloy::typecheck::find_luau_lsp(&config.flux).is_none() {
+        eprintln!("skipped: luau-lsp is not installed");
+
+        return;
+    }
+
+    let analysis = alloy::typecheck::analyze(&root, &config, &report.checks, &report.dep_artifacts)
+        .expect("the type check runs");
+    let errors: Vec<String> = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| d.is_error())
+        .map(|d| format!("{}:{} {}", d.line, d.col, d.message))
+        .collect();
+
+    assert_eq!(
+        errors,
+        vec!["5:20 Expected this to be '\"Blue\" | \"Red\"', but got '\"Green\"'".to_string()]
+    );
+    // The mirror opens the links on its way: the package keeps the
+    // Luau it shipped.
+    assert_eq!(
+        fs::read_to_string(root.join("packages/luau/.ember/geo/build/init.luau")).unwrap(),
+        PUBLISHED
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A relative import of the `.aly` link requires the `.luau` link file
+/// beside it. The link sits under the project's own root, outside `in`,
+/// and the build reported that the project imports itself.
+#[test]
+fn a_relative_import_of_a_package_link_requires_its_luau() {
+    let dir = installed_package("package-relative");
+    let root = dir.join("app");
+    fs::write(
+        root.join("src/main.aly"),
+        "import { Point } from '../packages/luau/geo'\n\nprint(new Point { x = 1, y = 2 })\n",
+    )
+    .unwrap();
+
+    let report = build(&root);
+
+    assert!(report.is_clean(), "{:?}", messages(&report));
+    let out = fs::read_to_string(root.join("build/main.luau")).unwrap();
+    assert!(out.contains("require('../packages/luau/geo')"), "{out}");
+    // The build leaves the package to `embr install`.
+    assert_eq!(
+        fs::read_to_string(root.join("packages/luau/.ember/geo/build/init.luau")).unwrap(),
+        PUBLISHED
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// A mount of the other project's output gives the require its place.
 /// Roblox climbs instances, so the disk path failed there, and luau-lsp
 /// read it the same way in the check artifact. The mount may sit beside

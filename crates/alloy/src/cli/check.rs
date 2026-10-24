@@ -3,7 +3,8 @@
 use std::process::ExitCode;
 
 use crate::cli::lint_support::{
-    lint_config_for, lint_context, lint_files, print_lints, split_level_flags,
+    apply_header_as_fixes, apply_lint_fixes, apply_std_import_fixes, lint_config_for, lint_context,
+    lint_files, offer_fixes, print_lints, split_level_flags,
 };
 use crate::cli::support::{
     apply_build_options, is_source, positionals, print_diagnostics, project,
@@ -46,7 +47,7 @@ pub(crate) fn check(args: &[String]) -> ExitCode {
     };
     apply_build_options(&mut config, args);
 
-    let report = match alloy::build::check_project(&root, &config) {
+    let mut report = match alloy::build::check_project(&root, &config) {
         Ok(r) => r,
 
         Err(e) => {
@@ -57,11 +58,47 @@ pub(crate) fn check(args: &[String]) -> ExitCode {
 
     let p = Painter::for_stderr();
     let input = root.join(&config.build.input);
+    // `--fix` rewrites every file of the project, as `alloy lint --fix`
+    // does: the source rewrites first, then a fresh check, then the
+    // lint fixes. Every path is under the input folder.
+    let fix = args.iter().any(|a| a == "--fix");
+    let header_rewrites = match fix {
+        true => {
+            apply_header_as_fixes(&input, &report.diagnostics)
+                + apply_std_import_fixes(&input, &report.diagnostics)
+        }
+
+        false => 0,
+    };
+
+    if header_rewrites > 0 {
+        report = match alloy::build::check_project(&root, &config) {
+            Ok(r) => r,
+
+            Err(e) => {
+                fail(&e.to_string());
+                return ExitCode::FAILURE;
+            }
+        };
+    }
+
     print_diagnostics(&input, &report.diagnostics, &report.failures);
     let lint_config = lint_config_for(&config, &flags, args);
-    let (warnings, denied) = print_lints(&input, &report.lints, &lint_config, args);
-    let counts = p.summary(&[
-        (report.written.len(), "files", ui::DIM),
+    let (rewrites, remaining) = if fix {
+        apply_lint_fixes(&input, &report.lints, &lint_config)
+    } else {
+        (0, report.lints.clone())
+    };
+    let (warnings, denied) = print_lints(&input, &remaining, &lint_config, args);
+    offer_fixes(&input, &report.lints, &lint_config, fix, "check");
+    let mut parts = vec![(report.written.len(), "files", ui::DIM)];
+
+    // The count of rewrites shows only when `--fix` asks for them.
+    if fix {
+        parts.push((rewrites + header_rewrites, "fixed", ui::GREEN));
+    }
+
+    parts.extend([
         // A compile that stopped leaves a failure, not a diagnostic; it
         // is still an error the summary counts.
         (
@@ -72,6 +109,7 @@ pub(crate) fn check(args: &[String]) -> ExitCode {
         (warnings, "warnings", ui::AMBER),
         (denied, "denied", ui::RED),
     ]);
+    let counts = p.summary(&parts);
 
     let deny_warnings = args.iter().any(|a| a == "--deny-warnings");
 

@@ -266,6 +266,8 @@ pub struct MessageSig {
     /// The parameters of `reply(...)`, each as written, when the
     /// message declares one.
     pub reply: Option<Vec<String>>,
+    /// The type each parameter declares, as written.
+    pub param_types: Vec<Option<String>>,
 }
 
 impl MessageSig {
@@ -290,6 +292,11 @@ impl MessageSig {
                 .reply
                 .as_ref()
                 .map(|(_, ps)| ps.iter().map(param).collect()),
+            param_types: m
+                .params
+                .iter()
+                .map(|p| p.ty.map(|t| expressions::one_line(t.text(src, toks))))
+                .collect(),
         }
     }
 }
@@ -727,6 +734,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         messages: options.import_messages.iter().cloned().collect(),
         message_shadows: Vec::new(),
         parallel_writers: HashMap::new(),
+        parallel_shapes: HashMap::new(),
         own_names: top_level_names(src, toks, chunk),
         table_exports: HashSet::new(),
         exports: Vec::new(),
@@ -1464,10 +1472,12 @@ struct Desugar<'s> {
     /// The locals, parameters, and loop variables named like the head
     /// of a message path, with the tokens each one holds.
     message_shadows: Vec<crate::naming::ScopedBinding>,
-    /// The functions of this file that write an instance, by the path a
-    /// call writes, with the first write each holds. A `parallel` block
-    /// refuses a call to one.
+    /// The functions and methods of this file that write an instance, by
+    /// the path a call writes, with what each does, at any depth. A
+    /// `parallel` block refuses a call to one.
     parallel_writers: HashMap<String, String>,
+    /// What the file knows about each name, for the parallel check.
+    parallel_shapes: HashMap<String, Option<actors::Shape>>,
     /// Every name the top level of this file binds.
     own_names: HashSet<String>,
     /// The exported values that live on the `__exports` table instead

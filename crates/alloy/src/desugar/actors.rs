@@ -10,11 +10,13 @@ against a value typed from the declaration, so the analyzer types both
 ends from one line.
 
 The phase check reads this file and no further. A call into another module
-is not followed, and a call to a function of this file is followed one
-level deep. The engine has the last word.
+is not followed. A call to a function or a struct method of this file is
+followed at any depth. The engine has the last word.
 */
 
-use alloy_syntax::ast::{CallArgs, FunctionBody, MessageDecl, ParallelBlock, Param};
+use alloy_syntax::ast::{
+    CallArgs, Destructure, FunctionBody, GenericFor, Local, MessageDecl, ParallelBlock, Param,
+};
 
 use super::expressions::one_line;
 use super::*;
@@ -63,12 +65,46 @@ const INSTANCE_GLOBALS: &[&str] = &["workspace", "game", "script"];
 /// The Instance methods that make or remove an instance.
 const INSTANCE_METHODS: &[&str] = &["Destroy", "Clone"];
 
+/// The Instance methods that give back an Instance.
+const FINDS_INSTANCE: &[&str] = &[
+    "Clone",
+    "FindFirstAncestor",
+    "FindFirstAncestorOfClass",
+    "FindFirstAncestorWhichIsA",
+    "FindFirstChild",
+    "FindFirstChildOfClass",
+    "FindFirstChildWhichIsA",
+    "FindFirstDescendant",
+    "FindService",
+    "GetService",
+    "WaitForChild",
+];
+
+/// The Instance methods that give back a list of Instances.
+const LISTS_INSTANCES: &[&str] = &["GetChildren", "GetDescendants"];
+
+/// What the phase check knows about a value.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Shape {
+    /// An Instance.
+    Instance,
+    /// A table whose values are Instances: `{ BasePart }` or
+    /// `{ [string]: Part }`.
+    Instances,
+    /// A value of a struct this file declares, by the struct's name.
+    Struct(String),
+}
+
+/// One scope of the check: each name it binds, with what the check knows
+/// about the value. `None` still hides an outer name of the same spelling.
+type Scope = HashMap<String, Option<Shape>>;
+
 impl<'s> Desugar<'s> {
     /*
     The messages this file declares join the imported ones, and the
     names that could shadow one are noted. A file that holds a `parallel`
-    word gets the functions that write an instance, for the one-level
-    call check.
+    word gets what it knows about each name, and the functions that write
+    an instance, for the phase check.
     */
     pub(crate) fn note_messages(&mut self, block: &Block) {
         for stmt in &block.stmts {
@@ -91,51 +127,386 @@ impl<'s> Desugar<'s> {
         }
 
         if self.toks.iter().any(|t| t.text(self.src) == "parallel") {
-            let mut writers = Vec::new();
-            self.collect_writers(&block.stmts, &mut writers);
-            self.parallel_writers = writers.into_iter().collect();
+            let mut shapes = Scope::new();
+            self.collect_shapes(&block.stmts, &mut shapes);
+            self.parallel_shapes = shapes;
+            self.parallel_writers = self.writers_of(block);
         }
     }
 
-    /// Each function the file declares that writes an instance itself,
-    /// by the path a call writes, with the first write it holds.
-    fn collect_writers(&self, stmts: &[Stmt], out: &mut Vec<(String, String)>) {
+    /*
+    What the file knows about each name, for a name the check meets
+    outside the scopes it walks: an annotation, a cast, or the value
+    that builds it. The first binding that tells answers, as a name
+    reads in the rest of the file.
+    */
+    fn collect_shapes(&self, stmts: &[Stmt], out: &mut Scope) {
         for stmt in stmts {
-            let (path, body) = match stmt.under_default() {
-                Stmt::Function(f) if !f.is_method => {
-                    let parts: Vec<&str> = f.path.iter().map(|p| self.text_of(*p)).collect();
+            match stmt.under_default() {
+                Stmt::Local(l) => {
+                    for (i, b) in l.names.iter().enumerate() {
+                        let name = self.text_of(b.name);
 
-                    (Some(parts.join(".")), Some(&f.body))
+                        if b.destructure.is_some() || out.contains_key(name) {
+                            continue;
+                        }
+
+                        let shape =
+                            self.binding_shape(b.ty, l.values.get(i), std::slice::from_ref(out));
+
+                        if shape.is_some() {
+                            out.insert(name.to_string(), shape);
+                        }
+                    }
                 }
 
-                Stmt::LocalFunction(f) => (Some(self.text_of(f.name).to_string()), Some(&f.body)),
+                Stmt::GenericFor(f) => {
+                    for b in &f.vars {
+                        self.note_typed(b.name, b.ty, out);
+                    }
+                }
+
+                Stmt::NumericFor(f) => self.note_typed(f.var.name, f.var.ty, out),
+
+                _ => {}
+            }
+
+            for c in stmt_children(stmt) {
+                self.shapes_in_child(c, out);
+            }
+        }
+    }
+
+    fn shapes_in_child(&self, c: Child<'_>, out: &mut Scope) {
+        match c {
+            Child::Block(b) => self.collect_shapes(&b.stmts, out),
+
+            Child::Function(f) => {
+                for p in &f.params {
+                    if p.destructure.is_none() && !p.is_vararg {
+                        self.note_typed(p.name, p.ty, out);
+                    }
+                }
+
+                self.collect_shapes(&f.block.stmts, out);
+            }
+
+            Child::Expr(e) => {
+                for c in expr_children(e) {
+                    self.shapes_in_child(c, out);
+                }
+            }
+        }
+    }
+
+    /// Notes a name whose annotation tells its shape, unless the file
+    /// already told it.
+    fn note_typed(&self, name: TokSpan, ty: Option<TokSpan>, out: &mut Scope) {
+        let name = self.text_of(name);
+
+        if !out.contains_key(name)
+            && let Some(shape) = ty.and_then(|t| self.type_shape(self.text_of(t)))
+        {
+            out.insert(name.to_string(), Some(shape));
+        }
+    }
+
+    /// The shape of a binding: its annotation when it has one, else the
+    /// value it takes.
+    fn binding_shape(
+        &self,
+        ty: Option<TokSpan>,
+        value: Option<&Expr>,
+        scopes: &[Scope],
+    ) -> Option<Shape> {
+        match ty {
+            Some(t) => self.type_shape(self.text_of(t)),
+
+            None => value.and_then(|v| self.expr_shape(v, scopes)),
+        }
+    }
+
+    /*
+    The shape a type names: an Instance class, a table of one,
+    `{ BasePart }` or `{ [string]: Part }`, or a struct of this file.
+    */
+    fn type_shape(&self, ty: &str) -> Option<Shape> {
+        let ty = ty.trim().trim_end_matches('?').trim();
+
+        if let Some(inner) = ty.strip_prefix('{').and_then(|t| t.strip_suffix('}')) {
+            let inner = inner.trim();
+            // `{ [K]: V }` holds V, and `{ V }` is a list of V.
+            let value = match inner.strip_prefix('[') {
+                Some(rest) => rest.split_once(']')?.1.trim_start().strip_prefix(':')?,
+
+                None => inner,
+            };
+
+            return is_instance_type(value).then_some(Shape::Instances);
+        }
+
+        if is_instance_type(ty) {
+            return Some(Shape::Instance);
+        }
+
+        self.struct_field_types
+            .contains_key(ty)
+            .then(|| Shape::Struct(ty.to_string()))
+    }
+
+    /*
+    What the check knows about a value. A name reads the scopes, the
+    innermost first, and then the Roblox globals. A field of an Instance
+    is a child or a property, and a property of a Roblox datatype takes
+    no write, so a write through the chain writes an instance.
+    */
+    fn expr_shape(&self, e: &Expr, scopes: &[Scope]) -> Option<Shape> {
+        match e {
+            Expr::Paren { inner, .. } => self.expr_shape(inner, scopes),
+
+            Expr::TypeAssert { expr, ty, .. } => self
+                .type_shape(self.text_of(*ty))
+                .or_else(|| self.expr_shape(expr, scopes)),
+
+            Expr::Name(n) => {
+                let name = self.text_of(*n);
+
+                for scope in scopes.iter().rev() {
+                    if let Some(shape) = scope.get(name) {
+                        return shape.clone();
+                    }
+                }
+
+                INSTANCE_GLOBALS.contains(&name).then_some(Shape::Instance)
+            }
+
+            Expr::Index { object, key, .. } => match self.expr_shape(object, scopes)? {
+                Shape::Instance | Shape::Instances => Some(Shape::Instance),
+
+                Shape::Struct(s) => match key {
+                    IndexKey::Field(f) => {
+                        let field = self.text_of(*f);
+
+                        self.struct_field_types
+                            .get(&s)?
+                            .iter()
+                            .find(|x| x.name == field)
+                            .and_then(|x| self.type_shape(self.text_of(x.ty)))
+                    }
+
+                    IndexKey::Computed(_) => None,
+                },
+            },
+
+            Expr::Child { object, .. } => {
+                (self.expr_shape(object, scopes)? == Shape::Instance).then_some(Shape::Instance)
+            }
+
+            Expr::Call {
+                func,
+                method: Some(m),
+                ..
+            } => {
+                let m = self.text_of(*m);
+
+                if self.expr_shape(func, scopes)? != Shape::Instance {
+                    return None;
+                }
+
+                if FINDS_INSTANCE.contains(&m) {
+                    Some(Shape::Instance)
+                } else {
+                    LISTS_INSTANCES.contains(&m).then_some(Shape::Instances)
+                }
+            }
+
+            Expr::Call {
+                func,
+                method: None,
+                args,
+                ..
+            } => match self.dotted_name(func).as_deref() {
+                Some("Instance.new") => Some(Shape::Instance),
+
+                // `ipairs(t)` and `pairs(t)` walk the table they take.
+                Some("ipairs" | "pairs") => match args {
+                    CallArgs::Paren(a) => a.first().and_then(|t| self.expr_shape(t, scopes)),
+
+                    _ => None,
+                },
+
+                _ => None,
+            },
+
+            Expr::New { name, .. } => match name.as_ref() {
+                Expr::Name(n) if self.text_of(*n) == "Instance" => Some(Shape::Instance),
+
+                Expr::Name(n) => self
+                    .struct_field_types
+                    .contains_key(self.text_of(*n))
+                    .then(|| Shape::Struct(self.text_of(*n).to_string())),
+
+                _ => None,
+            },
+
+            _ => None,
+        }
+    }
+
+    /// Binds the names of a `local` in the innermost scope, after its
+    /// values read the scopes outside it.
+    fn bind_local(&self, l: &Local, scopes: &mut [Scope]) {
+        let mut bound = Vec::new();
+
+        for (i, b) in l.names.iter().enumerate() {
+            match &b.destructure {
+                None => bound.push((
+                    self.text_of(b.name).to_string(),
+                    self.binding_shape(b.ty, l.values.get(i), scopes),
+                )),
+
+                Some(d) => {
+                    for name in destructured_names(d) {
+                        bound.push((self.text_of(name).to_string(), None));
+                    }
+                }
+            }
+        }
+
+        if let Some(top) = scopes.last_mut() {
+            top.extend(bound);
+        }
+    }
+
+    /// The scope a `for ... in` opens: the value of a loop over a table
+    /// of Instances is an Instance.
+    fn for_scope(&self, f: &GenericFor, scopes: &[Scope]) -> Scope {
+        let values = f.exprs.first().and_then(|e| self.expr_shape(e, scopes));
+
+        f.vars
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                let shape = match b.ty {
+                    Some(t) => self.type_shape(self.text_of(t)),
+
+                    None => (i == 1 && values == Some(Shape::Instances)).then_some(Shape::Instance),
+                };
+
+                (self.text_of(b.name).to_string(), shape)
+            })
+            .collect()
+    }
+
+    /// The scope of a function's parameters. `self` in a method of a
+    /// struct is a value of that struct.
+    fn params_scope(&self, body: &FunctionBody, owner: Option<&str>) -> Scope {
+        let mut scope: Scope = body
+            .params
+            .iter()
+            .filter(|p| p.destructure.is_none() && !p.is_vararg)
+            .map(|p| {
+                (
+                    self.text_of(p.name).to_string(),
+                    p.ty.and_then(|t| self.type_shape(self.text_of(t))),
+                )
+            })
+            .collect();
+
+        if let Some(s) = owner {
+            scope.insert("self".to_string(), Some(Shape::Struct(s.to_string())));
+        }
+
+        scope
+    }
+
+    /*
+    Each function and method the file declares that writes an instance,
+    by the path a call names, with what it does: "writes `p.Parent`", or
+    "calls `f`, which writes `p.Parent`". A function that calls one of
+    them writes too, at any depth, so the list grows until it holds.
+    */
+    fn writers_of(&self, block: &Block) -> HashMap<String, String> {
+        let mut bodies = Vec::new();
+        self.collect_bodies(&block.stmts, &mut bodies);
+        let mut writers = HashMap::new();
+
+        loop {
+            let mut grew = false;
+
+            for (path, body, owner) in &bodies {
+                if writers.contains_key(path) {
+                    continue;
+                }
+
+                if let Some(what) = self.first_write(body, owner.as_deref(), &writers) {
+                    writers.insert(path.clone(), what);
+                    grew = true;
+                }
+            }
+
+            if !grew {
+                return writers;
+            }
+        }
+    }
+
+    /// Each function the file declares: the path a call names, its body,
+    /// and the struct it is a method of. A method takes `T:name`, and
+    /// `T.name` too for a call through the type.
+    fn collect_bodies<'b>(
+        &self,
+        stmts: &'b [Stmt],
+        out: &mut Vec<(String, &'b FunctionBody, Option<String>)>,
+    ) {
+        for stmt in stmts {
+            match stmt.under_default() {
+                Stmt::Function(f) => {
+                    let parts: Vec<&str> = f.path.iter().map(|p| self.text_of(*p)).collect();
+
+                    match (f.is_method, parts.split_last()) {
+                        (true, Some((name, owner))) if !owner.is_empty() => {
+                            let owner = owner.join(".");
+                            out.push((format!("{owner}:{name}"), &f.body, Some(owner.clone())));
+                            out.push((format!("{owner}.{name}"), &f.body, Some(owner)));
+                        }
+
+                        _ => out.push((parts.join("."), &f.body, None)),
+                    }
+                }
+
+                Stmt::LocalFunction(f) => {
+                    out.push((self.text_of(f.name).to_string(), &f.body, None))
+                }
 
                 Stmt::Local(l) => {
                     for (b, v) in l.names.iter().zip(&l.values) {
-                        if let Expr::Function { body, .. } = v
-                            && let Some(what) = self.first_write(&body.block)
-                        {
-                            out.push((self.text_of(b.name).to_string(), what));
+                        if let Expr::Function { body, .. } = v {
+                            out.push((self.text_of(b.name).to_string(), body, None));
                         }
                     }
-
-                    (None, None)
                 }
 
-                _ => (None, None),
-            };
+                Stmt::Impl(i) => {
+                    let owner = one_line(self.text_of(i.target));
 
-            if let (Some(path), Some(body)) = (path, body)
-                && let Some(what) = self.first_write(&body.block)
-            {
-                out.push((path, what));
+                    for f in &i.methods {
+                        if let Some(name) = f.path.last() {
+                            let name = self.text_of(*name);
+                            out.push((format!("{owner}:{name}"), &f.body, Some(owner.clone())));
+                            out.push((format!("{owner}.{name}"), &f.body, Some(owner.clone())));
+                        }
+                    }
+                }
+
+                _ => {}
             }
 
             for c in stmt_children(stmt) {
                 match c {
-                    Child::Block(b) => self.collect_writers(&b.stmts, out),
+                    Child::Block(b) => self.collect_bodies(&b.stmts, out),
 
-                    Child::Function(f) => self.collect_writers(&f.block.stmts, out),
+                    Child::Function(f) => self.collect_bodies(&f.block.stmts, out),
 
                     Child::Expr(_) => {}
                 }
@@ -143,87 +514,214 @@ impl<'s> Desugar<'s> {
         }
     }
 
-    /// The first instance write a function body holds, as a report
-    /// names it: `` `part.Position` `` or `` `Instance.new` ``.
-    fn first_write(&self, block: &Block) -> Option<String> {
+    /// What the first instance write of a function body does, as a
+    /// report names it.
+    fn first_write(
+        &self,
+        body: &FunctionBody,
+        owner: Option<&str>,
+        writers: &HashMap<String, String>,
+    ) -> Option<String> {
+        let mut scopes = vec![self.parallel_shapes.clone(), self.params_scope(body, owner)];
         let mut found = Vec::new();
-        self.writes_in_block(block, &mut found);
+        self.writes_in_block(&body.block, &mut scopes, writers, &mut found);
 
-        found.into_iter().next().map(|(_, what, _)| what)
+        found.into_iter().next()
     }
 
-    /// The instance writes of a block, in source order: the span, the
-    /// write as a report names it, and whether it is a call. A nested
-    /// function is not followed, since its body runs when it is called.
-    fn writes_in_block(&self, block: &Block, out: &mut Vec<(TokSpan, String, bool)>) {
+    /// The instance writes of a block, in source order, as a report
+    /// names each one. A nested function is not followed, since its body
+    /// runs when it is called.
+    fn writes_in_block(
+        &self,
+        block: &Block,
+        scopes: &mut Vec<Scope>,
+        writers: &HashMap<String, String>,
+        out: &mut Vec<String>,
+    ) {
+        scopes.push(Scope::new());
+
         for stmt in &block.stmts {
-            self.writes_in_stmt(stmt, out);
+            self.writes_in_stmt(stmt, scopes, writers, out);
         }
+
+        scopes.pop();
     }
 
-    fn writes_in_stmt(&self, stmt: &Stmt, out: &mut Vec<(TokSpan, String, bool)>) {
+    fn writes_in_stmt(
+        &self,
+        stmt: &Stmt,
+        scopes: &mut Vec<Scope>,
+        writers: &HashMap<String, String>,
+        out: &mut Vec<String>,
+    ) {
         match stmt {
             Stmt::Assign(a) => {
                 for t in &a.targets {
-                    if let Some(what) = self.instance_write(t) {
-                        out.push((t.span(), format!("`{what}`"), false));
+                    if let Some(what) = self.instance_write(t, scopes) {
+                        out.push(format!("writes `{what}`"));
                     }
                 }
             }
 
-            Stmt::Delete { expr, span } | Stmt::Destroy { expr, span, .. } => {
+            Stmt::Delete { expr, .. } | Stmt::Destroy { expr, .. } => {
                 let what = one_line(self.text_of(expr.span()));
-                out.push((*span, format!("`destroy {what}`"), true));
+                out.push(format!("writes `destroy {what}`"));
             }
 
-            Stmt::LocalFunction(_) | Stmt::Function(_) => return,
+            Stmt::LocalFunction(f) => {
+                if let Some(top) = scopes.last_mut() {
+                    top.insert(self.text_of(f.name).to_string(), None);
+                }
+
+                return;
+            }
+
+            Stmt::Function(_) => return,
+
+            Stmt::GenericFor(f) => {
+                for e in &f.exprs {
+                    self.writes_in_expr(e, scopes, writers, out);
+                }
+
+                let inner = self.for_scope(f, scopes);
+                scopes.push(inner);
+
+                if let Some(c) = &f.filter {
+                    self.writes_in_expr(c, scopes, writers, out);
+                }
+
+                self.writes_in_block(&f.block, scopes, writers, out);
+                scopes.pop();
+
+                return;
+            }
+
+            Stmt::NumericFor(f) => {
+                for e in [Some(&f.start), Some(&f.limit), f.step.as_ref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    self.writes_in_expr(e, scopes, writers, out);
+                }
+
+                scopes.push(Scope::from([(self.text_of(f.var.name).to_string(), None)]));
+                self.writes_in_block(&f.block, scopes, writers, out);
+                scopes.pop();
+
+                return;
+            }
 
             _ => {}
         }
 
         for c in stmt_children(stmt) {
             match c {
-                Child::Expr(e) => self.writes_in_expr(e, out),
+                Child::Expr(e) => self.writes_in_expr(e, scopes, writers, out),
 
-                Child::Block(b) => self.writes_in_block(b, out),
+                Child::Block(b) => self.writes_in_block(b, scopes, writers, out),
+
+                Child::Function(_) => {}
+            }
+        }
+
+        if let Stmt::Local(l) = stmt {
+            self.bind_local(l, scopes);
+        }
+    }
+
+    fn writes_in_expr(
+        &self,
+        e: &Expr,
+        scopes: &mut Vec<Scope>,
+        writers: &HashMap<String, String>,
+        out: &mut Vec<String>,
+    ) {
+        if let Expr::Function { .. } | Expr::AsyncBlock { .. } = e {
+            return;
+        }
+
+        if let Some(what) = self.refused_call(e, scopes, writers) {
+            out.push(what.as_writer());
+        }
+
+        for c in expr_children(e) {
+            match c {
+                Child::Expr(x) => self.writes_in_expr(x, scopes, writers, out),
+
+                Child::Block(b) => self.writes_in_block(b, scopes, writers, out),
 
                 Child::Function(_) => {}
             }
         }
     }
 
-    fn writes_in_expr(&self, e: &Expr, out: &mut Vec<(TokSpan, String, bool)>) {
+    /*
+    A call the parallel phase refuses: one that makes or removes an
+    instance, `Instance.new`, `new Instance`, `Destroy`, and `Clone` in
+    either spelling, or a call of a function or method of this file that
+    writes an instance.
+    */
+    fn refused_call(
+        &self,
+        e: &Expr,
+        scopes: &[Scope],
+        writers: &HashMap<String, String>,
+    ) -> Option<RefusedCall> {
         match e {
-            Expr::Function { .. } | Expr::AsyncBlock { .. } => return,
-
             Expr::Call {
-                method: Some(m), ..
-            } if INSTANCE_METHODS.contains(&self.text_of(*m)) => {
-                out.push((e.span(), format!("`{}`", self.text_of(*m)), true));
+                func,
+                method: Some(m),
+                ..
+            } => {
+                let name = self.text_of(*m);
+
+                if INSTANCE_METHODS.contains(&name) {
+                    return Some(RefusedCall::Instance(one_line(self.text_of(e.span()))));
+                }
+
+                let Shape::Struct(s) = self.expr_shape(func, scopes)? else {
+                    return None;
+                };
+                let what = writers.get(&format!("{s}:{name}"))?;
+
+                Some(RefusedCall::Writer {
+                    call: one_line(self.text_of(e.span())),
+                    what: what.clone(),
+                })
             }
 
             Expr::Call {
                 func, method: None, ..
-            } if self.dotted_name(func).as_deref() == Some("Instance.new") => {
-                out.push((e.span(), "`Instance.new`".to_string(), true));
+            } => {
+                if let Expr::Index {
+                    key: IndexKey::Field(f),
+                    ..
+                } = func.as_ref()
+                    && INSTANCE_METHODS.contains(&self.text_of(*f))
+                {
+                    return Some(RefusedCall::Instance(one_line(self.text_of(e.span()))));
+                }
+
+                let path = self.dotted_name(func)?;
+
+                if path == "Instance.new" {
+                    return Some(RefusedCall::Instance(path));
+                }
+
+                let what = writers.get(&path)?;
+
+                Some(RefusedCall::Writer {
+                    call: path,
+                    what: what.clone(),
+                })
             }
 
-            Expr::New { name, .. } if matches!(name.as_ref(), Expr::Name(n) if self.text_of(*n) == "Instance") =>
-            {
-                out.push((e.span(), "`new Instance`".to_string(), true));
+            Expr::New { name, .. } if matches!(name.as_ref(), Expr::Name(n) if self.text_of(*n) == "Instance") => {
+                Some(RefusedCall::Instance("new Instance".to_string()))
             }
 
-            _ => {}
-        }
-
-        for c in expr_children(e) {
-            match c {
-                Child::Expr(x) => self.writes_in_expr(x, out),
-
-                Child::Block(b) => self.writes_in_block(b, out),
-
-                Child::Function(_) => {}
-            }
+            _ => None,
         }
     }
 
@@ -233,40 +731,18 @@ impl<'s> Desugar<'s> {
 
     A `Parent` write is always one: no other value names the field in a
     way a parallel block could mean. Any other property counts when the
-    receiver's type is known: a Roblox global, a name annotated with an
-    instance class, or a local that `Instance.new` built. A value typed
-    `any` cannot be seen, and a write through it does not report.
+    check knows the receiver is an Instance. A value typed `any` cannot
+    be seen, and a write through it does not report.
     */
-    fn instance_write(&self, target: &Expr) -> Option<String> {
+    fn instance_write(&self, target: &Expr, scopes: &[Scope]) -> Option<String> {
         let Expr::Index { object, key, .. } = target else {
             return None;
         };
 
         let parent = matches!(key, IndexKey::Field(f) if self.text_of(*f) == "Parent");
 
-        (parent || self.known_instance(object)).then(|| one_line(self.text_of(target.span())))
-    }
-
-    fn known_instance(&self, e: &Expr) -> bool {
-        match e {
-            Expr::Paren { inner, .. } => self.known_instance(inner),
-
-            Expr::Name(n) => {
-                let name = self.text_of(*n);
-
-                if let Some(ty) = self.annotation_of(name) {
-                    let base = ty.trim_end_matches('?');
-
-                    return base == "Instance"
-                        || crate::roblox_classes::INSTANCE_CLASSES.contains(&base);
-                }
-
-                INSTANCE_GLOBALS.contains(&name)
-                    || self.init_constructor_of(name).as_deref() == Some("Instance")
-            }
-
-            _ => false,
-        }
+        (parent || self.expr_shape(object, scopes) == Some(Shape::Instance))
+            .then(|| one_line(self.text_of(target.span())))
     }
 
     /// `parallel do ... end`: `task.desynchronize()` on the line of the
@@ -299,7 +775,7 @@ impl<'s> Desugar<'s> {
 
     /// Reports what the parallel phase refuses in a block.
     fn check_phase(&mut self, block: &Block, walk: Walk<'_>) {
-        self.check_phase_until(block, walk, None);
+        self.check_phase_until(block, walk, None, Scope::new());
     }
 
     /*
@@ -308,12 +784,20 @@ impl<'s> Desugar<'s> {
     before it fires, ends the parallel phase, so the statements after it
     run serial and take no check. A call inside a branch or a loop may
     not run, so only one that the body holds directly ends the phase.
+    `params` is the scope of the handler's parameters.
     */
-    fn check_phase_until(&mut self, block: &Block, walk: Walk<'_>, respond: Option<&str>) {
+    fn check_phase_until(
+        &mut self,
+        block: &Block,
+        walk: Walk<'_>,
+        respond: Option<&str>,
+        params: Scope,
+    ) {
         let mut found = Vec::new();
+        let mut scopes = vec![self.parallel_shapes.clone(), params, Scope::new()];
 
         for stmt in &block.stmts {
-            self.phase_stmt(stmt, walk, &mut found);
+            self.phase_stmt(stmt, walk, &mut scopes, &mut found);
 
             if let Phase::Handler(_) = walk.phase
                 && let Stmt::Call(Expr::Call { func, .. }, _) = stmt
@@ -329,13 +813,29 @@ impl<'s> Desugar<'s> {
         }
     }
 
-    fn phase_block(&self, block: &Block, walk: Walk<'_>, out: &mut Vec<(TokSpan, String)>) {
+    fn phase_block(
+        &self,
+        block: &Block,
+        walk: Walk<'_>,
+        scopes: &mut Vec<Scope>,
+        out: &mut Vec<(TokSpan, String)>,
+    ) {
+        scopes.push(Scope::new());
+
         for stmt in &block.stmts {
-            self.phase_stmt(stmt, walk, out);
+            self.phase_stmt(stmt, walk, scopes, out);
         }
+
+        scopes.pop();
     }
 
-    fn phase_stmt(&self, stmt: &Stmt, walk: Walk<'_>, out: &mut Vec<(TokSpan, String)>) {
+    fn phase_stmt(
+        &self,
+        stmt: &Stmt,
+        walk: Walk<'_>,
+        scopes: &mut Vec<Scope>,
+        out: &mut Vec<(TokSpan, String)>,
+    ) {
         let who = walk.phase.who();
         let block_only = matches!(walk.phase, Phase::Block);
 
@@ -374,7 +874,7 @@ impl<'s> Desugar<'s> {
 
             Stmt::Assign(a) => {
                 for t in &a.targets {
-                    if let Some(what) = self.instance_write(t) {
+                    if let Some(what) = self.instance_write(t, scopes) {
                         out.push((
                             t.span(),
                             format!("{who} cannot write `{what}`; {}", walk.phase.fix("write")),
@@ -395,31 +895,88 @@ impl<'s> Desugar<'s> {
             }
 
             // A function declared here runs when it is called.
-            Stmt::LocalFunction(_) | Stmt::Function(_) => return,
+            Stmt::LocalFunction(f) => {
+                if let Some(top) = scopes.last_mut() {
+                    top.insert(self.text_of(f.name).to_string(), None);
+                }
+
+                return;
+            }
+
+            Stmt::Function(_) => return,
+
+            Stmt::GenericFor(f) => {
+                for e in &f.exprs {
+                    self.phase_expr(e, walk, scopes, out);
+                }
+
+                let inner = self.for_scope(f, scopes);
+                scopes.push(inner);
+
+                if let Some(c) = &f.filter {
+                    self.phase_expr(c, walk, scopes, out);
+                }
+
+                let walk = Walk {
+                    loops: walk.loops + 1,
+                    ..walk
+                };
+                self.phase_block(&f.block, walk, scopes, out);
+                scopes.pop();
+
+                return;
+            }
+
+            Stmt::NumericFor(f) => {
+                for e in [Some(&f.start), Some(&f.limit), f.step.as_ref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    self.phase_expr(e, walk, scopes, out);
+                }
+
+                scopes.push(Scope::from([(self.text_of(f.var.name).to_string(), None)]));
+                let walk = Walk {
+                    loops: walk.loops + 1,
+                    ..walk
+                };
+                self.phase_block(&f.block, walk, scopes, out);
+                scopes.pop();
+
+                return;
+            }
 
             _ => {}
         }
 
         let loops = match stmt {
-            Stmt::While(_) | Stmt::Repeat(_) | Stmt::NumericFor(_) | Stmt::GenericFor(_) => {
-                walk.loops + 1
-            }
+            Stmt::While(_) | Stmt::Repeat(_) => walk.loops + 1,
 
             _ => walk.loops,
         };
 
         for c in stmt_children(stmt) {
             match c {
-                Child::Expr(e) => self.phase_expr(e, walk, out),
+                Child::Expr(e) => self.phase_expr(e, walk, scopes, out),
 
-                Child::Block(b) => self.phase_block(b, Walk { loops, ..walk }, out),
+                Child::Block(b) => self.phase_block(b, Walk { loops, ..walk }, scopes, out),
 
                 Child::Function(_) => {}
             }
         }
+
+        if let Stmt::Local(l) = stmt {
+            self.bind_local(l, scopes);
+        }
     }
 
-    fn phase_expr(&self, e: &Expr, walk: Walk<'_>, out: &mut Vec<(TokSpan, String)>) {
+    fn phase_expr(
+        &self,
+        e: &Expr,
+        walk: Walk<'_>,
+        scopes: &mut Vec<Scope>,
+        out: &mut Vec<(TokSpan, String)>,
+    ) {
         let who = walk.phase.who();
 
         match e {
@@ -434,62 +991,31 @@ impl<'s> Desugar<'s> {
                 ),
             )),
 
-            Expr::Call {
-                method: Some(m), ..
-            } if INSTANCE_METHODS.contains(&self.text_of(*m)) => {
-                let what = one_line(self.text_of(e.span()));
-                out.push((
-                    e.span(),
-                    format!("{who} cannot call `{what}`; {}", walk.phase.fix("call")),
-                ));
-            }
-
-            Expr::Call {
-                func, method: None, ..
-            } => {
-                let path = self.dotted_name(func);
-
-                if path.as_deref() == Some("Instance.new") {
-                    out.push((
-                        e.span(),
-                        format!(
-                            "{who} cannot call `Instance.new`; {}",
-                            walk.phase.fix("call")
-                        ),
-                    ));
-                } else if let Some(path) = path
-                    && let Some(what) = self.parallel_writers.get(&path)
-                {
-                    out.push((
-                        e.span(),
-                        format!(
-                            "{who} cannot call `{path}`, which writes {what}; {}",
-                            walk.phase.fix("call")
-                        ),
-                    ));
-                }
-            }
-
-            Expr::New { name, .. }
-                if matches!(name.as_ref(), Expr::Name(n) if self.text_of(*n) == "Instance") =>
-            {
-                out.push((
-                    e.span(),
-                    format!(
-                        "{who} cannot call `new Instance`; {}",
-                        walk.phase.fix("call")
-                    ),
-                ));
-            }
-
             _ => {}
+        }
+
+        match self.refused_call(e, scopes, &self.parallel_writers) {
+            Some(RefusedCall::Instance(what)) => out.push((
+                e.span(),
+                format!("{who} cannot call `{what}`; {}", walk.phase.fix("call")),
+            )),
+
+            Some(RefusedCall::Writer { call, what }) => out.push((
+                e.span(),
+                format!(
+                    "{who} cannot call `{call}`, which {what}; {}",
+                    walk.phase.fix("call")
+                ),
+            )),
+
+            None => {}
         }
 
         for c in expr_children(e) {
             match c {
-                Child::Expr(x) => self.phase_expr(x, walk, out),
+                Child::Expr(x) => self.phase_expr(x, walk, scopes, out),
 
-                Child::Block(b) => self.phase_block(b, walk, out),
+                Child::Block(b) => self.phase_block(b, walk, scopes, out),
 
                 Child::Function(_) => {}
             }
@@ -913,14 +1439,30 @@ impl<'s> Desugar<'s> {
         }
 
         match &list[0] {
-            Expr::Function { body, .. } => self.check_phase_until(
-                &body.block,
-                Walk {
-                    phase: Phase::Handler(&name),
-                    loops: 0,
-                },
-                respond.as_deref(),
-            ),
+            Expr::Function { body, .. } => {
+                // A parameter the handler leaves untyped takes the type the
+                // message declares.
+                let mut params = self.params_scope(body, None);
+
+                for (p, ty) in body.params.iter().zip(&sig.param_types) {
+                    if p.ty.is_none()
+                        && let Some(ty) = ty
+                        && let Some(entry) = params.get_mut(self.text_of(p.name))
+                    {
+                        *entry = self.type_shape(ty);
+                    }
+                }
+
+                self.check_phase_until(
+                    &body.block,
+                    Walk {
+                        phase: Phase::Handler(&name),
+                        loops: 0,
+                    },
+                    respond.as_deref(),
+                    params,
+                );
+            }
 
             handler => {
                 if let Some(f) = self.dotted_name(handler)
@@ -929,7 +1471,7 @@ impl<'s> Desugar<'s> {
                     self.diagnose(
                         handler.span(),
                         &format!(
-                            "the parallel handler of `{name}` is `{f}`, which writes {what}; the handler runs in the parallel phase, so call `task.synchronize()` before the write"
+                            "the parallel handler of `{name}` is `{f}`, which {what}; the handler runs in the parallel phase, so call `task.synchronize()` before the write"
                         ),
                     );
                 }
@@ -1388,4 +1930,40 @@ fn expr_blocks(e: &Expr) -> Vec<&Block> {
             Child::Expr(x) => expr_blocks(x),
         })
         .collect()
+}
+
+/// A call the parallel phase refuses.
+enum RefusedCall {
+    /// A call that makes or removes an instance, as the source spells it.
+    Instance(String),
+    /// A call of a function or method of this file, with what it does.
+    Writer { call: String, what: String },
+}
+
+impl RefusedCall {
+    /// What a function that holds this call does, as a report of a call
+    /// to that function names it.
+    fn as_writer(&self) -> String {
+        match self {
+            RefusedCall::Instance(what) => format!("writes `{what}`"),
+
+            RefusedCall::Writer { call, what } => format!("calls `{call}`, which {what}"),
+        }
+    }
+}
+
+/// Whether a type names an Instance class.
+fn is_instance_type(ty: &str) -> bool {
+    let ty = ty.trim().trim_end_matches('?').trim();
+
+    ty == "Instance" || crate::roblox_classes::INSTANCE_CLASSES.contains(&ty)
+}
+
+/// The names a destructure binds.
+fn destructured_names(d: &Destructure) -> Vec<TokSpan> {
+    match d {
+        Destructure::Table(fields) => fields.iter().map(|f| f.rename.unwrap_or(f.field)).collect(),
+
+        Destructure::Array { items, rest } => items.iter().copied().chain(*rest).collect(),
+    }
 }

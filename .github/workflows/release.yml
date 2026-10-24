@@ -65,12 +65,20 @@ jobs:
         # vendor field of a triple, which Linux leaves as `unknown`.
         # `alloy::target::label_for` maps a machine to the same name, so
         # `alloy self update` looks for the file this builds.
+        #
+        # The Linux targets build with cargo-zigbuild against glibc 2.17
+        # (`zig`). A plain build on the runner links its own glibc, 2.39
+        # on ubuntu-24.04, and the binary then fails to start on Debian 12
+        # (2.36), Ubuntu 22.04 (2.35), and older. Zig also links the C++
+        # runtime of the Luau VM into the binary.
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            zig: x86_64-unknown-linux-gnu.2.17
             label: linux-x64
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            zig: aarch64-unknown-linux-gnu.2.17
             label: linux-arm64
           - os: macos-latest
             target: aarch64-apple-darwin
@@ -90,8 +98,35 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+      - name: Install zig and cargo-zigbuild
+        if: matrix.zig
+        run: |
+          # A venv, since the runner's Python refuses a global pip install.
+          python3 -m venv "$RUNNER_TEMP/zig"
+          "$RUNNER_TEMP/zig/bin/pip" install --quiet cargo-zigbuild==0.24.0 ziglang==0.17.0
+          echo "$RUNNER_TEMP/zig/bin" >> "$GITHUB_PATH"
       - name: Build both binaries
+        if: ${{ !matrix.zig }}
         run: cargo build --release --locked -p alloy-luau -p alloy-luau-lsp --target ${{ matrix.target }}
+      - name: Build both binaries (zig, old glibc)
+        if: matrix.zig
+        # The output still goes to target/<target>/release: zigbuild
+        # drops the glibc version from the folder name.
+        run: cargo zigbuild --release --locked -p alloy-luau -p alloy-luau-lsp --target ${{ matrix.zig }}
+      - name: Check the glibc the binaries need
+        if: matrix.zig
+        run: |
+          for bin in alloy alloy-lsp; do
+            path="target/${{ matrix.target }}/release/$bin"
+            need=$(objdump -T "$path" | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)
+            echo "$bin needs $need"
+            # Above 2.17 means the build linked the runner's glibc.
+            if [ "$(printf '%s\nGLIBC_2.17\n' "$need" | sort -V | tail -1)" != "GLIBC_2.17" ]; then
+              echo "::error::$bin needs $need, newer than GLIBC_2.17"
+              exit 1
+            fi
+            "$path" --version
+          done
       - name: Package (unix)
         if: runner.os != 'Windows'
         shell: bash

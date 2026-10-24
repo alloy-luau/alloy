@@ -68,6 +68,33 @@ fn a_level_flag_reaches_the_lint_in_every_lint_command() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// `alloy check --fix` with no file rewrites every source of the project,
+/// as `alloy lint --fix` does, and never a package in a `.ember` folder.
+/// It used to rewrite only the files named on the command line.
+#[test]
+fn check_fix_rewrites_the_whole_project() {
+    let root = project("check-fix", TOML, "local a = 1\nprint(a)\n");
+    std::fs::write(root.join("src/two.aly"), "local b = 2\nprint(b)\n").expect("the source");
+    let package = root.join("src/packages/.ember/acme_lib");
+    std::fs::create_dir_all(&package).expect("the package folder");
+    std::fs::write(package.join("init.aly"), "local c = 3\nprint(c)\n").expect("the package");
+
+    let (code, err) = run(&root, &["check", "--fix"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("2 fixed"), "{err}");
+
+    let read = |rel: &str| std::fs::read_to_string(root.join(rel)).expect("the file");
+    assert!(read("src/main.aly").starts_with("const a = 1"));
+    assert!(read("src/two.aly").starts_with("const b = 2"));
+    assert!(read("src/packages/.ember/acme_lib/init.aly").starts_with("local c = 3"));
+
+    // A second run finds nothing left to fix in the project's own files.
+    let (_, err) = run(&root, &["check", "--fix"]);
+    assert!(err.contains("0 fixed"), "{err}");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn deny_warnings_fails_the_project_check() {
     let root = project("deny", TOML, WARNS);

@@ -422,6 +422,11 @@ impl FileDirectives {
 /// the line the rewrite starts on.
 fn is_fixable(path: &Path, l: &Lint, config: &LintConfig, directives: &mut FileDirectives) -> bool {
     let Some(fix) = &l.fix else { return false };
+
+    if in_package_store(path) {
+        return false;
+    }
+
     let d = directives.of(path);
 
     if lint::level_in(config, d, l.name) == lint::Level::Allow {
@@ -439,6 +444,13 @@ fn is_fixable(path: &Path, l: &Lint, config: &LintConfig, directives: &mut FileD
     !directives
         .of(path)
         .preserves(alloy::directives::line_of(&source, fix.start as usize))
+}
+
+/// Whether a path is inside an installed package (a `.ember` folder,
+/// where Ember keeps each package's files). `--fix` never rewrites one:
+/// the next install would put the published text back.
+fn in_package_store(path: &Path) -> bool {
+    path.components().any(|c| c.as_os_str() == ".ember")
 }
 
 /// Prints the lints at `warn` and `deny`; returns how many of each.
@@ -614,7 +626,7 @@ pub(crate) fn apply_header_as_fixes(
 ) -> usize {
     let mut paths: Vec<&PathBuf> = diagnostics
         .iter()
-        .filter(|(_, d)| d.message.ends_with(alloy::fmt::NEEDS_AS))
+        .filter(|(rel, d)| d.message.ends_with(alloy::fmt::NEEDS_AS) && !in_package_store(rel))
         .map(|(rel, _)| rel)
         .collect();
     paths.sort();
@@ -654,7 +666,7 @@ pub(crate) fn apply_std_import_fixes(
 ) -> usize {
     let mut files: std::collections::BTreeMap<&PathBuf, Vec<&str>> = Default::default();
 
-    for (rel, d) in diagnostics {
+    for (rel, d) in diagnostics.iter().filter(|(rel, _)| !in_package_store(rel)) {
         if let Some(name) = alloy::std_names::missing_name(&d.message) {
             files.entry(rel).or_default().push(name);
         }

@@ -314,6 +314,43 @@ fn link_entry(from: &Path, to: &Path) {
     }
 }
 
+/// Writes `text` at `target`, a path under `base`. Each folder on the way
+/// that links to a folder of the project becomes a real folder first,
+/// with a link to each entry of the folder it linked to. The write then
+/// lands in the mirror, and the entries beside it still resolve.
+fn write_unlinked(base: &Path, target: &Path, text: &str) -> std::io::Result<()> {
+    let is_link = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink());
+    // A link to a folder is a file on Unix and a folder on Windows.
+    let unlink = |p: &Path| std::fs::remove_file(p).or_else(|_| std::fs::remove_dir(p));
+    let mut at = base.to_path_buf();
+    let folders = target
+        .parent()
+        .and_then(|p| p.strip_prefix(base).ok())
+        .unwrap_or(Path::new(""));
+
+    for part in folders.components() {
+        at.push(part);
+
+        if is_link(&at) {
+            let real = std::fs::canonicalize(&at)?;
+            unlink(&at)?;
+            std::fs::create_dir(&at)?;
+
+            for entry in std::fs::read_dir(&real)?.flatten() {
+                link_entry(&entry.path(), &at.join(entry.file_name()));
+            }
+        }
+    }
+
+    std::fs::create_dir_all(&at)?;
+
+    if is_link(target) {
+        unlink(target)?;
+    }
+
+    std::fs::write(target, text)
+}
+
 /// Runs the analyzer over the check artifacts and maps what it says
 /// onto the sources. `deps` holds the artifacts of the projects the
 /// imports lead into, by absolute output path; each lands in the
@@ -356,16 +393,6 @@ pub fn analyze(
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&mirror).map_err(|e| format!("{}: {e}", mirror.display()))?;
 
-    for (rel, text) in &placed {
-        let target = normalize(&mirror.join(rel));
-
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-
-        std::fs::write(&target, text).map_err(|e| e.to_string())?;
-    }
-
     // Everything of the root but the sources and the output, linked, so
     // a package folder and its `.luaurc` resolve.
     let mut linked = Vec::new();
@@ -393,6 +420,14 @@ pub fn analyze(
             link_entry(&entry.path(), &mirror.join(&name));
             linked.push(name);
         }
+    }
+
+    // A dependency inside the root, as a package under `packages/`, lands
+    // under a linked folder. The write opens the links on its way, so the
+    // project itself does not change.
+    for (rel, text) in &placed {
+        write_unlinked(&base, &normalize(&mirror.join(rel)), text)
+            .map_err(|e| format!("{}: {e}", rel.display()))?;
     }
 
     // The mirror lays the artifacts out as the output, so an alias that

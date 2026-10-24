@@ -1119,7 +1119,7 @@ mod tests {
         let out = compile(src).unwrap();
         assert!(
             out.ship
-                .contains("function Box.map<T, U>(self, f: (T) -> U): Box<U>"),
+                .contains("function Box.map<T, U>(self: Box<T>, f: (T) -> U): Box<U>"),
             "{}",
             out.ship
         );
@@ -1507,7 +1507,7 @@ mod tests {
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         // The ship artifact: every method on the class, no view.
         assert!(
-            out.ship.contains("function Counter.log(self)"),
+            out.ship.contains("function Counter.log(self: Counter)"),
             "{}",
             out.ship
         );

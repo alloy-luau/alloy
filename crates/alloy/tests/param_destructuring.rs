@@ -92,7 +92,7 @@ fn every_parameter_list_takes_a_pattern() {
         "struct Rect as\n    w: number\n    h: number\nend\nimpl Rect as\n    function scaled(self, { x, y }: { x: number, y: number }): Rect\n        return Rect.new({ w = self.w * x, h = self.h * y })\n    end\nend\nlocal f = function({ w, h }: Rect): number\n    return w * h\nend\nmacro area({ w, h }: Rect)\n    return w * h\nend\nlocal r = Rect.new({ w = 2, h = 3 })\nprint(r:scaled({ x = 2, y = 2 }), f(r), $area(r))\n",
     );
 
-    assert!(out.contains("function Rect.scaled(self, _p1: { x: number, y: number }): Rect local x, y = _p1.x, _p1.y"), "{out}");
+    assert!(out.contains("function Rect.scaled(self: Rect, _p1: { x: number, y: number }): Rect local x, y = _p1.x, _p1.y"), "{out}");
     assert!(
         out.contains("function(_p1: Rect): number local w, h = _p1.w, _p1.h"),
         "{out}"

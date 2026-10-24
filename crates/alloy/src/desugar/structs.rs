@@ -222,7 +222,11 @@ impl<'s> Desugar<'s> {
             );
             self.diagnose(i.target, &message);
         }
-        let types_self = self.options.check && (foreign || local_type || !impl_generics.is_empty());
+        // The ship artifact types `self` of this file's types too, for a
+        // Luau project that installs the package. An untyped `self` is
+        // generic, and a call on a value of the alias then finds no type
+        // for it.
+        let types_self = (self.options.check && foreign) || local_type || !impl_generics.is_empty();
         // A class table, `local Frost = {}` with `Frost.__index = Frost`,
         // types `self` the way its colon methods do.
         let table_self = match self.options.check && !types_self {
@@ -986,7 +990,9 @@ impl<'s> Desugar<'s> {
         // of scope.
         // A generic struct types its constructor too: the parameters go
         // on the function, so the field types and the result name them.
-        let typed = self.options.check && (generics.is_empty() || !split);
+        // The ship artifact types the constructor too. A Luau project
+        // that installs the package reads its types from that artifact.
+        let typed = generics.is_empty() || !split;
         // A default belongs to the `type` alias alone. A function's
         // generic list and an instantiation of the struct take the
         // parameter names, the way a Luau alias refers to its own.
@@ -1022,7 +1028,43 @@ impl<'s> Desugar<'s> {
             .collect::<Vec<_>>()
             .join(" ");
         let head = self.decl_head(&name);
-        let header = if self.options.check {
+        /*
+        The result takes the struct's type by a cast. A return of
+        `any` into the `: Name` slot made the checker solve the
+        whole class, which reaches each field's type in other modules.
+        A provider that held a struct with two HashMaps took it past
+        its limit (LANG_BUGS 117).
+        */
+        let made = match typed {
+            true => format!("((setmetatable(f, {name}) :: any) :: {name}{fn_generics})"),
+
+            false => format!("(setmetatable(f, {name}) :: any)"),
+        };
+        /*
+        The ship artifact keeps the metatable that makes `Name(f)` a
+        constructor. It sets the metatable on the `end` line, after the
+        alias, so the alias reads the class table without it. An
+        instance then satisfies a trait, and a typed `new` returns the
+        alias. When the impl writes `new`, that one replaces the
+        generated one at load, but a Luau reader takes the type of the
+        first. So the generated one is not written.
+        */
+        let (header, class_call) = if !self.options.check {
+            let new_fn = match self.structs_with_new.get(&name).map(String::as_str) {
+                Some("new") => String::new(),
+
+                _ => {
+                    format!(" function {name}.new{fn_generics}({param}){ret} return {name}(f) end")
+                }
+            };
+
+            (
+                format!("{head}{name}.__index = {name}"),
+                format!(
+                    " setmetatable({name}, {{ __call = function{fn_generics}(_, {param}){ret} {d} return {made} end }}){new_fn}"
+                ),
+            )
+        } else {
             let new_fn = if self.structs_with_new.contains_key(&name) {
                 String::new()
             } else {
@@ -1037,25 +1079,11 @@ impl<'s> Desugar<'s> {
                 String::new()
             };
 
-            /*
-            The result takes the struct's type by a cast. A return of
-            `any` into the `: Name` slot made the checker solve the
-            whole class, which reaches each field's type in other modules.
-            A provider that held a struct with two HashMaps took it past
-            its limit (LANG_BUGS 117).
-            */
-            let made = match typed {
-                true => format!("((setmetatable(f, {name}) :: any) :: {name}{fn_generics})"),
-
-                false => format!("(setmetatable(f, {name}) :: any)"),
-            };
-
-            format!(
-                "{head}{name}.__index = {name}{private_table} function {name}.__new{fn_generics}({param}){ret} {d} return {made} end{new_fn}"
-            )
-        } else {
-            format!(
-                "{head}{name}.__index = {name} setmetatable({name}, {{ __call = function(_, f) {d} return setmetatable(f, {name}) end }}) function {name}.new(f) return {name}(f) end"
+            (
+                format!(
+                    "{head}{name}.__index = {name}{private_table} function {name}.__new{fn_generics}({param}){ret} {d} return {made} end{new_fn}"
+                ),
+                String::new(),
             )
         };
         self.generate(start, &header);
@@ -1066,7 +1094,7 @@ impl<'s> Desugar<'s> {
         self.blank_keeping_comments(start, end_tok.start);
 
         // Derives and attributes on the `end` line.
-        let mut tail = type_line;
+        let mut tail = type_line + &class_call;
         let mut derives_debug = false;
         let mut derived: HashSet<String> = HashSet::new();
 
@@ -4921,7 +4949,9 @@ mod tests {
     into a field, a return of `any` into the `: S` slot, and the
     instance passed as it is each did, and a provider that held a struct
     with HashMaps took the checker past its limit (LANG_BUGS 117). The
-    ship artifact keeps each one as it was.
+    ship artifact types its constructor too, for a Luau project that
+    installs the package, so it checks a default and casts the same
+    way. Its printer passes the instance as it is.
     */
     #[test]
     fn the_struct_lines_cast_the_class_in_checks() {
@@ -4938,7 +4968,8 @@ mod tests {
         }
 
         assert!(
-            out.ship.contains("if f.x == nil then f.x = 1 end"),
+            out.ship
+                .contains("if f.x == nil then local _x: number = 1 f.x = _x end"),
             "{}",
             out.ship
         );
@@ -4950,7 +4981,8 @@ mod tests {
             out.ship
         );
         assert!(
-            out.ship.contains("return setmetatable(f, S) end"),
+            out.ship
+                .contains("return ((setmetatable(f, S) :: any) :: S) end"),
             "{}",
             out.ship
         );

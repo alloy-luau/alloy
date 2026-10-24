@@ -3,25 +3,25 @@
 
 -- A payload enum desugars to tagged tables.
 local __alloy = require("@alloy") local Msg = {} Msg.__index = Msg
-    function Msg.Join(_1) return setmetatable({ tag = "Join", _1 = _1 }, Msg) end
-    function Msg.Chat(_1, _2) return setmetatable({ tag = "Chat", _1 = _1, _2 = _2 }, Msg) end
-    function Msg.Leave(_1) return setmetatable({ tag = "Leave", _1 = _1 }, Msg) end
+    function Msg.Join(_1: Player): typeof(setmetatable({} :: { tag: "Join", _1: Player }, Msg)) return (setmetatable({ tag = "Join", _1 = _1 }, Msg) :: any) end
+    function Msg.Chat(_1: Player, _2: string): typeof(setmetatable({} :: { tag: "Chat", _1: Player, _2: string }, Msg)) return (setmetatable({ tag = "Chat", _1 = _1, _2 = _2 }, Msg) :: any) end
+    function Msg.Leave(_1: Player): typeof(setmetatable({} :: { tag: "Leave", _1: Player }, Msg)) return (setmetatable({ tag = "Leave", _1 = _1 }, Msg) :: any) end
 function Msg.is(v) return (type(v) == "table" and getmetatable(v) == Msg) end Msg.__tostring = function(v) return __alloy.show_variant("Msg", v) end type Msg = typeof(setmetatable({} :: { tag: "Join", _1: Player }, Msg)) | typeof(setmetatable({} :: { tag: "Chat", _1: Player, _2: string }, Msg)) | typeof(setmetatable({} :: { tag: "Leave", _1: Player }, Msg))
 
 -- A unit enum emits a string literal union plus a table.
 -- Color.Red == "Red" at runtime, so it serializes for free.
 -- Members separate by newline, `,`, or `;`, so one line works too.
-local Color = {} Color.__index = Color Color.Red = "Red"  Color.Green = "Green"  Color.Blue = "Blue" function Color.is(v) return (type(v) == "table" and getmetatable(v) == Color) or v == "Red" or v == "Green" or v == "Blue" end Color.__tostring = function(v) return __alloy.show_variant("Color", v) end type Color = "Red" | "Green" | "Blue"
+local Color = {} Color.__index = Color Color.Red = ("Red" :: Color)  Color.Green = ("Green" :: Color)  Color.Blue = ("Blue" :: Color) function Color.is(v) return (type(v) == "table" and getmetatable(v) == Color) or v == "Red" or v == "Green" or v == "Blue" end Color.__tostring = function(v) return __alloy.show_variant("Color", v) end type Color = "Red" | "Green" | "Blue"
 
 local Rarity = {} Rarity.__index = Rarity
-    Rarity.Common = "Common";
-    Rarity.Rare = "Rare";
-    Rarity.Legendary = "Legendary"
+    Rarity.Common = ("Common" :: Rarity);
+    Rarity.Rare = ("Rare" :: Rarity);
+    Rarity.Legendary = ("Legendary" :: Rarity)
 function Rarity.is(v) return (type(v) == "table" and getmetatable(v) == Rarity) or v == "Common" or v == "Rare" or v == "Legendary" end Rarity.__tostring = function(v) return __alloy.show_variant("Rarity", v) end type Rarity = "Common" | "Rare" | "Legendary"
 
 -- `impl` on an enum adds methods, as on a struct.
 do
-    function Msg.player(self): Player
+    function Msg.player(self: Msg): Player
         return (
             if type(self) == "table" and self.tag == "Join" then self._1
             elseif type(self) == "table" and self.tag == "Chat" then self._1

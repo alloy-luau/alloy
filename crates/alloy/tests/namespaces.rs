@@ -149,7 +149,7 @@ fn an_impl_inside_a_namespace_targets_the_member() {
     let out = clean(
         "namespace M as\n    struct P as\n        x: number\n    end\n    impl P as\n        function get(self): number\n            return self.x\n        end\n    end\nend\n\nlocal p = new M.P { x = 1 }\n\nprint(p:get())\n",
     );
-    assert!(out.contains("function M_P.get(self)"), "{out}");
+    assert!(out.contains("function M_P.get(self: M_P)"), "{out}");
 }
 
 /// `impl Greeter for Widget` inside the namespace that declares the
@@ -182,7 +182,7 @@ fn an_impl_on_a_foreign_target_keeps_its_name() {
     let out = clean(
         "struct P as\n    x: number\nend\n\nnamespace M as\n    impl P as\n        function get(self): number\n            return self.x\n        end\n    end\nend\n\nlocal p = new P { x = 1 }\n\nprint(p:get())\n",
     );
-    assert!(out.contains("function P.get(self)"), "{out}");
+    assert!(out.contains("function P.get(self: P)"), "{out}");
 }
 
 /// A `match` over a namespaced enum reads the variant with no prefix

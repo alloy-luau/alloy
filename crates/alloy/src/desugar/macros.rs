@@ -51,6 +51,83 @@ fn body_parts(body: &str) -> Vec<(&str, &str)> {
 /// The names a macro body declares: after `local`, the variables of a
 /// `for`, and the parameters of a `function` inside it. The body is one
 /// line of the tokens the declaration wrote.
+/// The intrinsics `intrinsic` and `intrinsic_in_place` expand. None of
+/// them assigns an argument. A name missing from this list reads as a
+/// macro that may, which only keeps `prefer_const` quiet.
+pub(crate) const INTRINSICS: &[&str] = &[
+    "assert",
+    "assert_eq",
+    "bnot",
+    "dbg",
+    "expect",
+    "map",
+    "matches",
+    "nameof",
+    "set",
+    "stringify",
+    "todo",
+    "unreachable",
+];
+
+/// The parameters a macro body assigns, by index. `macro swap(a, b)`
+/// with `a, b = b, a` assigns both, so `$swap(x, y)` writes `x` and `y`
+/// of the caller. A parameter the body declares again as a `local` is
+/// the body's own name, and a write to it stays in the body.
+pub(crate) fn written_params(m: &MacroSource) -> Vec<usize> {
+    use alloy_syntax::ast::{Block, Stmt};
+
+    fn block(b: &Block, text: &dyn Fn(TokSpan) -> String, out: &mut Vec<String>) {
+        for s in &b.stmts {
+            if let Stmt::Assign(a) = s {
+                for t in &a.targets {
+                    if let Expr::Name(n) = t {
+                        out.push(text(*n));
+                    }
+                }
+            }
+            children(stmt_children(s), text, out);
+        }
+    }
+
+    fn children(cs: Vec<Child<'_>>, text: &dyn Fn(TokSpan) -> String, out: &mut Vec<String>) {
+        for c in cs {
+            match c {
+                Child::Block(b) => block(b, text, out),
+
+                Child::Function(f) => block(&f.block, text, out),
+
+                Child::Expr(e) => children(expr_children(e), text, out),
+            }
+        }
+    }
+
+    let Ok(parsed) = alloy_syntax::parse_lenient(&m.body, Default::default()) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let text = |span: TokSpan| span.text(&m.body, toks).to_string();
+    let mut assigned = Vec::new();
+    block(&parsed.chunk.block, &text, &mut assigned);
+    let own = body_locals(&m.body);
+
+    m.params
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| assigned.contains(p) && !own.contains(p))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// For each macro a file can call, the arguments its body assigns: the
+/// file's own macros and the imported ones.
+pub(crate) fn macro_writes(src: &str, imported: &[MacroSource]) -> Vec<(String, Vec<usize>)> {
+    crate::modules::module_macros(src)
+        .iter()
+        .chain(imported.iter().filter(|m| !m.hidden))
+        .map(|m| (m.name.clone(), written_params(m)))
+        .collect()
+}
+
 pub(crate) fn body_locals(body: &str) -> Vec<String> {
     let words: Vec<&str> = body_parts(body).into_iter().map(|(_, w)| w).collect();
     let is_name = |w: &str| {

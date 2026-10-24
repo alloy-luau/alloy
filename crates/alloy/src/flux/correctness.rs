@@ -1777,6 +1777,31 @@ mod tests {
 
     /// `prefer_const` and `const_mutation` never disagree: once every
     /// `prefer_const` fix is in, no `const_mutation` fires.
+    /// A macro that assigns its parameter assigns the caller's name:
+    /// `$swap(x, y)` writes both. An intrinsic and a macro that only
+    /// reads its argument write nothing.
+    #[test]
+    fn prefer_const_sees_a_macro_that_assigns_its_argument() {
+        let src = "macro swap(a, b)\n    a, b = b, a\nend\nmacro show(a)\n    print(a)\nend\nlocal x = 1\nlocal y = 2\nlocal z = 3\n$swap(x, y)\n$show(z)\n$dbg(x)\nprint(x, y, z)\n";
+        let lints: Vec<String> = crate::compile(src)
+            .unwrap()
+            .lints
+            .into_iter()
+            .filter(|l| l.name == "prefer_const")
+            .map(|l| l.message)
+            .collect();
+        assert_eq!(
+            lints,
+            vec!["`z` is never assigned again; declare it `const`"]
+        );
+
+        // `alloy fmt` sees no imports: a macro it cannot find may assign.
+        let fixes = crate::flux::prefer_const_fixes(
+            "import { swap } from \"./m\"\nlocal x = 1\n$swap(x, x)\nprint(x)\n",
+        );
+        assert!(fixes.is_empty(), "{fixes:?}");
+    }
+
     #[test]
     fn prefer_const_never_makes_a_const_mutation() {
         let f = "local function f(): { n: number }? return { n = 0 } end\n";

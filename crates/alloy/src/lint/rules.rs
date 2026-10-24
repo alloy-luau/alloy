@@ -94,8 +94,9 @@ pub fn const_reassignments(
     toks: &[Tok],
     block: &alloy_syntax::ast::Block,
     namespace_consts: &[String],
+    macro_writes: &[(String, Vec<usize>)],
 ) -> Vec<(u32, u32, String)> {
-    walk_bindings(src, toks, block, namespace_consts).out
+    walk_bindings(src, toks, block, namespace_consts, macro_writes).out
 }
 
 /// `export local count = 0`, then `count += 1` inside a function. The
@@ -103,7 +104,7 @@ pub fn const_reassignments(
 /// import copies each value, so the write never reaches an importer. A
 /// write at the top level runs before the return, and stays quiet.
 fn stale_exports(src: &str, toks: &[Tok], block: &alloy_syntax::ast::Block) -> Vec<Lint> {
-    walk_bindings(src, toks, block, &[]).stale
+    walk_bindings(src, toks, block, &[], &[]).stale
 }
 
 fn walk_bindings<'a>(
@@ -111,6 +112,7 @@ fn walk_bindings<'a>(
     toks: &'a [Tok],
     block: &alloy_syntax::ast::Block,
     namespace_consts: &'a [String],
+    macro_writes: &'a [(String, Vec<usize>)],
 ) -> ConstWalk<'a> {
     let text = |span: alloy_syntax::ast::TokSpan| span.text(src, toks).to_string();
     let mut exported = Vec::new();
@@ -136,6 +138,7 @@ fn walk_bindings<'a>(
         toks,
         scopes: Vec::new(),
         namespace_consts,
+        macro_writes,
         exported,
         deferred: 0,
         out: Vec::new(),
@@ -153,6 +156,9 @@ struct ConstWalk<'a> {
     toks: &'a [Tok],
     scopes: Vec<Vec<(String, bool)>>,
     namespace_consts: &'a [String],
+    /// Per macro, the arguments its body assigns. See
+    /// `crate::desugar::macro_writes`.
+    macro_writes: &'a [(String, Vec<usize>)],
     /// The names the module exports: `export local x` and the names of
     /// an `export { }` list.
     exported: Vec<String>,
@@ -236,11 +242,45 @@ impl ConstWalk<'_> {
     fn children(&mut self, children: Vec<crate::desugar::Child<'_>>) {
         for child in children {
             match child {
-                crate::desugar::Child::Expr(e) => self.children(crate::desugar::expr_children(e)),
+                crate::desugar::Child::Expr(e) => {
+                    self.macro_call(e);
+                    self.children(crate::desugar::expr_children(e))
+                }
 
                 crate::desugar::Child::Block(b) => self.block(b),
 
                 crate::desugar::Child::Function(f) => self.function(f),
+            }
+        }
+    }
+
+    /// `$swap(MAX, y)`: the expansion assigns the argument, so a
+    /// `const` there is a reassignment the call hides.
+    fn macro_call(&mut self, e: &alloy_syntax::ast::Expr) {
+        let alloy_syntax::ast::Expr::Macro { name, args, .. } = e else {
+            return;
+        };
+        let macro_name = self.text(*name);
+        let Some((_, written)) = self.macro_writes.iter().find(|(n, _)| *n == macro_name) else {
+            return;
+        };
+
+        for &i in written {
+            let Some(alloy_syntax::ast::Expr::Name(arg)) = args.get(i) else {
+                continue;
+            };
+            let arg_name = self.text(*arg);
+
+            if self.is_const(&arg_name) {
+                let start = self.toks[arg.start as usize].start;
+                let end = self.toks[arg.end as usize - 1].end;
+                self.out.push((
+                    start,
+                    end,
+                    format!(
+                        "`{arg_name}` is a `const`; `${macro_name}` assigns it, and its value is set once"
+                    ),
+                ));
             }
         }
     }
@@ -1406,8 +1446,10 @@ pub fn run(src: &str, toks: &[Tok], chunk: &Chunk, options: &crate::EmitOptions)
 
     let privates = options.privates();
     let ternary_colons = crate::fmt::colons::ternary_colons(src, toks, chunk);
+    let macro_writes = crate::desugar::macro_writes(src, &options.macros);
     let scan = crate::flux::scan::Scan::new(src, toks, &st)
         .with_ternary_colons(&ternary_colons)
+        .with_macro_writes(&macro_writes)
         .with_privates(&privates)
         .with_callables(&options.import_callables)
         .with_generated(&options.generated);

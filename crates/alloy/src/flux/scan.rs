@@ -25,6 +25,9 @@ pub(crate) struct Scan<'s> {
     /// The token of each `:` of a ternary. See
     /// `fmt::colons::ternary_colons`.
     pub(crate) ternary_colons: &'s [usize],
+    /// Per macro the file can call, the arguments its body assigns. See
+    /// `crate::desugar::macro_writes`.
+    pub(crate) macro_writes: &'s [(String, Vec<usize>)],
 }
 
 pub(crate) const KEYWORDS: &[&str] = &[
@@ -103,7 +106,14 @@ impl<'s> Scan<'s> {
             callables: &[],
             generated: &[],
             ternary_colons: &[],
+            macro_writes: &[],
         }
+    }
+
+    /// The same scan, with the arguments each macro assigns.
+    pub(crate) fn with_macro_writes(mut self, writes: &'s [(String, Vec<usize>)]) -> Self {
+        self.macro_writes = writes;
+        self
     }
 
     /// The same scan, with the `:` of each ternary.

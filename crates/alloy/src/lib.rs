@@ -250,11 +250,14 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         }
     }
 
+    let macro_writes = desugar::macro_writes(src, &options.macros);
+
     for (start, end, message) in lint::const_reassignments(
         src,
         &parsed.lexed.toks,
         &parsed.chunk.block,
         &namespace_consts,
+        &macro_writes,
     ) {
         diagnostics.push(Diagnostic {
             start,
@@ -899,6 +902,21 @@ mod tests {
         assert!(messages("local max = 3\nmax = 4\nprint(max)\n").is_empty());
         // A read is not a write.
         assert!(messages("const MAX = 3\nlocal n = MAX + 1\nprint(n)\n").is_empty());
+    }
+
+    /// `$swap(x, y)` assigns both arguments in its expansion. A `const`
+    /// passed there is a reassignment, and a `const` passed to a macro
+    /// that only reads it is not.
+    #[test]
+    fn a_macro_that_assigns_its_argument_reassigns_a_const() {
+        let macros = "macro swap(a, b)\n    a, b = b, a\nend\nmacro show(a)\n    print(a)\nend\n";
+        let src = format!(
+            "{macros}const x = 1\nlocal y = 2\nconst z = 3\n$swap(x, y)\n$show(z)\nprint(x, y, z)\n"
+        );
+        assert_eq!(
+            messages(&src),
+            vec!["`x` is a `const`; `$swap` assigns it, and its value is set once"]
+        );
     }
 
     /// The check reads scopes: a `local` or a parameter of the name hides

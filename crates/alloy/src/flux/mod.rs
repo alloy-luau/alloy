@@ -78,7 +78,11 @@ pub(crate) fn prefer_const_fixes(src: &str) -> Vec<crate::lint::Fix> {
     };
     let st = crate::fmt::structure::structure(src, &lexed.toks);
     let mut out = Vec::new();
-    Scan::new(src, &lexed.toks, &st).prefer_const(&mut out);
+    // `alloy fmt` sees no imports: a macro it cannot find may assign.
+    let writes = crate::desugar::macro_writes(src, &[]);
+    Scan::new(src, &lexed.toks, &st)
+        .with_macro_writes(&writes)
+        .prefer_const(&mut out);
 
     out.into_iter().filter_map(|l| l.fix).collect()
 }
@@ -96,7 +100,10 @@ pub fn reassigned(src: &str, name_at: usize) -> bool {
         return true;
     };
 
-    Scan::new(src, &lexed.toks, &st).written_after(n)
+    let writes = crate::desugar::macro_writes(src, &[]);
+    Scan::new(src, &lexed.toks, &st)
+        .with_macro_writes(&writes)
+        .written_after(n)
 }
 
 /// The byte where the declaration of the name at byte `at` starts: the

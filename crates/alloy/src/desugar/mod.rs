@@ -42,6 +42,7 @@ mod structs;
 mod types;
 
 use macros::MacroRef;
+pub(crate) use macros::{INTRINSICS, macro_writes};
 use namespaces::{NamespaceInfo, NsFrame, NsHoist};
 pub(crate) use remotes::WIRE_WIDTHS;
 pub(crate) use types::{group_len, qualify_names, split_top_level, strip_bounds};

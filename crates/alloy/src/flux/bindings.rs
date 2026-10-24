@@ -1443,6 +1443,12 @@ impl<'s> Scan<'s> {
                 return false;
             }
 
+            // `$swap(x, y)` assigns `x` when the macro body assigns its
+            // parameter, and the expansion is where the write happens.
+            if self.macro_assigns_arg(j) && self.reads_binding(n, j) {
+                return true;
+            }
+
             // The rest of a list of targets, then the operator. A target
             // can be a field or an index: `x, t.n = 1, 2`.
             let mut k = j + 1;
@@ -1485,6 +1491,65 @@ impl<'s> Scan<'s> {
             (self.statement_start(first) || after_expression)
                 && !matches!(self.prev(first), "local" | "const")
         })
+    }
+
+    /// Whether the name at `j` is a whole argument of a macro call that
+    /// assigns it: `x` in `$swap(x, y)`. A macro the file cannot see may
+    /// assign any argument, so its names count as assigned; an intrinsic
+    /// assigns none.
+    fn macro_assigns_arg(&self, j: usize) -> bool {
+        if !matches!(self.prev(j), "(" | ",") || !matches!(self.t(j + 1), "," | ")") {
+            return false;
+        }
+
+        // Back to the call's `(`, counting the commas at its depth.
+        let mut depth = 0i32;
+        let mut index = 0usize;
+        let mut open = None;
+
+        for k in (0..j).rev() {
+            match self.t(k) {
+                ")" | "]" | "}" => depth += 1,
+
+                "(" | "[" | "{" if depth > 0 => depth -= 1,
+
+                "(" => {
+                    open = Some(k);
+                    break;
+                }
+
+                "[" | "{" => return false,
+
+                "," if depth == 0 => index += 1,
+
+                _ => {}
+            }
+        }
+
+        // `$name(` or `$Ns.name(`: the path between the `$` and the `(`.
+        let Some(open) = open else {
+            return false;
+        };
+        let mut start = open;
+
+        while start >= 1 && (self.is_name(start - 1) || self.at(start - 1, ".")) {
+            start -= 1;
+        }
+
+        if start == open || start == 0 || !self.at(start - 1, "$") {
+            return false;
+        }
+
+        let path: String = (start..open).map(|k| self.t(k)).collect();
+
+        if crate::desugar::INTRINSICS.contains(&path.as_str()) {
+            return false;
+        }
+
+        self.macro_writes
+            .iter()
+            .find(|(name, _)| *name == path)
+            .is_none_or(|(_, written)| written.contains(&index))
     }
 
     /// The first token of the assignment target that ends at the `,` at

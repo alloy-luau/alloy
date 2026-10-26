@@ -117,8 +117,10 @@ impl Server {
     ///
     /// The editor sends the request after its own auto-indent, so the
     /// caret already sits on an indented line of its own. The edit
-    /// inserts at the caret, which leaves the caret where it is and puts
-    /// the `end` under the opener.
+    /// inserts at the caret and puts the `end` under the opener. VS Code
+    /// applies an on-type edit with replace and move, which pushes the
+    /// caret past the `end`, so the extension inserts this edit itself
+    /// and keeps the caret in the block.
     pub(crate) fn end_after_opener(&self, uri: &str, message: &Value, id: &Value) {
         let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let ch = message

@@ -3464,13 +3464,33 @@ fn returned_keys_at(path: &Path, aliases: &[(String, PathBuf)], depth: u8) -> Op
         return Some(keys);
     }
 
-    let target = resolve(&returned_require(&source)?, path, aliases).filter(|t| t != path)?;
+    let spec = returned_require(&source, path)?;
+    let target = resolve(&spec, path, aliases)
+        .or_else(|| project_entry(&path.parent()?.join(&spec), aliases))
+        .filter(|t| t != path)?;
 
     returned_keys_at(&target, aliases, depth.checked_sub(1)?)
 }
 
+/// The module a Rojo package folder stands for: the `$path` that its
+/// `default.project.json` gives the tree. Vide 0.3 from Wally has no
+/// `init.luau` at the package root, only this file.
+fn project_entry(dir: &Path, aliases: &[(String, PathBuf)]) -> Option<PathBuf> {
+    let file = dir.join("default.project.json");
+    let project: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).ok()?).ok()?;
+
+    resolve(
+        &format!("./{}", project["tree"]["$path"].as_str()?),
+        &file,
+        aliases,
+    )
+}
+
 /// The spec of a module that a source requires and returns as it is.
-fn returned_require(source: &str) -> Option<String> {
+/// The require takes a string, with or without parentheses, or the
+/// instance path that a Wally or pesde link file writes.
+fn returned_require(source: &str, path: &Path) -> Option<String> {
     use alloy_syntax::ast::{Expr, Stmt};
 
     let parsed = alloy_syntax::parse_lenient(source, Default::default()).ok()?;
@@ -3487,17 +3507,84 @@ fn returned_require(source: &str) -> Option<String> {
     stmts.iter().rev().find_map(|s| match s {
         Stmt::Local(l) if l.names.len() == 1 && text(l.names[0].name) == text(*n) => {
             let call = text(l.values.first()?.span());
-            let spec = call.strip_prefix("require(")?.strip_suffix(')')?.trim();
+            let arg = call.strip_prefix("require")?.trim();
+            let arg = arg
+                .strip_prefix('(')
+                .and_then(|a| a.strip_suffix(')'))
+                .unwrap_or(arg)
+                .trim();
 
-            Some(
-                spec.strip_prefix(['"', '\''])?
-                    .strip_suffix(['"', '\''])?
-                    .to_string(),
-            )
+            match unquote(arg) {
+                Some(spec) => Some(spec.to_string()),
+
+                None => instance_spec(arg, path),
+            }
         }
 
         _ => None,
     })
+}
+
+/// The text inside one quoted string, `"a"` or `'a'`.
+fn unquote(text: &str) -> Option<&str> {
+    text.strip_prefix(['"', '\''])?
+        .strip_suffix(['"', '\''])
+        .filter(|s| !s.contains(['"', '\'']))
+}
+
+/// The spec of an instance path, read from the module at `path`.
+/// `script.Parent._Index["a"]["b"]` in `Packages/vide.lua` is
+/// `./_Index/a/b`.
+fn instance_spec(expr: &str, path: &Path) -> Option<String> {
+    let mut rest = expr.strip_prefix("script")?;
+
+    // An `init` file is its folder. Any other module is the file, so
+    // its `Parent` is the folder that holds it.
+    let mut parts: Vec<&str> = match crate::build::is_init(path) {
+        true => Vec::new(),
+
+        false => vec![path.file_stem()?.to_str()?],
+    };
+
+    while !rest.is_empty() {
+        if let Some(r) = rest.strip_prefix('.') {
+            let end = r
+                .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .unwrap_or(r.len());
+            let name = &r[..end];
+            rest = &r[end..];
+
+            match name {
+                "" => return None,
+
+                "Parent" => match parts.last() {
+                    Some(&last) if last != ".." => {
+                        parts.pop();
+                    }
+
+                    _ => parts.push(".."),
+                },
+
+                _ => parts.push(name),
+            }
+
+            continue;
+        }
+
+        let (inner, tail) = match rest.strip_prefix('[') {
+            Some(r) => r.split_once(']')?,
+
+            None => rest
+                .strip_prefix(":FindFirstChild(")
+                .or_else(|| rest.strip_prefix(":WaitForChild("))?
+                .split_once(')')?,
+        };
+
+        parts.push(unquote(inner.trim())?);
+        rest = tail;
+    }
+
+    Some(format!("./{}", parts.join("/")))
 }
 
 /// The named keys of a table literal. A spread copies keys the reader
@@ -5174,6 +5261,63 @@ mod tests {
                 ("./plain".to_string(), vec!["P=".to_string()]),
             ]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Vide exports a type and a value named `source`. Wally and pesde
+    /// link files require the package by an instance path, and the
+    /// walk to the returned table follows that path.
+    #[test]
+    fn a_link_file_by_instance_path_keeps_the_value_of_a_type_name() {
+        let dir = std::env::temp_dir().join(format!("alloy-link-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let types =
+            "export type source<T> = M.source<T>\nexport type Source<T> = M.Source<T>\nreturn M\n";
+        let lib = "export type Source<T> = { T }\nexport type source<T> = Source<T>\nlocal source = 1\nreturn { source = source }\n";
+        let write = |rel: &str, text: &str| {
+            let file = dir.join(rel);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, text).unwrap();
+        };
+
+        // Wally, Vide 0.3: the package root has only a project file.
+        write(
+            "Packages/vide.lua",
+            &format!(
+                "local M = require(script.Parent._Index[\"centau_vide@0.3.1\"][\"vide\"])\n{types}"
+            ),
+        );
+        write(
+            "Packages/_Index/centau_vide@0.3.1/vide/default.project.json",
+            "{ \"name\": \"vide\", \"tree\": { \"$path\": \"src\" } }",
+        );
+        write("Packages/_Index/centau_vide@0.3.1/vide/src/init.luau", lib);
+
+        // pesde, Vide 0.4: a root `init.luau` requires `lib` with no
+        // parentheses.
+        write(
+            "roblox_packages/vide.luau",
+            &format!(
+                "local M = require(script.Parent:FindFirstChild(\".pesde\"):FindFirstChild(\"centau_vide@0.4.1\"):FindFirstChild(\"vide\"))\n{types}"
+            ),
+        );
+        write(
+            "roblox_packages/.pesde/centau_vide@0.4.1/vide/init.luau",
+            &format!("local M = require \"@self/src/lib\"\n{types}"),
+        );
+        write(
+            "roblox_packages/.pesde/centau_vide@0.4.1/vide/src/lib.luau",
+            lib,
+        );
+
+        for link in ["Packages/vide.lua", "roblox_packages/vide.luau"] {
+            assert_eq!(
+                module_types(&dir.join(link), &[], BARREL_DEPTH),
+                vec!["source<T>", "Source<T>="],
+                "{link}"
+            );
+        }
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -1093,6 +1093,19 @@ mod tests {
         );
     }
 
+    /// A generic pack read `T ...`: the rule of type arguments spaced
+    /// the `...` off the name. A keyword before `...` keeps its space.
+    #[test]
+    fn a_generic_pack_holds_its_name() {
+        let src = "local function run<T...>(fn: () -> T..., ...: T...): T...\n  return ...\nend\n\ntype P<T...> = (T...) -> ()\nlocal a = ...\nprint(a and ..., not ...)\n";
+
+        assert_eq!(fmt(src), src);
+        assert_eq!(
+            fmt("local function run<T ...>(fn: () -> T ...): T ...\nend\n"),
+            "local function run<T...>(fn: () -> T...): T...\nend\n"
+        );
+    }
+
     #[test]
     fn a_negation_holds_its_operand() {
         assert_eq!(

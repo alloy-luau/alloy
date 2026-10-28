@@ -167,6 +167,13 @@ impl<'s> Formatter<'s> {
             return false;
         }
 
+        // A generic pack holds its name: `T...`, `<T...>`, `() -> T...`.
+        // A name right before `...` is a pack and nothing else; `return
+        // ...` keeps its space, since a keyword is no name here.
+        if bt == "..." && a.is_ident() && !a.is_keyword_here() {
+            return false;
+        }
+
         // Type arguments: `Result<number, string>`, `show_all<T>(items)`.
         // An array suffix holds the type it closes: `Pair<A, B>[]`.
         if self.generic.get(ai) == Some(&true) {

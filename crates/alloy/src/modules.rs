@@ -1172,12 +1172,15 @@ fn module_types_read(
 
     // Luau keeps types and values apart, so a module may export a type
     // and a value by one name: Vide's `source`. The type is no type
-    // alone when the table the module returns holds the name.
-    if out.iter().any(|e| type_only(e))
-        && let Some(keys) = returned_keys_at(path, aliases, depth)
-    {
+    // alone when the table the module returns holds the name, or when
+    // an Alloy module exports a value of the name: Bevel's `Easing`,
+    // a type and a namespace.
+    if out.iter().any(|e| type_only(e)) {
+        let mut values = exported_value_names(source);
+        values.extend(returned_keys_at(path, aliases, depth).unwrap_or_default());
+
         for entry in out.iter_mut() {
-            if type_only(entry) && keys.iter().any(|k| k == type_head(entry)) {
+            if type_only(entry) && values.iter().any(|k| k == type_head(entry)) {
                 entry.pop();
             }
         }
@@ -3285,6 +3288,53 @@ pub fn exported_names(source: &str) -> Vec<String> {
     out
 }
 
+/// The names that a module exports with a value at run time: a
+/// namespace, a function, a `const` or a `local`, an attribute, a
+/// remote, a message. A `type` or an `interface` of the same name stays
+/// a type; the import binds the value beside it.
+fn exported_value_names(source: &str) -> Vec<String> {
+    use alloy_syntax::ast::Stmt;
+
+    let options = alloy_syntax::parser::ParseOptions {
+        definitions: true,
+        ..Default::default()
+    };
+    let source = parsable(source);
+    let source: &str = &source;
+    let Ok(parsed) = alloy_syntax::parse_lenient(source, options) else {
+        return Vec::new();
+    };
+    let toks = &parsed.lexed.toks;
+    let text = |span: alloy_syntax::ast::TokSpan| span.text(source, toks).to_string();
+    let mut out = Vec::new();
+
+    for stmt in &parsed.chunk.block.stmts {
+        match stmt {
+            Stmt::Namespace(d) if d.exported => out.push(text(d.name)),
+            Stmt::LocalFunction(d) if d.exported => out.push(text(d.name)),
+            Stmt::Attribute(d) if d.exported => out.push(text(d.name)),
+            Stmt::Remote(d) if d.exported => out.push(text(d.name)),
+            Stmt::Message(d) if d.exported => out.push(text(d.name)),
+
+            Stmt::Function(d) if d.exported => {
+                if let Some(first) = d.path.first() {
+                    out.push(text(*first));
+                }
+            }
+
+            Stmt::Local(d) if d.exported => {
+                for name in crate::desugar::statements::local_names(d) {
+                    out.push(text(name));
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    out
+}
+
 /// Whether a module has an `export default`, the value a bare
 /// `import X from "./m"` binds.
 pub fn exports_default(source: &str) -> bool {
@@ -5261,6 +5311,28 @@ mod tests {
                 ("./plain".to_string(), vec!["P=".to_string()]),
             ]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An Alloy module may export a type and a value of one name: Bevel's
+    /// `Easing` is a type and a namespace. The entry stayed type-only, so
+    /// `export { Easing } from './animate'` sent the type alone.
+    #[test]
+    fn a_type_and_a_value_of_an_alloy_module_keep_the_value() {
+        let dir = std::env::temp_dir().join(format!("alloy-type-value-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("a.aly"),
+            "export type E = (t: number) -> number\n\nexport namespace E\n    public function linear(t: number) -> number\n        return t\n    end\nend\n\nexport type Only = number\nexport type Both = number\nexport const Both = 1\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            module_types(&dir.join("a.aly"), &[], BARREL_DEPTH),
+            vec!["E", "Only=", "Both"]
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

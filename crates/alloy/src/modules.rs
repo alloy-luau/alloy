@@ -1260,7 +1260,24 @@ fn module_types_read(
         }
     }
 
-    out
+    // A barrel can send one type twice: `export { Easing, Easing_Style }`
+    // passes `Easing_Style` on as a member of the namespace and again by
+    // its own name, as Ember's `.aly` link lists it. An importer then
+    // wrote the alias twice. One name keeps one entry, the one with a
+    // value when either has one.
+    let mut kept: Vec<String> = Vec::with_capacity(out.len());
+
+    for entry in out {
+        match kept.iter_mut().find(|k| type_head(k) == type_head(&entry)) {
+            Some(k) if type_only(k) && !type_only(&entry) => *k = entry,
+
+            Some(_) => {}
+
+            None => kept.push(entry),
+        }
+    }
+
+    kept
 }
 
 /// What a module passes on from another: the name that module knows it
@@ -5332,6 +5349,29 @@ mod tests {
             module_types(&dir.join("a.aly"), &[], BARREL_DEPTH),
             vec!["E", "Only=", "Both"]
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ember's `.aly` link lists a namespace and each type that the
+    /// namespace carries, so the barrel sent `E_Side` twice and an
+    /// import of `E` wrote `type E_Side` twice.
+    #[test]
+    fn a_barrel_sends_each_type_once() {
+        let dir = std::env::temp_dir().join(format!("alloy-barrel-once-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("a.aly"),
+            "--- Curves.\nexport namespace E\n    --- A side.\n    public type Side = 'In' | 'Out'\n\n    --- No easing.\n    public function linear(t: number) -> number\n        return t\n    end\nend\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("b.aly"), "export { E, E_Side } from './a'\n").unwrap();
+
+        let types = module_types(&dir.join("b.aly"), &[], BARREL_DEPTH);
+        let sides = types.iter().filter(|t| type_head(t) == "E_Side").count();
+
+        assert_eq!(sides, 1, "{types:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

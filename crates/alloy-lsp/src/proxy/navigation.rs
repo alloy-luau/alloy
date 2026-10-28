@@ -4245,7 +4245,7 @@ pub(crate) fn struct_field_at_line(
 }
 
 /// Where the check artifact writes `field` in the type of `owner`: the
-/// `type Owner = typeof(setmetatable({} :: { ... }, Owner))` the emit
+/// `type Owner = typeof(setmetatable(({} :: any) :: { ... }, Owner))` the emit
 /// puts on the struct's `end` line. The child types the field there,
 /// so its references and its rename start from that position.
 pub(crate) fn shadow_field(doc: &Doc, owner: &str, field: &str) -> Option<(u32, u32)> {
@@ -4259,7 +4259,7 @@ pub(crate) fn shadow_field(doc: &Doc, owner: &str, field: &str) -> Option<(u32, 
 
             None => rest,
         };
-        let body = rest.strip_prefix(" = typeof(setmetatable({} :: {")?;
+        let body = rest.strip_prefix(" = typeof(setmetatable(({} :: any) :: {")?;
         let body_at = shadow.len() - body.len();
         let close = super::hover::group_len(&shadow[body_at - 1..], '{', '}')?;
         let inside = &shadow[body_at..body_at - 1 + close];

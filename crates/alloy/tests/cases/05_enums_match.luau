@@ -3,10 +3,10 @@
 
 -- A payload enum desugars to tagged tables.
 local __alloy = require("@alloy") local Msg = {} Msg.__index = Msg
-    function Msg.Join(_1: Player): typeof(setmetatable({} :: { tag: "Join", _1: Player }, Msg)) return (setmetatable({ tag = "Join", _1 = _1 }, Msg) :: any) end
-    function Msg.Chat(_1: Player, _2: string): typeof(setmetatable({} :: { tag: "Chat", _1: Player, _2: string }, Msg)) return (setmetatable({ tag = "Chat", _1 = _1, _2 = _2 }, Msg) :: any) end
-    function Msg.Leave(_1: Player): typeof(setmetatable({} :: { tag: "Leave", _1: Player }, Msg)) return (setmetatable({ tag = "Leave", _1 = _1 }, Msg) :: any) end
-function Msg.is(v) return (type(v) == "table" and getmetatable(v) == Msg) end Msg.__tostring = function(v) return __alloy.show_variant("Msg", v) end type Msg = typeof(setmetatable({} :: { tag: "Join", _1: Player }, Msg)) | typeof(setmetatable({} :: { tag: "Chat", _1: Player, _2: string }, Msg)) | typeof(setmetatable({} :: { tag: "Leave", _1: Player }, Msg))
+    function Msg.Join(_1: Player): typeof(setmetatable(({} :: any) :: { tag: "Join", _1: Player }, Msg)) return (setmetatable({ tag = "Join", _1 = _1 }, Msg) :: any) end
+    function Msg.Chat(_1: Player, _2: string): typeof(setmetatable(({} :: any) :: { tag: "Chat", _1: Player, _2: string }, Msg)) return (setmetatable({ tag = "Chat", _1 = _1, _2 = _2 }, Msg) :: any) end
+    function Msg.Leave(_1: Player): typeof(setmetatable(({} :: any) :: { tag: "Leave", _1: Player }, Msg)) return (setmetatable({ tag = "Leave", _1 = _1 }, Msg) :: any) end
+function Msg.is(v) return (type(v) == "table" and getmetatable(v) == Msg) end Msg.__tostring = function(v) return __alloy.show_variant("Msg", v) end type Msg = typeof(setmetatable(({} :: any) :: { tag: "Join", _1: Player }, Msg)) | typeof(setmetatable(({} :: any) :: { tag: "Chat", _1: Player, _2: string }, Msg)) | typeof(setmetatable(({} :: any) :: { tag: "Leave", _1: Player }, Msg))
 
 -- A unit enum emits a string literal union plus a table.
 -- Color.Red == "Red" at runtime, so it serializes for free.

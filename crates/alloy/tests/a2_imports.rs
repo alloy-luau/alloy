@@ -169,7 +169,7 @@ fn a_reexported_default_carries_its_type() {
     let dir = scratch("reexport-default-type");
     std::fs::write(
         dir.join("Klass.aly"),
-        "local Klass = {}\nKlass.__index = Klass\nexport type Klass<T> = typeof(setmetatable({} :: { v: T }, Klass))\nreturn Klass\n",
+        "local Klass = {}\nKlass.__index = Klass\nexport type Klass<T> = typeof(setmetatable(({} :: any) :: { v: T }, Klass))\nreturn Klass\n",
     )
     .unwrap();
     std::fs::write(

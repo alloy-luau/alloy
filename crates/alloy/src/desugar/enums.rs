@@ -263,7 +263,7 @@ impl<'s> Desugar<'s> {
                     )
                 } else {
                     format!(
-                        "typeof(setmetatable({{}} :: {{ tag: \"{vname}\", {} }}, {name}))",
+                        "typeof(setmetatable(({{}} :: any) :: {{ tag: \"{vname}\", {} }}, {name}))",
                         field_types.join(", ")
                     )
                 };
@@ -3387,7 +3387,7 @@ mod tests {
         // Luau project that installs the package.
         assert!(
             out.ship.contains(
-                "function Opt.Some<T>(_1: T): typeof(setmetatable({} :: { tag: \"Some\", _1: T }, Opt)) return (setmetatable({ tag = \"Some\", _1 = _1 }, Opt) :: any) end"
+                "function Opt.Some<T>(_1: T): typeof(setmetatable(({} :: any) :: { tag: \"Some\", _1: T }, Opt)) return (setmetatable({ tag = \"Some\", _1 = _1 }, Opt) :: any) end"
             ),
             "{}",
             out.ship
@@ -3495,7 +3495,11 @@ mod tests {
             "{}",
             out.check
         );
-        assert!(!out.check.contains("setmetatable({} ::"), "{}", out.check);
+        assert!(
+            !out.check.contains("setmetatable(({} :: any) ::"),
+            "{}",
+            out.check
+        );
         assert!(
             out.check
                 .contains("local l, r = _m1._1, _m1._2 return sumTree(l) + sumTree(r)"),
@@ -3855,7 +3859,7 @@ mod tests {
         let out = crate::compile(src).unwrap();
         assert!(
             out.check.contains(
-                "function Shape.Rect(_1: number, _2: number): typeof(setmetatable({} :: { tag: \"Rect\", _1: number, _2: number }, Shape))"
+                "function Shape.Rect(_1: number, _2: number): typeof(setmetatable(({} :: any) :: { tag: \"Rect\", _1: number, _2: number }, Shape))"
             ),
             "{}",
             out.check
@@ -3864,7 +3868,7 @@ mod tests {
         // that installs the package.
         assert!(
             out.ship.contains(
-                "function Shape.Rect(_1: number, _2: number): typeof(setmetatable({} :: { tag: \"Rect\", _1: number, _2: number }, Shape))"
+                "function Shape.Rect(_1: number, _2: number): typeof(setmetatable(({} :: any) :: { tag: \"Rect\", _1: number, _2: number }, Shape))"
             ),
             "{}",
             out.ship
@@ -3918,7 +3922,7 @@ mod tests {
         let out = crate::compile(src).unwrap();
         assert!(
             out.check.contains(
-                "type Shape = typeof(setmetatable({} :: { tag: \"Circle\", _1: number }, Shape))"
+                "type Shape = typeof(setmetatable(({} :: any) :: { tag: \"Circle\", _1: number }, Shape))"
             ),
             "{}",
             out.check

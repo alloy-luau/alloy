@@ -32,7 +32,7 @@ end
 local Swap = {} Swap.__index = Swap function Swap.__new<A, B>(f: { left: A, right: B }): Swap<A, B>  return ((setmetatable(f, Swap) :: any) :: Swap<A, B>) end function Swap.new<A, B>(f: { left: A, right: B }): Swap<A, B> return Swap.__new(f) end
 
 
- type Swap<A, B> = typeof(setmetatable({} :: { left: A, right: B }, Swap)) Swap.__tostring = function(s) return __alloy.show_struct("Swap", (s :: any), { "left", "right" }) end
+ type Swap<A, B> = typeof(setmetatable(({} :: any) :: { left: A, right: B }, Swap)) Swap.__tostring = function(s) return __alloy.show_struct("Swap", (s :: any), { "left", "right" }) end
 
 do
 	function Swap.flip<A, B>(self: Swap<A, B>): Swap<B, A>
@@ -46,7 +46,7 @@ local Loud = {} type Loud = { read shout: (self: any) -> string } Loud.shout = (
 
 local Voiced = {} Voiced.__index = Voiced function Voiced.__new<T>(f: { value: T }): Voiced<T>  return ((setmetatable(f, Voiced) :: any) :: Voiced<T>) end function Voiced.new<T>(f: { value: T }): Voiced<T> return Voiced.__new(f) end
 
- type Voiced<T> = typeof(setmetatable({} :: { value: T }, Voiced)) Voiced.__tostring = function(s) return __alloy.show_struct("Voiced", (s :: any), { "value" }) end
+ type Voiced<T> = typeof(setmetatable(({} :: any) :: { value: T }, Voiced)) Voiced.__tostring = function(s) return __alloy.show_struct("Voiced", (s :: any), { "value" }) end
 
 do
 	function Voiced.shout<T>(self: Voiced<T>): string

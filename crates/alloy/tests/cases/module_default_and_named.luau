@@ -5,7 +5,7 @@ local __alloy = require("@alloy") local VERSION = 2
 
 local Theme = {} Theme.__index = Theme
 
- export type Theme = typeof(setmetatable({} :: { primary: string }, Theme)) setmetatable(Theme, { __call = function(_, f: { primary: string }): Theme  return ((setmetatable(f, Theme) :: any) :: Theme) end }) function Theme.new(f: { primary: string }): Theme return Theme(f) end Theme.__tostring = function(s) return __alloy.show_struct("Theme", s, { "primary" }) end
+ export type Theme = typeof(setmetatable(({} :: any) :: { primary: string }, Theme)) setmetatable(Theme, { __call = function(_, f: { primary: string }): Theme  return ((setmetatable(f, Theme) :: any) :: Theme) end }) function Theme.new(f: { primary: string }): Theme return Theme(f) end Theme.__tostring = function(s) return __alloy.show_struct("Theme", s, { "primary" }) end
 
 local function name(): string
     return "theme"

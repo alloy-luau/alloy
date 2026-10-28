@@ -6,7 +6,7 @@ local __alloy = require("@alloy") local Named = {} export type Named = { read na
 local Point = {} Point.__index = Point function Point.__new(f: { x: number, y: number? }): Point if f.y == nil then local _y: number = 0 f.y = _y end return ((setmetatable(f, Point) :: any) :: Point) end function Point.new(f: { x: number, y: number? }): Point return Point.__new(f) end
 
 
- export type Point = typeof(setmetatable({} :: { x: number, y: number }, Point)) Point.__tostring = function(s: Point) return __alloy.show_struct("Point", (s :: any), { "x", "y" }) end
+ export type Point = typeof(setmetatable(({} :: any) :: { x: number, y: number }, Point)) Point.__tostring = function(s: Point) return __alloy.show_struct("Point", (s :: any), { "x", "y" }) end
 
 do
     function Point.name(self: Point): string
@@ -14,7 +14,7 @@ do
     end
 end
 
-local Vec2 = {} Vec2.__index = Vec2 function Vec2.__new(f: { x: number, y: number }): Vec2  return ((setmetatable(f, Vec2) :: any) :: Vec2) end export type Vec2 = typeof(setmetatable({} :: { x: number, y: number }, Vec2)) Vec2.__tostring = function(s: Vec2) return __alloy.show_struct("Vec2", (s :: any), { "x", "y" }) end
+local Vec2 = {} Vec2.__index = Vec2 function Vec2.__new(f: { x: number, y: number }): Vec2  return ((setmetatable(f, Vec2) :: any) :: Vec2) end export type Vec2 = typeof(setmetatable(({} :: any) :: { x: number, y: number }, Vec2)) Vec2.__tostring = function(s: Vec2) return __alloy.show_struct("Vec2", (s :: any), { "x", "y" }) end
 
 do
     function Vec2.new(x: number, y: number): Vec2
@@ -36,7 +36,7 @@ function Tree.is(v) return (type(v) == "table" and getmetatable(v) == Tree) end 
 
 local Grid = {} Grid.__index = Grid function Grid.__new(f: { rows: { number } }): Grid  return ((setmetatable(f, Grid) :: any) :: Grid) end function Grid.new(f: { rows: { number } }): Grid return Grid.__new(f) end
 
- export type Grid = typeof(setmetatable({} :: { rows: { number } }, Grid)) Grid.__tostring = function(s: Grid) return __alloy.show_struct("Grid", (s :: any), { "rows" }) end
+ export type Grid = typeof(setmetatable(({} :: any) :: { rows: { number } }, Grid)) Grid.__tostring = function(s: Grid) return __alloy.show_struct("Grid", (s :: any), { "rows" }) end
 
 do
     function Grid.row(self: Grid, x: number): number?

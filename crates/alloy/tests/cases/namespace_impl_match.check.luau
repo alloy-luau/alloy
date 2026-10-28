@@ -3,7 +3,7 @@
 local __alloy = require("@alloy") local Shapes = {}
     local Shapes_Circle = {} Shapes_Circle.__index = Shapes_Circle function Shapes_Circle.__new(f: { r: number }): Shapes_Circle  return ((setmetatable(f, Shapes_Circle) :: any) :: Shapes_Circle) end function Shapes_Circle.new(f: { r: number }): Shapes_Circle return Shapes_Circle.__new(f) end
 
- type Shapes_Circle = typeof(setmetatable({} :: { r: number }, Shapes_Circle)) Shapes_Circle.__tostring = function(s: Shapes_Circle) return __alloy.show_struct("Shapes.Circle", (s :: any), { "r" }) end Shapes.Circle = Shapes_Circle
+ type Shapes_Circle = typeof(setmetatable(({} :: any) :: { r: number }, Shapes_Circle)) Shapes_Circle.__tostring = function(s: Shapes_Circle) return __alloy.show_struct("Shapes.Circle", (s :: any), { "r" }) end Shapes.Circle = Shapes_Circle
     do
         function Shapes_Circle.area(self: Shapes_Circle): number
             return 3.14 * self.r * self.r

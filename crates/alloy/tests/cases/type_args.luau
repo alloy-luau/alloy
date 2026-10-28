@@ -3,7 +3,7 @@
 local __alloy = require("@alloy") local Pair = {} Pair.__index = Pair
 
 
- type Pair<A, B> = typeof(setmetatable({} :: { first: A, second: B }, Pair)) setmetatable(Pair, { __call = function<A, B>(_, f: { first: A, second: B }): Pair<A, B>  return ((setmetatable(f, Pair) :: any) :: Pair<A, B>) end }) function Pair.new<A, B>(f: { first: A, second: B }): Pair<A, B> return Pair(f) end Pair.__tostring = function(s) return __alloy.show_struct("Pair", s, { "first", "second" }) end
+ type Pair<A, B> = typeof(setmetatable(({} :: any) :: { first: A, second: B }, Pair)) setmetatable(Pair, { __call = function<A, B>(_, f: { first: A, second: B }): Pair<A, B>  return ((setmetatable(f, Pair) :: any) :: Pair<A, B>) end }) function Pair.new<A, B>(f: { first: A, second: B }): Pair<A, B> return Pair(f) end Pair.__tostring = function(s) return __alloy.show_struct("Pair", s, { "first", "second" }) end
 
 -- 1. a written list that holds an Alloy spelling
 local written = __alloy.HashMap.new()

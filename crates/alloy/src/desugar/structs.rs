@@ -946,7 +946,7 @@ impl<'s> Desugar<'s> {
             };
 
             format!(
-                "{export}type {name} = typeof(setmetatable({{}} :: {{ {} }}, {name})) {export}type {name}__all = {name}{hidden} & typeof({name}__private)",
+                "{export}type {name} = typeof(setmetatable(({{}} :: any) :: {{ {} }}, {name})) {export}type {name}__all = {name}{hidden} & typeof({name}__private)",
                 public_types.join(", ")
             )
         } else if let Some(members) =
@@ -958,7 +958,7 @@ impl<'s> Desugar<'s> {
             )
         } else {
             format!(
-                "{export}type {name}{generics} = typeof(setmetatable({{}} :: {{ {} }}, {name}))",
+                "{export}type {name}{generics} = typeof(setmetatable(({{}} :: any) :: {{ {} }}, {name}))",
                 field_types.join(", ")
             )
         };

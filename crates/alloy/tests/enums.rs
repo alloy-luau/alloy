@@ -37,7 +37,7 @@ fn a_braced_variant_reads_once_and_names_the_form() {
     let out = alloy::compile_with(src, &alloy::EmitOptions::default()).unwrap();
     assert!(
         out.ship
-            .contains("function Enemy.Grunt(_1: number, _2: number): typeof(setmetatable({} :: { tag: \"Grunt\", _1: number, _2: number }, Enemy)) return (setmetatable({ tag = \"Grunt\", _1 = _1, _2 = _2 }, Enemy) :: any) end"),
+            .contains("function Enemy.Grunt(_1: number, _2: number): typeof(setmetatable(({} :: any) :: { tag: \"Grunt\", _1: number, _2: number }, Enemy)) return (setmetatable({ tag = \"Grunt\", _1 = _1, _2 = _2 }, Enemy) :: any) end"),
         "{}",
         out.ship
     );

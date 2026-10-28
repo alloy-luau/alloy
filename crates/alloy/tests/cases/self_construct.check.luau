@@ -1,4 +1,4 @@
-local __alloy = require("@alloy") local Plain = {} Plain.__index = Plain function Plain.__new(f: {  }): Plain  return ((setmetatable(f, Plain) :: any) :: Plain) end type Plain = typeof(setmetatable({} :: {  }, Plain)) Plain.__tostring = function(s: Plain) return __alloy.show_struct("Plain", (s :: any), {  }) end
+local __alloy = require("@alloy") local Plain = {} Plain.__index = Plain function Plain.__new(f: {  }): Plain  return ((setmetatable(f, Plain) :: any) :: Plain) end type Plain = typeof(setmetatable(({} :: any) :: {  }, Plain)) Plain.__tostring = function(s: Plain) return __alloy.show_struct("Plain", (s :: any), {  }) end
 
 do
 	function Plain.new(): Plain
@@ -8,7 +8,7 @@ end
 
 local Marked = {} Marked.__index = Marked function Marked.__new(f: { field: number? }): Marked if f.field == nil then local _field: number = 0 f.field = _field end return ((setmetatable(f, Marked) :: any) :: Marked) end
 
- type Marked = typeof(setmetatable({} :: { field: number }, Marked)) Marked.__tostring = function(s: Marked) return __alloy.show_struct("Marked", (s :: any), { "field" }) end
+ type Marked = typeof(setmetatable(({} :: any) :: { field: number }, Marked)) Marked.__tostring = function(s: Marked) return __alloy.show_struct("Marked", (s :: any), { "field" }) end
 
 do
 	function Marked.new(): Marked

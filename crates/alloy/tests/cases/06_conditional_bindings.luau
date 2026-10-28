@@ -3,9 +3,9 @@
 local __alloy = require("@alloy") local Players = game:GetService("Players")
 
 local Job = {} Job.__index = Job
-    function Job.Build(_1: string): typeof(setmetatable({} :: { tag: "Build", _1: string }, Job)) return (setmetatable({ tag = "Build", _1 = _1 }, Job) :: any) end
-    function Job.Move(_1: Vector3): typeof(setmetatable({} :: { tag: "Move", _1: Vector3 }, Job)) return (setmetatable({ tag = "Move", _1 = _1 }, Job) :: any) end
-function Job.is(v) return (type(v) == "table" and getmetatable(v) == Job) end Job.__tostring = function(v) return __alloy.show_variant("Job", v) end type Job = typeof(setmetatable({} :: { tag: "Build", _1: string }, Job)) | typeof(setmetatable({} :: { tag: "Move", _1: Vector3 }, Job))
+    function Job.Build(_1: string): typeof(setmetatable(({} :: any) :: { tag: "Build", _1: string }, Job)) return (setmetatable({ tag = "Build", _1 = _1 }, Job) :: any) end
+    function Job.Move(_1: Vector3): typeof(setmetatable(({} :: any) :: { tag: "Move", _1: Vector3 }, Job)) return (setmetatable({ tag = "Move", _1 = _1 }, Job) :: any) end
+function Job.is(v) return (type(v) == "table" and getmetatable(v) == Job) end Job.__tostring = function(v) return __alloy.show_variant("Job", v) end type Job = typeof(setmetatable(({} :: any) :: { tag: "Build", _1: string }, Job)) | typeof(setmetatable(({} :: any) :: { tag: "Move", _1: Vector3 }, Job))
 
 local function first_player(): Player?
     return Players:GetPlayers()[1]

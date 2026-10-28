@@ -355,7 +355,7 @@ fn installed_package(name: &str) -> PathBuf {
 }
 
 /// The Luau of `geo` that alloy 0.1.2 published.
-const PUBLISHED: &str = "local Point = {} Point.__index = Point setmetatable(Point, { __call = function(_, f) return setmetatable(f, Point) end }) function Point.new(f) return Point(f) end\nexport type Point = typeof(setmetatable({} :: { x: number, y: number }, Point))\nlocal Color = {} Color.Red = \"Red\" Color.Blue = \"Blue\"\nexport type Color = \"Red\" | \"Blue\"\nreturn { Point = Point, Color = Color }\n";
+const PUBLISHED: &str = "local Point = {} Point.__index = Point setmetatable(Point, { __call = function(_, f) return setmetatable(f, Point) end }) function Point.new(f) return Point(f) end\nexport type Point = typeof(setmetatable(({} :: any) :: { x: number, y: number }, Point))\nlocal Color = {} Color.Red = \"Red\" Color.Blue = \"Blue\"\nexport type Color = \"Red\" | \"Blue\"\nreturn { Point = Point, Color = Color }\n";
 
 /// Flux checks an import of an installed package against the check
 /// artifacts of the package's sources. It read the published Luau, and

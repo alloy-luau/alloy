@@ -430,6 +430,18 @@ fn analyze(src: &str, name: &str) {
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
 
+/// A field whose type is a function and a table at once, as a signal of
+/// Bevel's: `(() -> T) & { set: ... }`. The struct's type cast `{}` to its
+/// fields, and luau called the two unrelated, so a struct with such a
+/// field did not check.
+#[test]
+fn a_field_typed_as_a_function_and_a_table_checks_clean() {
+    analyze(
+        "export type Sig<T> = (() -> T) & { set: (self: Sig<T>, value: T) -> () }\n\nexport struct Box\n    read value: Sig<number>\n    count: Sig<number>\nend\n\nexport enum Holder\n    One(Sig<number>)\nend\n\nlocal function total(b: Box): number\n    return b.value() + b.count()\nend\n\nprint(total, Holder.One)\n",
+        "intersection_field",
+    );
+}
+
 /// `in` on a value that is no container compiled clean and threw inside
 /// the std at run time.
 #[test]
@@ -1220,7 +1232,9 @@ fn a_private_member_read_from_outside_is_an_error_and_a_lint() {
     let check = &report.checks[0].check;
 
     assert!(
-        check.contains("type Counter = typeof(setmetatable({} :: { read name: string }, Counter))"),
+        check.contains(
+            "type Counter = typeof(setmetatable(({} :: any) :: { read name: string }, Counter))"
+        ),
         "{check}"
     );
     assert!(

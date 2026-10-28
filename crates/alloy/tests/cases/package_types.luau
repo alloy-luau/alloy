@@ -6,7 +6,7 @@ local __alloy = require("@alloy") local Named = {} export type Named = { read na
 local Point = {} Point.__index = Point
 
 
- export type Point = typeof(setmetatable({} :: { x: number, y: number }, Point)) setmetatable(Point, { __call = function(_, f: { x: number, y: number? }): Point if f.y == nil then local _y: number = 0 f.y = _y end return ((setmetatable(f, Point) :: any) :: Point) end }) function Point.new(f: { x: number, y: number? }): Point return Point(f) end Point.__tostring = function(s) return __alloy.show_struct("Point", s, { "x", "y" }) end
+ export type Point = typeof(setmetatable(({} :: any) :: { x: number, y: number }, Point)) setmetatable(Point, { __call = function(_, f: { x: number, y: number? }): Point if f.y == nil then local _y: number = 0 f.y = _y end return ((setmetatable(f, Point) :: any) :: Point) end }) function Point.new(f: { x: number, y: number? }): Point return Point(f) end Point.__tostring = function(s) return __alloy.show_struct("Point", s, { "x", "y" }) end
 
 do
     function Point.name(self: Point): string
@@ -14,7 +14,7 @@ do
     end
 end
 
-local Vec2 = {} Vec2.__index = Vec2 export type Vec2 = typeof(setmetatable({} :: { x: number, y: number }, Vec2)) setmetatable(Vec2, { __call = function(_, f: { x: number, y: number }): Vec2  return ((setmetatable(f, Vec2) :: any) :: Vec2) end }) Vec2.__tostring = function(s) return __alloy.show_struct("Vec2", s, { "x", "y" }) end
+local Vec2 = {} Vec2.__index = Vec2 export type Vec2 = typeof(setmetatable(({} :: any) :: { x: number, y: number }, Vec2)) setmetatable(Vec2, { __call = function(_, f: { x: number, y: number }): Vec2  return ((setmetatable(f, Vec2) :: any) :: Vec2) end }) Vec2.__tostring = function(s) return __alloy.show_struct("Vec2", s, { "x", "y" }) end
 
 do
     function Vec2.new(x: number, y: number): Vec2
@@ -26,17 +26,17 @@ local Color = {} Color.__index = Color Color.Red = ("Red" :: Color)  Color.Green
 
 local Opt = {} Opt.__index = Opt
 Opt.None = ("None" :: Opt<any>)
-    function Opt.Some<T>(_1: T): typeof(setmetatable({} :: { tag: "Some", _1: T }, Opt)) return (setmetatable({ tag = "Some", _1 = _1 }, Opt) :: any) end
-function Opt.is(v) return (type(v) == "table" and getmetatable(v) == Opt) or v == "None" end Opt.__tostring = function(v) return __alloy.show_variant("Opt", v) end export type Opt<T> = "None" | typeof(setmetatable({} :: { tag: "Some", _1: T }, Opt))
+    function Opt.Some<T>(_1: T): typeof(setmetatable(({} :: any) :: { tag: "Some", _1: T }, Opt)) return (setmetatable({ tag = "Some", _1 = _1 }, Opt) :: any) end
+function Opt.is(v) return (type(v) == "table" and getmetatable(v) == Opt) or v == "None" end Opt.__tostring = function(v) return __alloy.show_variant("Opt", v) end export type Opt<T> = "None" | typeof(setmetatable(({} :: any) :: { tag: "Some", _1: T }, Opt))
 
 local Tree = {} Tree.__index = Tree
-function Tree.Leaf<T>(_1: T): typeof(setmetatable({} :: { tag: "Leaf", _1: T }, Tree)) return (setmetatable({ tag = "Leaf", _1 = _1 }, Tree) :: any) end
-    function Tree.Node<T>(_1, _2): typeof(setmetatable({} :: { tag: "Node", _1: Tree<T>, _2: Tree<T> }, Tree)) return (setmetatable({ tag = "Node", _1 = _1, _2 = _2 }, Tree) :: any) end
-function Tree.is(v) return (type(v) == "table" and getmetatable(v) == Tree) end Tree.__tostring = function(v) return __alloy.show_variant("Tree", v) end export type Tree<T> = typeof(setmetatable({} :: { tag: "Leaf", _1: T }, Tree)) | typeof(setmetatable({} :: { tag: "Node", _1: Tree<T>, _2: Tree<T> }, Tree))
+function Tree.Leaf<T>(_1: T): typeof(setmetatable(({} :: any) :: { tag: "Leaf", _1: T }, Tree)) return (setmetatable({ tag = "Leaf", _1 = _1 }, Tree) :: any) end
+    function Tree.Node<T>(_1, _2): typeof(setmetatable(({} :: any) :: { tag: "Node", _1: Tree<T>, _2: Tree<T> }, Tree)) return (setmetatable({ tag = "Node", _1 = _1, _2 = _2 }, Tree) :: any) end
+function Tree.is(v) return (type(v) == "table" and getmetatable(v) == Tree) end Tree.__tostring = function(v) return __alloy.show_variant("Tree", v) end export type Tree<T> = typeof(setmetatable(({} :: any) :: { tag: "Leaf", _1: T }, Tree)) | typeof(setmetatable(({} :: any) :: { tag: "Node", _1: Tree<T>, _2: Tree<T> }, Tree))
 
 local Grid = {} Grid.__index = Grid
 
- export type Grid = typeof(setmetatable({} :: { rows: { number } }, Grid)) setmetatable(Grid, { __call = function(_, f: { rows: { number } }): Grid  return ((setmetatable(f, Grid) :: any) :: Grid) end }) function Grid.new(f: { rows: { number } }): Grid return Grid(f) end Grid.__tostring = function(s) return __alloy.show_struct("Grid", s, { "rows" }) end
+ export type Grid = typeof(setmetatable(({} :: any) :: { rows: { number } }, Grid)) setmetatable(Grid, { __call = function(_, f: { rows: { number } }): Grid  return ((setmetatable(f, Grid) :: any) :: Grid) end }) function Grid.new(f: { rows: { number } }): Grid return Grid(f) end Grid.__tostring = function(s) return __alloy.show_struct("Grid", s, { "rows" }) end
 
 do
     function Grid.row(self: Grid, x: number): number?

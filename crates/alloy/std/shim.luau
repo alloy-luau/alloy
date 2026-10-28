@@ -1322,6 +1322,20 @@ function methods.Fire(self, ...)
 	self.Event:Fire(...)
 end
 
+-- The events whose names do not end in `ed`. Vide connects to
+-- `RunService.Heartbeat` as it loads, so without these a spec that
+-- imports it fails before its first test.
+local events = {
+	Destroying = true,
+	Changed = true,
+	Event = true,
+	Heartbeat = true,
+	PreAnimation = true,
+	PreRender = true,
+	PreSimulation = true,
+	PostSimulation = true,
+}
+
 function instance_meta.__index(self, key)
 	local props = rawget(self, "__props")
 	local value = props[key]
@@ -1337,10 +1351,7 @@ function instance_meta.__index(self, key)
 	end
 	local signals = rawget(self, "__signals")
 	local signal = signals[key]
-	if
-		signal == nil
-		and (key:match("^[A-Z]") and key:match("ed$") or key == "Destroying" or key == "Changed" or key == "Event")
-	then
+	if signal == nil and (key:match("^[A-Z]") and key:match("ed$") or events[key]) then
 		signal = new_signal()
 		signals[key] = signal
 	end

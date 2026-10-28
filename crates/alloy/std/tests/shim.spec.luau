@@ -225,6 +225,18 @@ describe("shim", function()
 		expect(game:GetService("Players"):GetPlayers()).toEqual({})
 	end)
 
+	it("gives RunService the events whose names do not end in ed", function()
+		local run = game:GetService("RunService")
+		for _, name in { "Heartbeat", "PreAnimation", "PreRender", "PreSimulation", "PostSimulation" } do
+			local fired = nil
+			run[name]:Connect(function(dt)
+				fired = dt
+			end)
+			run[name]:Fire(0.5)
+			expect(fired).toBe(0.5)
+		end
+	end)
+
 	it("parks a waiting thread until a step", function()
 		local count = 0
 		task.spawn(function()

@@ -135,6 +135,14 @@ impl<'s> Scan<'s> {
         self.generated.iter().any(|&(a, b)| a <= at && at < b)
     }
 
+    /// The bytes of each `type function`, from `function` to its `end`.
+    pub(crate) fn type_function_bodies(&self) -> Vec<(u32, u32)> {
+        (1..self.toks.len())
+            .filter(|&i| self.at(i, "function") && self.at(i - 1, "type"))
+            .filter_map(|i| Some((self.start(i), self.end(self.st.ends[i]?))))
+            .collect()
+    }
+
     /// The same scan, with the private fields of the imported structs.
     pub(crate) fn with_privates(mut self, privates: &'s [(String, Vec<String>)]) -> Self {
         self.privates = privates;

@@ -41,6 +41,12 @@ pub(crate) fn run(s: &Scan) -> Vec<Lint> {
     s.prefer_new(&mut out);
     s.explicit_any(&mut out);
     s.array_long_string(&mut out);
+
+    // A type function runs in the type checker, and the emit copies its
+    // body as written: Luau, with no Alloy form lowered. A rewrite there
+    // to `?:` or `is` would not compile.
+    let bodies = s.type_function_bodies();
+    out.retain(|l| !bodies.iter().any(|&(a, b)| a <= l.start && l.start < b));
     out
 }
 
@@ -1186,6 +1192,16 @@ mod tests {
         );
         let src = "local f = script.Parent?:WaitForChild(\"systems\")\n";
         assert_eq!(fixed(src), src);
+    }
+
+    /// The body of a type function is Luau: the emit copies it as written
+    /// and lowers no `?:`. The same guard outside it still reports.
+    #[test]
+    fn a_type_function_body_takes_no_alloy_rewrite() {
+        let src = "type function first(t)\n    local new = t:readproperty(types.singleton(\"new\"))\n    if new and new:is(\"function\") then\n        return new\n    end\n    return types.unknown\nend\n\nlocal p = nil\nlocal n = p and p:GetName()\nprint(n)\n";
+
+        assert_eq!(names(src), vec!["manual_safe_access"]);
+        assert!(fixed(src).contains("if new and new:is(\"function\") then"));
     }
 
     #[test]

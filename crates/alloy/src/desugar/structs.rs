@@ -15,7 +15,9 @@ use super::enums::same_type_text;
 use super::modules::type_arguments;
 use super::remotes::WIRE_WIDTHS;
 use super::statements::{Piece, is_string_index_table};
-use super::types::{generic_head, names_other_args, optional_type, strip_bounds};
+use super::types::{
+    generic_head, groups_before_optional, names_other_args, optional_type, strip_bounds,
+};
 use super::*;
 
 /// Datatypes the definitions declare as a type alias, not a class. A
@@ -2140,7 +2142,10 @@ impl<'s> Desugar<'s> {
     fn zero_of(&mut self, ty: &str) -> Option<Option<String>> {
         let ty = ty.trim();
 
-        if ty.ends_with('?') || matches!(ty, "any" | "unknown" | "nil") {
+        // `() -> T?` ends in `?` but is a function, and no function is a zero.
+        if (ty.ends_with('?') && !groups_before_optional(ty))
+            || matches!(ty, "any" | "unknown" | "nil")
+        {
             return Some(None);
         }
 

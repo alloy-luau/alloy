@@ -35,6 +35,17 @@ fn default_starts_each_field_at_its_zero() {
             "`@derive(Default)` needs a starting value for `part: Part`; write one, `part: Part = ...`, or derive Default on the type"
         ]
     );
+
+    // A function that returns an optional is not itself optional.
+    assert_eq!(
+        messages("@derive(Default)\nstruct C as\n    clock: () -> number?\nend\n"),
+        [
+            "`@derive(Default)` needs a starting value for `clock: () -> number?`; write one, `clock: () -> number? = ...`, or derive Default on the type"
+        ]
+    );
+    assert!(
+        messages("@derive(Default)\nstruct C as\n    clock: (() -> number)?\nend\n").is_empty()
+    );
 }
 
 #[test]

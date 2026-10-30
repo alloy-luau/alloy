@@ -1104,8 +1104,17 @@ impl<'s> Desugar<'s> {
             return;
         }
 
+        /*
+        `x ?? {}` asks for an empty one of the left's kind. The checker
+        types the if expression `{} | X`: a read of a key of `X` then
+        reports it missing from `{}`, and a loop over the union binds
+        an error type, which a type function such as the one behind
+        `try do` refuses. The check artifact casts to the left's type.
+        */
+        let empty =
+            self.options.check && matches!(rhs, Expr::Table { fields, .. } if fields.is_empty());
         let right = self.render_side(|d| d.expr_lazy(true, rhs));
-        self.generate(anchor, "(if ");
+        self.generate(anchor, if empty { "((if " } else { "(if " });
 
         match first {
             Some(side) => self.r.append(side),
@@ -1115,7 +1124,12 @@ impl<'s> Desugar<'s> {
 
         self.generate(anchor, " == nil then ");
         self.r.append(right);
-        self.generate(anchor, &format!(" else {left})"));
+
+        match empty {
+            true => self.generate(anchor, &format!(" else {left}) :: typeof(assert({left})))")),
+
+            false => self.generate(anchor, &format!(" else {left})")),
+        }
     }
 
     /*

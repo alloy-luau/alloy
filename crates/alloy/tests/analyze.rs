@@ -473,6 +473,22 @@ fn a_spread_of_a_coalesce_analyzes() {
     );
 }
 
+/// `x ?? {}` typed `{} | X`: a loop over it bound an error type, which
+/// the type function behind `try do` refused, and a key of `X` read as
+/// missing from `{}`.
+#[test]
+fn a_coalesce_with_an_empty_table_takes_the_left_type() {
+    let src = "type Options = { name: string? }\n\nconst lists: { [string]: { () -> () } } = {}\n\nlocal function name(o: Options?) -> string?\n    const opts = o ?? {}\n    return opts.name\nend\n\nfor _, f in lists.a ?? {} do\n    const result = try do\n        f()\n    end\n\n    const n: number = f\n    print(result, n, name(nil))\nend\n";
+    let Some(bad) = reports(src, "coalesce_empty") else {
+        return;
+    };
+
+    // The loop's `f` is `() -> ()` now, so the one report is the
+    // annotation that asks for a number.
+    assert_eq!(bad.len(), 1, "{}", bad.join("\n"));
+    assert!(bad[0].contains("(15,"), "{}", bad.join("\n"));
+}
+
 /// `in` on a value that is no container compiled clean and threw inside
 /// the std at run time.
 #[test]

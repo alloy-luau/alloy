@@ -2586,7 +2586,7 @@ fn function_needs_rewrite(body: &FunctionBody) -> bool {
         || body
             .params
             .iter()
-            .any(|p| p.default.is_some() || p.destructure.is_some())
+            .any(|p| p.default.is_some() || p.destructure.is_some() || !p.attributes.is_empty())
 }
 
 fn for_needs_rewrite(f: &GenericFor) -> bool {

@@ -3430,7 +3430,8 @@ end
 --- for the next event's payload.
 --- The declaration the compiler writes for a remote: what it is called,
 --- which side may fire it, the parameter names, the defaults, the
---- attributes, and the wire layout when the payload packs.
+--- attributes, those of each parameter by its name, and the wire layout
+--- when the payload packs.
 export type RemoteSpec = {
 	name: string,
 	kind: string,
@@ -3439,6 +3440,7 @@ export type RemoteSpec = {
 	params: { string },
 	defaults: { [string]: any },
 	attrs: { [string]: { any } },
+	param_attrs: { [string]: { [string]: { any } } }?,
 	wire: { any }?,
 }
 

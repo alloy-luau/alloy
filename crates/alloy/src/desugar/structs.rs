@@ -1369,7 +1369,7 @@ impl<'s> Desugar<'s> {
         }
     }
 
-    pub(crate) fn attr_table(&mut self, attrs: &[Attr]) -> String {
+    pub(crate) fn attr_table<'a>(&mut self, attrs: impl IntoIterator<Item = &'a Attr>) -> String {
         let mut parts = Vec::new();
 
         for a in attrs {

@@ -67,3 +67,29 @@ fn a_remote_answers_attributes_get() {
 
     assert_eq!(got, (3, "Greets.".to_string()));
 }
+
+/// A package ships its own copy of the runtime. `attach` kept a
+/// function's attributes in a table local to one copy, so a package
+/// that read `Attributes.get(f, tagged)` for a game function got nil.
+#[test]
+fn every_copy_of_the_runtime_reads_the_attributes_of_a_function() {
+    let lua = mlua::Lua::new();
+    let game: mlua::Table = lua.load(alloy::RUNTIME).eval().unwrap();
+    let package: mlua::Table = lua.load(alloy::RUNTIME).eval().unwrap();
+    lua.globals().set("game_alloy", game).unwrap();
+    lua.globals().set("package_alloy", package).unwrap();
+
+    let got: (bool, String) = lua
+        .load(
+            r#"
+            local tagged = package_alloy.attribute("tagged", { "function" }, {})
+            local hint = package_alloy.attribute("hint", { "function" }, { "text" })
+            local f = game_alloy.attach(function() end, { tagged = {}, hint = { "x" } })
+            return package_alloy.Attributes.get(f, tagged), package_alloy.Attributes.of(f).hint[1]
+            "#,
+        )
+        .eval()
+        .unwrap();
+
+    assert_eq!(got, (true, "x".to_string()));
+}

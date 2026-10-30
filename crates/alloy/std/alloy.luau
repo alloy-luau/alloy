@@ -3050,7 +3050,18 @@ end
 -- Attributes: declared metadata, readable at runtime.
 -- ---------------------------------------------------------------------------
 
-local attached = setmetatable({}, { __mode = "k" })
+-- The attributes of each function value. A package ships its own copy
+-- of this module, and a game function reaches the package's copy, so
+-- the table lives in `_G`, which every copy in one Luau VM reads. The
+-- keys are weak: a function that goes takes its entry with it. The Luau
+-- CLI makes `_G` read only; there each copy keeps its own table.
+local attached = rawget(_G, "__alloy_attached")
+if attached == nil then
+	attached = setmetatable({}, { __mode = "k" })
+	if not table.isfrozen(_G) then
+		_G.__alloy_attached = attached
+	end
+end
 
 -- The type argument is the shape of the arguments an attribute takes,
 -- `{ min: number, max: number }` for `range(min, max)`; the compiler

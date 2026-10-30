@@ -1819,6 +1819,14 @@ mod tests {
             docs::kind_for("`test_it` is a macro of `testing`; write `$testing.test_it`"),
             "MacroError"
         );
+        // An attribute on the wrong target names the targets it takes,
+        // and `remote` there reached the wire rule.
+        assert_eq!(
+            docs::kind_for(
+                "the attribute `marked` has no meaning on a struct; it goes on `remote`"
+            ),
+            "AttributeError"
+        );
     }
 
     #[test]

@@ -1471,6 +1471,12 @@ mod tests {
         let own = "struct V as\n    x: number\nend\nimpl V as\n    function to_string(self): string\n        return `v{self.x}`\n    end\nend\n@derive(Debug)\nstruct W as\n    x: number\nend\n";
         let out = compile(own).unwrap();
         assert!(!out.ship.contains("show_struct(\"V\""), "{}", out.ship);
+        // The impl's `to_string` is the printer in the default's place.
+        assert!(
+            out.ship.contains("V.__tostring = V.to_string"),
+            "{}",
+            out.ship
+        );
         // `@derive(Debug)` prints the way the default printer does, and
         // adds `debug`.
         assert!(

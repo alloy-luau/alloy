@@ -473,6 +473,25 @@ impl<'s> Desugar<'s> {
         // Operator traits.
         let mut tail = String::new();
 
+        // A `to_string` in any impl keeps the default printer off the
+        // struct (see `structs_with_to_string`), so the impl sets
+        // `__tostring` in its place. `impl Display` sets it below, and an
+        // enum keeps the printer its declaration writes. The check
+        // artifact types no printer, and there a private `to_string` is
+        // on the private table, so the line goes in the ship artifact.
+        if !self.options.check
+            && !foreign
+            && !self.enums.contains_key(&target_name)
+            && trait_name.as_deref() != Some("Display")
+            && i.methods.iter().any(|m| {
+                m.path
+                    .first()
+                    .is_some_and(|n| self.text_of(*n) == "to_string")
+            })
+        {
+            tail.push_str(&format!(" {target}.__tostring = {target}.to_string"));
+        }
+
         if let (Some(t), Some(trait_name)) = (i.trait_name, trait_name) {
             for (tr, method, meta) in OPERATOR_TRAITS {
                 if trait_name == *tr {

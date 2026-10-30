@@ -1071,8 +1071,12 @@ pub fn spec(
         "\nlocal __lest = require(\"@{}\")\n",
         LEST_ALIAS.0
     ));
-    // `$expect(v)` reaches the matchers through the runtime.
-    text.push_str("__alloy.set_expect(__lest.expect)\n");
+    // `$expect(v)` reaches the matchers through the runtime. A module
+    // with a test requires it; one with no test and no runtime use has
+    // no `__alloy`, and nothing there calls `$expect`.
+    if out.uses_std {
+        text.push_str("__alloy.set_expect(__lest.expect)\n");
+    }
 
     // The modules that scoped imports name load now, while lest still
     // resolves a require. The shim calls the spec's own `require`, with
@@ -2099,31 +2103,58 @@ end
         );
     }
 
+    /// A `@test namespace` registered its functions with no runtime
+    /// use, so the spec called `__alloy.set_expect` on a nil `__alloy`
+    /// and failed to load. A namespace with no public function has no
+    /// test, and its spec calls nothing of the runtime.
     #[test]
     fn a_spec_requires_the_runtime_it_calls() {
-        let src = "@test
+        let function = "@test
 local function only_assert()
     $assert(1 == 1)
 end
 ";
+        let namespace = "@test
+namespace Suite
+    public function only_assert()
+        assert(1 == 1)
+    end
+end
+";
+        for src in [function, namespace] {
+            let (text, _, count) = spec(
+                &Config::default(),
+                Path::new("/none"),
+                Path::new("src/m.aly"),
+                src,
+                None,
+                &[],
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(count, 1);
+            assert!(
+                text.contains(
+                    "local __alloy = require(\"./.modules/alloy\") __alloy.set_testing(true)"
+                ),
+                "{text}"
+            );
+            assert_eq!(text.matches("set_testing").count(), 1, "{text}");
+        }
+
+        let empty = namespace.replace("public", "private");
         let (text, _, count) = spec(
             &Config::default(),
             Path::new("/none"),
             Path::new("src/m.aly"),
-            src,
+            &empty,
             None,
             &[],
         )
         .unwrap()
         .unwrap();
-        assert_eq!(count, 1);
-        assert!(
-            text.contains(
-                "local __alloy = require(\"./.modules/alloy\") __alloy.set_testing(true)"
-            ),
-            "{text}"
-        );
-        assert_eq!(text.matches("set_testing").count(), 1, "{text}");
+        assert_eq!(count, 0);
+        assert!(!text.contains("__alloy"), "{text}");
     }
 
     /// `export default function tick` declares `tick`, as the plain

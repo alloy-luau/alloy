@@ -182,7 +182,9 @@ impl<'s> Formatter<'s> {
                 && !closes(bt);
         }
 
-        if self.generic.get(bi) == Some(&true) {
+        // The `<` of a generic function type stands where any type
+        // would, so the rules below space it: `= <A>`, but `(<A>`.
+        if self.generic.get(bi) == Some(&true) && !(bt == "<" && self.opens_function_type(bi)) {
             return false;
         }
 

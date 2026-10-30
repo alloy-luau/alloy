@@ -1,6 +1,6 @@
 //! Remote declarations and their wire layout.
 
-use alloy_syntax::ast::{Block, Expr, IndexKey, RemoteDecl};
+use alloy_syntax::ast::{Attr, Block, Expr, IndexKey, RemoteDecl};
 
 use super::types::{group_len, split_top_level};
 use super::*;
@@ -702,6 +702,31 @@ impl<'s> Desugar<'s> {
             })
             .collect();
         let attrs = self.attr_table(&r.attributes);
+        // Each parameter's own attributes, by its name, as `defaults`
+        // holds its default. The wire layout carries the widths.
+        let mut param_attrs = Vec::new();
+
+        for p in &r.params {
+            let own: Vec<&Attr> = p
+                .attributes
+                .iter()
+                .filter(|a| {
+                    !a.name
+                        .is_some_and(|n| WIRE_WIDTHS.contains(&self.text_of(n)))
+                })
+                .collect();
+
+            if !own.is_empty() {
+                let table = self.attr_table(own);
+                param_attrs.push(format!("{} = {table}", self.text_of(p.name)));
+            }
+        }
+
+        let param_attrs = match param_attrs.is_empty() {
+            true => String::new(),
+
+            false => format!(", param_attrs = {{ {} }}", param_attrs.join(", ")),
+        };
         let wire = self.wire_layout(r);
 
         // The layout writes `struct = Shot`, the table the runtime sets as
@@ -834,7 +859,7 @@ impl<'s> Desugar<'s> {
         let kind = if r.is_function { "function" } else { "event" };
         let std = self.std();
         let value = format!(
-            "{std}.remote({{ name = {}, kind = \"{kind}\", from_client = {}, from_server = {}, params = {{ {} }}, defaults = {{ {} }}, attrs = {attrs}{wire} }})",
+            "{std}.remote({{ name = {}, kind = \"{kind}\", from_client = {}, from_server = {}, params = {{ {} }}, defaults = {{ {} }}, attrs = {attrs}{param_attrs}{wire} }})",
             luau_string(&name),
             r.from_client,
             r.from_server,
@@ -1384,8 +1409,8 @@ impl<'s> Desugar<'s> {
             let ty =
                 p.ty.map(|t| self.copy_type_to_string(t).trim().to_string())
                     .unwrap_or_else(|| "any".to_string());
-            let optional = if p.default.is_some() && !ty.ends_with('?') {
-                format!("{ty}?")
+            let optional = if p.default.is_some() {
+                super::types::optional_type(&ty)
             } else {
                 ty.clone()
             };
@@ -2269,6 +2294,49 @@ remote Chain(n: Node) from client
 
     fn ship(src: &str) -> String {
         crate::compile(src).unwrap().ship
+    }
+
+    /// A parameter attribute lives in the remote's `spec`, by the
+    /// parameter's name, and its target and arguments are checked. On a
+    /// function it reports in every form, and no `@` reaches the Luau.
+    #[test]
+    fn a_parameter_attribute_reaches_the_spec_of_a_remote_alone() {
+        let decl = "attribute hint(text: string) on param\nattribute tag on remote\n";
+        let out = ship(&format!(
+            "{decl}remote Ping(@hint(\"z\") a: number, @u8 b: number) from client\n"
+        ));
+        assert!(
+            out.contains(
+                "attrs = {}, param_attrs = { a = { hint = { \"z\" } } }, wire = { \"f64\", \"u8\" }"
+            ),
+            "{out}"
+        );
+
+        let got = messages(&format!(
+            "{decl}remote Bad(@tag a: number, @hint(1) b: number) from client\n"
+        ));
+        assert_eq!(
+            got,
+            vec![
+                "the attribute `tag` has no meaning on a param; it goes on `remote`",
+                "the attribute `hint` takes string for `text`, number given",
+            ]
+        );
+
+        let functions = format!(
+            "{decl}export function f(@hint(\"x\") a: number) return a end\nlocal g = function(@hint(\"y\") a: number) return a end\nstruct S\n    v: number\nend\nimpl S\n    function m(self, @hint(\"z\") a: number) return a end\nend\nprint(g)\n"
+        );
+        let out = crate::compile(&functions).unwrap();
+        let got: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(
+            got,
+            vec![
+                "`@hint` applies to a remote parameter or a struct field, not a function parameter";
+                3
+            ]
+        );
+        assert!(!out.ship.contains("@hint"), "{}", out.ship);
+        assert!(!out.check.contains("@hint"), "{}", out.check);
     }
 
     /// A width reads the parameter's own attributes: a `@u8` inside a

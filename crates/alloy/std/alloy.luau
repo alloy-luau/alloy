@@ -3050,7 +3050,18 @@ end
 -- Attributes: declared metadata, readable at runtime.
 -- ---------------------------------------------------------------------------
 
-local attached = setmetatable({}, { __mode = "k" })
+-- The attributes of each function value. A package ships its own copy
+-- of this module, and a game function reaches the package's copy, so
+-- the table lives in `_G`, which every copy in one Luau VM reads. The
+-- keys are weak: a function that goes takes its entry with it. The Luau
+-- CLI makes `_G` read only; there each copy keeps its own table.
+local attached = rawget(_G, "__alloy_attached")
+if attached == nil then
+	attached = setmetatable({}, { __mode = "k" })
+	if not table.isfrozen(_G) then
+		_G.__alloy_attached = attached
+	end
+end
 
 -- The type argument is the shape of the arguments an attribute takes,
 -- `{ min: number, max: number }` for `range(min, max)`; the compiler
@@ -3419,7 +3430,8 @@ end
 --- for the next event's payload.
 --- The declaration the compiler writes for a remote: what it is called,
 --- which side may fire it, the parameter names, the defaults, the
---- attributes, and the wire layout when the payload packs.
+--- attributes, those of each parameter by its name, and the wire layout
+--- when the payload packs.
 export type RemoteSpec = {
 	name: string,
 	kind: string,
@@ -3428,6 +3440,7 @@ export type RemoteSpec = {
 	params: { string },
 	defaults: { [string]: any },
 	attrs: { [string]: { any } },
+	param_attrs: { [string]: { [string]: { any } } }?,
 	wire: { any }?,
 }
 
@@ -4066,7 +4079,8 @@ function alloy.remote(spec: any): Remote
 	-- `@unreliable` picks the event class that may drop or reorder.
 	local class = if is_function then "RemoteFunction" elseif attrs.unreliable then "UnreliableRemoteEvent" else "RemoteEvent"
 	local inst: any = nil
-	local remote = { spec = spec }
+	-- `__attrs` is where `Attributes.get` reads a value's own attributes.
+	local remote = { spec = spec, __attrs = { own = attrs } }
 	local limiter = attrs.ratelimit
 	-- `@validate(fn)`: the server runs it on the sender and the
 	-- arguments; a false drops the event, or answers a call with nil.

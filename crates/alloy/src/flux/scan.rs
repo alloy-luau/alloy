@@ -207,6 +207,25 @@ impl<'s> Scan<'s> {
             // condition is a declaration too, but not a statement: see
             // `cond_binding`.
             || matches!(self.t(i), "local" | "const")
+            // `run(function() a.x = 2 end)`: the body opens on the line
+            // of the header.
+            || (self.prev(i) == ")" && self.closes_params(i - 1))
+    }
+
+    /// Whether the `)` at `close` ends the parameter list of a function:
+    /// its `(` follows `function`, past the name path and the type
+    /// parameters, as in `function M.f<T>(x)`.
+    fn closes_params(&self, close: usize) -> bool {
+        let Some(mut j) = self.opener(close) else {
+            return false;
+        };
+
+        while j > 0 && (self.is_name(j - 1) || matches!(self.prev(j), "." | ":" | "<" | ">" | ","))
+        {
+            j -= 1;
+        }
+
+        self.at(j.wrapping_sub(1), "function")
     }
 
     /// Whether the `local` or `const` at `i` binds in a condition, as in
@@ -342,6 +361,28 @@ impl<'s> Scan<'s> {
 
                 if depth == 0 {
                     return Some(i);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// The bracket that opens the group closing at `close`.
+    pub(crate) fn opener(&self, close: usize) -> Option<usize> {
+        let mut depth = 0i32;
+
+        for j in (0..=close).rev() {
+            let text = self.t(j);
+
+            if matches!(text, ")" | "]" | "}") {
+                depth += 1;
+            } else if matches!(text, "(" | "[" | "{") || text.ends_with('(') || text.ends_with('[')
+            {
+                depth -= 1;
+
+                if depth == 0 {
+                    return Some(j);
                 }
             }
         }
@@ -490,7 +531,9 @@ impl<'s> Scan<'s> {
     /// The byte range of the whole line a token sits on, the newline
     /// included, when nothing else shares that line. A rewrite that
     /// deletes a statement takes the line with it; one that shares a
-    /// line takes the token alone.
+    /// line takes the token and one run of spaces beside it, so
+    /// `f() return end` becomes `f() end`, not `f()  end`. The spaces in
+    /// front of a token first on its line are its indent and stay.
     pub(crate) fn whole_line(&self, i: usize) -> (u32, u32) {
         let (start, end) = (self.start(i) as usize, self.end(i) as usize);
         let from = self.src[..start].rfind('\n').map_or(0, |at| at + 1);
@@ -498,10 +541,24 @@ impl<'s> Scan<'s> {
             .find('\n')
             .map_or(self.src.len(), |at| end + at + 1);
 
-        if self.src[from..start].trim().is_empty() && self.src[end..to].trim().is_empty() {
-            (from as u32, to as u32)
-        } else {
-            (start as u32, end as u32)
+        match (
+            self.src[from..start].trim().is_empty(),
+            self.src[end..to].trim().is_empty(),
+        ) {
+            (true, true) => (from as u32, to as u32),
+
+            (true, false) => {
+                let rest = &self.src[end..];
+                let spaces = rest.len() - rest.trim_start_matches([' ', '\t']).len();
+
+                (start as u32, (end + spaces) as u32)
+            }
+
+            (false, _) => {
+                let before = self.src[..start].trim_end_matches([' ', '\t']).len();
+
+                (before as u32, end as u32)
+            }
         }
     }
 
@@ -815,7 +872,9 @@ impl<'s> Scan<'s> {
     }
 
     /// The start of the expression that ends right before `k`, walked
-    /// back on one line to a token that cannot be inside it.
+    /// back on one line to a token that cannot be inside it. A bracket
+    /// group is one step: the `(` of `t.value()` is inside the call, so
+    /// the walk does not stop at it.
     pub(crate) fn expr_start_before(&self, k: usize) -> usize {
         let mut c = k;
 
@@ -823,7 +882,15 @@ impl<'s> Scan<'s> {
             && !COND_BEFORE.contains(&self.prev(c))
             && self.line_of(c - 1) == self.line_of(c)
         {
-            c -= 1;
+            c = match self.prev(c) {
+                ")" | "]" | "}" => match self.opener(c - 1) {
+                    Some(open) => open,
+
+                    None => break,
+                },
+
+                _ => c - 1,
+            };
         }
 
         c

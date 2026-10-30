@@ -1104,8 +1104,17 @@ impl<'s> Desugar<'s> {
             return;
         }
 
+        /*
+        `x ?? {}` asks for an empty one of the left's kind. The checker
+        types the if expression `{} | X`: a read of a key of `X` then
+        reports it missing from `{}`, and a loop over the union binds
+        an error type, which a type function such as the one behind
+        `try do` refuses. The check artifact casts to the left's type.
+        */
+        let empty =
+            self.options.check && matches!(rhs, Expr::Table { fields, .. } if fields.is_empty());
         let right = self.render_side(|d| d.expr_lazy(true, rhs));
-        self.generate(anchor, "(if ");
+        self.generate(anchor, if empty { "((if " } else { "(if " });
 
         match first {
             Some(side) => self.r.append(side),
@@ -1115,7 +1124,12 @@ impl<'s> Desugar<'s> {
 
         self.generate(anchor, " == nil then ");
         self.r.append(right);
-        self.generate(anchor, &format!(" else {left})"));
+
+        match empty {
+            true => self.generate(anchor, &format!(" else {left}) :: typeof(assert({left})))")),
+
+            false => self.generate(anchor, &format!(" else {left})")),
+        }
     }
 
     /*
@@ -1805,15 +1819,17 @@ impl<'s> Desugar<'s> {
             let (fs, fe) = self.field_bytes(field);
             let is_spread = matches!(field, TableField::Spread(_));
             let last = i + 1 == fields.len();
-            let text = one_line(&self.src[fs as usize..fe as usize]);
 
             // The gap before a field carries the comma and the newlines.
             self.copy(cursor, fs);
 
+            // The parts read the Luau each field renders to, not its
+            // source: `...(args ?? {})` holds no Luau operator.
             if let TableField::Spread(e) = field {
                 spread_seen = true;
+                let mark = self.r.out_len() as usize;
                 self.expr(e);
-                parts.push(format!("typeof({})", text.trim_start_matches("...").trim()));
+                parts.push(format!("typeof({})", one_line(&self.r.text()[mark..])));
             } else {
                 if spread_seen && let TableField::Positional(v) = field {
                     self.diagnose(
@@ -1828,8 +1844,9 @@ impl<'s> Desugar<'s> {
                 }
 
                 let children = field_children(field);
+                let mark = self.r.out_len() as usize;
                 self.stitch_between(fs, fe, &children);
-                group.push(text);
+                group.push(one_line(&self.r.text()[mark..]));
                 let next_is_spread = matches!(fields.get(i + 1), Some(TableField::Spread(_)));
 
                 if next_is_spread || last {

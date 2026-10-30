@@ -936,6 +936,13 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
 
     let mut prefix_len = 0u32;
 
+    // A spec calls `set_testing` and `set_expect` on the runtime, so a
+    // module with a test requires it when no line of its own does. A
+    // `@test` function and a `@test namespace` both register here.
+    if options.tests && !d.test_names.is_empty() {
+        d.uses_std = true;
+    }
+
     if d.uses_std && !options.definitions {
         let line = runtime_prologue(options);
         prefix_len = line.len() as u32;
@@ -2579,7 +2586,7 @@ fn function_needs_rewrite(body: &FunctionBody) -> bool {
         || body
             .params
             .iter()
-            .any(|p| p.default.is_some() || p.destructure.is_some())
+            .any(|p| p.default.is_some() || p.destructure.is_some() || !p.attributes.is_empty())
 }
 
 fn for_needs_rewrite(f: &GenericFor) -> bool {

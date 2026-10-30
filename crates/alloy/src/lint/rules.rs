@@ -1412,10 +1412,34 @@ pub fn run(src: &str, toks: &[Tok], chunk: &Chunk, options: &crate::EmitOptions)
             .copied()
             .filter(|i| {
                 let name = toks[*i as usize].text(src);
-
-                !toks
+                // `case Red` uses an imported `Color` with no word of its
+                // name: a bare variant in a pattern resolves through the
+                // enums in scope, and with the import gone the arm binds a
+                // new name. The pattern runs from `case` to `then` or `where`.
+                let variants = options
+                    .import_enums
                     .iter()
-                    .any(|t| t.start >= after && t.kind == TokKind::Ident && t.text(src) == name)
+                    .find(|(e, _)| e == name)
+                    .map_or(&[][..], |(_, vs)| vs.as_slice());
+                let in_pattern = |j: usize| {
+                    (0..j).rev().map(text).find(|w| {
+                        matches!(*w, "case" | "default" | "then" | "where" | "do" | "end")
+                    }) == Some("case")
+                };
+
+                !toks.iter().enumerate().any(|(j, t)| {
+                    let w = t.text(src);
+
+                    t.start >= after
+                        && t.kind == TokKind::Ident
+                        && (w == name
+                            || (variants.iter().any(|(v, _)| v == w)
+                                && !matches!(
+                                    j.checked_sub(1).map(text),
+                                    Some("." | ":" | "?." | "?:")
+                                )
+                                && in_pattern(j)))
+                })
             })
             .collect();
         let cuts = import_cuts(

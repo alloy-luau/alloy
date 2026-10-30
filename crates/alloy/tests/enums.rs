@@ -23,6 +23,20 @@ fn a_named_payload_reads_once_and_names_the_form() {
     assert!(out.ship.contains("Playing"), "{}", out.ship);
 }
 
+/// Two named slots are still one mistake. Each slot reported alone and
+/// named a variant of one type, `Hit(number)`, which drops a slot.
+#[test]
+fn named_payload_slots_read_once_with_every_type() {
+    let src = "enum Mob as\n    Hit(amount: number, by: Player)\n    Seen(Model, at: number)\nend\n\nreturn Mob\n";
+    assert_eq!(
+        messages(src),
+        vec![
+            "an enum payload is a type, not a name; write `Hit(number, Player)`",
+            "an enum payload is a type, not a name; write `Seen(Model, number)`",
+        ]
+    );
+}
+
 /// `Grunt { hp: number }` is the struct habit. It read "expected a
 /// name, found `{`" and a cascade after it. It now reads once, names the
 /// form, and the parse goes on with the types as the payload.

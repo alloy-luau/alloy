@@ -1793,6 +1793,10 @@ impl<'s> Desugar<'s> {
                     if i.trait_name.is_some() {
                         self.trait_impl_targets.insert(target.clone());
                     } else {
+                        // A private method goes in the alias too: a generic
+                        // struct has no private view, so `self:inner()` in
+                        // the impl reads this alias. The private_access lint
+                        // reports a call from outside, as for a private field.
                         let methods: Vec<&alloy_syntax::ast::Function> = i
                             .methods
                             .iter()
@@ -1801,7 +1805,6 @@ impl<'s> Desugar<'s> {
                                     .params
                                     .first()
                                     .is_some_and(|p| self.text_of(p.name) == "self")
-                                    && !m.visibility.is_some_and(|v| self.text_of(v) == "private")
                             })
                             .collect();
                         let sigs: Vec<MethodSig> = methods

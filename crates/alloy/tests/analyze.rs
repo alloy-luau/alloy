@@ -442,6 +442,16 @@ fn a_field_typed_as_a_function_and_a_table_checks_clean() {
     );
 }
 
+/// The alias of a generic struct left out its private methods, so
+/// `self:inner()` in the impl found no key `inner` on `Box<T>`.
+#[test]
+fn a_private_method_of_a_generic_struct_reads_through_self() {
+    analyze(
+        "export struct Box<T>\n    value: T\nend\n\nimpl Box<T>\n    function get(self) -> T\n        return self:inner()\n    end\n\n    private function inner(self) -> T\n        return self.value\n    end\nend\n\nconst b = new Box { value = 1 }\nprint(b:get())\n",
+        "generic_private",
+    );
+}
+
 /// `in` on a value that is no container compiled clean and threw inside
 /// the std at run time.
 #[test]

@@ -4066,7 +4066,8 @@ function alloy.remote(spec: any): Remote
 	-- `@unreliable` picks the event class that may drop or reorder.
 	local class = if is_function then "RemoteFunction" elseif attrs.unreliable then "UnreliableRemoteEvent" else "RemoteEvent"
 	local inst: any = nil
-	local remote = { spec = spec }
+	-- `__attrs` is where `Attributes.get` reads a value's own attributes.
+	local remote = { spec = spec, __attrs = { own = attrs } }
 	local limiter = attrs.ratelimit
 	-- `@validate(fn)`: the server runs it on the sender and the
 	-- arguments; a false drops the event, or answers a call with nil.

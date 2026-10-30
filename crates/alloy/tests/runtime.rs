@@ -44,3 +44,26 @@ fn a_new_collection_takes_the_values_it_is_given() {
 
     assert_eq!(got, (2, Some(1), 2, Some(3)), "{}", out.ship);
 }
+
+/// A remote keeps its attributes in `spec.attrs`, and `Attributes.get`
+/// reads `__attrs`, so `Attributes.get(Greet, command)` gave nil.
+#[test]
+fn a_remote_answers_attributes_get() {
+    let lua = mlua::Lua::new();
+    let runtime: mlua::Table = lua.load(alloy::RUNTIME).eval().unwrap();
+    lua.globals().set("alloy", runtime).unwrap();
+
+    let got: (i64, String) = lua
+        .load(
+            r#"
+            local command = alloy.attribute("command", { "remote" }, { "level", "help" })
+            local Greet = alloy.remote({ name = "Greet", kind = "function", from_client = true, from_server = false, params = { "name" }, defaults = {}, attrs = { command = { 3, "Greets." } } })
+            local got = alloy.Attributes.get(Greet, command)
+            return got.level, got.help
+            "#,
+        )
+        .eval()
+        .unwrap();
+
+    assert_eq!(got, (3, "Greets.".to_string()));
+}

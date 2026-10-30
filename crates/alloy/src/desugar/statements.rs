@@ -3361,18 +3361,28 @@ impl<'s> Desugar<'s> {
             }
 
             if let Some(t) = p.ty {
+                let ts = self.byte_start(t);
+                let source = self.text_of(t).trim_end();
+                let grouped = p.default.is_some() && super::types::groups_before_optional(source);
+                let ends_optional = source.ends_with('?');
+                self.copy(cursor, ts);
+
+                if grouped {
+                    self.generate(ts, "(");
+                }
+
                 if bounds.is_empty() {
-                    self.copy(cursor, self.byte_end(t));
+                    self.copy(ts, self.byte_end(t));
                 } else {
-                    let ts = self.byte_start(t);
-                    self.copy(cursor, ts);
                     let text = self.copy_type_to_string(t);
                     self.generate(ts, &apply_bounds(&text, &bounds));
                 }
 
                 cursor = self.byte_end(t);
 
-                if p.default.is_some() && !self.text_of(t).trim_end().ends_with('?') {
+                if grouped {
+                    self.generate(cursor, ")?");
+                } else if p.default.is_some() && !ends_optional {
                     self.generate(cursor, "?");
                 }
             }

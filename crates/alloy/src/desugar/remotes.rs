@@ -1384,8 +1384,8 @@ impl<'s> Desugar<'s> {
             let ty =
                 p.ty.map(|t| self.copy_type_to_string(t).trim().to_string())
                     .unwrap_or_else(|| "any".to_string());
-            let optional = if p.default.is_some() && !ty.ends_with('?') {
-                format!("{ty}?")
+            let optional = if p.default.is_some() {
+                super::types::optional_type(&ty)
             } else {
                 ty.clone()
             };

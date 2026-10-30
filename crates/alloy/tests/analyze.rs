@@ -452,6 +452,17 @@ fn a_private_method_of_a_generic_struct_reads_through_self() {
     );
 }
 
+/// A field or a parameter of function type with a default wrote
+/// `() -> number?`, a function that returns `number?`, so a call or a
+/// construction that left it out reported it missing.
+#[test]
+fn a_function_type_with_a_default_may_be_left_out() {
+    analyze(
+        "export struct S\n    value: number\n    clock: () -> number = os.clock\nend\n\nimpl S\n    function at(self, now: () -> number = os.clock) -> number\n        return now() + self.clock()\n    end\nend\n\nlocal function tick(now: () -> number = os.clock) -> number\n    return now()\nend\n\nconst s = new S { value = 1 }\nprint(s:at(), tick())\n",
+        "optional_function",
+    );
+}
+
 /// `in` on a value that is no container compiled clean and threw inside
 /// the std at run time.
 #[test]

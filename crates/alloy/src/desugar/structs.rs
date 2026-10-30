@@ -15,7 +15,7 @@ use super::enums::same_type_text;
 use super::modules::type_arguments;
 use super::remotes::WIRE_WIDTHS;
 use super::statements::{Piece, is_string_index_table};
-use super::types::{generic_head, names_other_args, strip_bounds};
+use super::types::{generic_head, names_other_args, optional_type, strip_bounds};
 use super::*;
 
 /// Datatypes the definitions declare as a type alias, not a class. A
@@ -722,12 +722,8 @@ impl<'s> Desugar<'s> {
                     continue;
                 }
 
-                let opt = if *default && !ty.trim_end().ends_with('?') {
-                    "?"
-                } else {
-                    ""
-                };
-                params.push(format!("{}: {ty}{opt}", self.text_of(*pname)));
+                let ty = if *default { optional_type(&ty) } else { ty };
+                params.push(format!("{}: {ty}", self.text_of(*pname)));
             }
 
             let ret = m
@@ -881,15 +877,14 @@ impl<'s> Desugar<'s> {
                 .modifier
                 .map(|m| format!("{} ", self.text_of(m)))
                 .unwrap_or_default();
-            let opt = if f.default.is_some() && !ty.trim_end().ends_with('?') {
-                "?"
-            } else {
-                ""
-            };
             field_types.push(format!("{modifier}{fname}: {ty}"));
             // The constructor fills defaults into this table, so a
             // `read` field is plain here.
-            param_types.push(format!("{fname}: {ty}{opt}"));
+            param_types.push(match f.default {
+                Some(_) => format!("{fname}: {}", optional_type(&ty)),
+
+                None => format!("{fname}: {ty}"),
+            });
 
             if f.visibility.is_some_and(|v| self.text_of(v) == "private") {
                 private_types.push(format!("{modifier}{fname}: {ty}"));
@@ -3030,12 +3025,12 @@ impl<'s> Desugar<'s> {
         for f in fields.iter().filter(|f| !f.private) {
             let ty = self.copy_type_to_string(f.ty);
             let ty = ty.trim();
-            let opt = if optional.is_empty() || ty.ends_with('?') {
-                ""
+            let ty = if optional.is_empty() {
+                ty.to_string()
             } else {
-                optional
+                optional_type(ty)
             };
-            parts.push(format!("{prefix}{}: {ty}{opt}", f.name));
+            parts.push(format!("{prefix}{}: {ty}", f.name));
         }
 
         Some(format!("{{ {} }}", parts.join(", ")))

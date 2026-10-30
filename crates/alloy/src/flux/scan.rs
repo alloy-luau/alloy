@@ -207,6 +207,25 @@ impl<'s> Scan<'s> {
             // condition is a declaration too, but not a statement: see
             // `cond_binding`.
             || matches!(self.t(i), "local" | "const")
+            // `run(function() a.x = 2 end)`: the body opens on the line
+            // of the header.
+            || (self.prev(i) == ")" && self.closes_params(i - 1))
+    }
+
+    /// Whether the `)` at `close` ends the parameter list of a function:
+    /// its `(` follows `function`, past the name path and the type
+    /// parameters, as in `function M.f<T>(x)`.
+    fn closes_params(&self, close: usize) -> bool {
+        let Some(mut j) = self.opener(close) else {
+            return false;
+        };
+
+        while j > 0 && (self.is_name(j - 1) || matches!(self.prev(j), "." | ":" | "<" | ">" | ","))
+        {
+            j -= 1;
+        }
+
+        self.at(j.wrapping_sub(1), "function")
     }
 
     /// Whether the `local` or `const` at `i` binds in a condition, as in
@@ -342,6 +361,28 @@ impl<'s> Scan<'s> {
 
                 if depth == 0 {
                     return Some(i);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// The bracket that opens the group closing at `close`.
+    pub(crate) fn opener(&self, close: usize) -> Option<usize> {
+        let mut depth = 0i32;
+
+        for j in (0..=close).rev() {
+            let text = self.t(j);
+
+            if matches!(text, ")" | "]" | "}") {
+                depth += 1;
+            } else if matches!(text, "(" | "[" | "{") || text.ends_with('(') || text.ends_with('[')
+            {
+                depth -= 1;
+
+                if depth == 0 {
+                    return Some(j);
                 }
             }
         }

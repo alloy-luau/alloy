@@ -1799,6 +1799,29 @@ mod tests {
         assert_eq!(count(&src("const"), "const_mutation"), 1);
     }
 
+    /// `run(function() a.x = 2 end)`: the write opens the body on the
+    /// line of the header, after a `)`, which ended no statement. Both
+    /// lints missed it; on two lines they saw it.
+    #[test]
+    fn a_write_in_a_one_line_function_is_a_statement() {
+        let count = |src: &str, lint: &str| -> usize {
+            crate::compile(src)
+                .unwrap()
+                .lints
+                .iter()
+                .filter(|l| l.name == lint)
+                .count()
+        };
+        let src = |word: &str| -> String {
+            format!(
+                "local function run(f: () -> ())\n    f()\nend\n{word} a = {{ x = 1 }}\nrun(function() a.x = 2 end)\nprint(a)\n"
+            )
+        };
+
+        assert_eq!(count(&src("local"), "prefer_const"), 0);
+        assert_eq!(count(&src("const"), "const_mutation"), 1);
+    }
+
     /// `prefer_const` and `const_mutation` never disagree: once every
     /// `prefer_const` fix is in, no `const_mutation` fires.
     /// A macro that assigns its parameter assigns the caller's name:

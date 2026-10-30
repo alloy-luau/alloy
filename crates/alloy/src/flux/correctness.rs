@@ -1775,6 +1775,30 @@ mod tests {
         assert_eq!(lines, [3]);
     }
 
+    /// A string with two holes, `{a}{b}`, ended the scope of the local
+    /// that held it: the `}{` read as the close of the function. The
+    /// field write below reached no binding, so `prefer_const` asked
+    /// for a `const`, and `const_mutation` missed the write into one.
+    #[test]
+    fn a_string_with_two_holes_keeps_the_scope_around_it() {
+        let count = |src: &str, lint: &str| -> usize {
+            crate::compile(src)
+                .unwrap()
+                .lints
+                .iter()
+                .filter(|l| l.name == lint)
+                .count()
+        };
+        let src = |word: &str| -> String {
+            format!(
+                "local function make(cx: number)\n    {word} t = {{ n = `{{cx}}{{cx}}` }}\n    t.n = 'x'\n    return t\nend\nprint(make(1))\n"
+            )
+        };
+
+        assert_eq!(count(&src("local"), "prefer_const"), 0);
+        assert_eq!(count(&src("const"), "const_mutation"), 1);
+    }
+
     /// `prefer_const` and `const_mutation` never disagree: once every
     /// `prefer_const` fix is in, no `const_mutation` fires.
     /// A macro that assigns its parameter assigns the caller's name:

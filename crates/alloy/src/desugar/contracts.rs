@@ -810,6 +810,30 @@ pub fn is_string_union(ty: &str) -> bool {
             .all(|p| matches!(p.trim().chars().next(), Some('"' | '\'')))
 }
 
+/// A parameter type with its type aliases read through: `p: P` under
+/// `type P = 'x' | 'y'` takes the two strings, and `ps: P[]` a list of
+/// them. `value` gives what an alias names. The count stops a cycle.
+pub(crate) fn through_aliases<'a>(ty: &str, value: impl Fn(&str) -> Option<&'a str>) -> String {
+    let mut ty = ty.trim().to_string();
+
+    for _ in 0..8 {
+        let Some(v) = value(&element_type(&ty)) else {
+            break;
+        };
+        // `type P =` on its own line, then `| 'x'` on each line below.
+        let v = v.split_whitespace().collect::<Vec<_>>().join(" ");
+        let v = v.trim_start_matches('|').trim();
+
+        ty = match is_list_type(&ty) {
+            true => format!("({v})[]"),
+
+            false => v.to_string(),
+        };
+    }
+
+    ty
+}
+
 /// Reports if a type is a list: `T[]`, `Array<T>`, or `{ T }`.
 pub(crate) fn is_list_type(t: &str) -> bool {
     let t = t.trim();

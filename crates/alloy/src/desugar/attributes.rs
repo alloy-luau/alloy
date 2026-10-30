@@ -9,7 +9,7 @@ use alloy_syntax::ast::{
 
 use crate::roblox_classes::{DATATYPES, INSTANCE_CLASSES};
 
-use super::contracts::{Member, Owner, is_list_type};
+use super::contracts::{Member, Owner, is_list_type, through_aliases};
 use super::types::{literal_kind, literal_type, strip_bounds};
 use super::*;
 
@@ -1048,6 +1048,7 @@ impl<'s> Desugar<'s> {
             let (Some(arg), Some(want)) = (arg, ty.as_deref()) else {
                 continue;
             };
+            let want = &through_aliases(want, |n| self.alias_values.get(n).map(String::as_str));
 
             // A list parameter carries entries, and the element type
             // says what each one takes.

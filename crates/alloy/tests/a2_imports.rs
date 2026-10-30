@@ -718,6 +718,32 @@ fn a_dotted_attribute_is_checked_against_its_declaration() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An imported attribute whose parameter type is an alias the module
+/// keeps to itself: `type P = 'a' | 'b'`. The importer cannot see `P`,
+/// so every string, `@tag('a')` too, was a mismatch.
+#[test]
+fn an_imported_attribute_reads_its_module_aliases() {
+    let dir = scratch("aliased-attribute");
+    std::fs::write(
+        dir.join("tags.aly"),
+        "type P = 'a' | 'b'\nexport attribute tag(p: P) on function\n",
+    )
+    .unwrap();
+    let main = dir.join("main.aly");
+    let source = "import { tag } from \"./tags\"\n@tag('a')\nfunction f()\nend\n@tag('z')\nfunction g()\nend\nprint(f, g)\n";
+    std::fs::write(&main, source).unwrap();
+    let options = alloy::EmitOptions::default().imports(source, &main, &[]);
+    let out = alloy::compile_with(source, &options).unwrap();
+    let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+    assert_eq!(
+        messages,
+        ["the attribute `tag` takes 'a' | 'b' for `p`, `'z'` given"]
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `@M.Ns.tag` reads a public attribute of a namespace the module
 /// exports, with its targets and defaults. A path the index knows to be
 /// wrong reports; a name the module sends on from another module is

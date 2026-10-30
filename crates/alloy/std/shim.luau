@@ -1316,6 +1316,30 @@ function methods.BindToClose(self, f)
 	self.__props.__close = f
 end
 
+-- RunService, and the `@cfg` checks that read it. One DataModel holds
+-- both sides here, as the old Play Solo did, so the server and the
+-- client both answer true and the code of each side runs. A test picks
+-- one side with `RunService.IsClient = function() return false end`.
+function methods.IsServer(self)
+	return true
+end
+
+function methods.IsClient(self)
+	return true
+end
+
+function methods.IsRunning(self)
+	return true
+end
+
+function methods.IsStudio(self)
+	return false
+end
+
+function methods.IsEdit(self)
+	return false
+end
+
 -- A BindableEvent: `Fire` runs the handlers of its `Event` at once, as
 -- the engine does in the serial phase. The reply of a message rides one.
 function methods.Fire(self, ...)

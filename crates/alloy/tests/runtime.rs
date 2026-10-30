@@ -93,3 +93,23 @@ fn every_copy_of_the_runtime_reads_the_attributes_of_a_function() {
 
     assert_eq!(got, (true, "x".to_string()));
 }
+
+/// The runtime's `@cfg(server)` and `@cfg(client)` call RunService, and
+/// a module that branches on a side does too. The shim's RunService had
+/// no `IsServer` or `IsClient`, so each call raised in a spec.
+#[test]
+fn the_shim_answers_each_side_check_the_runtime_makes() {
+    let lua = mlua::Lua::new();
+    lua.load(alloy::SHIM).exec().unwrap();
+    let runtime: mlua::Table = lua.load(alloy::RUNTIME).eval().unwrap();
+    lua.globals().set("alloy", runtime).unwrap();
+
+    let got: (bool, bool, bool, bool, bool) = lua
+        .load(
+            "local c = alloy.cfg return c.server(), c.client(), c.running(), c.studio(), c.edit()",
+        )
+        .eval()
+        .unwrap();
+
+    assert_eq!(got, (true, true, true, false, false));
+}

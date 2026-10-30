@@ -856,7 +856,9 @@ impl<'s> Scan<'s> {
     }
 
     /// The start of the expression that ends right before `k`, walked
-    /// back on one line to a token that cannot be inside it.
+    /// back on one line to a token that cannot be inside it. A bracket
+    /// group is one step: the `(` of `t.value()` is inside the call, so
+    /// the walk does not stop at it.
     pub(crate) fn expr_start_before(&self, k: usize) -> usize {
         let mut c = k;
 
@@ -864,7 +866,15 @@ impl<'s> Scan<'s> {
             && !COND_BEFORE.contains(&self.prev(c))
             && self.line_of(c - 1) == self.line_of(c)
         {
-            c -= 1;
+            c = match self.prev(c) {
+                ")" | "]" | "}" => match self.opener(c - 1) {
+                    Some(open) => open,
+
+                    None => break,
+                },
+
+                _ => c - 1,
+            };
         }
 
         c

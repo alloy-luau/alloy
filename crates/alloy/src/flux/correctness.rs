@@ -1495,6 +1495,22 @@ mod tests {
         assert_eq!(names(plain), vec!["bool_comparison"]);
     }
 
+    /// A call on the left: the walk back stopped at the `(` of the call
+    /// and quoted "`) == true` is `)`".
+    #[test]
+    fn bool_comparison_quotes_a_call_whole() {
+        let got = lints("local ok = t.value(a, b) == true\n");
+
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(
+            got[0]
+                .message
+                .starts_with("`t.value(a, b) == true` is `t.value(a, b)`"),
+            "{}",
+            got[0].message
+        );
+    }
+
     /// The receiver decides which struct a member belongs to: a field
     /// named `coins` on an unrelated record is not the private `coins`
     /// of a struct nearby.

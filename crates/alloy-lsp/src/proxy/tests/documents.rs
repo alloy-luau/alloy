@@ -36,6 +36,42 @@ pub(crate) fn the_mirror_config_names_the_runtime_and_the_mounts() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+/// A package inside the game names the game's runtime. Its own copy is
+/// a second module to Luau, and its `Result` met the game's only by a
+/// walk of the whole type, which hit the checker's limit.
+#[test]
+fn a_package_names_the_runtime_of_the_game() {
+    let toml = "[build]\nin = \"src\"\nout = \"build\"\n";
+    let dir = alias_root(
+        "runtime",
+        &[
+            ("alloy.toml", toml),
+            ("src/main.aly", "print(1)\n"),
+            ("packages/.ember/lib/alloy.toml", toml),
+            ("packages/.ember/lib/src/init.aly", "print(2)\n"),
+        ],
+    );
+    let st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        ..State::default()
+    };
+    let alias = |rel: &str| {
+        let text = std::fs::read_to_string(st.mirror.join(rel).join(".luaurc")).expect(".luaurc");
+        let json: Value = serde_json::from_str(&text).expect("json");
+
+        json["aliases"]["alloy"].clone()
+    };
+
+    st.options_for(&path_to_uri(&dir.join("packages/.ember/lib/src/init.aly")));
+    st.options_for(&path_to_uri(&dir.join("src/main.aly")));
+
+    assert_eq!(alias("packages/.ember/lib"), "../../../build/alloy");
+    assert_eq!(alias(""), "./build/alloy");
+    assert!(st.mirror.join("build/alloy.luau").is_file());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
 /// Luau reads `src/init.luau` as the module `src`, so a relative
 /// require in it names a file beside `src`. The shadow of an `init.aly`
 /// names a file of its own folder as `@self/...`, which holds under a

@@ -715,6 +715,13 @@ fn run_inner(
     // the depth holds for the whole loop.
     let depth = deps.stack.len();
 
+    if depth == 1 {
+        deps.top = (tree.clone(), absolute(&out.join("alloy")));
+    }
+
+    let (top_tree, runtime) = deps.top.clone();
+    let top_root = deps.stack[0].clone();
+
     /*
     A file's options and compile read the sources and the tables above,
     and nothing that the compile of another file writes, so they run on
@@ -760,6 +767,26 @@ fn run_inner(
             // mirror's configuration and keeps the file path.
             None if keep && depth == 1 => {
                 ("@alloy".to_string(), Some(ship_by_tree.unwrap_or(by_file)))
+            }
+
+            // Two copies of the runtime are two modules to Luau, so a
+            // package's `Result` meets the game's only by a walk of the
+            // whole type, and the walk hits the checker's limit. The
+            // check artifact of a dependency names the runtime of the
+            // project the run started in: by its place when that tree
+            // holds the file, as a package under `packages/` is, else by
+            // the path, which the mirror keeps.
+            None if keep => {
+                let file = absolute(&out).join(crate::project::placed_output(&rel_out));
+                let from_root = relative(&top_root, &file);
+                let from_root = Path::new(&from_root);
+                let check = crate::project::std_require_for(
+                    &top_tree,
+                    from_root.strip_prefix(".").unwrap_or(from_root),
+                )
+                .unwrap_or_else(|| relative_require(&module_base(&file), &runtime));
+
+                (check, Some(ship_by_tree.unwrap_or(by_file)))
             }
 
             None => (by_file, ship_by_tree),
@@ -1327,6 +1354,10 @@ pub struct Deps {
     /// One line per project a build wrote, for the summary: the
     /// counts of its own `out`, which the project's counts leave out.
     notes: Vec<String>,
+    /// The tree of the project the run started in, and its runtime,
+    /// absolute and without the extension. Every check artifact
+    /// requires that one runtime.
+    top: (crate::project::Tree, PathBuf),
 }
 
 /// One project a build depends on: its `[build] in` and `out`,

@@ -1838,6 +1838,22 @@ mod tests {
         assert_eq!(count(&src("const"), "const_mutation"), 1);
     }
 
+    /// A bare `return` that shares its line goes with the spaces in front
+    /// of it; one first on its line keeps the indent.
+    #[test]
+    fn a_return_on_a_shared_line_takes_one_run_of_spaces() {
+        let head = "local function run(f: () -> ())\n    f()\nend\n";
+
+        assert_eq!(
+            fixed(&format!("{head}run(function() return end)\n")),
+            format!("{head}run(function() end)\n")
+        );
+        assert_eq!(
+            fixed("local function f()\n    return end\nf()\n"),
+            "local function f()\n    end\nf()\n"
+        );
+    }
+
     /// `prefer_const` and `const_mutation` never disagree: once every
     /// `prefer_const` fix is in, no `const_mutation` fires.
     /// A macro that assigns its parameter assigns the caller's name:

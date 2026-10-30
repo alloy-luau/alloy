@@ -531,7 +531,9 @@ impl<'s> Scan<'s> {
     /// The byte range of the whole line a token sits on, the newline
     /// included, when nothing else shares that line. A rewrite that
     /// deletes a statement takes the line with it; one that shares a
-    /// line takes the token alone.
+    /// line takes the token and one run of spaces beside it, so
+    /// `f() return end` becomes `f() end`, not `f()  end`. The spaces in
+    /// front of a token first on its line are its indent and stay.
     pub(crate) fn whole_line(&self, i: usize) -> (u32, u32) {
         let (start, end) = (self.start(i) as usize, self.end(i) as usize);
         let from = self.src[..start].rfind('\n').map_or(0, |at| at + 1);
@@ -539,10 +541,24 @@ impl<'s> Scan<'s> {
             .find('\n')
             .map_or(self.src.len(), |at| end + at + 1);
 
-        if self.src[from..start].trim().is_empty() && self.src[end..to].trim().is_empty() {
-            (from as u32, to as u32)
-        } else {
-            (start as u32, end as u32)
+        match (
+            self.src[from..start].trim().is_empty(),
+            self.src[end..to].trim().is_empty(),
+        ) {
+            (true, true) => (from as u32, to as u32),
+
+            (true, false) => {
+                let rest = &self.src[end..];
+                let spaces = rest.len() - rest.trim_start_matches([' ', '\t']).len();
+
+                (start as u32, (end + spaces) as u32)
+            }
+
+            (false, _) => {
+                let before = self.src[..start].trim_end_matches([' ', '\t']).len();
+
+                (before as u32, end as u32)
+            }
         }
     }
 

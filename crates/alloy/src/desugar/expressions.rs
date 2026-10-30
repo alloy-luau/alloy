@@ -1805,15 +1805,17 @@ impl<'s> Desugar<'s> {
             let (fs, fe) = self.field_bytes(field);
             let is_spread = matches!(field, TableField::Spread(_));
             let last = i + 1 == fields.len();
-            let text = one_line(&self.src[fs as usize..fe as usize]);
 
             // The gap before a field carries the comma and the newlines.
             self.copy(cursor, fs);
 
+            // The parts read the Luau each field renders to, not its
+            // source: `...(args ?? {})` holds no Luau operator.
             if let TableField::Spread(e) = field {
                 spread_seen = true;
+                let mark = self.r.out_len() as usize;
                 self.expr(e);
-                parts.push(format!("typeof({})", text.trim_start_matches("...").trim()));
+                parts.push(format!("typeof({})", one_line(&self.r.text()[mark..])));
             } else {
                 if spread_seen && let TableField::Positional(v) = field {
                     self.diagnose(
@@ -1828,8 +1830,9 @@ impl<'s> Desugar<'s> {
                 }
 
                 let children = field_children(field);
+                let mark = self.r.out_len() as usize;
                 self.stitch_between(fs, fe, &children);
-                group.push(text);
+                group.push(one_line(&self.r.text()[mark..]));
                 let next_is_spread = matches!(fields.get(i + 1), Some(TableField::Spread(_)));
 
                 if next_is_spread || last {

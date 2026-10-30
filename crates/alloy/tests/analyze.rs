@@ -463,6 +463,16 @@ fn a_function_type_with_a_default_may_be_left_out() {
     );
 }
 
+/// The parts of a spread's type copied the source, so `...(a ?? {})`
+/// put `??` into the check artifact, a syntax error there.
+#[test]
+fn a_spread_of_a_coalesce_analyzes() {
+    analyze(
+        "local function f(args: { [string]: number }?) -> { [string]: number }\n    return { ...(args ?? {}), count = args?.n ?? 1 }\nend\n\nprint(f(nil))\n",
+        "spread_coalesce",
+    );
+}
+
 /// `in` on a value that is no container compiled clean and threw inside
 /// the std at run time.
 #[test]

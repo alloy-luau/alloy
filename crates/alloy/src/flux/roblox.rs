@@ -176,28 +176,6 @@ impl<'s> Scan<'s> {
         c
     }
 
-    /// The bracket that opens the group closing at `close`.
-    fn opener(&self, close: usize) -> Option<usize> {
-        let mut depth = 0i32;
-
-        for j in (0..=close).rev() {
-            let text = self.t(j);
-
-            if matches!(text, ")" | "]" | "}") {
-                depth += 1;
-            } else if matches!(text, "(" | "[" | "{") || text.ends_with('(') || text.ends_with('[')
-            {
-                depth -= 1;
-
-                if depth == 0 {
-                    return Some(j);
-                }
-            }
-        }
-
-        None
-    }
-
     /// Whether the tokens `a..b` read a Roblox instance, or an event on
     /// one when `event` is set. Three shapes say yes: a member that
     /// starts with a capital, since every std member is snake case; one

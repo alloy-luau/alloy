@@ -547,6 +547,80 @@ fn flux_types_a_mounted_dependency_before_a_build() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// A dependency's `Result` is the importer's `Result`. Each project
+/// required its own copy of the runtime, which is a second module to
+/// Luau, and a `Result<nil, string>` return around a call into the
+/// dependency hit the checker's limit. The cases: a package as `embr
+/// install` lays it out, that package under a mount, and a project
+/// beside the root.
+#[test]
+fn a_dependency_result_is_the_result_of_the_importer() {
+    const LIB: &str = "export function save(key: string): Result<nil, string>\n    if key == \"\" then\n        return Err(\"empty\")\n    end\n\n    return Ok(nil)\nend\n";
+    const USE: &str = "\n\nfunction store(key: string): Result<nil, string>\n    return save(key)\nend\n\nprint(store(\"a\"))\n";
+
+    let dir = workspace("result", &["app", "lib"]);
+    let root = dir.join("app");
+    let package = root.join("packages/luau/.ember/lib");
+    fs::create_dir_all(package.join("src")).unwrap();
+    fs::write(package.join("alloy.toml"), TOML).unwrap();
+    fs::write(package.join("src/init.aly"), LIB).unwrap();
+    fs::write(
+        root.join("packages/luau/lib.luau"),
+        "return require(\"./.ember/lib/build\")\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("packages/luau/lib.aly"),
+        "export { save } from \"./.ember/lib/src\"\n",
+    )
+    .unwrap();
+    fs::write(dir.join("lib/src/util.aly"), LIB).unwrap();
+    fs::create_dir_all(root.join("src/server")).unwrap();
+    let mount = "\n[mount]\nserver = [\"src/server\", \"@game/ServerScriptService/Server\"]\npackages = [\"packages/luau\", \"@game/ReplicatedStorage/Packages\"]\n";
+
+    for (case, toml, import) in [
+        ("installed", "", "@packages/lib"),
+        ("mounted", mount, "@packages/lib"),
+        ("beside", "", "../../../lib/src/util"),
+    ] {
+        fs::write(root.join("alloy.toml"), format!("{TOML}{toml}")).unwrap();
+        fs::write(
+            root.join(".luaurc"),
+            "{ \"aliases\": { \"packages\": \"./packages/luau\" } }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/server/main.server.aly"),
+            format!("import {{ save }} from '{import}'{USE}"),
+        )
+        .unwrap();
+
+        let config = Config::load(&root.join("alloy.toml")).unwrap();
+        let report = alloy::build::flux_project(&root, &config).unwrap();
+        assert!(report.is_clean(), "{case}: {:?}", messages(&report));
+
+        if alloy::typecheck::find_luau_lsp(&config.flux).is_none() {
+            eprintln!("skipped: luau-lsp is not installed");
+
+            return;
+        }
+
+        let analysis =
+            alloy::typecheck::analyze(&root, &config, &report.checks, &report.dep_artifacts)
+                .expect("the type check runs");
+        let errors: Vec<String> = analysis
+            .diagnostics
+            .iter()
+            .filter(|d| d.is_error())
+            .map(|d| format!("{} {}", d.line, d.message))
+            .collect();
+
+        assert_eq!(errors, Vec::<String>::new(), "{case}");
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn one_file_follows_the_same_route() {
     let dir = workspace("one", &["main", "shared"]);

@@ -168,6 +168,9 @@ const KIND_RULES: &[(&[&str], &str)] = &[
         ],
         "ImportError",
     ),
+    // An attribute on a target it does not take. The report names the
+    // targets, and `remote`, `test` or `struct` would reach a rule below.
+    (&["has no meaning on"], "AttributeError"),
     // A member of a namespace reached by its bare name. The author's
     // name sits in the report, so a name like `remote_ctl` or
     // `testatr` would reach the wire or the test rule below.

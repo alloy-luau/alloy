@@ -1495,6 +1495,22 @@ mod tests {
         assert_eq!(names(plain), vec!["bool_comparison"]);
     }
 
+    /// A call on the left: the walk back stopped at the `(` of the call
+    /// and quoted "`) == true` is `)`".
+    #[test]
+    fn bool_comparison_quotes_a_call_whole() {
+        let got = lints("local ok = t.value(a, b) == true\n");
+
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(
+            got[0]
+                .message
+                .starts_with("`t.value(a, b) == true` is `t.value(a, b)`"),
+            "{}",
+            got[0].message
+        );
+    }
+
     /// The receiver decides which struct a member belongs to: a field
     /// named `coins` on an unrelated record is not the private `coins`
     /// of a struct nearby.
@@ -1773,6 +1789,69 @@ mod tests {
             .map(|l| plain[..l.start as usize].matches('\n').count() + 1)
             .collect();
         assert_eq!(lines, [3]);
+    }
+
+    /// A string with two holes, `{a}{b}`, ended the scope of the local
+    /// that held it: the `}{` read as the close of the function. The
+    /// field write below reached no binding, so `prefer_const` asked
+    /// for a `const`, and `const_mutation` missed the write into one.
+    #[test]
+    fn a_string_with_two_holes_keeps_the_scope_around_it() {
+        let count = |src: &str, lint: &str| -> usize {
+            crate::compile(src)
+                .unwrap()
+                .lints
+                .iter()
+                .filter(|l| l.name == lint)
+                .count()
+        };
+        let src = |word: &str| -> String {
+            format!(
+                "local function make(cx: number)\n    {word} t = {{ n = `{{cx}}{{cx}}` }}\n    t.n = 'x'\n    return t\nend\nprint(make(1))\n"
+            )
+        };
+
+        assert_eq!(count(&src("local"), "prefer_const"), 0);
+        assert_eq!(count(&src("const"), "const_mutation"), 1);
+    }
+
+    /// `run(function() a.x = 2 end)`: the write opens the body on the
+    /// line of the header, after a `)`, which ended no statement. Both
+    /// lints missed it; on two lines they saw it.
+    #[test]
+    fn a_write_in_a_one_line_function_is_a_statement() {
+        let count = |src: &str, lint: &str| -> usize {
+            crate::compile(src)
+                .unwrap()
+                .lints
+                .iter()
+                .filter(|l| l.name == lint)
+                .count()
+        };
+        let src = |word: &str| -> String {
+            format!(
+                "local function run(f: () -> ())\n    f()\nend\n{word} a = {{ x = 1 }}\nrun(function() a.x = 2 end)\nprint(a)\n"
+            )
+        };
+
+        assert_eq!(count(&src("local"), "prefer_const"), 0);
+        assert_eq!(count(&src("const"), "const_mutation"), 1);
+    }
+
+    /// A bare `return` that shares its line goes with the spaces in front
+    /// of it; one first on its line keeps the indent.
+    #[test]
+    fn a_return_on_a_shared_line_takes_one_run_of_spaces() {
+        let head = "local function run(f: () -> ())\n    f()\nend\n";
+
+        assert_eq!(
+            fixed(&format!("{head}run(function() return end)\n")),
+            format!("{head}run(function() end)\n")
+        );
+        assert_eq!(
+            fixed("local function f()\n    return end\nf()\n"),
+            "local function f()\n    end\nf()\n"
+        );
     }
 
     /// `prefer_const` and `const_mutation` never disagree: once every

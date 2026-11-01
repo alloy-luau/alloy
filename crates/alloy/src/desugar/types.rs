@@ -373,6 +373,26 @@ pub(crate) fn depth_step(text: &str, i: usize, c: char) -> i32 {
     }
 }
 
+/// Whether a type text takes parentheses before a `?`: `() -> T?` is a
+/// function that returns `T?`, and `A & B?` holds an optional `B`.
+pub(crate) fn groups_before_optional(ty: &str) -> bool {
+    top_level_find(ty, "->").is_some() || top_level_find(ty, "&").is_some()
+}
+
+/// The type that may also be nil: `T?`, `(() -> T)?`, or the text as it
+/// stands when it ends in `?` already.
+pub(crate) fn optional_type(ty: &str) -> String {
+    let ty = ty.trim_end();
+
+    match (groups_before_optional(ty), ty.ends_with('?')) {
+        (true, _) => format!("({ty})?"),
+
+        (false, true) => ty.to_string(),
+
+        (false, false) => format!("{ty}?"),
+    }
+}
+
 /// The byte offset of `needle` outside every bracket group, or `None`.
 pub(crate) fn top_level_find(text: &str, needle: &str) -> Option<usize> {
     let mut depth = 0i32;

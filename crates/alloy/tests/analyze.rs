@@ -442,6 +442,53 @@ fn a_field_typed_as_a_function_and_a_table_checks_clean() {
     );
 }
 
+/// The alias of a generic struct left out its private methods, so
+/// `self:inner()` in the impl found no key `inner` on `Box<T>`.
+#[test]
+fn a_private_method_of_a_generic_struct_reads_through_self() {
+    analyze(
+        "export struct Box<T>\n    value: T\nend\n\nimpl Box<T>\n    function get(self) -> T\n        return self:inner()\n    end\n\n    private function inner(self) -> T\n        return self.value\n    end\nend\n\nconst b = new Box { value = 1 }\nprint(b:get())\n",
+        "generic_private",
+    );
+}
+
+/// A field or a parameter of function type with a default wrote
+/// `() -> number?`, a function that returns `number?`, so a call or a
+/// construction that left it out reported it missing.
+#[test]
+fn a_function_type_with_a_default_may_be_left_out() {
+    analyze(
+        "export struct S\n    value: number\n    clock: () -> number = os.clock\nend\n\nimpl S\n    function at(self, now: () -> number = os.clock) -> number\n        return now() + self.clock()\n    end\nend\n\nlocal function tick(now: () -> number = os.clock) -> number\n    return now()\nend\n\nconst s = new S { value = 1 }\nprint(s:at(), tick())\n",
+        "optional_function",
+    );
+}
+
+/// The parts of a spread's type copied the source, so `...(a ?? {})`
+/// put `??` into the check artifact, a syntax error there.
+#[test]
+fn a_spread_of_a_coalesce_analyzes() {
+    analyze(
+        "local function f(args: { [string]: number }?) -> { [string]: number }\n    return { ...(args ?? {}), count = args?.n ?? 1 }\nend\n\nprint(f(nil))\n",
+        "spread_coalesce",
+    );
+}
+
+/// `x ?? {}` typed `{} | X`: a loop over it bound an error type, which
+/// the type function behind `try do` refused, and a key of `X` read as
+/// missing from `{}`.
+#[test]
+fn a_coalesce_with_an_empty_table_takes_the_left_type() {
+    let src = "type Options = { name: string? }\n\nconst lists: { [string]: { () -> () } } = {}\n\nlocal function name(o: Options?) -> string?\n    const opts = o ?? {}\n    return opts.name\nend\n\nfor _, f in lists.a ?? {} do\n    const result = try do\n        f()\n    end\n\n    const n: number = f\n    print(result, n, name(nil))\nend\n";
+    let Some(bad) = reports(src, "coalesce_empty") else {
+        return;
+    };
+
+    // The loop's `f` is `() -> ()` now, so the one report is the
+    // annotation that asks for a number.
+    assert_eq!(bad.len(), 1, "{}", bad.join("\n"));
+    assert!(bad[0].contains("(15,"), "{}", bad.join("\n"));
+}
+
 /// `in` on a value that is no container compiled clean and threw inside
 /// the std at run time.
 #[test]

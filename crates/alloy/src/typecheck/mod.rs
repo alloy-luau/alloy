@@ -245,6 +245,8 @@ pub fn roblox_definitions(config: &FluxConfig, notes: &mut Vec<String>) -> Optio
 /// `in`, the runtime under `out`, the Luau configuration, and a link to
 /// every other entry of the root. `above` is how many folders above the
 /// root the mirror holds, so a dependency at `../../x` stays inside it.
+/// Those folders keep their names, so a dependency's path back into the
+/// root, to the one runtime, reads the same in the mirror.
 fn mirror_dir(root: &Path, above: usize) -> PathBuf {
     use std::hash::{Hash, Hasher};
 
@@ -252,12 +254,24 @@ fn mirror_dir(root: &Path, above: usize) -> PathBuf {
     root.hash(&mut h);
 
     let mut dir = std::env::temp_dir().join(format!("alloy-flux-{:016x}", h.finish()));
+    let names: Vec<_> = root
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(n) => Some(n),
 
-    for _ in 1..above {
+            _ => None,
+        })
+        .collect();
+    let held = above.max(1);
+    let tail = &names[names.len().saturating_sub(held)..];
+
+    for _ in tail.len()..held {
         dir.push("up");
     }
 
-    dir.join("root")
+    dir.extend(tail);
+
+    dir
 }
 
 /// A path with `.` and `..` folded, no file system access.
@@ -384,7 +398,7 @@ pub fn analyze(
         })
         .max()
         .unwrap_or(1);
-    let mirror = mirror_dir(root, above);
+    let mirror = mirror_dir(&root_abs, above);
     let base = mirror
         .ancestors()
         .nth(above.max(1))

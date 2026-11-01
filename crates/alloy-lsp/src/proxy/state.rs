@@ -308,7 +308,24 @@ impl State {
             return;
         }
 
-        let text = mirror_luau_text(root, Some(config));
+        let mut text = mirror_luau_text(root, Some(config));
+
+        // Two copies of the runtime are two modules to Luau, so a
+        // package's `Result` meets the game's only by a walk of the
+        // whole type, and the walk hits the checker's limit. A project
+        // inside another, as a package under `packages/` is, names the
+        // runtime of the outermost one, as `alloy flux` does.
+        if let Some(out) = self.outer_runtime(root)
+            && let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text)
+        {
+            self.ensure_runtime(&out);
+            value["aliases"]["alloy"] = serde_json::json!(crate::imports::relative_spec(
+                &self.mirror_path(root),
+                &self.mirror_path(&out.join("alloy"))
+            ));
+            text = serde_json::to_string_pretty(&value).unwrap_or_default() + "\n";
+        }
+
         self.write_mirror(&root.join(".luaurc"), &text);
 
         // `in = "../examples"`: the sources sit beside the root, not
@@ -337,6 +354,24 @@ impl State {
         }
 
         self.luau_configs.borrow_mut().insert(root.to_path_buf());
+    }
+
+    /// The `[build] out` of the outermost project that holds the project
+    /// at `root`, inside the workspace. `None` when no project holds it.
+    fn outer_runtime(&self, root: &Path) -> Option<PathBuf> {
+        let workspace = normalize(self.root.as_deref()?);
+        let mut found = None;
+        let mut at = root.parent()?.to_path_buf();
+
+        while at.starts_with(&workspace)
+            && let Some(project) = self.config_at(&at)
+        {
+            let base = project.0.parent()?.to_path_buf();
+            found = Some(normalize(&base.join(&project.1.build.out)));
+            at = base.parent()?.to_path_buf();
+        }
+
+        found
     }
 
     /// The text the Roblox API docs hold for a member of a class,

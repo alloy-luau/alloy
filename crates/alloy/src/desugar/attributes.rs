@@ -9,7 +9,7 @@ use alloy_syntax::ast::{
 
 use crate::roblox_classes::{DATATYPES, INSTANCE_CLASSES};
 
-use super::contracts::{Member, Owner, is_list_type};
+use super::contracts::{Member, Owner, is_list_type, through_aliases};
 use super::types::{literal_kind, literal_type, strip_bounds};
 use super::*;
 
@@ -210,7 +210,13 @@ impl<'s> Desugar<'s> {
                 }
             }
 
-            Stmt::Remote(r) => self.check_attrs(&r.attributes, "remote"),
+            Stmt::Remote(r) => {
+                self.check_attrs(&r.attributes, "remote");
+
+                for p in &r.params {
+                    self.check_attrs(&p.attributes, "param");
+                }
+            }
 
             Stmt::Message(m) => self.check_attrs(&m.attributes, "message"),
 
@@ -1042,6 +1048,7 @@ impl<'s> Desugar<'s> {
             let (Some(arg), Some(want)) = (arg, ty.as_deref()) else {
                 continue;
             };
+            let want = &through_aliases(want, |n| self.alias_values.get(n).map(String::as_str));
 
             // A list parameter carries entries, and the element type
             // says what each one takes.
@@ -1793,6 +1800,10 @@ impl<'s> Desugar<'s> {
                     if i.trait_name.is_some() {
                         self.trait_impl_targets.insert(target.clone());
                     } else {
+                        // A private method goes in the alias too: a generic
+                        // struct has no private view, so `self:inner()` in
+                        // the impl reads this alias. The private_access lint
+                        // reports a call from outside, as for a private field.
                         let methods: Vec<&alloy_syntax::ast::Function> = i
                             .methods
                             .iter()
@@ -1801,7 +1812,6 @@ impl<'s> Desugar<'s> {
                                     .params
                                     .first()
                                     .is_some_and(|p| self.text_of(p.name) == "self")
-                                    && !m.visibility.is_some_and(|v| self.text_of(v) == "private")
                             })
                             .collect();
                         let sigs: Vec<MethodSig> = methods
@@ -2559,10 +2569,6 @@ impl<'s> Desugar<'s> {
                 if !self.options.tests {
                     let std = self.std();
                     tail.push_str(&format!(" {std}.test({}, {rendered})", luau_string(&path)));
-                } else {
-                    // The spec calls `__alloy.set_testing`, so the spec
-                    // requires the runtime even when the body does not.
-                    self.std();
                 }
             }
 
@@ -2796,50 +2802,6 @@ impl<'s> Desugar<'s> {
             }
 
             _ => Err("`@cfg` takes names joined by `not`, `and`, `or`, `any(...)`, or `all(...)`: `@cfg(server and not studio)`".to_string()),
-        }
-    }
-
-    /// Whether a plain function's parameter list carries `@attr`. The
-    /// parser keeps the text; only a remote reads a wire width.
-    pub(crate) fn params_have_attrs(&self, body: &FunctionBody) -> bool {
-        !self.param_attr_spans(body).is_empty()
-    }
-
-    /// The `@name` texts in front of parameters, with their byte ranges.
-    pub(crate) fn param_attr_spans(&self, body: &FunctionBody) -> Vec<(u32, u32, String)> {
-        let open = self.toks[self.params_open_tok(body) as usize].end;
-        let mut found = Vec::new();
-
-        for (i, p) in body.params.iter().enumerate() {
-            let from = if i == 0 {
-                open
-            } else {
-                self.byte_end(body.params[i - 1].name)
-            };
-            let gap = &self.src[from as usize..self.byte_start(p.name) as usize];
-
-            if let Some(at) = gap.find('@') {
-                let name: String = gap[at + 1..]
-                    .chars()
-                    .take_while(|c| c.is_alphanumeric() || *c == '_')
-                    .collect();
-                let start = from + at as u32;
-                found.push((start, start + 1 + name.len() as u32, name));
-            }
-        }
-
-        found
-    }
-
-    pub(crate) fn check_param_attrs(&mut self, body: &FunctionBody) {
-        for (start, end, name) in self.param_attr_spans(body) {
-            self.diagnostics.push(Diagnostic {
-                start,
-                end,
-                message: format!(
-                    "`@{name}` applies to a remote parameter or a struct field, not a function parameter"
-                ),
-            });
         }
     }
 }

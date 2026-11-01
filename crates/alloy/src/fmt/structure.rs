@@ -193,6 +193,16 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
                 }
 
                 push(&mut stack, Kind::Bracket, 1, &mut opens, &mut closes);
+
+                // In a bracket on the same line, as `{ n = `{a}{b}` }`,
+                // the pop gives the bracket its level back and the push
+                // takes it again. The pair moves no depth. Counted, it
+                // dipped below the block around the string, and a scope
+                // that holds the string ended at the `}{`.
+                if closes == 2 && opens == 2 {
+                    closes = 1;
+                    opens = 1;
+                }
             }
 
             TokKind::InterpTail => {

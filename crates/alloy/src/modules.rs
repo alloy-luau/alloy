@@ -2139,7 +2139,7 @@ pub fn import_attributes(
     from: &Path,
     aliases: &[(String, PathBuf)],
 ) -> Vec<(String, crate::desugar::AttrDecl)> {
-    let modules = module_decls(source, from, aliases, exported_attribute_decls);
+    let modules = module_decls(source, from, aliases, checked_attribute_decls);
     let bound: HashSet<String> = named_specs(source, from, aliases)
         .into_iter()
         .map(|(_, _, local)| local)
@@ -2193,6 +2193,52 @@ pub fn exported_attribute_decls(src: &str) -> Vec<(String, crate::desugar::AttrD
     attribute_walk(src, &mut out, &mut Vec::new(), &mut Vec::new(), false);
 
     out
+}
+
+/// `exported_attribute_decls` as a file that uses them checks them: each
+/// parameter type reads through the type aliases of the declaring module.
+/// `type P = 'x' | 'y'` can stay private there, and `@a('x')` in the
+/// importer still meets `p: P`.
+fn checked_attribute_decls(src: &str) -> Vec<(String, crate::desugar::AttrDecl)> {
+    use alloy_syntax::ast::Stmt;
+
+    let mut decls = exported_attribute_decls(src);
+
+    if decls
+        .iter()
+        .all(|(_, d)| d.params.iter().all(|(_, ty)| ty.is_none()))
+    {
+        return decls;
+    }
+
+    let Ok(parsed) = alloy_syntax::parse_lenient(src, Default::default()) else {
+        return decls;
+    };
+    let toks = &parsed.lexed.toks;
+    // A generic alias names its parameters, so its value stands for no
+    // one type.
+    let aliases: HashMap<&str, &str> = parsed
+        .chunk
+        .block
+        .stmts
+        .iter()
+        .filter_map(|stmt| {
+            let Stmt::TypeAlias(t) = stmt.under_default() else {
+                return None;
+            };
+            let (head, value) = t.span.text(src, toks).split_once('=')?;
+
+            (!head.contains('<')).then(|| (t.name.text(src, toks), value))
+        })
+        .collect();
+
+    for (_, d) in &mut decls {
+        for ty in d.params.iter_mut().filter_map(|(_, ty)| ty.as_mut()) {
+            *ty = crate::desugar::contracts::through_aliases(ty, |n| aliases.get(n).copied());
+        }
+    }
+
+    decls
 }
 
 /// Every attribute a file can name, by its path: its own declarations,

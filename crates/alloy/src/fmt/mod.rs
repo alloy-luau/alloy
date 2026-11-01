@@ -1106,6 +1106,22 @@ mod tests {
         );
     }
 
+    /// The `<` of a generic function type has no name before it, so it
+    /// read as a comparison: `(< A > (Id<A>) -> Q<A>)`. A long list then
+    /// broke at each comma, one name per line with no indent.
+    #[test]
+    fn a_generic_function_type_holds_its_parameters() {
+        let src = "type G = (<A>(Id<A>) -> Q<A>)\ntype H = <A>(A) -> A\ntype T = { get: <A>(A) -> A }\nlocal ok = a < b\n";
+
+        assert_eq!(fmt(src), src);
+        assert_eq!(
+            fmt(
+                "type G = (<Alpha, Bravo, Charlie, Delta, Echo, Foxtrot, Golf, Hotel, India, Juliet>(Id<Alpha>) -> Q<Alpha>)\n"
+            ),
+            "type G = (\n  <Alpha, Bravo, Charlie, Delta, Echo, Foxtrot, Golf, Hotel, India, Juliet>(Id<Alpha>) -> Q<Alpha>\n)\n"
+        );
+    }
+
     #[test]
     fn a_negation_holds_its_operand() {
         assert_eq!(

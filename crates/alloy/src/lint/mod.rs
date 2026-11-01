@@ -1561,6 +1561,39 @@ mod tests {
         );
     }
 
+    /// `case Red` uses an imported `Color` by its variant alone. The lint
+    /// read the import as unused, and `--fix` cut what the arm needs.
+    #[test]
+    fn a_bare_variant_in_a_pattern_uses_its_enum() {
+        let options = crate::EmitOptions {
+            import_enums: vec![(
+                "Color".to_string(),
+                vec![("Red".to_string(), 0), ("Green".to_string(), 0)],
+            )],
+            ..Default::default()
+        };
+        let unused = |src: &str| -> usize {
+            crate::compile_with(src, &options)
+                .unwrap()
+                .lints
+                .iter()
+                .filter(|l| l.name == "unused_import")
+                .count()
+        };
+
+        assert_eq!(
+            unused(
+                "import { Color, now } from \"./color\"\nmatch now() with\n    case Red then print(1)\n    case Green then print(2)\nend\n"
+            ),
+            0
+        );
+        // A key or a field of the same name is no pattern.
+        assert_eq!(
+            unused("import { Color } from \"./color\"\nlocal t = { Red = 1 }\nprint(t.Red)\n"),
+            1
+        );
+    }
+
     /// `--fix` cuts the dead name from the list, and the whole statement
     /// when every name it binds is dead. The text it leaves parses, and
     /// a second pass finds nothing to cut.

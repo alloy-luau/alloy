@@ -44,3 +44,72 @@ fn a_new_collection_takes_the_values_it_is_given() {
 
     assert_eq!(got, (2, Some(1), 2, Some(3)), "{}", out.ship);
 }
+
+/// A remote keeps its attributes in `spec.attrs`, and `Attributes.get`
+/// reads `__attrs`, so `Attributes.get(Greet, command)` gave nil.
+#[test]
+fn a_remote_answers_attributes_get() {
+    let lua = mlua::Lua::new();
+    let runtime: mlua::Table = lua.load(alloy::RUNTIME).eval().unwrap();
+    lua.globals().set("alloy", runtime).unwrap();
+
+    let got: (i64, String) = lua
+        .load(
+            r#"
+            local command = alloy.attribute("command", { "remote" }, { "level", "help" })
+            local Greet = alloy.remote({ name = "Greet", kind = "function", from_client = true, from_server = false, params = { "name" }, defaults = {}, attrs = { command = { 3, "Greets." } } })
+            local got = alloy.Attributes.get(Greet, command)
+            return got.level, got.help
+            "#,
+        )
+        .eval()
+        .unwrap();
+
+    assert_eq!(got, (3, "Greets.".to_string()));
+}
+
+/// A package ships its own copy of the runtime. `attach` kept a
+/// function's attributes in a table local to one copy, so a package
+/// that read `Attributes.get(f, tagged)` for a game function got nil.
+#[test]
+fn every_copy_of_the_runtime_reads_the_attributes_of_a_function() {
+    let lua = mlua::Lua::new();
+    let game: mlua::Table = lua.load(alloy::RUNTIME).eval().unwrap();
+    let package: mlua::Table = lua.load(alloy::RUNTIME).eval().unwrap();
+    lua.globals().set("game_alloy", game).unwrap();
+    lua.globals().set("package_alloy", package).unwrap();
+
+    let got: (bool, String) = lua
+        .load(
+            r#"
+            local tagged = package_alloy.attribute("tagged", { "function" }, {})
+            local hint = package_alloy.attribute("hint", { "function" }, { "text" })
+            local f = game_alloy.attach(function() end, { tagged = {}, hint = { "x" } })
+            return package_alloy.Attributes.get(f, tagged), package_alloy.Attributes.of(f).hint[1]
+            "#,
+        )
+        .eval()
+        .unwrap();
+
+    assert_eq!(got, (true, "x".to_string()));
+}
+
+/// The runtime's `@cfg(server)` and `@cfg(client)` call RunService, and
+/// a module that branches on a side does too. The shim's RunService had
+/// no `IsServer` or `IsClient`, so each call raised in a spec.
+#[test]
+fn the_shim_answers_each_side_check_the_runtime_makes() {
+    let lua = mlua::Lua::new();
+    lua.load(alloy::SHIM).exec().unwrap();
+    let runtime: mlua::Table = lua.load(alloy::RUNTIME).eval().unwrap();
+    lua.globals().set("alloy", runtime).unwrap();
+
+    let got: (bool, bool, bool, bool, bool) = lua
+        .load(
+            "local c = alloy.cfg return c.server(), c.client(), c.running(), c.studio(), c.edit()",
+        )
+        .eval()
+        .unwrap();
+
+    assert_eq!(got, (true, true, true, false, false));
+}

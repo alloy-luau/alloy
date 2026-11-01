@@ -556,7 +556,8 @@ impl<'s> Formatter<'s> {
 
     /// `Result<number, string>` and `<T: Display>`: a `<` right after a
     /// name, with no space in the source, opens type arguments; `a < b`
-    /// compares. The matching `>` or `>>` closes it.
+    /// compares. The matching `>` or `>>` closes it. So does the `<` of
+    /// a generic function type, `= <A>(A) -> A`.
     pub(crate) fn generic_brackets(&self) -> Vec<bool> {
         let mut generic = vec![false; self.items.len()];
 
@@ -565,7 +566,9 @@ impl<'s> Formatter<'s> {
 
             // `a < b` compares, so a `<` with a space before it opens no
             // type arguments. `<<` is the bracket wherever it stands.
-            if !(it.is("<") || it.is("<<")) || (it.space_before && !it.is("<<")) {
+            if !(it.is("<") || it.is("<<"))
+                || (it.space_before && !it.is("<<") && !self.opens_function_type(i))
+            {
                 continue;
             }
 
@@ -581,7 +584,7 @@ impl<'s> Formatter<'s> {
                 });
 
                 (t.is_ident() && (field || !t.is_keyword_here())) || t.is(">")
-            });
+            }) || self.opens_function_type(i);
 
             if !opens_generic {
                 continue;
@@ -623,6 +626,18 @@ impl<'s> Formatter<'s> {
         }
 
         generic
+    }
+
+    /// Whether the `<` at `i` opens the type parameters of a function
+    /// type: `(<A>(A) -> A)`, `= <A>(A) -> A`, `get: <A>(A) -> A`. The
+    /// token before it can end no operand, so the `<` compares nothing.
+    pub(crate) fn opens_function_type(&self, i: usize) -> bool {
+        self.prev_code(i).is_some_and(|p| {
+            matches!(
+                self.items[p].text.as_str(),
+                "=" | "(" | "," | ":" | "->" | "|" | "&" | "{"
+            )
+        })
     }
 
     // --- the tree ------------------------------------------------------------------

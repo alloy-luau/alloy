@@ -15,7 +15,9 @@ use super::enums::same_type_text;
 use super::modules::type_arguments;
 use super::remotes::WIRE_WIDTHS;
 use super::statements::{Piece, is_string_index_table};
-use super::types::{generic_head, names_other_args, strip_bounds};
+use super::types::{
+    generic_head, groups_before_optional, names_other_args, optional_type, strip_bounds,
+};
 use super::*;
 
 /// Datatypes the definitions declare as a type alias, not a class. A
@@ -473,6 +475,25 @@ impl<'s> Desugar<'s> {
         // Operator traits.
         let mut tail = String::new();
 
+        // A `to_string` in any impl keeps the default printer off the
+        // struct (see `structs_with_to_string`), so the impl sets
+        // `__tostring` in its place. `impl Display` sets it below, and an
+        // enum keeps the printer its declaration writes. The check
+        // artifact types no printer, and there a private `to_string` is
+        // on the private table, so the line goes in the ship artifact.
+        if !self.options.check
+            && !foreign
+            && !self.enums.contains_key(&target_name)
+            && trait_name.as_deref() != Some("Display")
+            && i.methods.iter().any(|m| {
+                m.path
+                    .first()
+                    .is_some_and(|n| self.text_of(*n) == "to_string")
+            })
+        {
+            tail.push_str(&format!(" {target}.__tostring = {target}.to_string"));
+        }
+
         if let (Some(t), Some(trait_name)) = (i.trait_name, trait_name) {
             for (tr, method, meta) in OPERATOR_TRAITS {
                 if trait_name == *tr {
@@ -703,12 +724,8 @@ impl<'s> Desugar<'s> {
                     continue;
                 }
 
-                let opt = if *default && !ty.trim_end().ends_with('?') {
-                    "?"
-                } else {
-                    ""
-                };
-                params.push(format!("{}: {ty}{opt}", self.text_of(*pname)));
+                let ty = if *default { optional_type(&ty) } else { ty };
+                params.push(format!("{}: {ty}", self.text_of(*pname)));
             }
 
             let ret = m
@@ -862,15 +879,14 @@ impl<'s> Desugar<'s> {
                 .modifier
                 .map(|m| format!("{} ", self.text_of(m)))
                 .unwrap_or_default();
-            let opt = if f.default.is_some() && !ty.trim_end().ends_with('?') {
-                "?"
-            } else {
-                ""
-            };
             field_types.push(format!("{modifier}{fname}: {ty}"));
             // The constructor fills defaults into this table, so a
             // `read` field is plain here.
-            param_types.push(format!("{fname}: {ty}{opt}"));
+            param_types.push(match f.default {
+                Some(_) => format!("{fname}: {}", optional_type(&ty)),
+
+                None => format!("{fname}: {ty}"),
+            });
 
             if f.visibility.is_some_and(|v| self.text_of(v) == "private") {
                 private_types.push(format!("{modifier}{fname}: {ty}"));
@@ -1355,7 +1371,7 @@ impl<'s> Desugar<'s> {
         }
     }
 
-    pub(crate) fn attr_table(&mut self, attrs: &[Attr]) -> String {
+    pub(crate) fn attr_table<'a>(&mut self, attrs: impl IntoIterator<Item = &'a Attr>) -> String {
         let mut parts = Vec::new();
 
         for a in attrs {
@@ -2126,7 +2142,10 @@ impl<'s> Desugar<'s> {
     fn zero_of(&mut self, ty: &str) -> Option<Option<String>> {
         let ty = ty.trim();
 
-        if ty.ends_with('?') || matches!(ty, "any" | "unknown" | "nil") {
+        // `() -> T?` ends in `?` but is a function, and no function is a zero.
+        if (ty.ends_with('?') && !groups_before_optional(ty))
+            || matches!(ty, "any" | "unknown" | "nil")
+        {
             return Some(None);
         }
 
@@ -3011,12 +3030,12 @@ impl<'s> Desugar<'s> {
         for f in fields.iter().filter(|f| !f.private) {
             let ty = self.copy_type_to_string(f.ty);
             let ty = ty.trim();
-            let opt = if optional.is_empty() || ty.ends_with('?') {
-                ""
+            let ty = if optional.is_empty() {
+                ty.to_string()
             } else {
-                optional
+                optional_type(ty)
             };
-            parts.push(format!("{prefix}{}: {ty}{opt}", f.name));
+            parts.push(format!("{prefix}{}: {ty}", f.name));
         }
 
         Some(format!("{{ {} }}", parts.join(", ")))

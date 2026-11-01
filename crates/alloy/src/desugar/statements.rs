@@ -882,11 +882,7 @@ impl<'s> Desugar<'s> {
 
             Stmt::TypeAlias(t) if !t.attributes.is_empty() => return true,
 
-            Stmt::Function(f) if self.params_have_attrs(&f.body) => return true,
-
             Stmt::Function(f) if self.table_self_type(f).is_some() => return true,
-
-            Stmt::LocalFunction(f) if self.params_have_attrs(&f.body) => return true,
 
             Stmt::LocalFunction(f) if self.is_hoisted_fn(f.name) => return true,
 
@@ -2007,16 +2003,6 @@ impl<'s> Desugar<'s> {
                 let rest = TokSpan::new(l.keyword.start as usize, l.span.end as usize);
                 self.copy(after_attrs, self.byte_start(rest));
                 self.local_rest(l, rest);
-            }
-
-            Stmt::Function(f) if self.params_have_attrs(&f.body) => {
-                self.check_param_attrs(&f.body);
-                self.copy_span(stmt.span());
-            }
-
-            Stmt::LocalFunction(f) if self.params_have_attrs(&f.body) => {
-                self.check_param_attrs(&f.body);
-                self.copy_span(stmt.span());
             }
 
             // A match whose arms run statements stands after `local x =`,
@@ -3324,6 +3310,31 @@ impl<'s> Desugar<'s> {
 
         for p in &body.params {
             let ps = self.byte_start(p.name);
+
+            // Of all parameters, only a remote's keep their attributes at
+            // run time, in its `spec`. A function's value holds no list
+            // of parameters, and Luau has no attribute there.
+            if let Some(first) = p.attributes.first() {
+                let at = self.byte_start(first.span);
+                self.copy(cursor, at);
+                self.blank_lines(at, ps);
+                cursor = ps;
+
+                for a in &p.attributes {
+                    let name = match a.name {
+                        Some(n) => self.text_of(n),
+
+                        None => self.text_of(a.span).trim_start_matches('@'),
+                    };
+                    self.diagnose(
+                        a.span,
+                        &format!(
+                            "`@{name}` applies to a remote parameter or a struct field, not a function parameter"
+                        ),
+                    );
+                }
+            }
+
             self.copy(cursor, ps);
 
             // A pattern takes a temp in the list and opens on the
@@ -3361,18 +3372,28 @@ impl<'s> Desugar<'s> {
             }
 
             if let Some(t) = p.ty {
+                let ts = self.byte_start(t);
+                let source = self.text_of(t).trim_end();
+                let grouped = p.default.is_some() && super::types::groups_before_optional(source);
+                let ends_optional = source.ends_with('?');
+                self.copy(cursor, ts);
+
+                if grouped {
+                    self.generate(ts, "(");
+                }
+
                 if bounds.is_empty() {
-                    self.copy(cursor, self.byte_end(t));
+                    self.copy(ts, self.byte_end(t));
                 } else {
-                    let ts = self.byte_start(t);
-                    self.copy(cursor, ts);
                     let text = self.copy_type_to_string(t);
                     self.generate(ts, &apply_bounds(&text, &bounds));
                 }
 
                 cursor = self.byte_end(t);
 
-                if p.default.is_some() && !self.text_of(t).trim_end().ends_with('?') {
+                if grouped {
+                    self.generate(cursor, ")?");
+                } else if p.default.is_some() && !ends_optional {
                     self.generate(cursor, "?");
                 }
             }

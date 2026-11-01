@@ -39,32 +39,20 @@ impl<'a> Parser<'a> {
             let mut payload = Vec::new();
 
             if self.eat("(") {
+                // The Rust habit, `Playing(round: number)`. An enum
+                // payload is a type; the name has no place. The parse
+                // takes the type, so the rest of the enum still reads,
+                // and one report at the first name covers the variant.
+                let mut named = None;
+
                 while !self.at(")") {
-                    // The Rust habit, `Playing(round: number)`. An
-                    // enum payload is a type; the name has no place.
-                    // The parse takes the type, so the rest of the
-                    // enum still reads and one report covers it.
-                    let named = (self.at_name() && self.text_at(1) == ":").then(|| {
-                        let at = self.toks[self.pos + 1].start as usize;
+                    if self.at_name() && self.text_at(1) == ":" {
+                        named = named.or(Some(self.toks[self.pos + 1].start as usize));
                         self.bump();
                         self.bump();
-
-                        at
-                    });
-                    let ty = self.type_()?;
-
-                    if let Some(at) = named {
-                        let head = self.span_text(vname).to_string();
-                        let body = self.span_text(ty).to_string();
-                        self.report_at(
-                            at,
-                            &format!(
-                                "an enum payload is a type, not a name; write `{head}({body})`"
-                            ),
-                        );
                     }
 
-                    payload.push(ty);
+                    payload.push(self.type_()?);
 
                     if !self.eat(",") {
                         break;
@@ -72,6 +60,18 @@ impl<'a> Parser<'a> {
                 }
 
                 self.expect(")")?;
+
+                if let Some(at) = named {
+                    let head = self.span_text(vname).to_string();
+                    let types: Vec<&str> = payload.iter().map(|t| self.span_text(*t)).collect();
+                    self.report_at(
+                        at,
+                        &format!(
+                            "an enum payload is a type, not a name; write `{head}({})`",
+                            types.join(", ")
+                        ),
+                    );
+                }
             } else if self.at("{") {
                 // The struct habit, `Grunt { hp: number }`. A payload is
                 // a list of types in parentheses. The parse takes each

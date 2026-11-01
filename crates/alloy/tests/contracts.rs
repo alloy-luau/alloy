@@ -442,6 +442,20 @@ fn a_narrowed_argument_takes_its_own_values() {
     );
 }
 
+/// A narrowed type under an alias names the same values. `p: P` read as
+/// a type named `P`, so every string, `@k('a')` too, was a mismatch.
+#[test]
+fn a_narrowed_alias_takes_its_own_values() {
+    clean(
+        "type P = 'a' | 'b'\n\nattribute k(p: P) on struct\n\n@k('a')\nstruct S as\n    x: number\nend\n\nprint(S)\n",
+    );
+
+    let m = one(
+        "type P = 'a' | 'b'\n\nattribute k(p: P) on struct\n\n@k('z')\nstruct S as\n    x: number\nend\n\nprint(S)\n",
+    );
+    assert_eq!(m, "the attribute `k` takes 'a' | 'b' for `p`, `'z'` given");
+}
+
 /// An enum-typed argument takes a variant of that enum.
 #[test]
 fn an_enum_argument_takes_a_variant() {

@@ -1527,7 +1527,7 @@ mod tests {
             out.check
         );
         assert!(
-            out.check.contains("type Counter = typeof(setmetatable(({} :: any) :: { read name: string }, Counter)) type Counter__all = Counter & { count: number } & typeof(Counter__private)"),
+            out.check.contains("type Counter = typeof(setmetatable(({} :: any) :: {\nread name: string,\n\n }, Counter)) type Counter__all = Counter & { count: number } & typeof(Counter__private)"),
             "{}",
             out.check
         );

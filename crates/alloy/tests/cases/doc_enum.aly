@@ -1,0 +1,15 @@
+--- An enum with no `as`, whose variants have doc comments.
+export enum Kind
+  --- The first variant, with a comma, here.
+  Alpha
+  --- The second variant, also, with commas.
+  Beta(number)
+  --- The third variant.
+  Gamma
+end
+
+export enum Pick as
+  --- Left, the default.
+  Left, -- after the comma, still a comment
+  Right
+end

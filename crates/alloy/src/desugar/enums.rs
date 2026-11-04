@@ -151,9 +151,15 @@ impl<'s> Desugar<'s> {
     pub(crate) fn enum_decl(&mut self, e: &EnumDecl) {
         self.reject_type_bounds(e.generics, "an enum");
         let name = self.decl_name(e.name);
-        // The `as` token follows the name, or the parameter list,
-        // whether or not `export` leads.
-        let header_end = self.toks[e.generics.unwrap_or(e.name).end as usize].end;
+        // The header ends at the name, or at the parameter list, or at
+        // the `as` after them. A header that ends its line needs no `as`,
+        // and the next token is then the first variant.
+        let head = e.generics.unwrap_or(e.name).end as usize;
+        let header_end = match self.toks.get(head).map(|t| t.text(self.src)) {
+            Some("as") => self.toks[head].end,
+
+            _ => self.toks[head - 1].end,
+        };
         let start = self.byte_start(e.span);
         // `enum Opt<T>`: the alias keeps the list with its defaults, a
         // constructor takes the names its payload writes, and the

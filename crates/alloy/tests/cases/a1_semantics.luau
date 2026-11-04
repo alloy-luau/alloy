@@ -14,10 +14,10 @@ do
     end
 end
 
-local Box = {} Box.__index = Box
-
-
- type Box<T> = typeof(setmetatable(({} :: any) :: { value: T, count: number }, Box)) setmetatable(Box, { __call = function<T>(_, f: { value: T, count: number? }): Box<T> if f.count == nil then local _count: number = 1 f.count = _count end return ((setmetatable(f, Box) :: any) :: Box<T>) end }) function Box.new<T>(f: { value: T, count: number? }): Box<T> return Box(f) end Box.__tostring = function(s) return __alloy.show_struct("Box", s, { "value", "count" }) end
+local Box = {} Box.__index = Box type Box<T> = typeof(setmetatable(({} :: any) :: {
+value: T,
+count: number,
+ }, Box)) setmetatable(Box, { __call = function<T>(_, f: { value: T, count: number? }): Box<T> if f.count == nil then local _count: number = 1 f.count = _count end return ((setmetatable(f, Box) :: any) :: Box<T>) end }) function Box.new<T>(f: { value: T, count: number? }): Box<T> return Box(f) end Box.__tostring = function(s) return __alloy.show_struct("Box", s, { "value", "count" }) end
 
 do
     function Box.get<T>(self: Box<T>): T

@@ -1,0 +1,27 @@
+--- A trait with no default body.
+export trait Store
+  --- Reads a key.
+  function read(self, key: string) -> string?
+  --- Writes a key.
+  function write(self, key: string, value: string) -> () -- trailing
+end
+
+--- A trait with a default body between two signatures.
+export trait Named
+  --- The name, which each impl writes.
+  function name(self) -> string
+  --- The greeting, from the name.
+  function greet(self) -> string
+    return "hi " .. self:name()
+  end
+  --- A signature after the default body.
+  function reset(self) -> ()
+end
+
+--- An interface with documented fields.
+export interface Options
+  --- The first field.
+  first: number
+  -- A plain comment on the second field.
+  second: string?
+end

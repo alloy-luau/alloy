@@ -901,10 +901,10 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
     d.check_negations();
 
     // Leading trivia, the block, trailing trivia: the printer's shape. The
-    // std require, when the file needs one, goes on the first line of
-    // code. Luau reads a `--!strict` only above the first token, and a
-    // plain comment may sit above the hot comments.
-    let insert_at = first_code_line(src, toks) as u32;
+    // std require, when the file needs one, goes on the line that
+    // `header_line` picks. Luau reads a `--!strict` only above the first
+    // token, and a plain comment may sit above the hot comments.
+    let insert_at = header_line(src, toks) as u32;
     d.copy(0, insert_at);
 
     let mut side = Renderer::new(src);
@@ -1315,6 +1315,93 @@ fn first_code_line(src: &str, toks: &[Tok]) -> usize {
     toks.first().map_or(src.len(), |t| {
         src[..t.start as usize].rfind('\n').map_or(0, |i| i + 1)
     })
+}
+
+/*
+The byte offset of the line that takes the header: the runtime require,
+the hoisted locals, the head imports. A doc comment documents the next
+code, so header code below the last `---` run takes that comment from
+the first statement. The header then goes on the nearest blank line
+above that run, below every hot comment, that no other doc comment comes
+just before. Without such a line, or without a doc comment above the
+first token, it goes on the line of the first token. In front of a doc
+comment on line 1, it would make that comment a trailing comment, which
+Moonwave and luau-lsp drop too.
+*/
+fn header_line(src: &str, toks: &[Tok]) -> usize {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Line {
+        Blank,
+        Doc,
+        Hot,
+        Other,
+    }
+
+    let code = first_code_line(src, toks);
+    let head = &src[..code];
+    let mut best = None;
+    let mut chosen = None;
+    let mut prev = Line::Blank;
+    let mut at = 0;
+
+    while at < head.len() {
+        let end = head[at..].find('\n').map_or(head.len(), |e| at + e);
+        let text = head[at..end].trim_start();
+        // `--[[` and `--[==[` open a long comment, which can span lines.
+        // Only `--[=[` is a doc comment.
+        let level = text
+            .strip_prefix("--[")
+            .map(|r| r.bytes().take_while(|&b| b == b'=').count())
+            .filter(|&n| text[3 + n..].starts_with('['));
+        let kind = match level {
+            Some(1) => Line::Doc,
+
+            Some(_) => Line::Other,
+
+            None if text.is_empty() => Line::Blank,
+
+            None if text.starts_with("--!") => Line::Hot,
+
+            None if text.starts_with("---") => Line::Doc,
+
+            None => Line::Other,
+        };
+
+        match kind {
+            Line::Blank if prev != Line::Doc => best = Some(at),
+
+            Line::Doc if prev != Line::Doc => chosen = Some(best),
+
+            // Luau reads a hot comment only above the first code.
+            Line::Hot => {
+                best = None;
+                chosen = None;
+            }
+
+            _ => {}
+        }
+
+        if kind != Line::Blank {
+            prev = kind;
+        }
+
+        let stop = match level {
+            Some(n) => {
+                let open = end - text.len() + 4 + n;
+                let close = format!("]{}]", "=".repeat(n));
+                let shut = head[open..]
+                    .find(&close)
+                    .map_or(head.len(), |e| open + e + close.len());
+
+                head[shut..].find('\n').map_or(head.len(), |e| shut + e)
+            }
+
+            None => end,
+        };
+        at = stop + 1;
+    }
+
+    chosen.flatten().unwrap_or(code)
 }
 
 /// One thing a statement hoists in front of itself.

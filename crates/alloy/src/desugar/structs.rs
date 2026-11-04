@@ -867,10 +867,12 @@ impl<'s> Desugar<'s> {
         let mut field_attrs = Vec::new();
         // The check artifact keeps a private field out of the public view.
         let split = self.has_private_view(&name);
-        let mut public_types = Vec::new();
         let mut private_types = Vec::new();
         // Each `@alias` key and the field it stands for.
         let mut aliases: Vec<(String, String)> = Vec::new();
+        // Each field as a member of the type, with its source range and
+        // whether it is private.
+        let mut members: Vec<(u32, u32, String, bool)> = Vec::new();
 
         for f in &st.fields {
             let fname = self.text_of(f.name).to_string();
@@ -879,7 +881,8 @@ impl<'s> Desugar<'s> {
                 .modifier
                 .map(|m| format!("{} ", self.text_of(m)))
                 .unwrap_or_default();
-            field_types.push(format!("{modifier}{fname}: {ty}"));
+            let private = f.visibility.is_some_and(|v| self.text_of(v) == "private");
+            let mut entries = vec![format!("{modifier}{fname}: {ty}")];
             // The constructor fills defaults into this table, so a
             // `read` field is plain here.
             param_types.push(match f.default {
@@ -888,26 +891,26 @@ impl<'s> Desugar<'s> {
                 None => format!("{fname}: {ty}"),
             });
 
-            if f.visibility.is_some_and(|v| self.text_of(v) == "private") {
-                private_types.push(format!("{modifier}{fname}: {ty}"));
-            } else {
-                public_types.push(format!("{modifier}{fname}: {ty}"));
-            }
-
             // `@alias("hp")`: another key that reads and writes the same
             // slot, so the type holds it too.
             for alias in self.attr_strings(&f.attributes, "alias") {
                 let key = crate::data::luau_key(&alias);
-                field_types.push(format!("{modifier}{key}: {ty}"));
-
-                if f.visibility.is_some_and(|v| self.text_of(v) == "private") {
-                    private_types.push(format!("{modifier}{key}: {ty}"));
-                } else {
-                    public_types.push(format!("{modifier}{key}: {ty}"));
-                }
-
+                entries.push(format!("{modifier}{key}: {ty}"));
                 aliases.push((alias, fname.clone()));
             }
+
+            field_types.extend(entries.iter().cloned());
+
+            if private {
+                private_types.extend(entries.iter().cloned());
+            }
+
+            members.push((
+                self.byte_start(f.span),
+                self.byte_end(f.span),
+                entries.join(", "),
+                private,
+            ));
 
             if let Some(dv) = &f.default {
                 // The constructor fills a default before the struct
@@ -951,7 +954,27 @@ impl<'s> Desugar<'s> {
             field_names.push(fname);
         }
 
-        let type_line = if split {
+        /*
+        The type opens on the header line and closes on the `end` line.
+        Each field sits on its own line between them, below its comments,
+        so a `---` comment documents its field and never the type. The
+        check artifact's private view puts the private fields in
+        `Name__all` alone, so they are not members of the open table.
+        */
+        let lines = |private: bool| -> Vec<(u32, u32, String)> {
+            members
+                .iter()
+                .filter(|m| private || !m.3)
+                .map(|(s, e, t, _)| (*s, *e, t.clone()))
+                .collect()
+        };
+        let (open, close, members) = if self.options.definitions {
+            (
+                format!("{export}type {name}{generics} = {{"),
+                "}".to_string(),
+                lines(true),
+            )
+        } else if split {
             // `Name` is what the world sees; `Name__all` is the same table
             // with the private fields and the private methods, which the
             // impl's methods put on `Name__private` in this artifact.
@@ -961,33 +984,43 @@ impl<'s> Desugar<'s> {
                 format!(" & {{ {} }}", private_types.join(", "))
             };
 
-            format!(
-                "{export}type {name} = typeof(setmetatable(({{}} :: any) :: {{ {} }}, {name})) {export}type {name}__all = {name}{hidden} & typeof({name}__private)",
-                public_types.join(", ")
+            (
+                format!("{export}type {name} = typeof(setmetatable(({{}} :: any) :: {{"),
+                format!(
+                    "}}, {name})) {export}type {name}__all = {name}{hidden} & typeof({name}__private)"
+                ),
+                lines(false),
             )
-        } else if let Some(members) =
+        } else if let Some(all) =
             self.generic_alias_members(&name, &type_arguments(&generics), &field_types)
         {
-            format!(
-                "{export}type {name}{generics} = {{ {} }}",
-                members.join(", ")
+            // The members after the fields are the methods.
+            let close = match all[field_types.len()..].join(", ") {
+                methods if methods.is_empty() => "}".to_string(),
+
+                methods => format!("{methods} }}"),
+            };
+
+            (
+                format!("{export}type {name}{generics} = {{"),
+                close,
+                lines(true),
             )
         } else {
-            format!(
-                "{export}type {name}{generics} = typeof(setmetatable(({{}} :: any) :: {{ {} }}, {name}))",
-                field_types.join(", ")
+            (
+                format!("{export}type {name}{generics} = typeof(setmetatable(({{}} :: any) :: {{"),
+                format!("}}, {name}))"),
+                lines(true),
             )
         };
 
         if self.options.definitions {
-            self.generate(
-                start,
-                &format!(
-                    "{export}type {name}{generics} = {{ {} }}",
-                    field_types.join(", ")
-                ),
-            );
-            self.blank_lines(start, end_tok.end);
+            self.generate(start, &open);
+            let cursor = self.members_on_lines(start, &members);
+            let close_at = end_tok.start.max(cursor);
+            self.blank_keeping_comments(cursor, close_at);
+            self.generate(close_at, &close);
+            self.blank_lines(close_at, end_tok.end);
 
             return;
         }
@@ -1102,15 +1135,16 @@ impl<'s> Desugar<'s> {
                 String::new(),
             )
         };
-        self.generate(start, &header);
+        self.generate(start, &format!("{header} {open}"));
 
-        // Field lines carry only their trivia, comments kept. The range
-        // starts at the attributes, so an attribute line above `struct`
-        // keeps its newline.
-        self.blank_keeping_comments(start, end_tok.start);
+        // Field lines carry their member and their trivia, comments
+        // kept. The range starts at the attributes, so an attribute line
+        // above `struct` keeps its newline.
+        let cursor = self.members_on_lines(start, &members);
+        self.blank_keeping_comments(cursor, end_tok.start);
 
         // Derives and attributes on the `end` line.
-        let mut tail = type_line + &class_call;
+        let mut tail = close + &class_call;
         let mut derives_debug = false;
         let mut derived: HashSet<String> = HashSet::new();
 
@@ -1279,9 +1313,52 @@ impl<'s> Desugar<'s> {
         out
     }
 
+    /// Writes the members of a table type on the lines of their source,
+    /// each below the comments above it, so a `---` comment documents
+    /// its own member in the build. A member is its source range and its
+    /// text. The copy starts at `cursor` and stops at the end of the
+    /// last member, which the result gives.
+    pub(crate) fn members_on_lines(
+        &mut self,
+        mut cursor: u32,
+        members: &[(u32, u32, String)],
+    ) -> u32 {
+        for (start, end, text) in members {
+            // A member on the line of the one before it, as in a body on
+            // one line, takes a space before it.
+            let lead = match self.src[cursor as usize..*start as usize].contains('\n') {
+                true => "",
+
+                false => " ",
+            };
+            self.blank_keeping_comments(cursor, *start);
+            // A comment after a one-line member keeps a space from it.
+            let rest = &self.src[*end as usize..];
+            let line = &rest[..rest.find('\n').unwrap_or(rest.len())];
+            let one_line = !self.src[*start as usize..*end as usize].contains('\n');
+            let trailing = line
+                .trim_start_matches([' ', '\t', ',', ';'])
+                .starts_with("--");
+            let gap = match one_line && trailing {
+                true => " ",
+
+                false => "",
+            };
+            self.generate(*start, &format!("{lead}{text},{gap}"));
+            self.blank_lines(*start, *end);
+            cursor = *end;
+        }
+
+        cursor
+    }
+
     /// Copies the lines in a range as blank lines, keeping the newlines
     /// and the comments between the tokens.
     fn blank_keeping_comments(&mut self, start: u32, end: u32) {
+        if start >= end {
+            return;
+        }
+
         let spans: Vec<(u32, u32)> = self
             .toks
             .iter()
@@ -2205,19 +2282,46 @@ impl<'s> Desugar<'s> {
         } else {
             ""
         };
-        let sigs: Vec<String> = t
-            .methods
-            .iter()
-            .map(|m| self.trait_method_type(m))
-            .collect();
         // Methods are read properties: a struct's methods are read-only to
         // the checker, and a read-write slot would reject them.
-        let props: Vec<String> = sigs.iter().map(|s| format!("read {s}")).collect();
-        let type_line = format!("{export}type {name} = {{ {} }}", props.join(", "));
+        let props: Vec<String> = t
+            .methods
+            .iter()
+            .map(|m| format!("read {}", self.trait_method_type(m)))
+            .collect();
+        // Each signature up to the first default body sits on its own
+        // line in the type, below its comments. A default body is a
+        // statement, so the type closes above it and takes the rest of
+        // the signatures on its last line. A definitions file writes no
+        // bodies.
+        let lead = match self.options.definitions {
+            true => t.methods.len(),
+
+            false => t
+                .methods
+                .iter()
+                .position(|m| m.body.is_some())
+                .unwrap_or(t.methods.len()),
+        };
+        let members: Vec<(u32, u32, String)> = t.methods[..lead]
+            .iter()
+            .zip(&props)
+            .map(|(m, p)| (self.byte_start(m.span), self.byte_end(m.span), p.clone()))
+            .collect();
+        let close = match lead == props.len() {
+            true => "}".to_string(),
+
+            false => format!(" {} }}", props[lead..].join(", ")),
+        };
+        let open = format!("{export}type {name} = {{");
 
         if self.options.definitions {
-            self.generate(start, &type_line);
-            self.blank_lines(self.byte_end(t.name), end_tok.end);
+            self.generate(start, &open);
+            let cursor = self.members_on_lines(self.byte_end(t.name), &members);
+            let close_at = end_tok.start.max(cursor);
+            self.blank_keeping_comments(cursor, close_at);
+            self.generate(close_at, &close);
+            self.blank_lines(close_at, end_tok.end);
 
             return;
         }
@@ -2225,22 +2329,31 @@ impl<'s> Desugar<'s> {
         // A signature without a body is a typed nil on the table, so
         // `Trait.` completes and hovers it. Assigning nil adds no key, so
         // the runtime table holds the default bodies only.
-        let stubs: String = t
-            .methods
+        fn stub(name: &str, method: &str, prop: &str) -> String {
+            let ty = prop.split_once(": ").map(|(_, t)| t).unwrap_or("any");
+
+            format!("{name}.{method} = (nil :: any) :: {ty}")
+        }
+
+        let stubs: String = t.methods[..lead]
             .iter()
-            .filter(|m| m.body.is_none())
-            .map(|m| {
-                let sig = self.trait_method_type(m);
-                let ty = sig.split_once(": ").map(|(_, t)| t).unwrap_or("any");
-                let mname = self.text_of(m.name);
-
-                format!(" {name}.{mname} = (nil :: any) :: {ty}")
-            })
+            .zip(&props)
+            .map(|(m, p)| format!(" {}", stub(&name, self.text_of(m.name), p)))
             .collect();
-        self.generate(start, &format!("local {name} = {{}} {type_line}{stubs}"));
-        let mut cursor = self.byte_end(t.name);
+        self.generate(start, &format!("local {name} = {{}} {open}"));
+        let mut cursor = self.members_on_lines(self.byte_end(t.name), &members);
+        // With no default body the type closes on the `end` line. A body
+        // with no `end` ends at its last signature.
+        let close_at = match lead == props.len() {
+            true => end_tok.start.max(cursor),
 
-        for m in &t.methods {
+            false => cursor,
+        };
+        self.blank_keeping_comments(cursor, close_at);
+        self.generate(close_at, &format!("{close}{stubs}"));
+        cursor = close_at;
+
+        for (i, m) in t.methods.iter().enumerate() {
             self.check_param_names(&m.params);
 
             for p in &m.params {
@@ -2249,8 +2362,12 @@ impl<'s> Desugar<'s> {
                 }
             }
 
+            if i < lead {
+                continue;
+            }
+
             let ms = self.byte_start(m.span);
-            self.blank_lines(cursor, ms);
+            self.blank_keeping_comments(cursor, ms);
 
             match &m.body {
                 Some(body) => {
@@ -2313,13 +2430,19 @@ impl<'s> Desugar<'s> {
                     }
                 }
 
-                None => self.blank_lines(ms, self.byte_end(m.span)),
+                // The type has closed, so the stub goes on the line of
+                // the signature, below its comments.
+                None => {
+                    let stub = stub(&name, self.text_of(m.name), &props[i]);
+                    self.generate(ms, &stub);
+                    self.blank_lines(ms, self.byte_end(m.span));
+                }
             }
 
             cursor = self.byte_end(m.span);
         }
 
-        self.blank_lines(cursor, end_tok.end);
+        self.blank_keeping_comments(cursor, end_tok.end);
 
         if t.exported {
             self.exports.push((name.clone(), name));
@@ -2526,7 +2649,7 @@ impl<'s> Desugar<'s> {
             .iter()
             .map(|b| self.text_of(*b).to_string())
             .collect();
-        let fields: Vec<String> = i
+        let fields: Vec<(u32, u32, String)> = i
             .fields
             .iter()
             .map(|f| {
@@ -2537,15 +2660,25 @@ impl<'s> Desugar<'s> {
                 let fname = self.text_of(f.name).to_string();
                 let ty = self.copy_type_to_string(f.ty);
 
-                format!("{modifier}{fname}: {ty}")
+                (
+                    self.byte_start(f.span),
+                    self.byte_end(f.span),
+                    format!("{modifier}{fname}: {ty}"),
+                )
             })
             .collect();
-        parts.push(format!("{{ {} }}", fields.join(", ")));
+        // Each field sits on its own line, below its comments.
+        parts.push("{".to_string());
         self.generate(
             start,
             &format!("{export}type {name}{generics} = {}", parts.join(" & ")),
         );
-        self.blank_lines(self.byte_end(i.name), end_tok.end);
+        let cursor = self.members_on_lines(self.byte_end(i.name), &fields);
+        // A body with no `end` ends at its last field.
+        let close_at = end_tok.start.max(cursor);
+        self.blank_keeping_comments(cursor, close_at);
+        self.generate(close_at, "}");
+        self.blank_lines(close_at, end_tok.end);
     }
 
     // --- remotes -----------------------------------------------------------
@@ -3987,8 +4120,9 @@ mod tests {
         let out = crate::compile(decl).unwrap();
 
         assert!(
-            out.check
-                .contains("type Fetcher = { read fetch: (self: any) -> __alloy.Future<string> }"),
+            out.check.contains(
+                "type Fetcher = {\nread fetch: (self: any) -> __alloy.Future<string>,\n}"
+            ),
             "{}",
             out.check
         );

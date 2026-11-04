@@ -1,0 +1,10 @@
+--- A struct whose fields have doc comments.
+export struct Counter
+  --- The public count.
+  read count: number
+  --- A private field. This comment must not document a type.
+  private step: number = 1 -- trailing
+  --- A field under an attribute.
+  @alias("total")
+  sum: number
+end

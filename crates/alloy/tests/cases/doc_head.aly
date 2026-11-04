@@ -1,0 +1,13 @@
+--!strict
+--[[
+  A module header. The runtime require goes on the blank line below
+  it, so the doc comment stays directly above its statement.
+]]
+
+--- The doc comment of the first statement.
+export type Id = number
+
+--- A struct, so the module needs the runtime.
+export struct Tag
+  id: Id
+end

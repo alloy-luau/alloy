@@ -1280,7 +1280,7 @@ fn a_private_member_read_from_outside_is_an_error_and_a_lint() {
 
     assert!(
         check.contains(
-            "type Counter = typeof(setmetatable(({} :: any) :: { read name: string }, Counter))"
+            "type Counter = typeof(setmetatable(({} :: any) :: {\nread name: string,\n\n }, Counter))"
         ),
         "{check}"
     );

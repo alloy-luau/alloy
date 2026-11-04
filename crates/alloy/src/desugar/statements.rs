@@ -2860,6 +2860,7 @@ impl<'s> Desugar<'s> {
     }
 
     /// Copies a gap, turning each comma into a space so newlines survive.
+    /// Only a comma token changes: a comma in a comment is text.
     ///
     /// An empty gap is no gap, the way `copy` reads one. A lenient parse
     /// leaves a body with no closing `end`, so its last token is the
@@ -2870,15 +2871,18 @@ impl<'s> Desugar<'s> {
         }
 
         let mut cursor = start;
-        let gap = &self.src[start as usize..end as usize];
+        let first = self.toks.partition_point(|t| t.start < start);
+        let commas: Vec<u32> = self.toks[first..]
+            .iter()
+            .take_while(|t| t.start < end)
+            .filter(|t| t.text(self.src) == ",")
+            .map(|t| t.start)
+            .collect();
 
-        for (i, b) in gap.bytes().enumerate() {
-            if b == b',' {
-                let at = start + i as u32;
-                self.copy(cursor, at);
-                self.generate(at, " ");
-                cursor = at + 1;
-            }
+        for at in commas {
+            self.copy(cursor, at);
+            self.generate(at, " ");
+            cursor = at + 1;
         }
 
         self.copy(cursor, end);

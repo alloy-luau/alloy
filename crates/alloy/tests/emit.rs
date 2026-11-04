@@ -191,8 +191,8 @@ fn a_definitions_file_declares_every_type_global_and_runs_nothing() {
     for line in [
         "export type Plain = number",
         "export type Id = string",
-        "export type Iface = { a: number }",
-        "export type Rec = { c: number }",
+        "export type Iface = {\na: number,\n}",
+        "export type Rec = {\nc: number,\n}",
         "export type Mode = \"Fast\" | \"Slow\"",
         "export type Shape = { tag: \"Circle\", _1: number } | \"Dot\"",
     ] {
@@ -221,7 +221,7 @@ fn a_definitions_file_writes_arrays_as_tables_and_names_a_std_type() {
     for line in [
         "declare items: { number }",
         "declare names: { read [number]: string }",
-        "export type Bag = { slots: { Bag } }",
+        "export type Bag = {\nslots: { Bag },\n}",
     ] {
         assert!(out.check.contains(line), "{line}\n{}", out.check);
     }
@@ -519,4 +519,29 @@ fn a_luau_compiler_limit_reports_at_its_declaration() {
     assert_eq!(got.len(), 1, "{got:?}");
     assert!(got[0].2.contains("out of upvalue registers"), "{got:?}");
     assert!(got[0].2.contains("read some through a table"), "{got:?}");
+}
+
+/// A doc comment documents the next code, so the header code goes above
+/// the doc comment of the first statement. The blank line just below
+/// another doc comment is not a place for it. With no free line above
+/// the doc comment, the header stays on the line of the statement.
+#[test]
+fn the_header_leaves_a_doc_comment_above_its_statement() {
+    let body = "export struct Tag\n    id: number\nend\n";
+    let head = |out: &str, line: usize| {
+        out.lines()
+            .nth(line)
+            .is_some_and(|l| l.starts_with("local __alloy = require("))
+    };
+
+    let out = ship(&format!("-- plain\n\n--- @class Free\n\n--- Tag.\n{body}"));
+    assert!(head(&out, 1), "{out}");
+    assert!(out.contains("\n--- Tag.\nlocal Tag = {}"), "{out}");
+
+    let out = ship(&format!("--- Tag.\n{body}"));
+    assert!(head(&out, 1), "{out}");
+
+    // No doc comment: the header keeps the line of the first statement.
+    let out = ship(&format!("-- plain\n\n{body}"));
+    assert!(head(&out, 2), "{out}");
 }

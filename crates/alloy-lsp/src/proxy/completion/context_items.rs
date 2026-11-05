@@ -458,6 +458,41 @@ impl State {
 
                     items.push(item);
                 }
+
+                // The macros an ingot's manifest declares: its transform
+                // rewrites them, so they list beside the intrinsics with
+                // the doc the manifest gives.
+                if let (Some(ingots), Some(path)) = (&self.ingots, uri_to_path(uri)) {
+                    for (name, text, ingot, insert) in ingots.macros(&path.to_string_lossy()) {
+                        let label = format!("${name}");
+
+                        if !seen.insert(label.clone()) {
+                            continue;
+                        }
+
+                        let detail = format!("macro of {ingot}");
+                        let item = match insert.is_empty() {
+                            true => {
+                                let mut item = word(&label, 3, Some(text.to_string()), *sigil);
+                                item["detail"] = json!(detail);
+                                item
+                            }
+
+                            // `$` opens a tab stop in a snippet, so the
+                            // sigil of the label is written escaped.
+                            false => snippet(
+                                &label,
+                                &format!("\\${insert}"),
+                                3,
+                                &detail,
+                                Some(text.to_string()),
+                                *sigil,
+                            ),
+                        };
+
+                        items.push(item);
+                    }
+                }
             }
 
             Context::DeriveArg { prefix } => {

@@ -1271,7 +1271,8 @@ fn hole_range(src: &str, open: usize, close: usize, expression: &str) -> Option<
 /// around a tag still answers. `None` when the markup does not parse,
 /// which leaves no region to blank.
 pub fn blank_markup(src: &str) -> Option<(Vec<(usize, usize)>, String)> {
-    let spans = luaux::compile::markup_spans(src).ok()?;
+    let spans = luaux::compile::markup_spans(&markup_view(src)).ok()?;
+    let spans = after_script(src, spans);
 
     (!spans.is_empty()).then(|| {
         let text = luaux::resolve::blank_luaux_regions(src, &spans);
@@ -1282,9 +1283,230 @@ pub fn blank_markup(src: &str) -> Option<(Vec<(usize, usize)>, String)> {
 
 pub use luaux::resolve::bound_names;
 
+/// The tags around the script of a component file.
+const SCRIPT_OPEN: &str = "<script>";
+const SCRIPT_CLOSE: &str = "</script>";
+
+/// A `.alx` file that starts with `<script>` is a component file, after
+/// Svelte. The script is the body of a function of `props`, the markup
+/// after the script is the fragment that the function returns, and the
+/// module returns the function:
+///
+/// ```text
+/// <script>                     return function(props)
+///   const name = props.name      const name = props.name
+/// </script>                    return (<>
+/// <TextLabel Text={name} />    <TextLabel Text={name} />
+///                              </>) end
+/// ```
+///
+/// The imports at the top of the script stay at the top of the module,
+/// because an import cannot stand in a function. Every line keeps its
+/// place. `None` for a file that does not start with a script.
+pub fn script_edits(src: &str) -> Option<Vec<Edit>> {
+    let open = leading_trivia_end(src);
+
+    if !src[open..].starts_with(SCRIPT_OPEN) {
+        return None;
+    }
+
+    let body = open + SCRIPT_OPEN.len();
+    let close = body + src[body..].find(SCRIPT_CLOSE)?;
+    let start = body + first_statement(&src[body..close]).unwrap_or(close - body);
+    let end = src.trim_end().len();
+    let edit = |start: usize, end: usize, text: &str| Edit {
+        start: start as u32,
+        end: end as u32,
+        text: text.to_string(),
+    };
+
+    Some(vec![
+        edit(open, body, ""),
+        edit(start, start, "return function(props) "),
+        edit(close, close + SCRIPT_CLOSE.len(), "return (<>"),
+        edit(end, end, "</>) end"),
+    ])
+}
+
+/// A component file as the module it becomes; see [`script_edits`].
+/// The map runs from `src` to the text, and marks the text it wrote as
+/// generated, so no lint lands on it.
+pub fn script_layer(src: &str) -> Option<(String, SpanMap)> {
+    let (text, map, errors) = apply_edits(src, &script_edits(src)?);
+
+    errors.is_empty().then_some((text, map))
+}
+
+/// A component file as markup tools read it, with every offset the
+/// source's own: `<script>` becomes spaces and `</script>` becomes
+/// `return(<>`, so the script is code and the markup after it is one
+/// fragment, closed past the end of the text. Another file comes back as
+/// it is.
+pub fn markup_view(src: &str) -> std::borrow::Cow<'_, str> {
+    let open = leading_trivia_end(src);
+    let close = src[open..]
+        .strip_prefix(SCRIPT_OPEN)
+        .and_then(|rest| rest.find(SCRIPT_CLOSE))
+        .map(|at| open + SCRIPT_OPEN.len() + at);
+
+    let Some(close) = close else {
+        return std::borrow::Cow::Borrowed(src);
+    };
+
+    let mut view = String::with_capacity(src.len() + 4);
+    view.push_str(&src[..open]);
+    view.push_str(&" ".repeat(SCRIPT_OPEN.len()));
+    view.push_str(&src[open + SCRIPT_OPEN.len()..close]);
+    view.push_str("return(<>");
+    view.push_str(&src[close + SCRIPT_CLOSE.len()..]);
+    view.push_str("</>)");
+
+    std::borrow::Cow::Owned(view)
+}
+
+/// One past the `</script>` of a component file, where its markup
+/// starts; `None` for another file.
+pub fn script_end(src: &str) -> Option<usize> {
+    let open = leading_trivia_end(src);
+    let body = open + SCRIPT_OPEN.len();
+
+    src[open..].starts_with(SCRIPT_OPEN).then_some(())?;
+
+    src[body..]
+        .find(SCRIPT_CLOSE)
+        .map(|at| body + at + SCRIPT_CLOSE.len())
+}
+
+/// The markup regions of [`markup_view`], cut to the source: a region
+/// starts past `</script>` and ends at the end of the text, so blanking
+/// one keeps the script tags whole.
+pub fn after_script(src: &str, spans: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    let Some(start) = script_end(src) else {
+        return spans;
+    };
+
+    spans
+        .into_iter()
+        .map(|(a, b)| {
+            (
+                if a < start && b > start { start } else { a },
+                b.min(src.len()),
+            )
+        })
+        .filter(|(a, b)| a < b)
+        .collect()
+}
+
+/// The offset of the first byte past the whitespace and comments that
+/// open a file.
+fn leading_trivia_end(src: &str) -> usize {
+    let mut at = 0;
+
+    loop {
+        at += src[at..].len() - src[at..].trim_start().len();
+
+        let Some(rest) = src[at..].strip_prefix("--") else {
+            return at;
+        };
+
+        let level = rest
+            .strip_prefix('[')
+            .map(|r| r.bytes().take_while(|b| *b == b'=').count())
+            .filter(|n| rest.as_bytes().get(1 + n) == Some(&b'['));
+
+        at = match level {
+            Some(n) => {
+                let close = format!("]{}]", "=".repeat(n));
+                let body = at + 2 + n + 2;
+
+                src[body..]
+                    .find(&close)
+                    .map_or(src.len(), |i| body + i + close.len())
+            }
+
+            None => src[at..].find('\n').map_or(src.len(), |i| at + i),
+        };
+    }
+}
+
+/// The offset in a script body of its first statement that is not an
+/// import, or `None` when the body holds imports alone. An import runs
+/// from `import` to its module string.
+fn first_statement(body: &str) -> Option<usize> {
+    let text = blank_markup(body).map_or_else(|| body.to_string(), |(_, t)| t);
+    let Ok(lexed) = alloy_syntax::lexer::lex(&text) else {
+        // A body the lexer refuses fails the compile anyway; the function
+        // starts at its first byte.
+        return Some(body.len() - body.trim_start().len()).filter(|n| *n < body.len());
+    };
+    let mut toks = lexed.toks.iter();
+
+    while let Some(t) = toks.next() {
+        if t.kind == TokKind::Ident && t.text(&text) == "import" {
+            toks.find(|t| matches!(t.kind, TokKind::Str { .. }));
+            continue;
+        }
+
+        return Some(t.start as usize);
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A component file returns a function of `props`: the script is its
+    /// body, and the markup after the script is the fragment it returns.
+    /// The imports stay at the top, and every line keeps its place.
+    #[test]
+    fn a_script_file_returns_its_component() {
+        let src = "-- a comment\n<script>\n  import { create } from './f'\n  const n = props.n\n</script>\n<TextLabel Text={n} />\n";
+        let (text, _) = script_layer(src).expect("a component file");
+
+        assert_eq!(
+            text,
+            "-- a comment\n\n  import { create } from './f'\n  return function(props) const n = props.n\nreturn (<>\n<TextLabel Text={n} /></>) end\n"
+        );
+        assert_eq!(text.lines().count(), src.lines().count());
+        assert!(script_layer("local x = 1 -- <script>\n").is_none());
+    }
+
+    /// The markup view keeps every offset: the script reads as code, and
+    /// the markup after it as one region.
+    #[test]
+    fn the_markup_view_keeps_the_offsets() {
+        let src = "<script>\n  local n = 1\n</script>\n<Frame />\n<TextLabel />\n";
+        let view = markup_view(src);
+
+        assert_eq!(view.len(), src.len() + 4);
+        assert_eq!(
+            &view[..src.len()],
+            "        \n  local n = 1\nreturn(<>\n<Frame />\n<TextLabel />\n"
+        );
+
+        let spans = luaux::compile::markup_spans(&view).expect("the view reads");
+        assert_eq!(spans.len(), 1);
+        assert!(spans[0].0 > src.find("local").unwrap());
+        assert!(matches!(
+            markup_view("local x = 1\n"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    /// A script of imports alone puts the function at the close tag.
+    #[test]
+    fn a_script_of_imports_alone_starts_the_function_at_its_close() {
+        let (text, _) =
+            script_layer("<script>\nimport { create } from './f'\n</script>\n<Frame />")
+                .expect("a component file");
+
+        assert_eq!(
+            text,
+            "\nimport { create } from './f'\nreturn function(props) return (<>\n<Frame /></>) end"
+        );
+    }
 
     /// A lint's rewrite after the lowering. The markup grows the text,
     /// so a rewrite that kept the lowered offsets writes over the wrong

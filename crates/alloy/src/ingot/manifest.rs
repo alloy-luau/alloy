@@ -178,6 +178,13 @@ pub struct Manifest {
     /// them, so the editor takes the names from here.
     #[serde(default)]
     pub props: BTreeMap<String, PropDecl>,
+    /// The macros the ingot compiles, `state` for `$state`. Its transform
+    /// rewrites each call before the compiler reads it, so the compiler
+    /// knows none of them; the editor lists them after `$` beside the
+    /// intrinsics and shows the doc on a hover. A key may hold dots,
+    /// `derived.by`, and a bare string is the doc.
+    #[serde(default)]
+    pub macros: BTreeMap<String, PropDecl>,
 }
 
 impl Manifest {
@@ -267,6 +274,22 @@ impl Manifest {
             }
         }
 
+        for name in self.macros.keys() {
+            let fits = |part: &str| {
+                let mut chars = part.chars();
+
+                chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+                    && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+            };
+
+            if !name.split('.').all(fits) {
+                return Err(format!(
+                    "macro `{name}` of `{}`: a macro name is a letter and then letters, digits, or `_`, in parts joined by `.`",
+                    self.name
+                ));
+            }
+        }
+
         for (name, lint) in &self.lints {
             if !matches!(lint.default.as_str(), "allow" | "warn" | "deny") {
                 return Err(format!(
@@ -337,6 +360,10 @@ detail = "Replace this lint with your own, or remove it."
 # the props the ingot reads on a markup tag; the editor completes them
 # [props]
 # ClassName = {{ doc = "what it holds", insert = "ClassName=\"$1\"" }}
+
+# the macros the transform compiles; the editor lists them after `$`
+# [macros]
+# shout = {{ doc = "the text in capitals", insert = "shout($1)" }}
 "#
     )
 }
@@ -388,6 +415,20 @@ mod tests {
         .unwrap();
         assert_eq!(m.props["ClassName"].doc(), "the utility list");
         assert_eq!(m.props["Style"].doc(), "a table of properties");
+
+        let m = Manifest::parse(
+            "name = \"x\"\napi = 1\nhooks = [\"transform\"]\n[macros]\nstate = { doc = \"a state\", insert = \"state($1)\" }\n\"derived.by\" = \"a derived value\"\n",
+        )
+        .expect("macros parse");
+        assert_eq!(m.macros["state"].insert(), "state($1)");
+        assert_eq!(m.macros["derived.by"].doc(), "a derived value");
+        assert!(
+            Manifest::parse(
+                "name = \"x\"\napi = 1\nhooks = [\"transform\"]\n[macros]\n\"2x\" = \"no\"\n"
+            )
+            .and_then(|m| m.validate().map(|_| m))
+            .is_err()
+        );
 
         let e = Manifest::parse(
             "name = \"x\"\napi = 1\nhooks = [\"complete\"]\n[props]\n\"class-name\" = \"no\"\n",

@@ -964,7 +964,12 @@ pub(crate) fn plain_snippet(insert: &str) -> String {
         out.push_str(&rest[..i]);
         let after = &rest[i + 1..];
 
-        if let Some(body) = after.strip_prefix('{') {
+        // `\$` is a `$` of the text, as a macro name writes it.
+        if out.ends_with('\\') {
+            out.pop();
+            out.push('$');
+            rest = after;
+        } else if let Some(body) = after.strip_prefix('{') {
             let end = body.find('}').unwrap_or(body.len());
             out.push_str(body[..end].split_once(':').map_or("", |(_, name)| name));
             rest = &body[(end + 1).min(body.len())..];

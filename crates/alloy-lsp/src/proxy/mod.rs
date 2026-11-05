@@ -102,6 +102,8 @@ use crate::{block_end, components, context, keywords, log, markup, settings, tok
 
 /// The names bound in a file, with markup blanked for `.alx`.
 pub(crate) fn markup_bound(src: &str) -> HashSet<String> {
+    let view = alloy::alx::markup_view(src);
+    let src: &str = &view;
     let blanked = alloy::luaux::compile::markup_spans(src)
         .map(|spans| alloy::luaux::resolve::blank_luaux_regions(src, &spans))
         .unwrap_or_else(|_| src.to_string());

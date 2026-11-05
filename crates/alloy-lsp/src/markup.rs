@@ -104,6 +104,10 @@ fn statement_between(src: &str, lt: usize, offset: usize) -> bool {
 /// and the child sees the author's tags. A tag that parses keeps its own
 /// span; the one that does not runs to the next statement line.
 pub fn recovered_spans(src: &str) -> Vec<(usize, usize)> {
+    // A component file reads with its script as code.
+    let view = alloy::alx::markup_view(src);
+    let src: &str = &view;
+
     let mut spans: Vec<(usize, usize)> = Vec::new();
     let mut from = 0;
 
@@ -138,11 +142,19 @@ pub fn recovered_spans(src: &str) -> Vec<(usize, usize)> {
 /// The markup regions of a source. A file with an unfinished tag, which
 /// is every file while the author types one, takes the recovered ones.
 pub fn regions(src: &str) -> Vec<(usize, usize)> {
+    // A component file reads with its script as code.
+    let view = alloy::alx::markup_view(src);
+    let src: &str = &view;
+
     alloy::luaux::compile::markup_spans(src).unwrap_or_else(|_| recovered_spans(src))
 }
 
 /// The components a source declares: the functions that return markup.
 pub fn components(src: &str) -> HashSet<String> {
+    // A component file reads with its script as code.
+    let view = alloy::alx::markup_view(src);
+    let src: &str = &view;
+
     alloy::naming::components(src, &regions(src))
 }
 
@@ -161,6 +173,10 @@ fn is_name_char(c: char) -> bool {
 /// `{ }` hole, or outside markup, and for an element that already has
 /// its closing tag.
 pub fn close_tag(src: &str, offset: usize) -> Option<String> {
+    // A component file reads with its script as code.
+    let view = alloy::alx::markup_view(src);
+    let src: &str = &view;
+
     let offset = offset.min(src.len());
     let bytes = src.as_bytes();
     let gt = match bytes.get(offset) {
@@ -237,6 +253,10 @@ pub fn close_tag(src: &str, offset: usize) -> Option<String> {
 /// it that no closing tag has taken yet. The caret may follow part of
 /// the name, `</Fr`.
 pub fn closing_slot(src: &str, offset: usize) -> Option<String> {
+    // A component file reads with its script as code.
+    let view = alloy::alx::markup_view(src);
+    let src: &str = &view;
+
     let head = &src[..offset.min(src.len())];
     let lt = head
         .trim_end_matches(is_name_char)
@@ -332,6 +352,10 @@ fn already_closed(src: &str, from: usize, name: &str) -> bool {
 
 /// The spot for a completion: text-based, so an unfinished tag counts.
 pub fn completion_spot(src: &str, offset: usize) -> Option<Spot> {
+    // A component file reads with its script as code.
+    let view = alloy::alx::markup_view(src);
+    let src: &str = &view;
+
     let offset = offset.min(src.len());
     let text = || in_markup_text(src, offset).then_some(Spot::Text);
     let lt = src[..offset].rfind('<')?;
@@ -389,6 +413,10 @@ pub fn completion_spot(src: &str, offset: usize) -> Option<Spot> {
 /// keyword and the child answers nothing there. The expression after
 /// the keyword carries the same scope the whole hole takes.
 pub fn hole_expression_start(src: &str, offset: usize) -> Option<usize> {
+    // A component file reads with its script as code.
+    let view = alloy::alx::markup_view(src);
+    let src: &str = &view;
+
     let offset = offset.min(src.len());
     let open = enclosing_hole(src, offset)?;
 
@@ -471,6 +499,10 @@ fn in_markup_text(src: &str, offset: usize) -> bool {
 /// `interface` that names one. `src` is the source that declares the
 /// component, which `component_source` resolves.
 pub fn component_props(src: &str, name: &str) -> Vec<Field> {
+    // A component file reads with its script as code.
+    let view = alloy::alx::markup_view(src);
+    let src: &str = &view;
+
     // `<Cards.Card>`: the declaration carries the last segment alone,
     // in the module or the namespace the path names.
     let name = name.rsplit('.').next().unwrap_or(name);
@@ -517,6 +549,10 @@ pub fn component_props(src: &str, name: &str) -> Vec<Field> {
 /// this file declares it. The module declares the component under its
 /// own name, so a tag that reads an import's alias finds nothing.
 pub fn component_module(src: &str, name: &str, load: &Load) -> Option<String> {
+    // A component file reads with its script as code.
+    let view = alloy::alx::markup_view(src);
+    let src: &str = &view;
+
     let last = name.rsplit('.').next()?;
 
     if roblox::is_class(last) {
@@ -540,6 +576,10 @@ pub fn component_module(src: &str, name: &str, load: &Load) -> Option<String> {
 /// The source that declares the component a tag names: `None` when this
 /// file declares it, and otherwise the module an import brings it from.
 pub fn component_source(src: &str, name: &str, load: &Load) -> Option<String> {
+    // A component file reads with its script as code.
+    let view = alloy::alx::markup_view(src);
+    let src: &str = &view;
+
     load(&component_module(src, name, load)?).map(|(text, _)| text)
 }
 
@@ -676,6 +716,10 @@ fn attribute_names(tag: &str) -> Vec<String> {
 /// The spot for a hover: the parsed tree, and the text for a tag the
 /// tree does not hold.
 pub fn hover_spot(src: &str, offset: usize) -> Option<Spot> {
+    // A component file reads with its script as code.
+    let view = alloy::alx::markup_view(src);
+    let src: &str = &view;
+
     // The `<` itself is punctuation. The child reads the factory the
     // markup lowers to and answers with that, which is emit detail.
     if src[offset..].starts_with('<') && opens_markup(src, offset) {
@@ -689,6 +733,10 @@ pub fn hover_spot(src: &str, offset: usize) -> Option<Spot> {
 
 /// Whether the source writes an element of `name`, as `<name ...>`.
 pub fn names_a_tag(src: &str, name: &str) -> bool {
+    // A component file reads with its script as code.
+    let view = alloy::alx::markup_view(src);
+    let src: &str = &view;
+
     src.match_indices(&format!("<{name}"))
         .any(|(i, _)| matches!(hover_spot(src, i + 1), Some(Spot::Tag { name: n }) if n == name))
 }
@@ -697,6 +745,10 @@ pub fn names_a_tag(src: &str, name: &str) -> bool {
 /// that sets it: `<Button label="ok" />` gives `Button` and the byte
 /// range of `label`.
 pub fn attribute_sites(src: &str, attr: &str) -> Vec<(String, (usize, usize))> {
+    // A component file reads with its script as code.
+    let view = alloy::alx::markup_view(src);
+    let src: &str = &view;
+
     let word = |c: char| c.is_alphanumeric() || c == '_';
 
     src.match_indices(attr)

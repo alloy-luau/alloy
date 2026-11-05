@@ -3424,6 +3424,12 @@ pub fn exports_default(source: &str) -> bool {
 /// blanks to text of the same width: every statement around it keeps
 /// its place, and a trailing `return` reads as the return it is.
 pub fn parsable(source: &str) -> std::borrow::Cow<'_, str> {
+    // A component file returns its component, so the reader takes the
+    // module it becomes.
+    if let Some((text, _)) = crate::alx::script_layer(source) {
+        return std::borrow::Cow::Owned(crate::alx::blank_markup(&text).map_or(text, |(_, t)| t));
+    }
+
     match crate::alx::blank_markup(source) {
         Some((_, text)) => std::borrow::Cow::Owned(text),
 

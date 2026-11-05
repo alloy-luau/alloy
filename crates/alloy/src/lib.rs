@@ -490,6 +490,60 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
     })
 }
 
+/// The text a file becomes before luaux and the desugar: the layer of a
+/// component file, a `.alx` file that starts with `<script>` (see
+/// [`alx::script_edits`]), then the ingots' source transforms. The
+/// component layer runs first, so each ingot reads a plain module and
+/// none has to know the component form. `None` when nothing changes
+/// the file.
+pub(crate) fn source_layer(
+    path: &str,
+    source: &str,
+    ingots: Option<&ingot::Ingots>,
+) -> Option<ingot::Layer> {
+    let ingots = ingots.filter(|i| !i.is_empty());
+    let script = match path.ends_with(".alx") {
+        true => alx::script_layer(source),
+
+        false => None,
+    };
+
+    let Some((text, map)) = script else {
+        return ingots.map(|i| i.before(path, source));
+    };
+
+    let Some(layer) = ingots.map(|i| i.before(path, &text)) else {
+        return Some(ingot::Layer {
+            text,
+            map: Some(map),
+            diagnostics: Vec::new(),
+        });
+    };
+
+    // An ingot reports against the component text; the author reads
+    // the file they wrote.
+    let diagnostics = layer
+        .diagnostics
+        .into_iter()
+        .map(|mut d| {
+            d.start = map.to_source(d.start);
+            d.end = map.to_source(d.end).max(d.start);
+            d
+        })
+        .collect();
+    let map = match &layer.map {
+        Some(inner) => map.compose(inner),
+
+        None => map,
+    };
+
+    Some(ingot::Layer {
+        text: layer.text,
+        map: Some(map),
+        diagnostics,
+    })
+}
+
 /// Compiles one file through the whole pipeline: the ingots' source
 /// transforms, luaux for `.alx`, the desugar, then the ingots' lints and
 /// output edits. Every caller that has a project goes through here, so
@@ -505,7 +559,7 @@ pub fn compile_file(
     ingots: Option<&ingot::Ingots>,
 ) -> Result<Output, CompileError> {
     let ingots = ingots.filter(|i| !i.is_empty());
-    let layer = ingots.map(|i| i.before(path, source));
+    let layer = source_layer(path, source, ingots);
     let text = layer.as_ref().map_or(source, |l| l.text.as_str());
     // A block the transform wrote around the author's code, such as a
     // helper function around a tag, adds no depth to the lints.
@@ -569,7 +623,22 @@ pub fn compile_file(
     }
 
     if let Some(ingots) = ingots {
-        ingots.after(path, source, &mut out);
+        // An ingot lints the module a component file becomes, the text
+        // its transform read, and the author reads the file they wrote.
+        match path
+            .ends_with(".alx")
+            .then(|| alx::script_layer(source))
+            .flatten()
+        {
+            Some((text, map)) => {
+                let kept = std::mem::take(&mut out.lints);
+                ingots.after(path, &text, &mut out);
+                lint::to_source(&mut out.lints, source, &map);
+                out.lints.splice(0..0, kept);
+            }
+
+            None => ingots.after(path, source, &mut out),
+        }
 
         // The compile applied the file's directives before the ingots
         // linted, so their lints meet the same silence here.

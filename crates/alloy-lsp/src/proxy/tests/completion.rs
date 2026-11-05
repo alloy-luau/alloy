@@ -1531,6 +1531,8 @@ pub(crate) fn a_signature_drops_its_receiver_and_names_its_arguments() {
         Some("flush()".to_string())
     );
     assert_eq!(plain_snippet("Score($1, $2)"), "Score()");
+    // An ingot macro writes its sigil escaped.
+    assert_eq!(plain_snippet("\\$state($1)"), "$state()");
 }
 /// A derived table pair prints no field the struct keeps private.
 #[test]

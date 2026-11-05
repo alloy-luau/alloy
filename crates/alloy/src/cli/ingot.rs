@@ -387,6 +387,10 @@ fn info(dir: &Path) -> ExitCode {
         println!("  prop       {name} {}", prop.doc());
     }
 
+    for (name, m) in &manifest.macros {
+        println!("  macro      ${name} {}", m.doc());
+    }
+
     ExitCode::SUCCESS
 }
 

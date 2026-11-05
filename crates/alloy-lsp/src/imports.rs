@@ -103,6 +103,8 @@ fn push_export(
 /// The exports of one file, from its top-level statements. Markup is
 /// blanked first for an `.alx` file.
 pub fn exports_of(src: &str, is_alx: bool) -> Vec<Export> {
+    let view = alloy::alx::markup_view(src);
+    let src: &str = &view;
     let blanked;
     let text = if is_alx {
         match alloy::luaux::compile::markup_spans(src) {
@@ -282,6 +284,8 @@ pub fn exports_of(src: &str, is_alx: bool) -> Vec<Export> {
 /// it binds, else of the `export` word. A default import's binding
 /// points here.
 pub fn default_span(src: &str, is_alx: bool) -> Option<(u32, u32)> {
+    let view = alloy::alx::markup_view(src);
+    let src: &str = &view;
     let blanked;
     let text = if is_alx {
         match alloy::luaux::compile::markup_spans(src) {

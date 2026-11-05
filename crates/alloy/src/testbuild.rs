@@ -949,6 +949,21 @@ pub fn spec(
     ingots: Option<&crate::ingot::Ingots>,
     extensions: &[crate::extensions::Extension],
 ) -> Result<Option<(String, Vec<Diagnostic>, usize)>, crate::CompileError> {
+    // A source with no `@test` has no spec. It may hold syntax that only
+    // an ingot or the component layer reads, which the parse below
+    // would report.
+    if !source.contains("@test") {
+        return Ok(None);
+    }
+
+    // The slice cuts the text the ingots and the component layer make,
+    // since an ingot's syntax is no Alloy the parser reads. The slice
+    // then compiles with no ingot, so no transform runs twice; an
+    // ingot's `output` hook does not reach a spec.
+    let layer = crate::source_layer(&source_rel.to_string_lossy(), source, ingots);
+    let source = layer.as_ref().map_or(source, |l| l.text.as_str());
+    let ingots = if layer.is_some() { None } else { ingots };
+
     // Markup is no Alloy the parser reads. Blanked, it keeps every
     // offset, so the slice cuts the source itself.
     let alx = source_rel.extension().is_some_and(|e| e == "alx");

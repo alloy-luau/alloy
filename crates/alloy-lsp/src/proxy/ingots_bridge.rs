@@ -156,6 +156,31 @@ impl Server {
         let Some(path) = uri_to_path(uri) else {
             return false;
         };
+        // A macro the ingot compiles reads like an intrinsic: its name,
+        // the ingot it comes from, and the doc of the manifest.
+        if let Some((start, end)) = macro_word(&doc.source, offset) {
+            let name = &doc.source[start + 1..end];
+            let found = ingots
+                .macros(&path.to_string_lossy())
+                .into_iter()
+                .find(|(n, ..)| *n == name);
+
+            if let Some((_, text, ingot, _)) = found {
+                let span = json!([start, end]);
+                let value =
+                    format!("```alloy\n${name}\n```\n\nA macro of the `{ingot}` ingot.\n\n{text}");
+                let result = crate::ingots::hover(
+                    doc,
+                    &json!({ "contents": value, "span": span }),
+                    |_, _| None,
+                );
+                drop(st);
+                self.respond(id, result);
+
+                return true;
+            }
+        }
+
         let Some(hover) = ingots.hover(&path.to_string_lossy(), &doc.source, offset as u32) else {
             return false;
         };
@@ -333,6 +358,39 @@ impl Server {
     }
 }
 
+/// The span of the `$name` under an offset, with its `.name` parts:
+/// `$derived.by`. `None` where no `$` word stands.
+fn macro_word(src: &str, offset: usize) -> Option<(usize, usize)> {
+    let bytes = src.as_bytes();
+    let part = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'.';
+    let mut start = offset.min(bytes.len());
+
+    while start > 0 && part(bytes[start - 1]) {
+        start -= 1;
+    }
+
+    if start == 0 || bytes[start - 1] != b'$' {
+        // The caret on the `$` itself.
+        if bytes.get(offset) != Some(&b'$') {
+            return None;
+        }
+
+        start = offset + 1;
+    }
+
+    let mut end = start;
+
+    while end < bytes.len() && part(bytes[end]) {
+        end += 1;
+    }
+
+    while end > start && bytes[end - 1] == b'.' {
+        end -= 1;
+    }
+
+    (end > start).then_some((start - 1, end))
+}
+
 /// The ingot's items, then the host's markup items it does not already
 /// hold. `hide_roblox` leaves out the Roblox classes and their properties
 /// and events.
@@ -380,6 +438,19 @@ fn merged(mut items: Vec<Value>, host: Vec<Value>, hide_roblox: bool) -> Vec<Val
     );
 
     items
+}
+
+#[cfg(test)]
+mod macro_word_tests {
+    #[test]
+    fn reads_the_macro_under_the_caret() {
+        let src = "local n = $derived.by(f) + $state(1)";
+
+        assert_eq!(super::macro_word(src, 12), Some((10, 21)));
+        assert_eq!(super::macro_word(src, 10), Some((10, 21)));
+        assert_eq!(super::macro_word(src, 28), Some((27, 33)));
+        assert_eq!(super::macro_word(src, 3), None);
+    }
 }
 
 #[cfg(test)]

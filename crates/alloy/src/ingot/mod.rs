@@ -446,6 +446,26 @@ impl Ingots {
         out
     }
 
+    /// The macros the ingots compile for a file of this path, as
+    /// `(name, doc, ingot, insert)`; the name has no `$`.
+    pub fn macros(&self, path: &str) -> Vec<(&str, &str, &str, &str)> {
+        let kind = kind_of(path);
+        let mut out = Vec::new();
+
+        for ingot in self.list.iter().filter(|i| i.manifest.wants(kind)) {
+            for (name, decl) in &ingot.manifest.macros {
+                out.push((
+                    name.as_str(),
+                    decl.doc(),
+                    ingot.name.as_str(),
+                    decl.insert(),
+                ));
+            }
+        }
+
+        out
+    }
+
     /// Every code action the ingots offer for a span.
     pub fn actions(
         &self,

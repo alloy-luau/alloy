@@ -375,7 +375,7 @@ pub(crate) fn qualify_module_types(
         return text.to_string();
     }
 
-    let bound = alloy::alx::bound_names(&doc.source);
+    let bound = alloy::alx::bound_names(&alloy::alx::markup_view(&doc.source));
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
     let mut out = String::with_capacity(text.len());
     let mut at = 0;

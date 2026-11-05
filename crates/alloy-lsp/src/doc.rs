@@ -499,7 +499,8 @@ impl Doc {
                 Some(pair) => pair,
 
                 None => {
-                    let spans = crate::markup::recovered_spans(source);
+                    let spans =
+                        alloy::alx::after_script(source, crate::markup::recovered_spans(source));
 
                     if spans.is_empty() {
                         return None;

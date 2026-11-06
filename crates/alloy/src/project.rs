@@ -208,17 +208,27 @@ impl Tree {
     }
 
     /// The mount that holds `rel`, the one with the longest disk path,
-    /// with the rest of `rel` under it.
+    /// with the rest of `rel` under it. A mount of one module file also
+    /// holds the file's path without its extension.
     fn holder(&self, rel: &Path) -> Option<(&Mounted, PathBuf)> {
         let mut best: Option<(&Mounted, PathBuf)> = None;
 
         for m in &self.mounts {
-            if let Ok(rest) = rel.strip_prefix(&m.disk)
+            let whole_file = ((crate::rojo::names_a_script(&m.disk)
+                || crate::rojo::names_data(&m.disk))
+                && rel == m.disk.with_extension(""))
+            .then(PathBuf::new);
+
+            if let Some(rest) = rel
+                .strip_prefix(&m.disk)
+                .ok()
+                .map(Path::to_path_buf)
+                .or(whole_file)
                 && best
                     .as_ref()
                     .is_none_or(|(b, _)| b.disk.components().count() < m.disk.components().count())
             {
-                best = Some((m, rest.to_path_buf()));
+                best = Some((m, rest));
             }
         }
 
@@ -1466,6 +1476,36 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
                 "require(\"@shared/economy\") require(\"@pkg/jecs\") require(\"@shared/data/config.json\") require(\"@lest/core\")"
             ),
             "require(\"@game/ReplicatedStorage/Shared/economy\") require(\"@game/ReplicatedStorage/Packages/jecs\") require(\"@game/ReplicatedStorage/Shared/data/config\") require(\"@lest/core\")"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_require_reaches_a_module_that_a_file_mount_places() {
+        let dir = temp("file-mounts");
+        write(
+            &dir,
+            "default.project.json",
+            r#"{ "name": "place", "tree": { "$className": "DataModel",
+                 "Util": { "$path": "src/shared/util.aly" },
+                 "Config": { "$path": "src/shared/config.json" },
+                 "Model": { "$path": "src/shared/thing.model.json" },
+                 "Main": { "$path": "src/server/main.server.aly" } } }"#,
+        );
+        write(
+            &dir,
+            ".luaurc",
+            r#"{ "aliases": { "shared": "src/shared" } }"#,
+        );
+        let t = Tree::load(&dir, &Config::default());
+        assert_eq!(
+            rewrite_requires(
+                &t,
+                Path::new("src/server/main.server.aly"),
+                "require(\"@shared/util\") require(\"../shared/config.json\") require(\"../shared/thing.model\")"
+            ),
+            "require(\"@game/Util\") require(\"@game/Config\") require(\"../shared/thing.model\")"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

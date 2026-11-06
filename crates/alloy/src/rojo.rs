@@ -111,10 +111,29 @@ fn disk_path(node: &Map<String, Value>) -> Option<PathBuf> {
 }
 
 /// Whether a `$path` names a script file rather than a folder.
-fn names_a_script(path: &Path) -> bool {
+pub(crate) fn names_a_script(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| matches!(e, "luau" | "lua" | "aly" | "alx"))
+}
+
+pub(crate) fn names_data(path: &Path) -> bool {
+    let name = path.to_string_lossy();
+
+    crate::data::Format::of_path(path).is_some()
+        && !crate::data::is_project_file(path)
+        && !name.ends_with(".model.json")
+        && !name.ends_with(".meta.json")
+}
+
+fn written_by_build(rest: &Path) -> PathBuf {
+    let written = crate::build::output_for(rest)
+        .or_else(|| names_data(rest).then(|| rest.with_extension("luau")))
+        .unwrap_or_else(|| rest.to_path_buf());
+
+    crate::project::actor_output(&written)
+        .and_then(|(script, _)| script.parent().map(Path::to_path_buf))
+        .unwrap_or(written)
 }
 
 /// The children of a node: every key that is not a `$` directive.
@@ -206,7 +225,9 @@ impl ProjectFile {
                         continue;
                     };
                     let shown = match disk.strip_prefix(input) {
-                        Ok(rest) => out.join(rest),
+                        Ok(rest) if root.join(&disk).is_dir() => out.join(rest),
+
+                        Ok(rest) => out.join(written_by_build(rest)),
 
                         Err(_) => disk,
                     };
@@ -537,6 +558,32 @@ mod tests {
             built["tree"]["Workspace"]["Props"]["$properties"]["Name"],
             "Props"
         );
+    }
+
+    #[test]
+    fn a_file_mount_points_at_the_file_the_build_writes() {
+        let root = temp("file-mounts");
+        std::fs::create_dir_all(root.join("src/x.aly")).unwrap();
+        let value: Value = serde_json::from_str(
+            r#"{ "Util": { "$path": "src/util.aly" }, "Config": { "$path": "src/config.json" },
+                 "Model": { "$path": "src/thing.model.json" }, "X": { "$path": "src/x.aly" },
+                 "Physics": { "$path": "src/physics.server.actor.aly" } }"#,
+        )
+        .unwrap();
+        let p = ProjectFile {
+            file: PathBuf::from("default.project.json"),
+            name: "n".into(),
+            tree: value.as_object().unwrap().clone(),
+        };
+        let built = p.build_tree(&root, &root, Path::new("src"), Path::new("build"), &[]);
+        let path = |node: &str| built["tree"][node]["$path"].clone();
+        assert_eq!(path("Util"), "build/util.luau");
+        assert_eq!(path("Config"), "build/config.luau");
+        assert_eq!(path("Model"), "build/thing.model.json");
+        assert_eq!(path("X"), "build/x.aly");
+        assert_eq!(path("Physics"), "build/physics");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

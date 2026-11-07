@@ -97,6 +97,48 @@ fn spelled_end(
         .then(|| position_of(&doc.source, at + text.len()))
 }
 
+/// The LSP's standard semantic token types, the names an ingot's token
+/// takes.
+const STANDARD_TYPES: &[&str] = &[
+    "namespace",
+    "type",
+    "class",
+    "enum",
+    "interface",
+    "struct",
+    "typeParameter",
+    "parameter",
+    "variable",
+    "property",
+    "enumMember",
+    "event",
+    "function",
+    "method",
+    "macro",
+    "keyword",
+    "modifier",
+    "comment",
+    "string",
+    "number",
+    "regexp",
+    "operator",
+    "decorator",
+];
+
+/// The LSP's standard semantic token modifiers.
+const STANDARD_MODIFIERS: &[&str] = &[
+    "declaration",
+    "definition",
+    "readonly",
+    "static",
+    "deprecated",
+    "abstract",
+    "async",
+    "modification",
+    "documentation",
+    "defaultLibrary",
+];
+
 /// The child's capabilities, as the editor should see them: no
 /// formatting of a shadow, semantic tokens whole and never by range or
 /// delta, and rename follow-up for Alloy files and the Luau modules
@@ -174,6 +216,26 @@ pub(crate) fn edit_capabilities(message: &mut Value) {
     if let Some(Value::Object(tokens)) = caps.get_mut("semanticTokensProvider") {
         tokens.remove("range");
         tokens.insert("full".to_string(), Value::Bool(true));
+
+        // An ingot's token may name any standard type or modifier. The
+        // child's legend may lack some; they go on the end, so the
+        // child's own indices hold.
+        for (key, names) in [
+            ("tokenTypes", STANDARD_TYPES),
+            ("tokenModifiers", STANDARD_MODIFIERS),
+        ] {
+            if let Some(list) = tokens
+                .get_mut("legend")
+                .and_then(|l| l.get_mut(key))
+                .and_then(Value::as_array_mut)
+            {
+                for name in names {
+                    if !list.iter().any(|v| v == name) {
+                        list.push(json!(name));
+                    }
+                }
+            }
+        }
     }
 
     // `@` and `$` open an attribute and a macro or intrinsic, `(` an

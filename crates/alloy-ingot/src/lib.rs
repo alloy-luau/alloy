@@ -46,6 +46,7 @@
 //! {"op": "actions", ..., "span": [0, 4]}  // reply {"ok": true, "actions": [{"title": "t", "edits": [...]}]}
 //! {"op": "colors", ...}                   // reply {"ok": true, "colors": [{"span": [3, 13], "red": 1, "green": 0, "blue": 0, "alpha": 1}]}
 //! {"op": "present", ..., "span": [3, 13], "color": {"red": 1, ...}}  // reply {"ok": true, "labels": ["bg-red-500"]}
+//! {"op": "tokens", ...}                   // reply {"ok": true, "tokens": [{"span": [0, 3], "type": "keyword", "modifiers": ["readonly"]}]}
 //! {"op": "manifest"}                      // reply {"ok": true, "manifest": "ingot.toml text"}
 //! ```
 //!
@@ -515,6 +516,81 @@ impl Color {
     }
 }
 
+/// The type of a semantic token: one of the LSP's standard types, so
+/// every editor theme has a color for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TokenType {
+    Namespace,
+    Type,
+    Class,
+    Enum,
+    Interface,
+    Struct,
+    TypeParameter,
+    Parameter,
+    Variable,
+    Property,
+    EnumMember,
+    Event,
+    Function,
+    Method,
+    Macro,
+    Keyword,
+    Modifier,
+    Comment,
+    String,
+    Number,
+    Regexp,
+    Operator,
+    Decorator,
+}
+
+/// A modifier of a semantic token: one of the LSP's standard modifiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TokenModifier {
+    Declaration,
+    Definition,
+    Readonly,
+    Static,
+    Deprecated,
+    Abstract,
+    Async,
+    Modification,
+    Documentation,
+    DefaultLibrary,
+}
+
+/// A semantic token over a span of the file, for the syntax the ingot
+/// adds. In the editor it replaces each host token that it overlaps,
+/// because the ingot owns its syntax. A span over a line break gives
+/// one token on each line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Token {
+    pub span: (u32, u32),
+    #[serde(rename = "type")]
+    pub kind: TokenType,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modifiers: Vec<TokenModifier>,
+}
+
+impl Token {
+    pub fn new(span: (u32, u32), kind: TokenType) -> Self {
+        Self {
+            span,
+            kind,
+            modifiers: Vec::new(),
+        }
+    }
+
+    pub fn with(mut self, modifier: TokenModifier) -> Self {
+        self.modifiers.push(modifier);
+
+        self
+    }
+}
+
 /// The resolved settings of the project, sent once at init.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Settings {
@@ -640,6 +716,14 @@ pub trait Handler {
         Ok(Vec::new())
     }
 
+    /// Semantic tokens over the syntax this ingot adds, for the colors of
+    /// the editor. Each one replaces the host tokens that it overlaps.
+    fn tokens(&mut self, file: &File) -> Result<Vec<Token>, String> {
+        let _ = file;
+
+        Ok(Vec::new())
+    }
+
     /// The `ingot.toml` text this binary carries. `cargo install` ships
     /// one binary and no data files; an ingot that returns its manifest
     /// installs from crates.io, and the host writes the text beside the
@@ -703,6 +787,10 @@ enum Request {
         span: (u32, u32),
         #[serde(default)]
         color: Color,
+    },
+    Tokens {
+        #[serde(flatten)]
+        file: File,
     },
     Manifest,
 }
@@ -796,6 +884,10 @@ fn answer(handler: &mut impl Handler, request: Request) -> Vec<u8> {
         Request::Present { file, span, color } => handler
             .present(&file, span, color)
             .map(|labels| serde_json::json!({ "ok": true, "labels": labels })),
+
+        Request::Tokens { file } => handler
+            .tokens(&file)
+            .map(|tokens| serde_json::json!({ "ok": true, "tokens": tokens })),
 
         Request::Manifest => match handler.manifest() {
             Some(text) => Ok(serde_json::json!({ "ok": true, "manifest": text })),
@@ -967,6 +1059,36 @@ mod tests {
                 "merge": true,
                 "hide_roblox": true,
                 "class": "Frame",
+            })
+        );
+    }
+
+    #[test]
+    fn tokens_name_their_type_and_modifiers() {
+        struct Blocks;
+
+        impl Handler for Blocks {
+            fn tokens(&mut self, _file: &File) -> Result<Vec<Token>, String> {
+                Ok(vec![
+                    Token::new((0, 3), TokenType::Keyword),
+                    Token::new((4, 9), TokenType::Variable).with(TokenModifier::Readonly),
+                ])
+            }
+        }
+
+        let request =
+            serde_json::from_str(r#"{"op":"tokens","path":"a.alx","source":"{#if ready}"}"#)
+                .unwrap();
+        let reply: Value = serde_json::from_slice(&answer(&mut Blocks, request)).unwrap();
+
+        assert_eq!(
+            reply,
+            serde_json::json!({
+                "ok": true,
+                "tokens": [
+                    { "span": [0, 3], "type": "keyword" },
+                    { "span": [4, 9], "type": "variable", "modifiers": ["readonly"] },
+                ],
             })
         );
     }

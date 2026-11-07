@@ -32,6 +32,8 @@ pub enum Hook {
     Actions,
     /// The colors a file names, and the labels for a picked color.
     Colors,
+    /// Semantic tokens over the syntax the ingot adds.
+    Tokens,
 }
 
 impl Hook {
@@ -44,6 +46,7 @@ impl Hook {
         Hook::Complete,
         Hook::Actions,
         Hook::Colors,
+        Hook::Tokens,
     ];
 
     pub fn name(self) -> &'static str {
@@ -56,6 +59,7 @@ impl Hook {
             Hook::Complete => "complete",
             Hook::Actions => "actions",
             Hook::Colors => "colors",
+            Hook::Tokens => "tokens",
         }
     }
 }

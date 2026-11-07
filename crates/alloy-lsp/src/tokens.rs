@@ -18,7 +18,7 @@ use crate::doc::{Doc, offset_of, position_of};
 
 /// One token in source coordinates: line, column, length, type, and
 /// modifiers.
-type Token = (u32, u32, u64, u64, u64);
+pub(crate) type Token = (u32, u32, u64, u64, u64);
 
 pub fn remap(data: &[u64], doc: &Doc, types: &[String], modifiers: &[String]) -> Vec<u64> {
     let Some(out) = doc.mapping() else {
@@ -101,10 +101,53 @@ pub fn remap(data: &[u64], doc: &Doc, types: &[String], modifiers: &[String]) ->
     tokens.sort_by_key(|t| (t.0, t.1));
     tokens.dedup_by_key(|t| (t.0, t.1));
 
+    encode(&tokens)
+}
+
+/// Lays the ingots' tokens over encoded ones. An ingot owns the syntax
+/// it adds, so a token that overlaps one of the ingot's goes. Between
+/// two ingots, the first one to claim a place keeps it.
+pub fn overlay(data: &[u64], extra: &[Token]) -> Vec<u64> {
+    if extra.is_empty() {
+        return data.to_vec();
+    }
+
+    let overlaps =
+        |a: &Token, b: &Token| a.0 == b.0 && a.1 < b.1 + b.2 as u32 && b.1 < a.1 + a.2 as u32;
+    let mut own: Vec<Token> = Vec::new();
+
+    for t in extra {
+        if t.2 > 0 && !own.iter().any(|o| overlaps(o, t)) {
+            own.push(*t);
+        }
+    }
+
+    let mut tokens = decode(data);
+    tokens.retain(|t| !own.iter().any(|o| overlaps(o, t)));
+    tokens.extend(own);
+    tokens.sort_by_key(|t| (t.0, t.1));
+
+    encode(&tokens)
+}
+
+fn decode(data: &[u64]) -> Vec<Token> {
+    let (mut line, mut start) = (0u64, 0u64);
+
+    data.chunks_exact(5)
+        .map(|t| {
+            line += t[0];
+            start = if t[0] > 0 { t[1] } else { start + t[1] };
+
+            (line as u32, start as u32, t[2], t[3], t[4])
+        })
+        .collect()
+}
+
+fn encode(tokens: &[Token]) -> Vec<u64> {
     let mut encoded = Vec::with_capacity(tokens.len() * 5);
     let (mut pl, mut pc) = (0u32, 0u32);
 
-    for (l, c, len, kind, mods) in tokens {
+    for &(l, c, len, kind, mods) in tokens {
         let dl = l - pl;
         let dc = if dl > 0 { c } else { c - pc };
         encoded.extend_from_slice(&[dl as u64, dc as u64, len, kind, mods]);
@@ -801,6 +844,20 @@ fn alloy_tokens(doc: &Doc, types: &[String], modifiers: &[String]) -> Vec<Token>
 
 #[cfg(test)]
 mod tests {
+    /// An ingot's token replaces each token that it overlaps on its line,
+    /// and leaves the others. Between two ingots, the first one wins.
+    #[test]
+    fn an_ingot_token_replaces_the_tokens_it_overlaps() {
+        let host = encode(&[(0, 0, 3, 1, 0), (0, 4, 2, 2, 0), (1, 1, 4, 1, 0)]);
+        let out = overlay(&host, &[(0, 1, 4, 7, 0), (0, 3, 1, 8, 0), (2, 0, 2, 7, 1)]);
+
+        assert_eq!(
+            decode(&out),
+            [(0, 1, 4, 7, 0), (1, 1, 4, 1, 0), (2, 0, 2, 7, 1)]
+        );
+        assert_eq!(overlay(&host, &[]), host);
+    }
+
     use super::*;
     use alloy::EmitOptions;
 

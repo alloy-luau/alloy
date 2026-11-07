@@ -62,6 +62,23 @@ impl State {
         crate::ingots::colors(doc, &colors)
     }
 
+    /// The semantic tokens the ingots give a document, in source
+    /// positions and the child's legend.
+    pub(crate) fn ingot_tokens(&self, uri: &str) -> Vec<crate::tokens::Token> {
+        let Some(ingots) = &self.ingots else {
+            return Vec::new();
+        };
+        let Some(doc) = self.docs.get(uri) else {
+            return Vec::new();
+        };
+        let Some(path) = uri_to_path(uri) else {
+            return Vec::new();
+        };
+        let tokens = ingots.tokens(&path.to_string_lossy(), &doc.source);
+
+        crate::ingots::tokens(doc, &tokens, &self.token_types, &self.token_modifiers)
+    }
+
     /// The code actions the ingots offer for a range.
     pub(crate) fn ingot_actions(&self, uri: &str, range: ((u32, u32), (u32, u32))) -> Vec<Value> {
         let Some(ingots) = &self.ingots else {

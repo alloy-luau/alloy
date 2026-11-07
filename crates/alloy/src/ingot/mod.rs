@@ -507,6 +507,23 @@ impl Ingots {
         colors
     }
 
+    /// Every semantic token the ingots give a file: `{ span, type,
+    /// modifiers }` each, in the order of the ingots.
+    pub fn tokens(&self, path: &str, source: &str) -> Vec<Value> {
+        let mut tokens = Vec::new();
+
+        for ingot in self.with_hook(Hook::Tokens, path) {
+            let mut request = self.file(path, source);
+            request["op"] = json!("tokens");
+
+            if let Ok(reply) = ingot.request(&request, EDITOR_TIMEOUT) {
+                tokens.extend(reply["tokens"].as_array().cloned().unwrap_or_default());
+            }
+        }
+
+        tokens
+    }
+
     /// The labels the ingots offer for a picked color at a span; empty
     /// when no ingot owns the span.
     pub fn present(

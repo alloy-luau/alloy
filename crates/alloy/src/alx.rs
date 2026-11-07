@@ -1377,6 +1377,18 @@ pub fn script_end(src: &str) -> Option<usize> {
         .map(|at| body + at + SCRIPT_CLOSE.len())
 }
 
+/// The byte ranges of `<script>` and `</script>` in a component file;
+/// `None` for another file.
+pub fn script_tags(src: &str) -> Option<[(usize, usize); 2]> {
+    let open = leading_trivia_end(src);
+    let end = script_end(src)?;
+
+    Some([
+        (open, open + SCRIPT_OPEN.len()),
+        (end - SCRIPT_CLOSE.len(), end),
+    ])
+}
+
 /// The markup regions of [`markup_view`], cut to the source: a region
 /// starts past `</script>` and ends at the end of the text, so blanking
 /// one keeps the script tags whole.

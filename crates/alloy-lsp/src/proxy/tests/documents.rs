@@ -689,6 +689,28 @@ pub(crate) fn capabilities_lose_formatting_and_gain_renames() {
     assert!(caps["semanticTokensProvider"].get("range").is_none());
     assert!(caps["workspace"]["fileOperations"]["didRename"].is_object());
 }
+/// An ingot's token may name a standard type that luau-lsp's legend
+/// lacks. The proxy adds it at the end, so the child's indices hold.
+#[test]
+pub(crate) fn the_legend_gains_the_standard_types_at_its_end() {
+    let mut m = json!({ "result": { "capabilities": {
+            "semanticTokensProvider": {
+                "legend": { "tokenTypes": ["variable", "function"], "tokenModifiers": ["readonly"] },
+                "full": true
+            }
+        } } });
+    edit_capabilities(&mut m);
+    let legend = &m["result"]["capabilities"]["semanticTokensProvider"]["legend"];
+    let types = legend["tokenTypes"].as_array().expect("types");
+    let modifiers = legend["tokenModifiers"].as_array().expect("modifiers");
+
+    assert_eq!(types[0], "variable");
+    assert_eq!(types[1], "function");
+    assert!(types.iter().any(|t| t == "keyword"));
+    assert_eq!(types.iter().filter(|t| *t == "variable").count(), 1);
+    assert_eq!(modifiers[0], "readonly");
+    assert!(modifiers.iter().any(|m| m == "declaration"));
+}
 #[test]
 pub(crate) fn an_emit_slot_is_no_parameter_hint() {
     assert!(emit_slot_hint(&json!({ "label": "_1:" })));

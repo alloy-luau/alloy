@@ -116,6 +116,36 @@ fn plain_enough(source: &str) -> String {
     source.replace("?.", " .").replace("!.", " .")
 }
 
+/// The markup regions of a `.alx` and the text with each one blanked.
+/// An unfinished tag stops the span scan, so `blank_markup` reports no
+/// region and the child would read the tags. The regions read from the
+/// text bound the broken one, and the code after it answers.
+fn blank_markup(source: &str) -> Option<(Vec<(usize, usize)>, String)> {
+    alloy::alx::blank_markup(source).or_else(|| {
+        let spans = alloy::alx::after_script(source, crate::markup::recovered_spans(source));
+
+        (!spans.is_empty()).then(|| {
+            let text = alloy::luaux::resolve::blank_luaux_regions(source, &spans);
+
+            (spans, text)
+        })
+    })
+}
+
+/// The shadow of a `.alx` that no compile reads. The markup and the
+/// script tags become spaces of the same width, so the child reads only
+/// code and every position still maps. The raw tags read as Luau, and
+/// `<script>` then names the `script` global.
+fn plain_alx(source: &str) -> String {
+    let mut text = blank_markup(source).map_or_else(|| source.to_string(), |(_, t)| t);
+
+    for (start, end) in alloy::alx::script_tags(source).into_iter().flatten() {
+        text.replace_range(start..end, &" ".repeat(end - start));
+    }
+
+    plain_enough(&text)
+}
+
 /// The name the repair pass writes after a dangling member operator.
 /// The call keeps the statement a call, the one expression Luau reads
 /// as a statement, so `HashMap.new().` repairs in every position.
@@ -491,26 +521,7 @@ impl Doc {
         // a region keeps its offset, so the code around the markup
         // answers and each position still maps.
         let blanked = |source: &str| -> Option<(Vec<(usize, usize)>, Repair)> {
-            // An unfinished tag stops the span scan, so `blank_markup`
-            // reports no region and the child would read the tags. The
-            // regions read from the text bound the broken one, and the
-            // code after it answers.
-            let (spans, text) = match alloy::alx::blank_markup(source) {
-                Some(pair) => pair,
-
-                None => {
-                    let spans =
-                        alloy::alx::after_script(source, crate::markup::recovered_spans(source));
-
-                    if spans.is_empty() {
-                        return None;
-                    }
-
-                    let text = alloy::luaux::resolve::blank_luaux_regions(source, &spans);
-
-                    (spans, text)
-                }
-            };
+            let (spans, text) = blank_markup(source)?;
             let compile = |text: &str| {
                 alloy::compile_file(&options.file_name, text, options, Some(jsx), ingots).ok()
             };
@@ -568,6 +579,8 @@ impl Doc {
 
                 self.shadow = match &self.repair {
                     Some(r) => r.output.check.clone(),
+
+                    None if self.is_alx => plain_alx(&self.source),
 
                     None => plain_enough(&self.source),
                 };
@@ -1169,6 +1182,32 @@ local r = b?.
         let at = src.find("<Frame").expect("the tag") + 2;
         assert!(doc.in_blanked_markup(at));
         assert!(!doc.in_blanked_markup(6));
+    }
+
+    /// A component file that no compile reads. The child used to read
+    /// the raw tags, and `<script>` then took the color and the hover of
+    /// the `script` global. The shadow blanks the tags and the markup to
+    /// their width, and the script stays code.
+    #[test]
+    fn a_component_no_compile_reads_hides_its_tags() {
+        let src = "<script>\n  local x = )\n</script>\n<Frame Name=\"a\" />\n";
+        let options = EmitOptions {
+            file_name: "/w/p.alx".to_string(),
+            ..EmitOptions::default()
+        };
+        let doc = Doc::new(
+            src.to_string(),
+            1,
+            &options,
+            &alloy::luaux::Config::default(),
+            None,
+        );
+
+        assert!(doc.mapping().is_none());
+        assert_eq!(doc.shadow.len(), src.len());
+        assert!(doc.shadow.contains("local x = )"), "{}", doc.shadow);
+        assert!(!doc.shadow.contains("script"), "{}", doc.shadow);
+        assert!(!doc.shadow.contains("Frame"), "{}", doc.shadow);
     }
 
     /// A tag the author is still typing: `<TextLabel Text={props.}`

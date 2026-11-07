@@ -1821,9 +1821,12 @@ impl Server {
                             let raw: Vec<u64> = data.iter().filter_map(Value::as_u64).collect();
                             let mapped =
                                 tokens::remap(&raw, doc, &st.token_types, &st.token_modifiers);
+                            let own = st.ingot_tokens(uri);
+                            let mapped = tokens::overlay(&mapped, &own);
                             log::debug(&format!(
-                                "semantic tokens: {} in, {} out",
+                                "semantic tokens: {} in, {} from ingots, {} out",
                                 raw.len() / 5,
+                                own.len(),
                                 mapped.len() / 5
                             ));
                             result["data"] = json!(mapped);

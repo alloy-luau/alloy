@@ -168,6 +168,63 @@ pub fn colors(doc: &Doc, colors: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// The ingots' semantic tokens over the source, one on each line that a
+/// span covers. A type or a modifier that the legend does not hold
+/// drops the token or the modifier.
+pub fn tokens(
+    doc: &Doc,
+    tokens: &[Value],
+    types: &[String],
+    modifiers: &[String],
+) -> Vec<crate::tokens::Token> {
+    let src = &doc.source;
+    let mut out = Vec::new();
+
+    for t in tokens {
+        let Some(kind) = t["type"]
+            .as_str()
+            .and_then(|name| types.iter().position(|k| k == name))
+        else {
+            continue;
+        };
+        let mods = t["modifiers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|m| {
+                modifiers
+                    .iter()
+                    .position(|k| Some(k.as_str()) == m.as_str())
+            })
+            .fold(0u64, |bits, i| bits | 1 << i);
+        let Some(span) = t["span"].as_array() else {
+            continue;
+        };
+        let start = span.first().and_then(Value::as_u64).unwrap_or(0) as usize;
+        let end = (span.get(1).and_then(Value::as_u64).unwrap_or(0) as usize).min(src.len());
+
+        if start >= end || !src.is_char_boundary(start) || !src.is_char_boundary(end) {
+            continue;
+        }
+
+        let mut at = start;
+
+        for raw in src[start..end].split('\n') {
+            let piece = raw.strip_suffix('\r').unwrap_or(raw);
+            let width = piece.encode_utf16().count() as u64;
+
+            if width > 0 {
+                let (line, column) = position_of(src, at);
+                out.push((line, column, width, kind as u64, mods));
+            }
+
+            at += raw.len() + 1;
+        }
+    }
+
+    out
+}
+
 /// Code actions as LSP actions with a workspace edit over the source.
 pub fn actions(doc: &Doc, uri: &str, actions: &[Value]) -> Vec<Value> {
     actions
@@ -227,6 +284,34 @@ pub fn diagnostics_in(doc: &Doc, span: (u32, u32)) -> Vec<Value> {
 mod tests {
     use super::*;
     use alloy::EmitOptions;
+
+    /// A span over a line break gives a token on each line, a type the
+    /// legend lacks drops the token, and modifiers become bits.
+    #[test]
+    fn ingot_tokens_split_at_line_breaks() {
+        let source = "local x = 1\n{#if\r\n  x}\n".to_string();
+        let start = source.find("{#if").expect("the block") as u64;
+        let doc = Doc::new(
+            source,
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let types = ["variable".to_string(), "keyword".to_string()];
+        let modifiers = ["readonly".to_string(), "static".to_string()];
+        let tokens = tokens(
+            &doc,
+            &[
+                json!({ "span": [start, start + 10], "type": "keyword", "modifiers": ["static"] }),
+                json!({ "span": [0, 5], "type": "decorator" }),
+            ],
+            &types,
+            &modifiers,
+        );
+
+        assert_eq!(tokens, [(1, 0, 4, 1, 2), (2, 0, 4, 1, 2)]);
+    }
 
     #[test]
     fn a_prefix_item_opens_the_list_again() {

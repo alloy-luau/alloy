@@ -302,7 +302,7 @@ impl Server {
             let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let (o, j) = st.options_for(uri);
 
-            (o, j, st.ingots.clone())
+            (o, j, st.ingots_for(uri))
         };
 
         if let Some(path) = uri_to_path(uri) {

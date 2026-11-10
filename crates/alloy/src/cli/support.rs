@@ -229,8 +229,41 @@ pub(crate) fn find_project(args: &[String]) -> Result<(PathBuf, Config), String>
             Ok((root, config))
         }
 
+        // With no project and no path to check, the defaults read `src`
+        // here. Above a project there is none, and "ok: 0 files" hides
+        // that nothing ran.
+        None if positionals(args).is_empty()
+            && !cwd.join(&Config::default().build.input).is_dir() =>
+        {
+            Err(no_project_message(&cwd))
+        }
+
         None => Ok((cwd, Config::default())),
     }
+}
+
+/// The error for a run with no `alloy.toml` and no `src`, with the
+/// projects one folder down, where a run from a workspace root lands.
+fn no_project_message(cwd: &Path) -> String {
+    let mut below: Vec<String> = std::fs::read_dir(cwd)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| Config::file_in(&e.path()).is_some())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    below.sort();
+
+    let mut message = format!(
+        "no alloy.toml in {} or above, and no `src` folder to check",
+        cwd.display()
+    );
+
+    if !below.is_empty() {
+        message.push_str(&format!("; run it in a project: {}", below.join(", ")));
+    }
+
+    message
 }
 
 pub(crate) fn apply_build_options(config: &mut Config, args: &[String]) {

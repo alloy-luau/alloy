@@ -503,7 +503,8 @@ impl<'s> Scan<'s> {
 
                 ")" | "]" | "}" | ">" | ">>" => depth -= 1,
 
-                "," | "=" | ";" if depth == 0 => break,
+                // `for a: T in t do` ends the annotation at `in`.
+                "," | "=" | ";" | "in" | "do" if depth == 0 => break,
 
                 _ => {}
             }
@@ -1240,6 +1241,14 @@ mod tests {
         );
         assert_eq!(
             unused("for _, v in t do\n    print(v)\nend\n"),
+            Vec::<&str>::new()
+        );
+        // The annotation ends at `in`, so the `>` in the body does not
+        // close it and `w` in the body is no loop variable (#80).
+        assert_eq!(
+            unused(
+                "local w = {}\nfor e, v: number in w do\n    if v > 0 then\n        w[e] = v\n    end\nend\n"
+            ),
             Vec::<&str>::new()
         );
         // A function above a top-level `const` reads it. The read is a

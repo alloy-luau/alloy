@@ -148,6 +148,10 @@ pub struct EmitOptions {
     /// import of a struct or an enum binds the type too. See
     /// `crate::modules::import_types`.
     pub import_types: Vec<(String, Vec<String>)>,
+    /// Per import spec, each exported alias whose body is one builtin
+    /// type, as `(spec, name, body)`. See
+    /// `crate::modules::import_inline_types`.
+    pub import_inline_types: Vec<(String, String, String)>,
     /// The enums the imported modules declare, with their variants and
     /// payload counts. A `match` over an imported enum covers it.
     /// See `crate::modules::import_enums`.
@@ -513,6 +517,7 @@ impl Default for EmitOptions {
             late_requires: None,
             test_runner: true,
             import_types: Vec::new(),
+            import_inline_types: Vec::new(),
             import_enums: Vec::new(),
             import_remotes: Vec::new(),
             import_messages: Vec::new(),

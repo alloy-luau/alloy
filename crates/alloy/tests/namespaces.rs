@@ -427,7 +427,7 @@ fn a_type_only_import_writes_the_namespace_aliases() {
     let main = output(&dir, "main.luau");
     assert!(main.contains("type A_Shape = _m1.A_Shape"), "{main}");
     assert!(main.contains("type A_B_Deep = _m1.A_B_Deep"), "{main}");
-    assert!(main.contains("type Meters = _m1.Meters"), "{main}");
+    assert!(main.contains("type Meters = number"), "{main}");
     assert!(!main.contains("type A = _m1.A"), "{main}");
     assert!(
         main.contains("function use(s: A_Shape, d: A_B_Deep, m: Meters)"),

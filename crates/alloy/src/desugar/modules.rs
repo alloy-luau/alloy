@@ -138,6 +138,30 @@ impl<'s> Desugar<'s> {
         self.module_type_entry(quoted, name).is_some()
     }
 
+    /// The body to copy for an imported alias, `number` for
+    /// `export type Meters = number`. See `modules::import_inline_types`.
+    pub(crate) fn inline_type(&self, quoted: &str, name: &str) -> Option<String> {
+        let spec = quoted
+            .strip_prefix(['"', '\''])
+            .and_then(|s| s.strip_suffix(['"', '\'']))
+            .unwrap_or(quoted);
+
+        self.options
+            .import_inline_types
+            .iter()
+            .find(|(s, n, _)| s == spec && n == name)
+            .map(|(_, _, body)| body.clone())
+    }
+
+    /// Whether each name of a type-only list copies its alias, so the
+    /// line needs no `require` in either artifact.
+    fn all_inline(&self, quoted: &str, specs: &[ImportSpec]) -> bool {
+        !specs.is_empty()
+            && specs
+                .iter()
+                .all(|sp| self.inline_type(quoted, self.text_of(sp.name)).is_some())
+    }
+
     /// Whether the module exports this name as a type with no value:
     /// `export type`, `export interface`. A bare import of one binds
     /// the type alone; a `local` would read a key the table lacks.
@@ -656,12 +680,18 @@ impl<'s> Desugar<'s> {
                 // `import type { }` line says, so its `require` goes
                 // too. A list with one value in it keeps the require and
                 // drops nothing.
-                if self.list_is_type_only(&path, specs) {
+                let copies = self.list_is_type_only(&path, specs) && self.all_inline(&path, specs);
+
+                if self.list_is_type_only(&path, specs) && !copies {
                     self.ship_blanks
                         .push((self.byte_start(i.span), self.byte_end(i.span)));
                 }
 
-                let temp = self.hoist_import(&target, anchor);
+                let temp = match copies {
+                    true => String::new(),
+
+                    false => self.hoist_import(&target, anchor),
+                };
                 let text = self.spec_bindings(&path, &temp, specs);
                 self.generate(anchor, text.trim_start());
             }
@@ -671,15 +701,21 @@ impl<'s> Desugar<'s> {
                 // is blanked to ship: every output chunk anchored inside
                 // it goes. A require there runs the module, and two
                 // modules that name each other's types would loop.
-                self.ship_blanks
-                    .push((self.byte_start(i.span), self.byte_end(i.span)));
+                // A line whose aliases all copy their bodies requires
+                // nothing, so the ship artifact keeps it.
+                let copies = self.all_inline(&path, specs);
+
+                if !copies {
+                    self.ship_blanks
+                        .push((self.byte_start(i.span), self.byte_end(i.span)));
+                }
                 // luau-lsp types no cycle of requires: the module it
                 // reaches second has no types. An import that closes one
                 // requires nothing here, and its names read as `any`.
                 // ponytail: `any` loses the shape; a checker-only copy of
                 // the target's types would keep it.
                 let cut = self.options.type_cuts.iter().any(|c| c == bare);
-                let temp = match cut {
+                let temp = match cut || copies {
                     true => String::new(),
 
                     false => self.hoist_import(&target, anchor),
@@ -701,7 +737,11 @@ impl<'s> Desugar<'s> {
                     // the name alone only when the module exports it.
                     let aliases = self.namespace_type_aliases(&path, &name, &local, &temp);
 
-                    if aliases.is_empty() || self.module_exports_type(&path, &name) {
+                    if let Some(body) = self.inline_type(&path, &name) {
+                        let word = self.type_word(&local);
+
+                        parts.push(format!("{word} {local} = {body}"));
+                    } else if aliases.is_empty() || self.module_exports_type(&path, &name) {
                         let word = self.type_word(&local);
 
                         parts.push(format!("{word} {local}{args} = {temp}.{name}{type_args}"));
@@ -773,7 +813,12 @@ impl<'s> Desugar<'s> {
 
             let word = self.type_word(&local);
 
-            if sp.is_type || self.module_exports_type_only(path, &name) {
+            if let Some(body) = (sp.is_type || self.module_exports_type_only(path, &name))
+                .then(|| self.inline_type(path, &name))
+                .flatten()
+            {
+                types.push(format!("{word} {local} = {body}"));
+            } else if sp.is_type || self.module_exports_type_only(path, &name) {
                 types.push(format!("{word} {local}{args} = {temp}.{name}{type_args}"));
             } else {
                 // A struct or an enum is a value and a type; the type

@@ -862,6 +862,14 @@ fn a_dependency_shadow_sits_where_the_require_names_it() {
         Some(normalize(&app.join("src/main.luau")))
     );
 
+    // The shadow of `.config.aly` is no `.config.luau`, which luau-lsp
+    // would read as the Luau configuration (#84).
+    let config = st.mirror_path(&app.join(".config.aly"));
+    assert_eq!(
+        config.file_name().and_then(|n| n.to_str()),
+        Some(crate::proxy::documents::CONFIG_SHADOW)
+    );
+
     // Five folders up is too far: a root that deep keeps such a file
     // under `_outside`.
     let deep = State {

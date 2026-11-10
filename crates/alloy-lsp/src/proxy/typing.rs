@@ -25,7 +25,7 @@ impl Server {
         let (ingots, options) = {
             let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
-            (st.ingots.clone(), st.fmt_config(uri))
+            (st.ingots_for(uri), st.fmt_config(uri))
         };
         let formatted =
             format_source(uri, &source, &options).map(|f| match (&ingots, uri_to_path(uri)) {

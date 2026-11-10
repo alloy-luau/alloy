@@ -224,3 +224,26 @@ fn a_file_that_does_not_lex_counts_in_the_build_summary() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A run above every project fails and names the projects below. It
+/// printed "ok: flux 0 files" and passed with nothing checked.
+#[test]
+fn a_run_above_a_project_names_the_projects_below() {
+    let parent = std::env::temp_dir().join(format!("alloy-above-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&parent);
+    let root = project("above", TOML, "print(1)\n");
+    std::fs::create_dir_all(&parent).expect("the folder");
+    std::fs::rename(&root, parent.join("game")).expect("the move");
+
+    for command in ["flux", "check", "lint"] {
+        let (code, err) = run(&parent, &[command]);
+        assert_eq!(code, 1, "{command}: {err}");
+        assert!(err.contains("no alloy.toml"), "{command}: {err}");
+        assert!(
+            err.contains("run it in a project: game"),
+            "{command}: {err}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&parent);
+}

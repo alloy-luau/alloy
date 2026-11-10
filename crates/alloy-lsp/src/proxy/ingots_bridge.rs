@@ -13,7 +13,7 @@ impl State {
         character: u32,
         trigger: Option<&str>,
     ) -> Option<(Vec<Value>, alloy::ingot::Completed)> {
-        let ingots = self.ingots.as_ref()?;
+        let ingots = self.ingots_for(uri)?;
         let doc = self.docs.get(uri)?;
         let offset = offset_of(&doc.source, line, character)?;
         let path = uri_to_path(uri)?;
@@ -29,7 +29,7 @@ impl State {
     /// The props the ingots read on a markup tag of a document, as the
     /// markup completion takes them.
     pub(crate) fn ingot_props(&self, uri: &str) -> Vec<markup::IngotProp> {
-        let (Some(ingots), Some(path)) = (&self.ingots, uri_to_path(uri)) else {
+        let (Some(ingots), Some(path)) = (self.ingots_for(uri), uri_to_path(uri)) else {
             return Vec::new();
         };
 
@@ -48,7 +48,7 @@ impl State {
     /// The colors the ingots find in a document, as LSP color
     /// information.
     pub(crate) fn ingot_colors(&self, uri: &str) -> Vec<Value> {
-        let Some(ingots) = &self.ingots else {
+        let Some(ingots) = self.ingots_for(uri) else {
             return Vec::new();
         };
         let Some(doc) = self.docs.get(uri) else {
@@ -65,7 +65,7 @@ impl State {
     /// The semantic tokens the ingots give a document, in source
     /// positions and the child's legend.
     pub(crate) fn ingot_tokens(&self, uri: &str) -> Vec<crate::tokens::Token> {
-        let Some(ingots) = &self.ingots else {
+        let Some(ingots) = self.ingots_for(uri) else {
             return Vec::new();
         };
         let Some(doc) = self.docs.get(uri) else {
@@ -81,7 +81,7 @@ impl State {
 
     /// The code actions the ingots offer for a range.
     pub(crate) fn ingot_actions(&self, uri: &str, range: ((u32, u32), (u32, u32))) -> Vec<Value> {
-        let Some(ingots) = &self.ingots else {
+        let Some(ingots) = self.ingots_for(uri) else {
             return Vec::new();
         };
         let Some(doc) = self.docs.get(uri) else {
@@ -111,6 +111,13 @@ impl Server {
     /// run. A problem with one is a warning in the editor; the others
     /// still load.
     pub(crate) fn load_ingots(&self) {
+        // The other projects' ingots load again on their next use.
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .project_ingots
+            .borrow_mut()
+            .clear();
         let root = self
             .state
             .lock()
@@ -161,7 +168,7 @@ impl Server {
             return false;
         };
         let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(ingots) = st.ingots.clone() else {
+        let Some(ingots) = st.ingots_for(uri) else {
             return false;
         };
         let Some(doc) = st.docs.get(uri) else {
@@ -335,7 +342,7 @@ impl Server {
             return false;
         };
         let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(ingots) = st.ingots.clone() else {
+        let Some(ingots) = st.ingots_for(uri) else {
             return false;
         };
         let Some(doc) = st.docs.get(uri) else {

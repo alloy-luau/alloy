@@ -61,6 +61,11 @@ pub(crate) struct State {
     /// The ingots of the root's alloy.toml, started at workspace open
     /// and again when the file changes.
     pub(crate) ingots: Option<std::sync::Arc<alloy::ingot::Ingots>>,
+    /// The ingots of every other alloy.toml a document answers to: a
+    /// nested project, or one in another workspace folder. Each loads
+    /// on first use; `load_ingots` empties the table.
+    pub(crate) project_ingots:
+        std::cell::RefCell<HashMap<PathBuf, Option<std::sync::Arc<alloy::ingot::Ingots>>>>,
     /// The mirror workspace the child works in.
     pub(crate) mirror: PathBuf,
     /// Plain Luau documents the editor holds open, by real URI: their
@@ -576,6 +581,41 @@ impl State {
             .unwrap_or(dir);
 
         (config, config_dir)
+    }
+
+    /// The ingots of the alloy.toml a document answers to. The root's
+    /// come from `load_ingots`; another project's start here once.
+    pub(crate) fn ingots_for(&self, uri: &str) -> Option<std::sync::Arc<alloy::ingot::Ingots>> {
+        let path = uri_to_path(uri)?;
+        let Some(found) = self.project_for(&path).0 else {
+            return self.ingots.clone();
+        };
+        let (config_path, config) = (&found.0, &found.1);
+        let root_config = self.root.as_deref().and_then(|r| Config::find_within(r, r));
+
+        if root_config.as_deref() == Some(config_path.as_path()) {
+            return self.ingots.clone();
+        }
+
+        if let Some(hit) = self.project_ingots.borrow().get(config_path) {
+            return hit.clone();
+        }
+
+        let loaded = (!config.ingots.is_empty()).then(|| {
+            let base = config_path.parent().unwrap_or(Path::new("."));
+            let ingots = alloy::ingot::Ingots::load(base, config);
+
+            for p in &ingots.problems {
+                log::warn(&p.to_string());
+            }
+
+            std::sync::Arc::new(ingots)
+        });
+        self.project_ingots
+            .borrow_mut()
+            .insert(config_path.clone(), loaded.clone());
+
+        loaded
     }
 
     /// The markup config of a file: the `[alx]` table, or a

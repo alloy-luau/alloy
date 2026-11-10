@@ -420,7 +420,8 @@ fn a_type_only_import_drops_its_require() {
     for name in ["whole", "spec", "exported"] {
         let out = fs::read_to_string(dir.join(format!("build/{name}.luau"))).unwrap();
         assert!(!out.contains("require("), "{name}: {out}");
-        assert!(!out.contains("type Meters"), "{name}: {out}");
+        // An alias to one builtin is copied, so native code reads it (#83).
+        assert!(out.contains("type Meters = number"), "{name}: {out}");
     }
 
     let mixed = fs::read_to_string(dir.join("build/mixed.luau")).unwrap();

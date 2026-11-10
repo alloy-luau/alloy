@@ -462,7 +462,7 @@ impl State {
                 // The macros an ingot's manifest declares: its transform
                 // rewrites them, so they list beside the intrinsics with
                 // the doc the manifest gives.
-                if let (Some(ingots), Some(path)) = (&self.ingots, uri_to_path(uri)) {
+                if let (Some(ingots), Some(path)) = (self.ingots_for(uri), uri_to_path(uri)) {
                     for (name, text, ingot, insert) in ingots.macros(&path.to_string_lossy()) {
                         let label = format!("${name}");
 

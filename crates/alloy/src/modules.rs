@@ -1138,6 +1138,74 @@ pub fn import_types(
     out
 }
 
+/// The aliases an import may copy instead of reading them off the
+/// module: `export type Meters = number`, whose body is one type name
+/// that the module does not declare or import. Luau's compiler reads an
+/// alias only from the file that declares it, so native code sees
+/// `number` only in a copy (#83).
+pub fn import_inline_types(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+
+    for spec in import_specs(source) {
+        let Some(text) = resolve(&spec, from, aliases).and_then(|p| module_text(&p).ok()) else {
+            continue;
+        };
+
+        for (name, body) in inline_aliases(&text) {
+            out.push((spec.clone(), name, body));
+        }
+    }
+
+    out
+}
+
+/// `export type Name = word` lines whose word is a name the source does
+/// not declare or import, with an optional `?`.
+fn inline_aliases(source: &str) -> Vec<(String, String)> {
+    let word = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_');
+    let declares = |w: &str| {
+        source.lines().any(|l| {
+            let mut parts = l.split_whitespace().skip_while(|p| *p == "export");
+            let head = parts.next();
+            let named = parts
+                .next()
+                .map(|n| n.split(['<', '=', '{', '(']).next().unwrap_or(n));
+
+            match head {
+                Some("import") => l.contains(w),
+
+                Some(
+                    "type" | "struct" | "interface" | "enum" | "class" | "trait" | "namespace",
+                ) => named == Some(w),
+
+                _ => false,
+            }
+        })
+    };
+    let mut out = Vec::new();
+
+    for line in source.lines() {
+        let Some(rest) = line.trim().strip_prefix("export type ") else {
+            continue;
+        };
+        let Some((name, body)) = rest.split_once('=') else {
+            continue;
+        };
+        let (name, body) = (name.trim(), body.trim().trim_end_matches(';').trim_end());
+        let base = body.strip_suffix('?').unwrap_or(body);
+
+        if word(name) && word(base) && !declares(base) {
+            out.push((name.to_string(), body.to_string()));
+        }
+    }
+
+    out
+}
+
 /// How many modules a re-export is followed through. A barrel of a
 /// barrel is rare, a cycle of them is a mistake, and the walk reads a
 /// file per step.
@@ -2895,6 +2963,7 @@ impl crate::EmitOptions {
     /// goes through here, so one new index reaches all of them.
     pub fn imports(mut self, source: &str, from: &Path, aliases: &[(String, PathBuf)]) -> Self {
         self.import_types = import_types(source, from, aliases);
+        self.import_inline_types = import_inline_types(source, from, aliases);
         self.import_enums = import_enums(source, from, aliases);
         self.import_remotes = import_remotes(source, from, aliases);
         self.import_messages = import_messages(source, from, aliases);
@@ -5337,6 +5406,18 @@ mod tests {
         assert_eq!(type_head("F<T>="), "F");
         assert_eq!(type_args("F<T>="), "<T>");
         assert!(type_only("D=") && !type_only("E"));
+    }
+
+    #[test]
+    fn an_alias_to_one_builtin_name_copies() {
+        let src = "export type Meters = number\nexport type V = vector?\nexport type Box = { n: number }\nexport type Same = Box\nimport { Part } from './p'\nexport type P = Part\n";
+        assert_eq!(
+            inline_aliases(src),
+            vec![
+                ("Meters".to_string(), "number".to_string()),
+                ("V".to_string(), "vector?".to_string())
+            ]
+        );
     }
 
     #[test]

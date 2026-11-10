@@ -63,7 +63,13 @@ impl State {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let swapped = if let Some(b) = name.strip_suffix(".d.aly") {
+        // `.config.aly` must not become `.config.luau`: luau-lsp reads that
+        // name as its own configuration, over `.luaurc`. The Alloy config
+        // has no `luau` table, so the mode fell back to nonstrict and the
+        // type errors of the whole project went away (#84, #85).
+        let swapped = if name == alloy::config_aly::FILE_NAME {
+            CONFIG_SHADOW.to_string()
+        } else if let Some(b) = name.strip_suffix(".d.aly") {
             format!("{b}.d.luau")
         } else if let Some(b) = name
             .strip_suffix(".aly")
@@ -1653,6 +1659,9 @@ pub(crate) fn mirror_above(root: Option<&Path>) -> usize {
 
     deepest.clamp(ABOVE, ABOVE_MAX)
 }
+
+/// The name of the shadow of `.config.aly` in the mirror.
+pub(crate) const CONFIG_SHADOW: &str = ".config.alloy.luau";
 
 /// The folder that holds the mirror of every root. `ALLOY_LSP_MIRRORS`
 /// moves it, so a test run keeps its mirrors in a folder it removes.

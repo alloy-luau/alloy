@@ -259,8 +259,15 @@ fn no_project_message(cwd: &Path) -> String {
         cwd.display()
     );
 
+    // A folder of many projects, such as a temp folder, names a few.
+    const SHOWN: usize = 5;
     if !below.is_empty() {
+        let more = below.len().saturating_sub(SHOWN);
+        below.truncate(SHOWN);
         message.push_str(&format!("; run it in a project: {}", below.join(", ")));
+        if more > 0 {
+            message.push_str(&format!(", and {more} more"));
+        }
     }
 
     message

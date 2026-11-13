@@ -724,6 +724,13 @@ impl Server {
             let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
             for path in plain {
+                // `x.aly` and `x.luau` side by side, as Ember writes a
+                // package stub, land on one mirror path. The shadow of the
+                // source is the module; the copy would overwrite it.
+                if shadowed_by_source(&path) {
+                    continue;
+                }
+
                 if let Ok(text) = std::fs::read_to_string(&path) {
                     let text =
                         mirror_text(&path, &root, config.as_ref(), &input, out.as_deref(), text);
@@ -877,7 +884,7 @@ impl Server {
                 continue;
             }
 
-            let now = tree_stamp(&roots);
+            let now = tree_stamp(&roots, self.poll_skip().as_deref());
             // A pass is already running: it reads the same tree, so
             // this tick has nothing to add.
             let idle = self.scan.try_lock().is_ok();
@@ -938,6 +945,25 @@ impl Server {
         let all = roots.clone();
         roots.retain(|r| !all.iter().any(|o| o != r && r.starts_with(o)));
         roots
+    }
+
+    /// The build's output folder, which the poll must not stamp. The
+    /// workspace root is one of the poll roots and holds `[build] out`,
+    /// so without this every `alloy build --watch` write read as a
+    /// change and started a rescan of every plain file.
+    pub(crate) fn poll_skip(&self) -> Option<PathBuf> {
+        let root = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .root
+            .clone()?;
+        let path = Config::find_within(&root, &root)?;
+        let config = Config::load(&path).ok()?;
+
+        Some(normalize(
+            &path.parent().unwrap_or(&root).join(&config.build.out),
+        ))
     }
 
     /// Re-reads the project from disk. A package install writes a whole
@@ -1048,6 +1074,13 @@ impl Server {
 
                         _ => {}
                     }
+                }
+
+                // The shadow of `x.aly` owns the mirror's `x.luau`, so a
+                // plain `x.luau` beside it never matched and reopened the
+                // whole workspace on every rescan.
+                if shadowed_by_source(path) {
+                    return false;
                 }
 
                 let Ok(text) = std::fs::read_to_string(path) else {
@@ -1438,8 +1471,16 @@ impl State {
 /// configuration can reach into `plain`.
 /// The newest change under the roots: how many files there are and the
 /// latest modification time. Both move on any write, add, or delete.
-pub(crate) fn tree_stamp(roots: &[PathBuf]) -> (usize, Option<std::time::SystemTime>) {
-    fn walk_stamp(dir: &Path, count: &mut usize, newest: &mut Option<std::time::SystemTime>) {
+pub(crate) fn tree_stamp(
+    roots: &[PathBuf],
+    skip: Option<&Path>,
+) -> (usize, Option<std::time::SystemTime>) {
+    fn walk_stamp(
+        dir: &Path,
+        skip: Option<&Path>,
+        count: &mut usize,
+        newest: &mut Option<std::time::SystemTime>,
+    ) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
@@ -1451,11 +1492,12 @@ pub(crate) fn tree_stamp(roots: &[PathBuf]) -> (usize, Option<std::time::SystemT
             if path.is_dir() {
                 if matches!(name.as_str(), "node_modules" | "target")
                     || (name.starts_with('.') && !matches!(name.as_str(), ".alloy" | ".ember"))
+                    || skip.is_some_and(|s| normalize(&path) == s)
                 {
                     continue;
                 }
 
-                walk_stamp(&path, count, newest);
+                walk_stamp(&path, skip, count, newest);
             } else if let Ok(meta) = entry.metadata()
                 && let Ok(m) = meta.modified()
             {
@@ -1472,7 +1514,7 @@ pub(crate) fn tree_stamp(roots: &[PathBuf]) -> (usize, Option<std::time::SystemT
     let mut newest = None;
 
     for root in roots {
-        walk_stamp(root, &mut count, &mut newest);
+        walk_stamp(root, skip, &mut count, &mut newest);
     }
 
     (count, newest)
@@ -1666,9 +1708,26 @@ pub(crate) const CONFIG_SHADOW: &str = ".config.alloy.luau";
 /// The folder that holds the mirror of every root. `ALLOY_LSP_MIRRORS`
 /// moves it, so a test run keeps its mirrors in a folder it removes.
 fn mirror_parent() -> PathBuf {
-    std::env::var_os("ALLOY_LSP_MIRRORS")
+    let parent = std::env::var_os("ALLOY_LSP_MIRRORS")
         .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("alloy-lsp"))
+        .unwrap_or_else(|| resolved(std::env::temp_dir()).join("alloy-lsp"));
+
+    resolved(parent)
+}
+
+/// A folder with its symlinks resolved, when it exists. luau-lsp names
+/// a module it found through the sourcemap by its resolved path, and on
+/// macOS the temp folder `/var/folders` resolves to
+/// `/private/var/folders`: a report for `file:///private/var/...` found
+/// no shadow under `file:///var/...` and went to the editor as a report
+/// on a file no one has open. Windows is left alone: there the resolved
+/// form is a `\\?\` path no URI here is written in.
+fn resolved(path: PathBuf) -> PathBuf {
+    if cfg!(windows) {
+        return path;
+    }
+
+    std::fs::canonicalize(&path).unwrap_or(path)
 }
 
 /// The folder beside the mirrors that holds each root's definitions.
@@ -2192,6 +2251,16 @@ pub(crate) fn mirror_text(
 
         false => text,
     }
+}
+
+/// Whether a plain Luau file has an Alloy source beside it with the
+/// same stem. Both map to one mirror path, and the source's shadow
+/// takes it.
+pub(crate) fn shadowed_by_source(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e == "luau" || e == "lua")
+        && ["aly", "alx"]
+            .iter()
+            .any(|ext| path.with_extension(ext).is_file())
 }
 
 /// Whether the pass writes the mirror's sourcemap from the tree. The

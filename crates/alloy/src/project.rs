@@ -572,6 +572,50 @@ pub fn mount_requires(tree: &Tree, source: &Path, text: &str) -> Vec<(String, St
         .collect()
 }
 
+/// The alias the editor's mirror gives the project root, so a shadow
+/// can name a file by its path on disk: see `off_tree_requires`.
+pub const ROOT_ALIAS: &str = "alloy_root";
+
+/// Each relative import spec of `text` that leaves every mount, from a
+/// file a mount holds, with the `@alloy_root/...` path its shadow
+/// requires. luau-lsp reads a relative path in a file the sourcemap
+/// holds as a place in the tree, and a folder outside the mounts, such
+/// as the sources of a vendored project, has no place there: the
+/// require found nothing, and each name it bound read as `unknown`
+/// with no report. An alias resolves on disk. The editor alone uses
+/// this: the build requires the output of the other project.
+pub fn off_tree_requires(tree: &Tree, source: &Path, text: &str) -> Vec<(String, String)> {
+    if tree.holder(source).is_none() {
+        return Vec::new();
+    }
+
+    let dir = source.parent().unwrap_or(Path::new(""));
+
+    crate::modules::import_specs(text)
+        .into_iter()
+        .filter_map(|spec| {
+            if !spec.starts_with("./") && !spec.starts_with("../") {
+                return None;
+            }
+
+            let target = normalize(&dir.join(crate::data::strip_spec(&spec)));
+
+            // A target above the root has no path the alias can name.
+            if target.starts_with("..") || tree.holder(&target).is_some() {
+                return None;
+            }
+
+            let shown = target.to_string_lossy().replace('\\', "/");
+            let bare = [".aly", ".alx", ".luau"]
+                .iter()
+                .find_map(|ext| shown.strip_suffix(ext))
+                .unwrap_or(&shown);
+
+            Some((spec, format!("@{ROOT_ALIAS}/{bare}")))
+        })
+        .collect()
+}
+
 /// Rewrites the path of every `require("...")` of a text through `f`,
 /// which answers `None` for a path it leaves alone. The text keeps its
 /// line count, so `f` returns no newline.
@@ -1184,6 +1228,45 @@ pkg = ["Packages", "@game/ReplicatedStorage/Packages"]
         assert_eq!(
             resolve_alias(&t, Path::new(""), "shared", "data/config.json").unwrap(),
             "@game/ReplicatedStorage/Shared/data/config"
+        );
+    }
+
+    /// Strata re-exports Forge from `../../vendor/Forge/src/index`, a
+    /// folder no mount holds. luau-lsp read the path as a place in the
+    /// tree, so `new Forge():` gave no completion and no report.
+    #[test]
+    fn a_shadow_requires_a_file_outside_the_mounts_by_the_root_alias() {
+        let config = Config::parse(MOUNTS, Path::new("alloy.toml")).unwrap();
+        let t = Tree::load(Path::new("/does-not-exist"), &config);
+        let text = "import { a } from '../../vendor/Forge/src/index.aly'\nimport { b } from './util'\nimport { c } from '../../../above'\n";
+
+        assert_eq!(
+            off_tree_requires(&t, Path::new("src/shared/forge.aly"), text),
+            [(
+                "../../vendor/Forge/src/index.aly".to_string(),
+                "@alloy_root/vendor/Forge/src/index".to_string()
+            )]
+        );
+        // A file no mount holds is in no sourcemap: its path reads on disk.
+        assert!(
+            off_tree_requires(
+                &t,
+                Path::new("tools/gen.aly"),
+                "import { a } from '../vendor/x'\n"
+            )
+            .is_empty()
+        );
+
+        let options = crate::EmitOptions {
+            mount_requires: off_tree_requires(&t, Path::new("src/shared/forge.aly"), text),
+            ..Default::default()
+        };
+        let out = crate::compile_with(text, &options).unwrap();
+        assert!(
+            out.check
+                .contains("require('@alloy_root/vendor/Forge/src/index')"),
+            "{}",
+            out.check
         );
     }
 

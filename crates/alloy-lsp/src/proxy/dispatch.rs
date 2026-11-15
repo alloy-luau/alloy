@@ -2409,6 +2409,19 @@ impl Server {
 
                             false => st.auto_imports(uri, line, character),
                         };
+                        // The auto-imports are the exports that start
+                        // with the word under the cursor, and before a
+                        // word there are none. A list asked for there, by
+                        // a space or a new line, is not the whole answer:
+                        // the editor kept it as the word grew, and no
+                        // export joined it (alloy-luau/alloy#92).
+                        let before_word = !member
+                            && !quoted
+                            && st.docs.get(uri).is_some_and(|d| {
+                                offset_of(&d.source, line, character).is_some_and(|at| {
+                                    imports::word_before(&d.source, at).is_empty()
+                                })
+                            });
 
                         if !quoted {
                             extra.extend(st.primitive_completions(uri, line, character, result));
@@ -2453,7 +2466,7 @@ impl Server {
                         // An ingot's list is made from the word being
                         // typed, so the child's answer stops being the
                         // whole answer.
-                        if incomplete {
+                        if incomplete || before_word {
                             let list = match result {
                                 Value::Array(items) => Some(std::mem::take(items)),
 

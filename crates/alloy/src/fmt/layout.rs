@@ -174,9 +174,7 @@ impl<'s> Formatter<'s> {
     fn header_has_after(&self, i: usize, word: &str) -> bool {
         let mut depth = 0i32;
 
-        for j in i + 1..self.items.len() {
-            let it = &self.items[j];
-
+        for it in &self.items[i + 1..] {
             if depth == 0 && it.newlines_before > 0 {
                 return false;
             }
@@ -596,9 +594,7 @@ impl<'s> Formatter<'s> {
             // newlines. A plain `<` still ends at the line.
             let group = it.is("<<");
 
-            for j in i..self.items.len() {
-                let t = &self.items[j];
-
+            for (j, t) in self.items.iter().enumerate().skip(i) {
                 if (t.newlines_before > 0 && j != i && !group)
                     || t.is("then")
                     || t.is("do")
@@ -1803,9 +1799,7 @@ impl<'s> Formatter<'s> {
     fn closer_at(&self, open: usize) -> Option<usize> {
         let mut depth = 0i32;
 
-        for j in open..self.items.len() {
-            let t = &self.items[j];
-
+        for (j, t) in self.items.iter().enumerate().skip(open) {
             if t.is_comment() {
                 continue;
             }

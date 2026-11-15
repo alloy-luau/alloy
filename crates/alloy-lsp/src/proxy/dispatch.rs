@@ -235,6 +235,20 @@ impl Server {
 
                         if let Some(ws) = ws.as_object_mut() {
                             ws.insert("configuration".to_string(), Value::Bool(true));
+                            ws.remove("diagnostics");
+                        }
+
+                        // The proxy takes the child's reports by push and
+                        // takes the pull capability away from the editor
+                        // (`capabilities.rs`). luau-lsp pushes only to a
+                        // client that cannot pull, so with the editor's
+                        // pull support passed through it pushed nothing
+                        // for a source and nobody pulled: no type error
+                        // ever reached the editor.
+                        if let Some(td) =
+                            caps.get_mut("textDocument").and_then(Value::as_object_mut)
+                        {
+                            td.remove("diagnostic");
                         }
                     }
                 }
@@ -1310,6 +1324,14 @@ impl Server {
                 let (source, is_alloy) = st.editor_uri(&uri);
                 drop(st);
 
+                crate::log::debug(&format!(
+                    "child published {} diagnostics for {uri}, editor uri {source}, alloy {is_alloy}",
+                    message
+                        .pointer("/params/diagnostics")
+                        .and_then(Value::as_array)
+                        .map_or(0, Vec::len)
+                ));
+
                 match is_alloy {
                     true => {
                         let diagnostics = message
@@ -1329,6 +1351,12 @@ impl Server {
                                 for mut d in diagnostics {
                                     if !keep_diagnostic(&d, doc, doc_path.as_deref(), &lint_config)
                                     {
+                                        crate::log::debug(&format!(
+                                            "dropped child diagnostic in {source}: {}",
+                                            d.get("message")
+                                                .and_then(Value::as_str)
+                                                .unwrap_or_default()
+                                        ));
                                         continue;
                                     }
 
@@ -1730,8 +1758,24 @@ impl Server {
                             let lint_config = st.lint_config();
                             let doc_path = uri_to_path(uri);
                             let unmet = unmet_expectations(doc, items);
+                            crate::log::debug(&format!(
+                                "child pulled {} diagnostics for {uri}",
+                                items.len()
+                            ));
                             items.retain(|d| {
-                                keep_diagnostic(d, doc, doc_path.as_deref(), &lint_config)
+                                let keep =
+                                    keep_diagnostic(d, doc, doc_path.as_deref(), &lint_config);
+
+                                if !keep {
+                                    crate::log::debug(&format!(
+                                        "dropped child diagnostic in {uri}: {}",
+                                        d.get("message")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or_default()
+                                    ));
+                                }
+
+                                keep
                             });
                             items.extend(unmet);
                             collapse_diagnostics(items);

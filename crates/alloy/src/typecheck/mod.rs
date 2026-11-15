@@ -92,7 +92,14 @@ pub struct Analysis {
 /// then `~/.alloy/bin` and `~/.ember/bin`.
 pub fn find_luau_lsp(config: &FluxConfig) -> Option<PathBuf> {
     if let Some(p) = &config.luau_lsp {
-        let p = PathBuf::from(p);
+        // `~/.ember/bin/luau-lsp` reads as written in a config; no shell
+        // expands the tilde here, and without this the configured binary
+        // never matched and the check was skipped as "not on the PATH".
+        let p = match p.strip_prefix("~/").zip(dirs::home_dir()) {
+            Some((rest, home)) => home.join(rest),
+
+            None => PathBuf::from(p),
+        };
 
         return p.is_file().then_some(p);
     }
@@ -784,6 +791,9 @@ pub fn analyze(
     // them describe a partial tree.
     let mut unparsed: HashSet<PathBuf> = HashSet::new();
 
+    // The mirror as the checker names it, symlinks resolved.
+    let mirror_real = std::fs::canonicalize(&mirror).unwrap_or_else(|_| mirror.clone());
+
     // Every report, for a report that repeats one inside its bracket.
     let reports: Vec<Line<'_>> = text.lines().filter_map(parse_line).collect();
 
@@ -814,10 +824,15 @@ pub fn analyze(
             continue;
         }
 
-        // The path is relative to the mirror: `<out>/a/b.luau`.
+        // The path is relative to the mirror: `<out>/a/b.luau`. With a
+        // sourcemap the checker prints it absolute and resolved, and on
+        // macOS the temp folder `/var/folders` resolves to
+        // `/private/var/folders`: the plain prefix never matched, and
+        // every report fell through to the `continue` below unseen.
         let path = PathBuf::from(report.path.trim_start_matches("./"));
         let path = path
             .strip_prefix(&mirror)
+            .or_else(|_| path.strip_prefix(&mirror_real))
             .map(Path::to_path_buf)
             .unwrap_or(path);
         // A merged file of `.d.aly` files, or the copy that carries the

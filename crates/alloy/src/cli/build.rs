@@ -176,7 +176,8 @@ pub(crate) fn watch_loop(
     };
     let mut current = roots();
     let mut stamp = tree_stamp(&current);
-    build();
+    // The watch goes on after a build that failed, so its code is not read.
+    let _ = build();
     announce(&current);
 
     loop {
@@ -198,7 +199,7 @@ pub(crate) fn watch_loop(
 
             stamp = tree_stamp(&current);
             eprintln!();
-            build();
+            let _ = build();
         }
     }
 }

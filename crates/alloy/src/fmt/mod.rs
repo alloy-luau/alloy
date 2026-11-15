@@ -713,9 +713,7 @@ impl<'s> Formatter<'s> {
             let mut depth = 0i32;
             let mut lines = Vec::new();
 
-            for k in kw + 1..then {
-                let t = &self.items[k];
-
+            for (k, t) in self.items.iter().enumerate().take(then).skip(kw + 1) {
                 if t.is_comment() {
                     continue;
                 }

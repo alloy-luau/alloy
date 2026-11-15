@@ -313,6 +313,22 @@ impl Server {
 
         if let Some(path) = uri_to_path(uri) {
             options = options.imports_for_file(&path, text);
+
+            // An import of a file outside the mounts goes by the root
+            // alias: the child reads the relative path as a place in
+            // the tree, and finds nothing there.
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+
+            if let Some(project) = st.config_at(path.parent().unwrap_or(&path)) {
+                let root = normalize(project.0.parent().unwrap_or(Path::new(".")));
+                let tree = alloy::project::Tree::load(&root, &project.1);
+
+                if let Ok(rel) = path.strip_prefix(&root) {
+                    options
+                        .mount_requires
+                        .extend(alloy::project::off_tree_requires(&tree, rel, text));
+                }
+            }
         }
 
         (options, jsx, ingots)
@@ -1406,8 +1422,13 @@ impl State {
         Some(config_dir(base, &config.build.input.to_string_lossy()))
     }
 
-    /// The `[mount]` table as instance path to directory, longest
-    /// instance path first, so a nested mount wins over its parent.
+    /// The tree as instance path to directory, longest instance path
+    /// first, so a nested mount wins over its parent. The tree is the
+    /// `[mount]` table, else the Rojo project file at the root: a
+    /// project that keeps its tree there got no module import at all,
+    /// since no offer of the child found its file (alloy-luau/alloy#92).
+    /// A project file names the build's output, and the module the
+    /// author imports is the source under `[build] in`.
     pub(crate) fn instance_mounts(&self) -> Vec<(String, PathBuf)> {
         let Some(root) = self.root.as_deref() else {
             return Vec::new();
@@ -1419,13 +1440,21 @@ impl State {
             return Vec::new();
         };
         let base = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-        let mut out: Vec<(String, PathBuf)> = config
-            .mount
-            .values()
-            .filter_map(|m| {
-                let instance = m.1.strip_prefix("@game/")?.replace('/', ".");
+        let tree = alloy::project::Tree::load(&base, &config);
+        let mut out: Vec<(String, PathBuf)> = tree
+            .mounts
+            .iter()
+            .map(|m| {
+                let disk = match m.disk.strip_prefix(&config.build.out) {
+                    Ok(rest) => config.build.input.join(rest),
 
-                Some((instance, config_dir(&base, &m.0)))
+                    Err(_) => m.disk.clone(),
+                };
+
+                (
+                    m.place.join("."),
+                    config_dir(&base, &disk.to_string_lossy()),
+                )
             })
             .collect();
         out.sort_by_key(|(i, _)| std::cmp::Reverse(i.len()));
@@ -2404,6 +2433,17 @@ pub(crate) fn mirror_luau_text(root: &Path, config: Option<&Config>) -> String {
         None => luau
             .aliases
             .push((RUNTIME_ALIAS.trim_start_matches('@').to_string(), target)),
+    }
+
+    // The root by a name, for a shadow that imports a file outside
+    // the mounts: see `alloy::project::off_tree_requires`.
+    if !luau
+        .aliases
+        .iter()
+        .any(|(a, _)| a == alloy::project::ROOT_ALIAS)
+    {
+        luau.aliases
+            .push((alloy::project::ROOT_ALIAS.to_string(), ".".to_string()));
     }
 
     alloy::luau_config::render_luaurc(&luau)

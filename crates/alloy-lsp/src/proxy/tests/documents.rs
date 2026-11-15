@@ -27,6 +27,8 @@ pub(crate) fn the_mirror_config_names_the_runtime_and_the_mounts() {
     // A name the Luau configuration declares wins over the mount.
     assert_eq!(json["aliases"]["pkg"], "./vendor");
     assert_eq!(json["aliases"]["shared"], "./src/shared");
+    // The root by a name, for an import of a file outside the mounts.
+    assert_eq!(json["aliases"]["alloy_root"], ".");
 
     // With no alloy.toml the runtime sits at the root.
     let bare = mirror_luau_text(&dir, None);

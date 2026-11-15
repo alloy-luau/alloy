@@ -451,3 +451,44 @@ pub(crate) fn the_auto_import_pass_drops_a_store_module() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A project that keeps its tree in a Rojo project file has no
+/// `[mount]` table. No module the child offered found its file then, so
+/// no package and no module of the project could be imported from the
+/// list (alloy-luau/alloy#92). The project file names the build's
+/// output; the module the author imports is the source.
+#[test]
+pub(crate) fn a_project_file_gives_the_mounts_of_a_module_offer() {
+    let dir = std::env::temp_dir().join(format!("alloy-rojo-mounts-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n",
+    )
+    .expect("toml");
+    std::fs::write(
+        dir.join("default.project.json"),
+        r#"{ "name": "p", "tree": { "$className": "DataModel", "ReplicatedStorage": {
+            "Source": { "$path": "build" }, "Packages": { "$path": "packages/roblox" } } } }"#,
+    )
+    .expect("project file");
+
+    let st = State {
+        root: Some(dir.clone()),
+        mirror: dir.join("mirror"),
+        ..State::default()
+    };
+    let mounts = st.instance_mounts();
+
+    assert_eq!(
+        crate::proxy::navigation::module_file_of("ReplicatedStorage.Packages.lever", &mounts),
+        Some(dir.join("packages/roblox/lever"))
+    );
+    assert_eq!(
+        crate::proxy::navigation::module_file_of("ReplicatedStorage.Source.ui.button", &mounts),
+        Some(dir.join("src/ui/button"))
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

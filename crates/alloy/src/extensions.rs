@@ -518,7 +518,10 @@ pub fn primitives_text(exts: &[Extension], done: &mut HashSet<usize>) -> Option<
 /// and the runtime say one thing. A definitions file declares a type
 /// with `type`, not `export type`.
 pub fn rig_types() -> String {
-    let text = crate::RUNTIME;
+    // A Windows checkout can give the std CRLF line ends, and the search
+    // for the end of the type then found nothing: the server panicked at
+    // start (alloy-luau/extensions#19).
+    let text = crate::RUNTIME.replace("\r\n", "\n");
     let start = text
         .find("export type R15Character = ")
         .expect("R15Character in the std");

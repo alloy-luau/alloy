@@ -281,7 +281,11 @@ fn run() -> ExitCode {
             for line in BufReader::new(child_err).lines().map_while(Result::ok) {
                 eprintln!("{line}");
 
-                if !line.trim().is_empty() {
+                // A flag the binary does not know is a notice of every
+                // start, hundreds of lines of it, and no reason to exit:
+                // as the last line it named itself the cause
+                // (alloy-luau/alloy#91).
+                if !line.trim().is_empty() && !line.starts_with("Unknown FFlag") {
                     *tail.lock().unwrap_or_else(|e| e.into_inner()) = line;
                 }
             }

@@ -861,6 +861,9 @@ pub fn auto_import_candidates<'a>(
     let mut out = Vec::new();
     let from_dir = current.parent().unwrap_or(Path::new("."));
     let taken = imported_specs(src);
+    // The editor matches a word with no regard for case, so `anim`
+    // finds `Animator` in its own list, and it finds it here too.
+    let prefix = prefix.to_lowercase();
 
     for (path, exports) in files {
         if *path == current {
@@ -887,7 +890,7 @@ pub fn auto_import_candidates<'a>(
         }
 
         for export in exports.iter() {
-            if export.name.starts_with(prefix) && !bound.contains(&export.name) {
+            if export.name.to_lowercase().starts_with(&prefix) && !bound.contains(&export.name) {
                 out.push((spec.clone(), export));
             }
         }
@@ -914,7 +917,10 @@ pub fn auto_import_items(
                 "label": export.name,
                 "kind": export.kind,
                 "detail": format!("auto-import: {}", import_shape(&spec, export, quote)),
-                "sortText": format!("zz{}", export.name),
+                // The tier the child gives a module it can import,
+                // `7`. Under `zz` an export sat below every global and
+                // keyword of the list, some 1,700 items down.
+                "sortText": format!("72{}", export.name),
                 "additionalTextEdits": [import_edit(src, &spec, export, quote)],
             })
         })
@@ -1351,6 +1357,15 @@ namespace Inner as end
         let found = auto_import_candidates(src, &main, &files, "Ve", &HashSet::new(), &aliases);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].0, "./shapes");
+
+        // The editor matches with no regard for case, so `ve` offers
+        // `Vec2` too, and the item sorts in the tier of an import, not
+        // below every global (alloy-luau/alloy#92).
+        let lower = auto_import_candidates(src, &main, &files, "ve", &HashSet::new(), &aliases);
+        assert_eq!(lower.len(), 1);
+
+        let items = auto_import_items(src, &main, &files, "ve", &HashSet::new(), &aliases, '"');
+        assert_eq!(items[0]["sortText"], "72Vec2");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

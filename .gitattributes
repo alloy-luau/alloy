@@ -8,3 +8,8 @@
 # The golden cases are fixtures of the compiler's own tests. They read
 # as code, and they say nothing about what this crate is written in.
 alloy/tests/cases/** linguist-detectable=false
+
+# The compiler reads its own std and its golden cases as text, with
+# `include_str!`, and searches them by line. A CRLF checkout on Windows
+# broke one search and the server panicked at start.
+* text=auto eol=lf

@@ -251,10 +251,17 @@ pub fn uri_to_path(uri: &str) -> Option<PathBuf> {
     Some(PathBuf::from(text))
 }
 
-/// The `file:` URI of a path, with the characters editors escape.
+/// The `file:` URI of a path, as VS Code and luau-lsp write it: the
+/// drive letter in lower case and every `:` escaped, `file:///c%3A/x`.
+/// The proxy keys its maps by this text. On Windows `file:///C:/x`
+/// matched none of the URIs the editor and the child sent.
 pub fn path_to_uri(path: &Path) -> String {
-    let text = path.to_string_lossy().replace('\\', "/");
+    let mut text = path.to_string_lossy().replace('\\', "/");
     let mut out = String::from("file://");
+
+    if text.as_bytes().get(1) == Some(&b':') && text.as_bytes()[0].is_ascii_alphabetic() {
+        text[..1].make_ascii_lowercase();
+    }
 
     if !text.starts_with('/') {
         out.push('/');
@@ -262,7 +269,7 @@ pub fn path_to_uri(path: &Path) -> String {
 
     for b in text.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
                 out.push(b as char);
             }
 

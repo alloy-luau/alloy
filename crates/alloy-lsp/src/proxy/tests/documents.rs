@@ -429,9 +429,15 @@ pub(crate) fn a_windows_uri_keeps_its_drive() {
         uri_to_path("file:///ab:/x.aly"),
         Some(PathBuf::from("/ab:/x.aly"))
     );
+    // The URI of a path is the text VS Code and luau-lsp send back, so
+    // a map keyed by it finds their reports.
     assert_eq!(
         path_to_uri(Path::new("c:/Users/a/x.aly")),
-        "file:///c:/Users/a/x.aly"
+        "file:///c%3A/Users/a/x.aly"
+    );
+    assert_eq!(
+        path_to_uri(Path::new("C:\\Users\\a b\\x.aly")),
+        "file:///c%3A/Users/a%20b/x.aly"
     );
     // A path the editor wrote comes back as the same path.
     for uri in [

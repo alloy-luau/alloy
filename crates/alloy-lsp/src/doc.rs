@@ -102,10 +102,18 @@ pub struct Doc {
 pub const MARK: &str = "\u{feff}";
 
 /// Drops a leading byte order mark, so the source, the shadow, the
-/// mirror and every offset agree.
-fn strip_mark(text: &mut String) {
+/// mirror and every offset agree. Each CRLF line end becomes LF for the
+/// same reason: many scans step over `.lines()` by `len() + 1`, so on a
+/// Windows file each line moved the offset one byte. A hover then read
+/// the wrong comment, and a slice inside a character panicked. An LSP
+/// position is a line and a column, so it means the same in both texts.
+pub(crate) fn strip_mark(text: &mut String) {
     if text.starts_with(MARK) {
         text.drain(..MARK.len());
+    }
+
+    if text.contains('\r') {
+        *text = text.replace("\r\n", "\n");
     }
 }
 
@@ -955,6 +963,31 @@ mod tests {
 
         assert!(doc.bom);
         assert_eq!(doc.source, "local greeting = \"hi\"\n");
+    }
+
+    /// A Windows file comes in with CRLF line ends, and the document
+    /// holds LF. An edit at a line and a column lands on the same text
+    /// in both, and the CRLF it inserts becomes LF too.
+    #[test]
+    fn crlf_line_ends_become_lf() {
+        let mut doc = Doc::new(
+            "-- é\r\nlocal a = 1\r\nprint(a)\r\n".to_string(),
+            1,
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+
+        assert_eq!(doc.source, "-- é\nlocal a = 1\nprint(a)\n");
+
+        apply_edit(
+            &mut doc.source,
+            &mut doc.bom,
+            Some(((1, 11), (1, 11))),
+            "\r\nlocal b = 2",
+        );
+
+        assert_eq!(doc.source, "-- é\nlocal a = 1\nlocal b = 2\nprint(a)\n");
     }
 
     #[test]

@@ -2637,14 +2637,18 @@ impl State {
         }
     }
 
-    /// A module's text: the open document first, then the disk.
+    /// A module's text: the open document first, then the disk, with the
+    /// line ends a document has.
     pub(crate) fn module_text(&self, file: &Path) -> Option<String> {
         let uri = path_to_uri(file);
 
         match self.docs.get(&uri) {
             Some(doc) => Some(doc.source.clone()),
 
-            None => std::fs::read_to_string(file).ok(),
+            None => std::fs::read_to_string(file).ok().map(|mut text| {
+                crate::doc::strip_mark(&mut text);
+                text
+            }),
         }
     }
 

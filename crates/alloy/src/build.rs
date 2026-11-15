@@ -173,7 +173,7 @@ pub fn struct_shapes(
 
     // Each source reads and parses on its own, so they run on every
     // core: 2.2 s of a Strata build of 1070 files ran here on one.
-    let found = par_map(sources, |path| {
+    let one = |path: &PathBuf| -> FileShapes {
         let src = crate::modules::disk_text(path).ok()?;
         // The key holds all the result reads: the text, the base, the
         // aliases, and the file each import names now.
@@ -208,7 +208,45 @@ pub fn struct_shapes(
                 own
             }
         }
-    });
+    };
+    /*
+    A language server asks for the shapes of the chain of each file it
+    opens, about 400 modules a file on Strata, and the answer of a
+    module is the same each time. The threads below have no `Reads`,
+    so each ask read the module from the disk again: 23 s of the 93 s
+    the server took to open the project. The `Reads` of this thread
+    holds each answer until the disk changes; the shapes read the disk
+    alone, never an open buffer.
+    */
+    let found: Vec<FileShapes> = match crate::modules::current_reads() {
+        Some(reads) => {
+            let ctx = {
+                use std::hash::{Hash, Hasher};
+
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                (&base, aliases).hash(&mut h);
+                h.finish()
+            };
+            let generation = reads.generation();
+            let mut found: Vec<Option<FileShapes>> = sources
+                .iter()
+                .map(|path| reads.held::<FileShapes>("struct_shapes", path, ctx))
+                .collect();
+            let missing: Vec<usize> = (0..sources.len()).filter(|&i| found[i].is_none()).collect();
+            let fresh = par_map(&missing, |&i| {
+                crate::modules::with_reads(&reads, || one(&sources[i]))
+            });
+
+            for (i, own) in missing.into_iter().zip(fresh) {
+                reads.hold("struct_shapes", &sources[i], ctx, generation, own.clone());
+                found[i] = Some(own);
+            }
+
+            found.into_iter().flatten().collect()
+        }
+
+        None => par_map(sources, one),
+    };
 
     for (own, scope) in found.into_iter().flatten() {
         shapes.extend(own);

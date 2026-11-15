@@ -34,16 +34,36 @@ fn open_sources() -> &'static RwLock<HashMap<PathBuf, String>> {
 /// `None` takes it away again, and the file reads from the disk.
 pub fn set_open_source(path: &Path, text: Option<&str>) {
     let key = normalize(path);
+    // The text a module read as before this call: the buffer, else the
+    // disk. When the call leaves that text as it was, as the workspace
+    // pass of a language server does for each file it opens, what was
+    // read from the module stays good.
+    let before = open_sources()
+        .read()
+        .ok()
+        .and_then(|open| open.get(&key).cloned())
+        .or_else(|| disk_text(&key).ok());
     let Ok(mut open) = open_sources().write() else {
         return;
     };
 
     match text {
-        Some(text) => open.insert(key, text.to_string()),
+        Some(text) => open.insert(key.clone(), text.to_string()),
 
         None => open.remove(&key),
     };
+    drop(open);
+
+    let after = text.map(str::to_string).or_else(|| disk_text(&key).ok());
+
+    if before != after {
+        OPEN_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
+
+/// Moves each time an open buffer changes the text a module reads as.
+/// A list read from the text of a module is good for one value of it.
+static OPEN_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /*
 The files one build has read and probed. The import passes of each
@@ -63,6 +83,9 @@ pub struct Reads {
     files: RwLock<HashMap<PathBuf, bool>>,
     /// What one reader found in one module, by `DeclKey` (`shared`).
     decls: RwLock<HashMap<DeclKey, std::sync::Arc<dyn std::any::Any + Send + Sync>>>,
+    /// The Alloy modules each module imports, with the aliases and the
+    /// `OPEN_EPOCH` they were read under (`alloy_imports`).
+    edges: RwLock<HashMap<PathBuf, Edges>>,
     /// Moves on each `clear`. A read that started before a clear keeps
     /// its answer out of the table, since the disk may have changed
     /// under it.
@@ -72,9 +95,12 @@ pub struct Reads {
 impl Reads {
     /// Forgets every text and probe, so the next read goes to the disk.
     pub fn clear(&self) {
-        let (Ok(mut texts), Ok(mut files), Ok(mut decls)) =
-            (self.texts.write(), self.files.write(), self.decls.write())
-        else {
+        let (Ok(mut texts), Ok(mut files), Ok(mut decls), Ok(mut edges)) = (
+            self.texts.write(),
+            self.files.write(),
+            self.decls.write(),
+            self.edges.write(),
+        ) else {
             return;
         };
 
@@ -83,7 +109,105 @@ impl Reads {
         texts.clear();
         files.clear();
         decls.clear();
+        edges.clear();
     }
+
+    /// The count of clears so far. A value read before a clear must not
+    /// go into a table after it: see `hold`.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// What `reader` found in the module at `path` under the context
+    /// `ctx`, when a call of `hold` kept it. The caller answers for
+    /// `ctx`: it holds all that the value reads beside the disk.
+    pub(crate) fn held<V: Clone + Send + Sync + 'static>(
+        &self,
+        reader: &'static str,
+        path: &Path,
+        ctx: u64,
+    ) -> Option<V> {
+        let key: DeclKey = (reader, path.to_path_buf(), 0, ctx);
+
+        self.decls
+            .read()
+            .ok()
+            .and_then(|d| d.get(&key).cloned())
+            .and_then(|v| v.downcast::<V>().ok())
+            .map(|v| (*v).clone())
+    }
+
+    /// Keeps `value` for `held`, unless a clear ran since `generation`.
+    pub(crate) fn hold<V: Clone + Send + Sync + 'static>(
+        &self,
+        reader: &'static str,
+        path: &Path,
+        ctx: u64,
+        generation: u64,
+        value: V,
+    ) {
+        if let Ok(mut d) = self.decls.write()
+            && self.generation() == generation
+        {
+            d.insert(
+                (reader, path.to_path_buf(), 0, ctx),
+                std::sync::Arc::new(value),
+            );
+        }
+    }
+}
+
+/*
+The Alloy modules the module at `file` imports, in the order it names
+them. `imports_for_file` walks the chain of a file's imports, and on
+Strata a chain holds about 400 modules: the walk read and scanned
+500,000 texts to open 1,259 sources, 20 s of the 93 s a language server
+took to open the project. A module's list is good until the disk
+changes (`Reads::clear`) or an open buffer does (`OPEN_EPOCH`).
+*/
+fn alloy_imports(
+    file: &Path,
+    aliases: &[(String, PathBuf)],
+    aliases_key: u64,
+) -> std::sync::Arc<Vec<PathBuf>> {
+    let read = || {
+        let text = module_text(file).unwrap_or_default();
+        let mut out: Vec<PathBuf> = Vec::new();
+
+        for target in import_specs(&text)
+            .iter()
+            .filter_map(|spec| resolve(spec, file, aliases))
+        {
+            if is_alloy(&target) && !out.contains(&target) {
+                out.push(target);
+            }
+        }
+
+        std::sync::Arc::new(out)
+    };
+    let Some(reads) = READS.with(|r| r.borrow().clone()) else {
+        return read();
+    };
+    let epoch = OPEN_EPOCH.load(std::sync::atomic::Ordering::SeqCst);
+
+    if let Some(held) = reads.edges.read().ok().and_then(|e| {
+        e.get(file)
+            .filter(|(a, at, _)| *a == aliases_key && *at == epoch)
+            .map(|(_, _, list)| list.clone())
+    }) {
+        return held;
+    }
+
+    let generation = reads.generation();
+    let list = read();
+
+    if let Ok(mut e) = reads.edges.write()
+        && reads.generation() == generation
+    {
+        e.insert(file.to_path_buf(), (aliases_key, epoch, list.clone()));
+    }
+
+    list
 }
 
 thread_local! {
@@ -1658,6 +1782,10 @@ fn sent_decls<T: Clone + Send + Sync + 'static, F: Fn(&Path, &str) -> Vec<(Strin
     )
 }
 
+/// The Alloy imports of one module in `Reads`: the hash of the aliases
+/// and the `OPEN_EPOCH` they were read under, and the list.
+type Edges = (u64, u64, std::sync::Arc<Vec<PathBuf>>);
+
 /// A shared reader's key in `Reads`: the reader, the module, the barrel
 /// depth, and a hash of the module's text and the project's aliases.
 type DeclKey = (&'static str, PathBuf, u8, u64);
@@ -2995,23 +3123,36 @@ impl crate::EmitOptions {
         let (from, aliases, config) = project_context(path);
         // The file and the chain of modules it imports: a type in a
         // remote's layout reads through the imports of each one.
+        let aliases_key = {
+            use std::hash::{Hash, Hasher};
+
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            aliases.hash(&mut h);
+            h.finish()
+        };
         let mut files = vec![from.clone()];
+        let mut seen: HashSet<PathBuf> = HashSet::from([from.clone()]);
         let mut next = 0;
 
         while let Some(file) = files.get(next).cloned() {
-            let text = match next {
-                0 => source.to_string(),
+            // The text in hand is the file's own; each other module
+            // gives the list it was last read to.
+            let targets = match next {
+                0 => std::sync::Arc::new(
+                    import_specs(source)
+                        .iter()
+                        .filter_map(|spec| resolve(spec, &file, &aliases))
+                        .filter(|target| is_alloy(target))
+                        .collect::<Vec<_>>(),
+                ),
 
-                _ => module_text(&file).unwrap_or_default(),
+                _ => alloy_imports(&file, &aliases, aliases_key),
             };
             next += 1;
 
-            for target in import_specs(&text)
-                .iter()
-                .filter_map(|spec| resolve(spec, &file, &aliases))
-            {
-                if is_alloy(&target) && !files.contains(&target) {
-                    files.push(target);
+            for target in targets.iter() {
+                if seen.insert(target.clone()) {
+                    files.push(target.clone());
                 }
             }
         }
@@ -5698,6 +5839,34 @@ mod tests {
             !values.iter().any(|(n, _)| n.ends_with("Slot")),
             "{values:?}"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The list a module's imports were read to is good until an open
+    /// buffer changes the text: the walk of a file's chain reads it for
+    /// each of some 400 modules, and an edit must still reach it.
+    #[test]
+    fn the_imports_of_a_module_follow_an_open_buffer() {
+        let dir = std::env::temp_dir().join(format!("alloy-edges-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b, c) = (dir.join("a.aly"), dir.join("b.aly"), dir.join("c.aly"));
+        std::fs::write(&a, "import { x } from './b'\n").unwrap();
+        std::fs::write(&b, "export const x = 1\n").unwrap();
+        std::fs::write(&c, "export const x = 2\n").unwrap();
+
+        let reads = std::sync::Arc::new(Reads::default());
+
+        with_reads(&reads, || {
+            assert_eq!(*alloy_imports(&a, &[], 0), vec![b.clone()]);
+
+            set_open_source(&a, Some("import { x } from './c'\n"));
+            assert_eq!(*alloy_imports(&a, &[], 0), vec![c.clone()]);
+
+            set_open_source(&a, None);
+            assert_eq!(*alloy_imports(&a, &[], 0), vec![b.clone()]);
+        });
 
         let _ = std::fs::remove_dir_all(&dir);
     }

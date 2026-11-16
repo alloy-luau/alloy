@@ -2290,7 +2290,8 @@ impl<'s> Desugar<'s> {
     /// reports nothing. A child lookup after it needs a receiver that is
     /// not nil: a `->` or a timed `=>` guards it, and a `=>` with no
     /// timeout gives one. Only a `->` before an unguarded `=>` casts to
-    /// `Instance`. `bare` drops every guard, see `require_arg`.
+    /// `Instance`. `bare` drops every guard, see `require_arg`. A `!`
+    /// that ends the chain counts as the end: `->Folder!` is the child.
     ///
     /// luau-lsp types a timed `WaitForChild` by the sourcemap alone and
     /// drops the nil the timeout gives. `?` casts the last link to its
@@ -2309,7 +2310,37 @@ impl<'s> Desugar<'s> {
             return None;
         };
 
-        let cast = match links.get(i + 1) {
+        // `->child!` at the end of a chain is the child itself, with the
+        // nil taken off: no field and no method reads it, so it needs no
+        // `any`, and the name keeps the class the sourcemap gives.
+        let ends_in_non_nil = links[i + 1..]
+            .iter()
+            .all(|l| matches!(l, Link::NonNil { .. }));
+        // `->child!:GetChildren()` reads a member every Instance has,
+        // past the `!`. The plain call types it, whatever class the
+        // child is, so the result keeps its type too.
+        let past_non_nil = links[i + 1..]
+            .iter()
+            .find(|l| !matches!(l, Link::NonNil { .. }));
+        let instance_member = matches!(links.get(i + 1), Some(Link::NonNil { .. }))
+            && match past_non_nil {
+                Some(Link::Plain(
+                    Step::Field(member)
+                    | Step::Call {
+                        method: Some(member),
+                        ..
+                    },
+                )) => INSTANCE_MEMBERS.contains(&self.text_of(*member)),
+
+                _ => false,
+            };
+        let next = match ends_in_non_nil || instance_member {
+            true => None,
+
+            false => links.get(i + 1),
+        };
+
+        let cast = match next {
             None if target => Some("any"),
 
             None => (timed && *wait && !bare).then_some("?"),
@@ -2783,6 +2814,49 @@ fn reads_field(e: &Expr) -> bool {
     }
 }
 
+/// The members of `Instance` itself: every child has them, whatever
+/// its class. A member of a subclass, such as `CFrame`, is not here.
+const INSTANCE_MEMBERS: &[&str] = &[
+    "Name",
+    "Parent",
+    "ClassName",
+    "Archivable",
+    "AddTag",
+    "ClearAllChildren",
+    "Clone",
+    "Destroy",
+    "FindFirstAncestor",
+    "FindFirstAncestorOfClass",
+    "FindFirstAncestorWhichIsA",
+    "FindFirstChild",
+    "FindFirstChildOfClass",
+    "FindFirstChildWhichIsA",
+    "FindFirstDescendant",
+    "GetAttribute",
+    "GetAttributeChangedSignal",
+    "GetAttributes",
+    "GetChildren",
+    "GetDescendants",
+    "GetFullName",
+    "GetPropertyChangedSignal",
+    "GetTags",
+    "HasTag",
+    "IsA",
+    "IsAncestorOf",
+    "IsDescendantOf",
+    "RemoveTag",
+    "SetAttribute",
+    "WaitForChild",
+    "AncestryChanged",
+    "AttributeChanged",
+    "Changed",
+    "ChildAdded",
+    "ChildRemoved",
+    "DescendantAdded",
+    "DescendantRemoving",
+    "Destroying",
+];
+
 #[cfg(test)]
 mod tests {
     use crate::EmitOptions;
@@ -3111,6 +3185,34 @@ mod tests {
         ] {
             assert!(out.contains(want), "{want}\n{out}");
         }
+    }
+
+    /// `p->Folder!` cast the lookup to `any`, as a child before a field
+    /// does, so the name it bound read as `any` in the editor. A `!` that
+    /// ends the chain reads no member: the lookup stays plain, and the
+    /// name keeps the class the sourcemap gives. A member of `Instance`
+    /// after the `!` types the same way; any other member still casts.
+    #[test]
+    fn a_child_under_a_last_non_nil_keeps_its_type() {
+        let options = EmitOptions {
+            check: true,
+            ..EmitOptions::default()
+        };
+        let src = "local a = p->Folder!\nlocal b = p->Folder!:GetChildren()\nlocal c = p=>Folder!\nlocal d = p->Spawn!.CFrame\n";
+        let out = crate::compile_with(src, &options).unwrap().check;
+
+        for want in [
+            "local _1 = (if p == nil then nil else p:FindFirstChild(\"Folder\")) local a = (if _1 == nil then (error(\"p->Folder is nil\") :: never) else _1)\n",
+            // A member of every Instance: the plain call types it.
+            "else _1):GetChildren()",
+            "p:WaitForChild(\"Folder\")",
+            // `CFrame` is a member of a subclass, so the cast stays.
+            "(p:FindFirstChild(\"Spawn\") :: any)",
+        ] {
+            assert!(out.contains(want), "{want}\n{out}");
+        }
+
+        assert_eq!(out.matches(":: any").count(), 1, "{out}");
     }
 
     /// Under a timeout, `=>` on a name that may be nil guards it, as `->`

@@ -3330,6 +3330,35 @@ impl<'s> Desugar<'s> {
                     return self.copy(ne, end);
                 }
 
+                // A supertype: `struct<T>` is the struct whose values
+                // are `T`, `struct` alone is any struct, and `enum` is
+                // any enum. Off the flag the word stays as written, and
+                // Luau reports a type it does not know.
+                if matches!(name.as_str(), "struct" | "enum") {
+                    if !self.options.fflags.on(&crate::fflags::SUPERTYPES)
+                        || self.options.definitions
+                    {
+                        self.r.copy(ns, ne);
+
+                        return self.copy(ne, end);
+                    }
+
+                    let std = self.type_std();
+                    let takes_arguments = self.src[ne as usize..end as usize]
+                        .trim_start()
+                        .starts_with('<');
+                    let text = match (name.as_str(), takes_arguments) {
+                        ("struct", true) => format!("{std}Struct"),
+
+                        ("struct", false) => format!("{std}Struct<any>"),
+
+                        _ => format!("{std}Enum"),
+                    };
+                    self.generate(ns, &text);
+
+                    return self.copy(ne, end);
+                }
+
                 if !self.options.definitions {
                     self.check_std_name(span, &name);
                 }

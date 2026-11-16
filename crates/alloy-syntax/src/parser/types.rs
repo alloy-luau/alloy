@@ -328,6 +328,11 @@ impl<'a> Parser<'a> {
                             | "Iter"
                             | "R15Character"
                             | "R6Character"
+                            // The supertypes: `struct<T>`, `struct`, and
+                            // `enum`. The emit writes them only under
+                            // their flag, and copies them otherwise.
+                            | "struct"
+                            | "enum"
                     ) && self.text_at(1) != ".";
                     let i = self.bump();
                     self.type_names.push(TokSpan::new(i, i + 1));

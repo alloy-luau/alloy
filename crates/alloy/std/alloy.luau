@@ -175,6 +175,55 @@ function alloy.deep_eq(a: any, b: any): boolean
 	return true
 end
 
+-- ---------------------------------------------------------------------------
+-- Supertypes: what a value of the language is, whatever its own name.
+-- ---------------------------------------------------------------------------
+
+--- `struct<T>`: the struct whose values are `T`. `new` constructs one
+--- from a table of its fields. The type names `new` alone: the checker
+--- sees a struct as a plain table, with no call of its own.
+export type Struct<T> = { read new: (fields: any) -> T }
+
+--- `enum`: any enum. An enum is a table that tests a value with `is`.
+export type Enum = { read is: (value: any) -> boolean }
+
+--- The kind of a value the language declares, for `x is struct`,
+--- `x is enum`, and `x is object`: `"struct"` for a struct, `"enum"` for
+--- an enum, `"object"` for a value a struct made, and nil for any other
+--- value. The emit gives each one its shape, and this reads the shape:
+--- a struct and an enum index themselves, a struct is also callable, an
+--- enum has `is`, and an object has a struct for its metatable. A
+--- variant of an enum is a string or a tagged table, and has no kind.
+function alloy.kind(value: any): string?
+	if type(value) ~= "table" then
+		return nil
+	end
+
+	local function declared(t: any): string?
+		if rawget(t, "__index") ~= t then
+			return nil
+		end
+
+		local meta = getmetatable(t)
+
+		if type(meta) == "table" and type(rawget(meta, "__call")) == "function" then
+			return "struct"
+		end
+
+		return if type(rawget(t, "is")) == "function" then "enum" else nil
+	end
+
+	local own = declared(value)
+
+	if own then
+		return own
+	end
+
+	local meta = getmetatable(value)
+
+	return if type(meta) == "table" and declared(meta) == "struct" then "object" else nil
+end
+
 --- `Msg.Move(1, 2)`: the printer of an enum variant with a payload.
 --- `enums` names the enum of each payload slot that declares one, by
 --- variant: `{ Tool = { [1] = "Kind" } }`.

@@ -35,8 +35,18 @@ pub const NATIVE_EXPORT: Flag = Flag {
     doc: "Write the exports of a module as Luau's own `export const` statements in the ship artifact, in place of the returned table. Luau reads the syntax only where its export flag is on, and it freezes the table an importer gets. A module with `export default`, or with a `return` at its top level, keeps the returned table.",
 };
 
+pub const ENUM_EACH: Flag = Flag {
+    name: "AlloyExperimentalEnumEach",
+    doc: "The `$each(Enum)` intrinsic: an Array of the items of an enum, in the order the enum declares them. A unit variant is its value, and a variant with a payload is its constructor. The RFC is `syntax-enum-each` in alloy-luau/rfcs.",
+};
+
+pub const SUPERTYPES: Flag = Flag {
+    name: "AlloyExperimentalSupertypes",
+    doc: "The supertypes of Alloy's own declarations. `x is struct`, `x is enum`, and `x is object` test for a struct, an enum, and a value a struct made. As types, `struct<T>` is the struct whose values are `T`, `struct` is any struct, and `enum` is any enum. The RFC is `types-supertypes` in alloy-luau/rfcs.",
+};
+
 /// Every flag this version of the compiler reads.
-pub const FLAGS: &[&Flag] = &[&NATIVE_IF_LOCAL, &NATIVE_EXPORT];
+pub const FLAGS: &[&Flag] = &[&NATIVE_IF_LOCAL, &NATIVE_EXPORT, &ENUM_EACH, &SUPERTYPES];
 
 /// The value of one flag. An Alloy flag is `true` or `false`; a Luau
 /// flag can be a number too. The editor sends each value as text.

@@ -1,5 +1,28 @@
 use super::*;
 
+/// The supertypes a type slot offers: the word, its completion kind,
+/// its detail, and its text.
+const SUPERTYPES: &[(&str, u64, &str, &str)] = &[
+    (
+        "struct",
+        22,
+        "struct<T>",
+        "```alloy\nstruct<T>\nstruct\n```\n`struct<T>` is the struct whose values are `T`, and `struct` alone is any struct. A value of the type constructs with `.new(fields)`. After `is`, the test holds for a struct itself.",
+    ),
+    (
+        "enum",
+        13,
+        "enum",
+        "```alloy\nenum\n```\nAny enum. It takes no type argument. After `is`, the test holds for an enum itself.",
+    ),
+    (
+        "object",
+        7,
+        "object",
+        "```alloy\nx is object\n```\nHolds for a value a struct made.",
+    ),
+];
+
 impl State {
     /// The items for a completion context, less the names its list
     /// already holds: `@derive(Serialize, |` offers no second
@@ -1015,6 +1038,37 @@ impl State {
                     }
 
                     items.push(item);
+                }
+
+                // The supertypes, under their flag: `struct` and `enum`
+                // are types, and all three follow `is`. A type the file
+                // declares under one of the words is already in the list.
+                let flags = uri_to_path(uri)
+                    .and_then(|p| self.config_at(p.parent()?))
+                    .map(|project| project.1.fflags.clone())
+                    .unwrap_or_default()
+                    .with(&self.fflags);
+
+                if flags.on(&alloy::fflags::SUPERTYPES) {
+                    let head = doc.source[..from].trim_end();
+                    let after_is = ["is", "is not"].iter().any(|word| {
+                        head.strip_suffix(word).is_some_and(|rest| {
+                            !rest.ends_with(|c: char| c.is_alphanumeric() || c == '_')
+                        })
+                    });
+
+                    for (name, kind, detail, text) in SUPERTYPES {
+                        if (*name == "object" && !after_is)
+                            || items.iter().any(|i| i["label"] == json!(name))
+                        {
+                            continue;
+                        }
+
+                        let mut item = word(name, *kind, Some((*text).to_string()), from);
+                        item["detail"] = json!(detail);
+                        item["sortText"] = json!(format!("{}{name}", type_rank(*prefers, detail)));
+                        items.push(item);
+                    }
                 }
 
                 // `stor: Scri|`: the module `Scribe` is no type itself,

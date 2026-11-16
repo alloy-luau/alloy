@@ -8,6 +8,11 @@ pub(crate) const CHILD_SHUTDOWN_ID: i64 = -900_001;
 /// shadow. The child's reports on it reach no one.
 pub(crate) const SCRATCH_SUFFIX: &str = ".__member.luau";
 
+thread_local! {
+    /// Set on the thread that handles the editor's messages.
+    static REQUEST_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 pub struct Server {
     pub(crate) state: Mutex<State>,
     pub(crate) child_in: Mutex<Box<dyn Write + Send>>,
@@ -116,8 +121,26 @@ impl Server {
     pub fn handle_client(self: &Arc<Self>, message: Value) -> bool {
         use std::sync::atomic::Ordering;
 
+        REQUEST_THREAD.set(true);
+        let request = message.get("method").and(message.get("id")).cloned();
         self.busy.fetch_add(1, Ordering::Relaxed);
-        let more = self.reading(|| self.dispatch_client(message));
+        // A panic here ended the process, and the editor stops a server
+        // after five crashes. The request that panicked gets an error,
+        // and the server goes on.
+        let more = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.reading(|| self.dispatch_client(message))
+        }))
+        .unwrap_or_else(|_| {
+            if let Some(id) = request {
+                self.to_client(&json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": { "code": -32603, "message": "alloy-lsp failed on this request; the server log has the panic" },
+                }));
+            }
+
+            true
+        });
         self.busy.fetch_sub(1, Ordering::Relaxed);
 
         more
@@ -128,6 +151,13 @@ impl Server {
     /// files, so an editor request never waits behind the whole pass.
     pub(crate) fn wait_for_requests(&self) {
         use std::sync::atomic::Ordering;
+
+        // The request thread counts itself in `busy`, so a pass it runs
+        // itself, on a save, slept the whole tenth of a second for every
+        // importer: 3.2 s a save with 30 importers.
+        if REQUEST_THREAD.get() {
+            return;
+        }
 
         let until = std::time::Instant::now() + std::time::Duration::from_millis(100);
 
@@ -1219,7 +1249,16 @@ impl Server {
 
     /// Handles one message from the child.
     pub fn handle_child(&self, message: Value) {
-        self.reading(|| self.route_child(message));
+        // This thread is the only reader of the child. A panic stopped
+        // it, the child then blocked on its full output, and every
+        // request waited forever.
+        let routed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.reading(|| self.route_child(message))
+        }));
+
+        if routed.is_err() {
+            log::error("a message from luau-lsp failed; the panic is above");
+        }
     }
 
     fn route_child(&self, mut message: Value) {

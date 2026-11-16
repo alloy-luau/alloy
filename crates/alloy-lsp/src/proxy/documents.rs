@@ -1688,8 +1688,10 @@ fn walk_dependencies(
     }
 }
 
-/// One workspace root as a directory name. Two servers run at once, one
-/// per project, and neither may write where the other reads.
+/// One server's directory name: its workspace root and its process.
+/// Two servers can run on one root, in two windows or two editors. With
+/// the root alone, the `initialize` of one emptied the other's mirror,
+/// and its `exit` deleted the definitions the other's analyzer read.
 pub(crate) fn root_key(root: Option<&Path>) -> String {
     use std::hash::{Hash, Hasher};
 
@@ -1697,6 +1699,7 @@ pub(crate) fn root_key(root: Option<&Path>) -> String {
     root.map(|r| r.to_string_lossy().into_owned())
         .unwrap_or_default()
         .hash(&mut hasher);
+    std::process::id().hash(&mut hasher);
 
     format!("{:016x}", hasher.finish())
 }

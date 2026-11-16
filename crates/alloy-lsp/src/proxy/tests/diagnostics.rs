@@ -33,6 +33,27 @@ pub(crate) fn a_private_view_in_a_message_reads_as_the_struct() {
     );
 }
 #[test]
+pub(crate) fn a_megabyte_type_in_a_message_is_cut_before_the_rewrite() {
+    // A jecs `World` printed to 8 MB, and the rewrite took 8 s on it.
+    let st = State::default();
+    let doc = Doc::new(
+        "local x = 1\n".to_string(),
+        1,
+        &EmitOptions::default(),
+        &alloy::luaux::Config::default(),
+        None,
+    );
+    let world = "{ __T: nil }, ".repeat(300_000);
+    let mut d = json!({
+        "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 1 } },
+        "message": format!("TypeError: Cannot call a value of the union type: | {world}"),
+    });
+    friendly_message(&mut d, &doc, &st);
+    let message = d["message"].as_str().expect("a message");
+    assert!(message.len() < 250_000, "{} bytes", message.len());
+    assert!(message.ends_with("*TRUNCATED*"));
+}
+#[test]
 pub(crate) fn unused_lints_name_the_variable() {
     assert_eq!(
         unused_name("LocalUnused: Variable 'RunService' is never used; prefix with '_' to silence"),

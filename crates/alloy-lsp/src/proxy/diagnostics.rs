@@ -12,6 +12,10 @@ use super::*;
 /// byte range of the source.
 const BAD_CHARACTER: &str = "unexpected character ";
 
+/// The longest child report the rewrite reads, in bytes: the limit
+/// `alloy flux` gives the analyzer's type printer.
+const MESSAGE_LIMIT: usize = 200_000;
+
 impl State {
     /// The compiler's diagnostics of one document as LSP diagnostics.
     /// Another open source that builds the same module as this one:
@@ -1732,6 +1736,23 @@ pub(crate) fn statement_range(d: &mut Value, doc: &Doc, line: usize) {
 /// the real one, and an unresolved require is an `UnknownModule` error
 /// over the whole import, naming the module the source asked for.
 pub(crate) fn friendly_message(d: &mut Value, doc: &Doc, st: &State) {
+    // A cyclic type prints to megabytes at the child's limit: one jecs
+    // `World` report was 8 MB, and the fold below spent 8 s on it while
+    // every request waited for the state lock. `alloy flux` reads the
+    // report at the same length.
+    if let Some(Value::String(m)) = d.get_mut("message")
+        && m.len() > MESSAGE_LIMIT
+    {
+        let mut end = MESSAGE_LIMIT;
+
+        while !m.is_char_boundary(end) {
+            end -= 1;
+        }
+
+        m.truncate(end);
+        m.push_str("... *TRUNCATED*");
+    }
+
     // The child's own words, before the folding below rewrites them: an
     // `Unknown require` names the file it looked for, and that path
     // says which require of the line the report is about.

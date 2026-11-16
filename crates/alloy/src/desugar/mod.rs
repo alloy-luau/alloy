@@ -107,6 +107,11 @@ pub struct EmitOptions {
     /// are skipped. A file with an `--@alloy-expect-error` still lints,
     /// since a lint meets that directive.
     pub ship_only: bool,
+    /// `[emit] native_if_local`: the ship artifact keeps a plain
+    /// `if local x = e then` as Luau's own statement. The check
+    /// artifact never does, since the analyzer the editor runs may not
+    /// parse it. See `Desugar::native_binding`.
+    pub native_if_local: bool,
     /// Extensions declared anywhere in the project, so a call by one of
     /// their names routes through the dispatcher in every file, not only
     /// in the file that declares the impl.
@@ -507,6 +512,7 @@ impl Default for EmitOptions {
             wire_scopes: Vec::new(),
             check: false,
             ship_only: false,
+            native_if_local: false,
             extensions: Vec::new(),
             std_globals: crate::std_names::Globals::All,
             foreign_impls: Vec::new(),

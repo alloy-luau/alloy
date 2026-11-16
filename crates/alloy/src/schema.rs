@@ -348,6 +348,12 @@ pub const TABLES: &[Table] = &[
                 BOOL,
                 "Deprecated, and does nothing. A type-only import never runs its `require`, so remove the key.",
             ),
+            key(
+                "native_if_local",
+                BOOL,
+                "false",
+                "Keep `if local x = e then`, `elseif local`, and the `if` expression form as Luau's own syntax in the ship artifact. Luau reads the syntax only where its `if local` flag is on, so the default is off. A condition with `where`, `not`, a pattern, or more than one name still lowers, and so does every `while local`.",
+            ),
         ],
         open: None,
     },

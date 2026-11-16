@@ -508,6 +508,7 @@ fn run_inner(
     let emit = &config.emit;
     let base_options = EmitOptions {
         wait_timeout: emit.wait_timeout,
+        native_if_local: emit.native_if_local,
         std_require: emit
             .std_require
             .clone()

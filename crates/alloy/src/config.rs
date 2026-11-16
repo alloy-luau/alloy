@@ -956,6 +956,12 @@ pub struct Emit {
     /// `require`, so the key has nothing left to turn on. It still
     /// parses, so an old file loads, and `deprecations` names it.
     pub erase_type_imports: Option<bool>,
+    /// Keep `if local x = e then`, `elseif local`, and the `if`
+    /// expression form as Luau's own syntax in the ship artifact. Off
+    /// by default: Luau reads the syntax only where its `if local`
+    /// flag is on. A condition with `where`, `not`, a pattern, or more
+    /// than one name still lowers, and so does every `while local`.
+    pub native_if_local: bool,
 }
 
 /// The `[build]` table.

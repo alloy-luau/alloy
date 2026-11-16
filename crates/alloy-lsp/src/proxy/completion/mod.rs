@@ -97,6 +97,55 @@ pub(crate) fn declaration_detail(hover: &str) -> Option<String> {
     }
 }
 
+/// The completion kind `Variable`, which the child gives every binding.
+const VARIABLE: u32 = 6;
+
+/// The completion kind of a declaration, from the word its detail
+/// starts with: `Struct`, `Enum`, `Interface`, `Constant`. `None` for a
+/// word the child already gives a kind of its own, such as `function`.
+fn item_kind(detail: &str) -> Option<u32> {
+    match detail.split_whitespace().next()? {
+        "struct" => Some(22),
+
+        "enum" => Some(13),
+
+        "trait" | "interface" => Some(8),
+
+        "const" => Some(21),
+
+        _ => None,
+    }
+}
+
+/// Every name a `const` of the source binds: `const a = 1`,
+/// `const a, b: T = f()`, and `if const x = f() then`. The scan reads
+/// words alone, so a name in a comment counts too; a wrong kind on a
+/// completion item is the whole cost.
+fn const_names(src: &str) -> HashSet<&str> {
+    let is_name = |c: char| c.is_alphanumeric() || c == '_';
+    let mut names = HashSet::new();
+
+    for (at, _) in src.match_indices("const ") {
+        if src[..at].chars().next_back().is_some_and(is_name) {
+            continue;
+        }
+
+        let rest = &src[at + "const ".len()..];
+        let list = rest.split(['=', '\n']).next().unwrap_or("");
+
+        for part in list.split(',') {
+            let part = part.trim_start();
+            let end = part.find(|c| !is_name(c)).unwrap_or(part.len());
+
+            if end > 0 && !part.starts_with(|c: char| c.is_ascii_digit()) {
+                names.insert(&part[..end]);
+            }
+        }
+    }
+
+    names
+}
+
 impl State {
     /// After `Msg.`, the child lists a variant as the function or the
     /// string the emit made of it. Each one becomes an enum member with
@@ -272,6 +321,14 @@ impl State {
             .map(|d| (d.name.as_str(), d))
             .collect();
 
+        // The child sees each binding as a variable. A `const` of this
+        // file completes as a constant, so a list tells the two apart.
+        let consts = self
+            .docs
+            .get(uri)
+            .map(|d| const_names(&d.source))
+            .unwrap_or_default();
+
         for item in items.iter_mut() {
             let Some(label) = item["label"].as_str().map(str::to_string) else {
                 continue;
@@ -286,6 +343,10 @@ impl State {
                 .get(sigil.as_str())
                 .or_else(|| in_scope.get(label.as_str()))
             else {
+                if item["kind"] == json!(VARIABLE) && consts.contains(label.as_str()) {
+                    item["kind"] = json!(21);
+                }
+
                 continue;
             };
             let Some(detail) = declaration_detail(&d.hover) else {
@@ -300,6 +361,15 @@ impl State {
             // the child sees the local the emit wrote for it.
             if detail.starts_with("namespace ") || detail.starts_with("global namespace ") {
                 item["kind"] = json!(9);
+            }
+
+            // The same holds for a struct, an enum, a trait, and an
+            // interface: the kind is what the list shows first, as an
+            // icon or a word, and `variable` says nothing.
+            if item["kind"] == json!(VARIABLE)
+                && let Some(kind) = item_kind(&detail)
+            {
+                item["kind"] = json!(kind);
             }
 
             item["detail"] = json!(detail);
@@ -1737,4 +1807,27 @@ pub(crate) fn callable_signature(text: &str) -> Option<(String, Vec<String>)> {
     };
 
     Some((label, payload_types(&head[open..=close])))
+}
+
+#[cfg(test)]
+mod kind_tests {
+    use super::{const_names, item_kind};
+
+    /// A completion item shows what a name is: the kind of its
+    /// declaration, and `Constant` for a `const` of the file.
+    #[test]
+    fn a_declaration_completes_as_its_own_kind() {
+        assert_eq!(item_kind("struct Point"), Some(22));
+        assert_eq!(item_kind("enum Color"), Some(13));
+        assert_eq!(item_kind("trait Named"), Some(8));
+        assert_eq!(item_kind("const LIMIT: number"), Some(21));
+        assert_eq!(item_kind("function f()"), None);
+
+        let names = const_names(
+            "const LIMIT = 10\nexport const a, b: T = f()\nif const hit = ray() then\nlocal reconst = 1\n",
+        );
+        let mut names: Vec<&str> = names.into_iter().collect();
+        names.sort_unstable();
+        assert_eq!(names, ["LIMIT", "a", "b", "hit"]);
+    }
 }

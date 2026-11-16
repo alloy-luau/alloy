@@ -225,6 +225,13 @@ fn rule_key_schema(extra: &[String]) -> Value {
     })
 }
 
+fn luau_flag_value() -> Value {
+    json!({
+        "description": "A Luau flag, passed to luau-lsp as `--flag:Name=value`.",
+        "type": ["boolean", "integer", "string"]
+    })
+}
+
 fn mount_value() -> Value {
     json!({
         "description": "A path and where it lands, or a path alone. The pair mounts the folder at a DataModel location; a `.server.` or `.client.` file name picks the script class, and `init` names its directory. A bare string is the alias-only form: the name serves as an alias for a folder another mount already carries, and the folder has to sit under one.",
@@ -815,7 +822,7 @@ pub const TABLES: &[Table] = &[
     },
     Table {
         name: "fflags",
-        doc: "The features that are not the default yet. Each one is off until the project turns it on here, and the list changes from one version to the next: a flag leaves it when its feature becomes the default.",
+        doc: "Feature flags, by name. A name that starts with `Alloy` is a flag of the compiler: a feature that is not the default yet, off until the project turns it on here. Such a flag leaves the list when its feature becomes the default. Any other name is a Luau flag, and `alloy flux` and the editor pass it to luau-lsp.",
         keys: &[
             key(
                 crate::fflags::NATIVE_IF_LOCAL.name,
@@ -830,7 +837,7 @@ pub const TABLES: &[Table] = &[
                 crate::fflags::NATIVE_EXPORT.doc,
             ),
         ],
-        open: None,
+        open: Some(luau_flag_value),
     },
     Table {
         name: "mount",
@@ -1185,8 +1192,11 @@ pub fn key_paths() -> Vec<String> {
     let mut out = Vec::new();
 
     for t in TABLES {
+        // The keys an open table does name sit under that one path.
         if t.open.is_some() {
             out.push(t.name.to_string());
+
+            continue;
         }
 
         for k in t.keys {
@@ -1259,11 +1269,12 @@ mod tests {
         };
         config.alx.lints.static_conditional_child = Some("warn".into());
 
-        // The table of flags is empty by default; the schema names each
-        // flag of `crate::fflags::FLAGS`, and no other.
-        for flag in crate::fflags::FLAGS {
-            config.fflags.0.insert(flag.name.to_string(), false);
-        }
+        // The schema names each flag of `crate::fflags::FLAGS`, and no
+        // other.
+        let fflags = TABLES.iter().find(|t| t.name == "fflags").unwrap();
+        let named: Vec<&str> = fflags.keys.iter().map(|k| k.name).collect();
+        let flags: Vec<&str> = crate::fflags::FLAGS.iter().map(|f| f.name).collect();
+        assert_eq!(named, flags);
 
         let value = toml::Value::try_from(&config).unwrap();
         let mut from_config = BTreeSet::new();

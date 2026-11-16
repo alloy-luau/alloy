@@ -23,8 +23,8 @@ pub struct Config {
     pub test: TestConfig,
     pub project: Project,
     pub std: StdConfig,
-    /// The `[fflags]` table: the features that are not the default yet,
-    /// name to `true` or `false`. See `crate::fflags`.
+    /// The `[fflags]` table: the flags of Alloy, by an `Alloy` name, and
+    /// the Luau flags luau-lsp runs under. See `crate::fflags`.
     pub fflags: crate::fflags::FFlags,
     /// The `[mount]` table: alias to `[path, mount]`. The folder at
     /// `path` lands at `mount` in the DataModel. The table is the tree

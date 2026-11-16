@@ -77,13 +77,13 @@ pub fn editor(options: &Value, current: Editor) -> Editor {
     }
 }
 
-/// The editor's list of Alloy flags, `fflags.alloy` of its settings
-/// object: name to `true` or `false`. `None` when the object has no
-/// such key, so a settings change that leaves it out keeps the list.
-/// The other keys of `fflags` are Luau's flags, for the child.
+/// The editor's list of flags, `fflags.override` of its settings
+/// object. It holds the flags of Alloy, by an `Alloy` name, beside the
+/// Luau flags of the child. `None` when the object has no such key, so
+/// a settings change that leaves it out keeps the list.
 pub fn alloy_fflags(options: &Value) -> Option<alloy::fflags::FFlags> {
     options
-        .pointer("/fflags/alloy")
+        .pointer("/fflags/override")
         .map(alloy::fflags::FFlags::from_json)
 }
 
@@ -219,7 +219,12 @@ pub fn child_flags(options: &Value) -> Vec<String> {
         .and_then(|f| f.get("override"))
         .and_then(Value::as_object)
     {
-        for (name, value) in overrides {
+        // A flag of Alloy is the proxy's own, and the child would
+        // report a name it does not know.
+        for (name, value) in overrides
+            .iter()
+            .filter(|(n, _)| !n.starts_with(alloy::fflags::PREFIX))
+        {
             let value = match value {
                 Value::String(s) => s.clone(),
 
@@ -235,6 +240,23 @@ pub fn child_flags(options: &Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One list in the editor holds both kinds of flag. A flag of
+    /// Alloy stays with the proxy, and a Luau flag goes to the child.
+    #[test]
+    fn an_alloy_flag_in_the_override_list_stays_with_the_proxy() {
+        let options = json!({ "fflags": { "override": {
+            "AlloyNativeIfLocal": "true",
+            "LuauSomeFlag": "true",
+        } } });
+        let child = child_flags(&options);
+        assert!(child.contains(&"--flag:LuauSomeFlag=true".to_string()));
+        assert!(!child.iter().any(|f| f.contains("Alloy")), "{child:?}");
+
+        let own = alloy_fflags(&options).unwrap();
+        assert!(own.on(&alloy::fflags::NATIVE_IF_LOCAL));
+        assert_eq!(alloy_fflags(&json!({})), None);
+    }
 
     #[test]
     fn the_flags_section_turns_into_child_arguments() {

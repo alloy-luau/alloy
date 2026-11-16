@@ -1488,7 +1488,7 @@ impl<'s> Desugar<'s> {
 
     /*
     Whether the module writes its exports as Luau's own `export const`
-    statements, under the `native_export` flag. Each one stands where the
+    statements, under the `AlloyNativeExport` flag. Each one stands where the
     returned table stood, after the last statement, so it holds the value
     the name has when the module returns, as the table did. A write to an
     exported `local` in a function comes later and reaches no importer,
@@ -1701,13 +1701,13 @@ print(ex)
     /// with the value: the declaration takes the `export` word, an
     /// interface or an alias goes out as a type alone, and a rename
     /// adds an alias.
-    /// The `native_export` flag writes each export as Luau's own
+    /// The `AlloyNativeExport` flag writes each export as Luau's own
     /// statement, where the returned table stood. A module Luau cannot
     /// read that way keeps the table, and so does the check artifact.
     #[test]
     fn the_exports_of_a_module_are_native_under_the_flag() {
         let options = crate::EmitOptions {
-            fflags: toml::from_str("native_export = true").unwrap(),
+            fflags: toml::from_str("AlloyNativeExport = true").unwrap(),
             ..crate::EmitOptions::default()
         };
         let ship = |src: &str| {

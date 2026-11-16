@@ -1451,6 +1451,36 @@ pub(crate) fn collapse_diagnostics(items: &mut Vec<Value>) {
             .is_none_or(|r| !nil_lines.contains(&r.0.0))
     });
 
+    // A method call on an optional value: the report on the receiver
+    // says again what `could be nil` said at the same spot.
+    let nil_reports: Vec<((u32, u32), String)> = items
+        .iter()
+        .filter_map(|d| {
+            let message = d.get("message").and_then(Value::as_str)?;
+            let start = d.get("range").and_then(range_of)?.0;
+
+            message
+                .contains("could be nil")
+                .then(|| (start, message.to_string()))
+        })
+        .collect();
+
+    items.retain(|d| {
+        let (Some(message), Some(range)) = (
+            d.get("message").and_then(Value::as_str),
+            d.get("range").and_then(range_of),
+        ) else {
+            return true;
+        };
+        let here: Vec<&str> = nil_reports
+            .iter()
+            .filter(|(start, _)| *start == range.0)
+            .map(|(_, m)| m.as_str())
+            .collect();
+
+        !alloy::typecheck::nil_echo(message, &here)
+    });
+
     // The checker gave up on the line: what else it says there comes
     // from a solve it did not finish.
     let limit_lines: Vec<u32> = items

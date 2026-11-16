@@ -836,6 +836,18 @@ pub const TABLES: &[Table] = &[
                 "false",
                 crate::fflags::NATIVE_EXPORT.doc,
             ),
+            key(
+                crate::fflags::ENUM_EACH.name,
+                BOOL,
+                "false",
+                crate::fflags::ENUM_EACH.doc,
+            ),
+            key(
+                crate::fflags::SUPERTYPES.name,
+                BOOL,
+                "false",
+                crate::fflags::SUPERTYPES.doc,
+            ),
         ],
         open: Some(luau_flag_value),
     },

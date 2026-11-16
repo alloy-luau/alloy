@@ -633,6 +633,30 @@ impl<'s> Desugar<'s> {
             return format!("{}?", self.lower_type(inner));
         }
 
+        // The supertypes, under their flag: `struct<T>` is the struct
+        // whose values are `T`, `struct` is any struct, and `enum` is
+        // any enum. Off, the words stay as written and Luau reports a
+        // type it does not know.
+        if self.options.fflags.on(&crate::fflags::SUPERTYPES) {
+            if text == "enum" {
+                return format!("{}Enum", self.type_std());
+            }
+
+            if text == "struct" {
+                return format!("{}Struct<any>", self.type_std());
+            }
+
+            if let Some(inner) = text
+                .strip_prefix("struct<")
+                .and_then(|rest| rest.strip_suffix('>'))
+                && group_len(&text["struct".len()..], '<', '>') == Some(text.len() - "struct".len())
+            {
+                let inner = self.lower_type(inner);
+
+                return format!("{}Struct<{inner}>", self.type_std());
+            }
+        }
+
         if let Some(inner) = text.strip_suffix("[]") {
             if self.options.definitions {
                 return format!("{{ {} }}", self.lower_type(inner));

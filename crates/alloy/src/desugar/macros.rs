@@ -59,6 +59,7 @@ pub(crate) const INTRINSICS: &[&str] = &[
     "assert_eq",
     "bnot",
     "dbg",
+    "each",
     "expect",
     "map",
     "matches",
@@ -1016,6 +1017,57 @@ impl<'s> Desugar<'s> {
 
             ("bnot", 1) => format!("bit32.bnot({})", rendered[0]),
 
+            // `$each(Enum)`: an Array of the items of the enum, in the
+            // order it declares them. A unit variant is its value, and a
+            // variant with a payload is its constructor, the two things
+            // `Enum.Name` reads as. The compiler knows the variants of
+            // an enum this file declares or imports, and of no other
+            // value, so the argument is the name of one.
+            ("each", 1) if self.options.fflags.on(&crate::fflags::ENUM_EACH) => {
+                let path = sources[0].trim().to_string();
+
+                // A namespace member reads under its full name, so the
+                // path is tried as each name it can stand for.
+                let names: Option<Vec<String>> = self
+                    .name_candidates(&path)
+                    .iter()
+                    .find_map(|key| self.enums.get(key))
+                    .map(|variants| variants.iter().map(|(name, _)| name.clone()).collect());
+
+                match names {
+                    Some(names) => {
+                        let std = self.std();
+                        let items: Vec<String> = names
+                            .iter()
+                            .map(|name| format!("{}.{name}", rendered[0]))
+                            .collect();
+
+                        format!("{std}.Array.from({{ {} }})", items.join(", "))
+                    }
+
+                    None => {
+                        self.diagnose(
+                            args[0].span(),
+                            &format!("`$each` takes the name of an enum; `{path}` is not one this file declares or imports"),
+                        );
+
+                        self.any_cast("nil")
+                    }
+                }
+            }
+
+            ("each", 1) => {
+                self.diagnose(
+                    span,
+                    &format!(
+                        "`$each` is not final; set `{} = true` under `[fflags]` in alloy.toml to use it",
+                        crate::fflags::ENUM_EACH.name
+                    ),
+                );
+
+                self.any_cast("nil")
+            }
+
             // `$matches(value, Pattern)`: the match with one arm, as a
             // boolean. The pattern is the second argument's text, read
             // by the match parser.
@@ -1157,6 +1209,37 @@ impl<'s> Desugar<'s> {
 
 #[cfg(test)]
 mod tests {
+    /// `$each(Enum)` is the items of the enum in the order it declares
+    /// them, behind its flag. Off, the call reports and names the flag.
+    #[test]
+    fn each_lists_the_items_of_an_enum_under_its_flag() {
+        let src = "enum C as\n    Tag\n    Value(unknown)\n    Other\nend\nlocal xs = $each(C)\nlocal ys = $each(print)\nprint(xs, ys)\n";
+        let options = crate::EmitOptions {
+            fflags: toml::from_str("AlloyExperimentalEnumEach = true").unwrap(),
+            ..crate::EmitOptions::default()
+        };
+        let out = crate::compile_with(src, &options).unwrap();
+        assert!(
+            out.ship
+                .contains("local xs = __alloy.Array.from({ C.Tag, C.Value, C.Other })"),
+            "{}",
+            out.ship
+        );
+        let on: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(
+            on,
+            ["`$each` takes the name of an enum; `print` is not one this file declares or imports"]
+        );
+
+        let off = messages(src);
+        assert!(
+            off.iter().all(|m| m
+                == "`$each` is not final; set `AlloyExperimentalEnumEach = true` under `[fflags]` in alloy.toml to use it"),
+            "{off:?}"
+        );
+        assert_eq!(off.len(), 2);
+    }
+
     fn messages(src: &str) -> Vec<String> {
         crate::compile(src)
             .unwrap()

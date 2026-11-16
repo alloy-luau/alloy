@@ -1155,6 +1155,37 @@ impl<'s> Desugar<'s> {
             };
         }
 
+        // `x is struct`, `x is enum`, `x is object`: the kind of an
+        // Alloy declaration, which the runtime reads from the shape the
+        // emit gives each one. A type the file declares under one of
+        // these names is that type, and the chain below tests it.
+        if SUPERTYPES.contains(&n.as_str())
+            && !self.structs.contains(&n)
+            && !self.enums.contains_key(&n)
+            && self.alias_head(&n).is_none()
+        {
+            if !self.options.fflags.on(&crate::fflags::SUPERTYPES) {
+                self.diagnose(
+                    name,
+                    &format!(
+                        "`is {n}` is not final; set `{} = true` under `[fflags]` in alloy.toml to use it",
+                        crate::fflags::SUPERTYPES.name
+                    ),
+                );
+
+                return "false".to_string();
+            }
+
+            let std = self.std();
+            let test = format!("{std}.kind({x}) == \"{n}\"");
+
+            return match negated {
+                true => format!("(not ({test}))"),
+
+                false => format!("({test})"),
+            };
+        }
+
         // One step through an alias, and only to a name the chain
         // below answers. A trait's alias lands on the trait's report,
         // since the resolve runs before the guard.
@@ -2814,6 +2845,10 @@ fn reads_field(e: &Expr) -> bool {
     }
 }
 
+/// The kinds `is` tests under the `AlloyExperimentalSupertypes` flag: a
+/// struct, an enum, and a value a struct made.
+const SUPERTYPES: &[&str] = &["struct", "enum", "object"];
+
 /// The members of `Instance` itself: every child has them, whatever
 /// its class. A member of a subclass, such as `CFrame`, is not here.
 const INSTANCE_MEMBERS: &[&str] = &[
@@ -3185,6 +3220,52 @@ mod tests {
         ] {
             assert!(out.contains(want), "{want}\n{out}");
         }
+    }
+
+    /// The supertypes, behind their flag: `is struct`, `is enum`, and
+    /// `is object` ask the runtime for the kind of a value, and
+    /// `struct<T>`, `struct`, and `enum` are types of the std. Off, a
+    /// test reports and names the flag, and a type stays as written.
+    #[test]
+    fn the_supertypes_test_and_type_under_their_flag() {
+        let src = "struct Point\n    x: number\nend\nlocal function f(class: struct<Point>, any_class: struct, e: enum, v: unknown)\n    print(class, any_class, e, v is struct, v is enum, v is not object)\nend\nprint(f)\n";
+        let options = EmitOptions {
+            fflags: toml::from_str("AlloyExperimentalSupertypes = true").unwrap(),
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(src, &options).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+        for want in [
+            "(class: __alloy.Struct<Point>, any_class: __alloy.Struct<any>, e: __alloy.Enum, v: unknown)",
+            "(__alloy.kind(v) == \"struct\"), (__alloy.kind(v) == \"enum\"), (not (__alloy.kind(v) == \"object\"))",
+        ] {
+            assert!(out.ship.contains(want), "{want}\n{}", out.ship);
+        }
+
+        let off = crate::compile(src).unwrap();
+        assert!(
+            off.ship
+                .contains("(class: struct<Point>, any_class: struct, e: enum, v: unknown)"),
+            "{}",
+            off.ship
+        );
+        let messages: Vec<&str> = off.diagnostics.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(messages.len(), 3, "{messages:?}");
+        assert!(
+            messages[0]
+                .starts_with("`is struct` is not final; set `AlloyExperimentalSupertypes = true`"),
+            "{messages:?}"
+        );
+
+        // A type the file declares under one of the words is that type.
+        let own = crate::compile_with(
+            "struct object\n    x: number\nend\nlocal function g(v: unknown)\n    return v is object\nend\nprint(g)\n",
+            &options,
+        )
+        .unwrap();
+        assert!(own.ship.contains("getmetatable("), "{}", own.ship);
+        assert!(!own.ship.contains("__alloy.kind"), "{}", own.ship);
     }
 
     /// `p->Folder!` cast the lookup to `any`, as a child before a field

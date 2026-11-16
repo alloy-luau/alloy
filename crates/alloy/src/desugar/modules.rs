@@ -1453,6 +1453,17 @@ impl<'s> Desugar<'s> {
             return;
         }
 
+        if self.native_exports(block) {
+            let lines: String = self
+                .exports
+                .iter()
+                .map(|(k, v)| format!(" export const {k} = {v}"))
+                .collect();
+            self.generate(at, &lines);
+
+            return;
+        }
+
         // Past the budget of locals the table already holds the moved
         // values, and the rest join it before the return.
         if !self.table_exports.is_empty() {
@@ -1475,7 +1486,64 @@ impl<'s> Desugar<'s> {
         self.generate(at, &format!(" return {{ {} }}", fields.join(", ")));
     }
 
+    /*
+    Whether the module writes its exports as Luau's own `export const`
+    statements, under the `native_export` flag. Each one stands where the
+    returned table stood, after the last statement, so it holds the value
+    the name has when the module returns, as the table did. A write to an
+    exported `local` in a function comes later and reaches no importer,
+    as before. `export` on the declaration itself would differ there:
+    Luau then writes through to the frozen table, and the write throws.
+
+    Luau takes no `default` export, no `export` beside a `return` of the
+    chunk, and no name twice. Each statement binds a local, and a chunk
+    holds 200, so a module near the budget keeps the table. The check
+    artifact keeps it too: the analyzer the editor runs may not parse the
+    syntax.
+    */
+    fn native_exports(&self, block: &Block) -> bool {
+        let mut seen = HashSet::new();
+
+        self.options.fflags.on(&crate::fflags::NATIVE_EXPORT)
+            && !self.options.check
+            && self.table_exports.is_empty()
+            && self.own_names.len() + self.exports.len() <= EXPORTS_TABLE_AT
+            && self
+                .exports
+                .iter()
+                .all(|(k, _)| k != "default" && seen.insert(k))
+            && !block.stmts.iter().any(leaves_chunk)
+    }
+
     // --- enums ---------------------------------------------------------------
+}
+
+/// Whether a top-level statement can end the module chunk early, at any
+/// depth: a `return`, or a `try`, which returns the `Err` from the
+/// chunk. A function, a macro body and an `after` block return from a
+/// function of their own.
+fn leaves_chunk(stmt: &Stmt) -> bool {
+    fn child_leaves(c: &Child) -> bool {
+        match c {
+            Child::Block(b) => b.stmts.iter().any(leaves_chunk),
+
+            Child::Expr(Expr::Function { .. }) | Child::Function(_) => false,
+
+            Child::Expr(e) => {
+                matches!(e, Expr::Try { .. }) || expr_children(e).iter().any(child_leaves)
+            }
+        }
+    }
+
+    match stmt {
+        Stmt::Return(_) => true,
+
+        Stmt::Attributed { stmt, .. } => leaves_chunk(stmt),
+
+        Stmt::Macro(_) | Stmt::After(_) => false,
+
+        _ => stmt_children(stmt).iter().any(child_leaves),
+    }
 }
 
 /// Whether a top-level statement runs a `return` of the module chunk.
@@ -1633,6 +1701,57 @@ print(ex)
     /// with the value: the declaration takes the `export` word, an
     /// interface or an alias goes out as a type alone, and a rename
     /// adds an alias.
+    /// The `native_export` flag writes each export as Luau's own
+    /// statement, where the returned table stood. A module Luau cannot
+    /// read that way keeps the table, and so does the check artifact.
+    #[test]
+    fn the_exports_of_a_module_are_native_under_the_flag() {
+        let options = crate::EmitOptions {
+            fflags: toml::from_str("native_export = true").unwrap(),
+            ..crate::EmitOptions::default()
+        };
+        let ship = |src: &str| {
+            let out = crate::compile_with(src, &options).unwrap();
+            assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+            assert!(!out.check.contains("export const"), "{}", out.check);
+
+            out.ship
+        };
+
+        let plain = ship(
+            "export local count = 0\nexport function bump()\n    count += 1\nend\nlocal other = 4\nexport { other as shown }\n",
+        );
+        assert!(
+            plain.contains(
+                " export const count = count export const bump = bump export const shown = other"
+            ),
+            "{plain}"
+        );
+        assert!(!plain.contains("return {"), "{plain}");
+
+        for (why, src) in [
+            (
+                "a default",
+                "export const one = 1\nexport default function make() return 1 end\n",
+            ),
+            (
+                "a return of the chunk",
+                "export const a = 1\nif a > 2 then return end\n",
+            ),
+            (
+                "a `try` at the top level",
+                "local function f(): Result<number, string> return Ok(1) end\nexport const v = try f()\n",
+            ),
+        ] {
+            let out = ship(src);
+            assert!(out.contains(" return { "), "{why}\n{out}");
+            assert!(!out.contains("export const"), "{why}\n{out}");
+        }
+
+        let off = crate::compile("export const a = 1\n").unwrap();
+        assert!(off.ship.contains(" return { a = a }"), "{}", off.ship);
+    }
+
     #[test]
     fn an_export_list_sends_the_type_of_a_declaration_out() {
         let src = "struct Named as\n    n: number\nend\n\nenum Kind as\n    A,\n    B,\nend\n\ninterface Shape as\n    area: number\nend\n\ntype Id = number\n\nfunction make(): Named\n    return new Named { n = 1 }\nend\n\nexport { Named, Kind, Shape, Id, make, Named as Other }\n";

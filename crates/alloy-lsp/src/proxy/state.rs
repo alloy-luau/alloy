@@ -79,6 +79,9 @@ pub(crate) struct State {
     pub(crate) settings: Value,
     /// The proxy's own editor options, from the same settings object.
     pub(crate) editor: settings::Editor,
+    /// The editor's list of Alloy flags, which goes over `[fflags]` of
+    /// the project.
+    pub(crate) fflags: alloy::fflags::FFlags,
     /// Questions in flight, by request id.
     pub(crate) asked: HashMap<String, Asked>,
     pub(crate) next_id: u64,
@@ -678,6 +681,7 @@ impl State {
                     extensions: self.extensions.clone(),
                     std_globals: config.std.globals.clone(),
                     naming: config.lint.naming.clone(),
+                    fflags: config.fflags.clone().with(&self.fflags),
                     ..EmitOptions::default()
                 }
             }
@@ -693,6 +697,7 @@ impl State {
                     std_require: "./alloy".to_string(),
                     definitions,
                     extensions: self.extensions.clone(),
+                    fflags: self.fflags.clone(),
                     ..EmitOptions::default()
                 }
             }

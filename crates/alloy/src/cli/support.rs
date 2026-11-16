@@ -434,7 +434,7 @@ pub(crate) fn compile_file(
         wait_timeout: option(args, "--wait-timeout")
             .and_then(|t| t.parse().ok())
             .or(emit.wait_timeout),
-        native_if_local: emit.native_if_local,
+        fflags: config.fflags,
         naming: config.lint.naming,
         file_name: path.to_string(),
         definitions: path.ends_with(".d.aly"),

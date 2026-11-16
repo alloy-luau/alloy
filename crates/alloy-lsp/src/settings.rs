@@ -77,6 +77,16 @@ pub fn editor(options: &Value, current: Editor) -> Editor {
     }
 }
 
+/// The editor's list of Alloy flags, `fflags.alloy` of its settings
+/// object: name to `true` or `false`. `None` when the object has no
+/// such key, so a settings change that leaves it out keeps the list.
+/// The other keys of `fflags` are Luau's flags, for the child.
+pub fn alloy_fflags(options: &Value) -> Option<alloy::fflags::FFlags> {
+    options
+        .pointer("/fflags/alloy")
+        .map(alloy::fflags::FFlags::from_json)
+}
+
 /// Deep-merges `over` into `base`: objects merge key by key, anything
 /// else replaces.
 pub fn merge(base: &mut Value, over: &Value) {

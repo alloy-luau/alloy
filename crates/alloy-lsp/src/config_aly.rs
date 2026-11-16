@@ -1267,7 +1267,7 @@ mod tests {
             |label: &str| top.iter().find(|i| i["label"] == label).unwrap()["detail"].clone();
         assert_eq!(
             detail("emit"),
-            "{ wait_timeout: number?, std_require: string?, erase_type_imports: boolean?, native_if_local: boolean? }"
+            "{ wait_timeout: number?, std_require: string?, erase_type_imports: boolean? }"
         );
         assert_eq!(detail("mount"), "{ [string]: { string } | string }");
         assert_eq!(detail("ingots"), "{ [string]: string | { ... } }");

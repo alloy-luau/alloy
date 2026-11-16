@@ -348,12 +348,6 @@ pub const TABLES: &[Table] = &[
                 BOOL,
                 "Deprecated, and does nothing. A type-only import never runs its `require`, so remove the key.",
             ),
-            key(
-                "native_if_local",
-                BOOL,
-                "false",
-                "Keep `if local x = e then`, `elseif local`, and the `if` expression form as Luau's own syntax in the ship artifact. Luau reads the syntax only where its `if local` flag is on, so the default is off. A condition with `where`, `not`, a pattern, or more than one name still lowers, and so does every `while local`.",
-            ),
         ],
         open: None,
     },
@@ -820,6 +814,25 @@ pub const TABLES: &[Table] = &[
         open: None,
     },
     Table {
+        name: "fflags",
+        doc: "The features that are not the default yet. Each one is off until the project turns it on here, and the list changes from one version to the next: a flag leaves it when its feature becomes the default.",
+        keys: &[
+            key(
+                crate::fflags::NATIVE_IF_LOCAL.name,
+                BOOL,
+                "false",
+                crate::fflags::NATIVE_IF_LOCAL.doc,
+            ),
+            key(
+                crate::fflags::NATIVE_EXPORT.name,
+                BOOL,
+                "false",
+                crate::fflags::NATIVE_EXPORT.doc,
+            ),
+        ],
+        open: None,
+    },
+    Table {
         name: "mount",
         doc: "Where each folder lands in the DataModel: `alias = [path, mount]`. A tool that reads a Rojo or Argon project file needs no table here; Alloy reads `default.project.json`. A tool with its own format describes the tree here, and this table then wins over any project file. With it, `alloy build` also writes `default.project.json` over the sources. `alias = path`, a bare string, names a folder another mount already carries and gives it an alias alone.",
         keys: &[],
@@ -1245,6 +1258,12 @@ mod tests {
             merge: Some("merge".into()),
         };
         config.alx.lints.static_conditional_child = Some("warn".into());
+
+        // The table of flags is empty by default; the schema names each
+        // flag of `crate::fflags::FLAGS`, and no other.
+        for flag in crate::fflags::FLAGS {
+            config.fflags.0.insert(flag.name.to_string(), false);
+        }
 
         let value = toml::Value::try_from(&config).unwrap();
         let mut from_config = BTreeSet::new();

@@ -2599,10 +2599,11 @@ impl<'s> Desugar<'s> {
 
     /// The one binding of a condition that Luau's own `if local` takes:
     /// one plain name, a truthy test, no `where`, no `not`. `None` when
-    /// `[emit] native_if_local` is off, in the check artifact, and for
+    /// the `native_if_local` flag is off, in the check artifact, since
+    /// the analyzer the editor runs may not parse the syntax, and for
     /// every other shape, which lowers to a temp and a test.
     pub(crate) fn native_binding<'c>(&self, cond: &'c Cond) -> Option<&'c CondBinding> {
-        if !self.options.native_if_local || self.options.check {
+        if !self.options.fflags.on(&crate::fflags::NATIVE_IF_LOCAL) || self.options.check {
             return None;
         }
 
@@ -3262,14 +3263,14 @@ mod tests {
 
     use crate::EmitOptions;
 
-    /// `[emit] native_if_local` keeps the plain binding as Luau's own
+    /// The `native_if_local` flag keeps the plain binding as Luau's own
     /// `if local` in the ship artifact. Each other shape lowers, and so
     /// does the whole check artifact.
     #[test]
     fn a_plain_binding_stays_native_under_the_option() {
         let src = "local function f(): string?\n    return nil\nend\nif local a = f() then\n    print(a)\nelseif const b: string = f() then\n    print(b)\nelseif local c = f() where #c > 2 then\n    print(c)\nelseif local d = f() then\n    print(d)\nend\nlocal v = if local x = f() then x else 'z'\nif not local n = f() then\n    return\nend\nif local p = f(); local q = f() then\n    print(p, q)\nend\nif const s, t = f() then\n    print(s, t)\nend\nwhile local line = f() do\n    print(line)\nend\nprint(v, n)\n";
         let options = EmitOptions {
-            native_if_local: true,
+            fflags: toml::from_str("native_if_local = true").unwrap(),
             ..EmitOptions::default()
         };
         let out = crate::compile_with(src, &options).unwrap();

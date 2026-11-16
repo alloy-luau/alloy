@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use alloy_syntax::ast::{
-    Cond, EnumDecl, Expr, FieldPattern, If, MatchExpr, MatchStmt, Pattern, PatternLocal, Stmt,
-    TokSpan, While,
+    Cond, CondBinding, EnumDecl, Expr, FieldPattern, If, MatchExpr, MatchStmt, Pattern,
+    PatternLocal, Stmt, TokSpan, While,
 };
 
 use super::types::{split_generics, strip_bounds};
@@ -2597,6 +2597,77 @@ impl<'s> Desugar<'s> {
 
     // --- conditions with bindings -------------------------------------------
 
+    /// The one binding of a condition that Luau's own `if local` takes:
+    /// one plain name, a truthy test, no `where`, no `not`. `None` when
+    /// the `AlloyNativeIfLocal` flag is off, in the check artifact, since
+    /// the analyzer the editor runs may not parse the syntax, and for
+    /// every other shape, which lowers to a temp and a test.
+    pub(crate) fn native_binding<'c>(&self, cond: &'c Cond) -> Option<&'c CondBinding> {
+        if !self.options.fflags.on(&crate::fflags::NATIVE_IF_LOCAL) || self.options.check {
+            return None;
+        }
+
+        let Cond::Local {
+            negated: false,
+            bindings,
+            filter: None,
+            ..
+        } = cond
+        else {
+            return None;
+        };
+        let [b] = &bindings[..] else {
+            return None;
+        };
+        let Pattern::Bind(n) = &b.pattern else {
+            return None;
+        };
+        let plain = b.rest.is_empty()
+            && b.filter.is_none()
+            && self.unit_variant_of(self.text_of(*n)).is_none();
+
+        plain.then_some(b)
+    }
+
+    /// `local x: T = value` of a native binding, with no keyword before
+    /// it. A binding past the first branch runs on some paths only.
+    fn native_binding_text(&mut self, b: &CondBinding, lazy: bool) -> String {
+        let Pattern::Bind(n) = &b.pattern else {
+            unreachable!("a native binding is one plain name");
+        };
+        self.misspelt_variant(*n, b);
+        let value = if lazy {
+            self.render_lazy(&b.value)
+        } else {
+            self.render_to_string(&b.value)
+        };
+        let ty =
+            b.ty.map(|t| format!(": {}", self.text_of(t)))
+                .unwrap_or_default();
+
+        format!("local {}{ty} = {value}", self.text_of(*n))
+    }
+
+    /// `if local Idel = job` with `job: Job`: the value is never nil, so
+    /// a capital name there is a misspelt variant. `job: Job?` keeps the
+    /// plain binding.
+    fn misspelt_variant(&mut self, n: TokSpan, b: &CondBinding) {
+        if is_variant_name(self.text_of(n))
+            && let Expr::Name(v) = &b.value
+            && self
+                .binding_types
+                .get(self.text_of(*v))
+                .is_some_and(|t| !t.contains('?') && !names_word(t, "nil"))
+            && self.scrutinee_enum(&b.value).is_some()
+        {
+            self.check_variant_patterns(
+                &[std::slice::from_ref(&b.pattern)],
+                std::slice::from_ref(&b.value),
+                false,
+            );
+        }
+    }
+
     /// The declarations and test for a `Cond::Local`, for a block context
     /// where temps and bindings can be locals. Each declaration keeps
     /// the chunks of its value, so a name in the value maps to its own
@@ -2644,24 +2715,7 @@ impl<'s> Desugar<'s> {
                 // after a guard clause.
                 Pattern::Bind(n) if self.unit_variant_of(self.text_of(*n)).is_none() => {
                     let name = self.text_of(*n).to_string();
-
-                    // `if local Idel = job` with `job: Job`: the value is
-                    // never nil, so a capital name there is a misspelt
-                    // variant. `job: Job?` keeps the plain binding.
-                    if is_variant_name(&name)
-                        && let Expr::Name(v) = &b.value
-                        && self
-                            .binding_types
-                            .get(self.text_of(*v))
-                            .is_some_and(|t| !t.contains('?') && !names_word(t, "nil"))
-                        && self.scrutinee_enum(&b.value).is_some()
-                    {
-                        self.check_variant_patterns(
-                            &[std::slice::from_ref(&b.pattern)],
-                            std::slice::from_ref(&b.value),
-                            false,
-                        );
-                    }
+                    self.misspelt_variant(*n, b);
 
                     if *negated {
                         tests.push(name.clone());
@@ -2840,6 +2894,15 @@ impl<'s> Desugar<'s> {
                     let keyword = if idx == 0 { "if" } else { "elseif" };
                     let c = self.render_to_string(e);
                     self.generate(kw_tok.start, &format!("{keyword} {c} then"));
+                }
+
+                // Luau binds and tests the name itself, and the name
+                // lives in this branch alone, as in Alloy.
+                Cond::Local { .. } if self.native_binding(cond).is_some() => {
+                    let b = self.native_binding(cond).expect("checked above");
+                    let keyword = if idx == 0 { "if" } else { "elseif" };
+                    let binding = self.native_binding_text(b, idx > 0);
+                    self.generate(kw_tok.start, &format!("{keyword} {binding} then"));
                 }
 
                 Cond::Local { .. } => {
@@ -3097,6 +3160,13 @@ impl<'s> Desugar<'s> {
                     text.push_str(&format!("{keyword} {c} then {v} "));
                 }
 
+                Cond::Local { .. } if self.native_binding(cond).is_some() => {
+                    let b = self.native_binding(cond).expect("checked above");
+                    let binding = self.native_binding_text(b, idx > 0);
+                    let v = self.render_lazy(value);
+                    text.push_str(&format!("{keyword} {binding} then {v} "));
+                }
+
                 Cond::Local { .. } => {
                     let (decls, test, binds) = self.cond_local_parts(cond, anchor);
 
@@ -3192,6 +3262,40 @@ mod tests {
     }
 
     use crate::EmitOptions;
+
+    /// The `AlloyNativeIfLocal` flag keeps the plain binding as Luau's own
+    /// `if local` in the ship artifact. Each other shape lowers, and so
+    /// does the whole check artifact.
+    #[test]
+    fn a_plain_binding_stays_native_under_the_option() {
+        let src = "local function f(): string?\n    return nil\nend\nif local a = f() then\n    print(a)\nelseif const b: string = f() then\n    print(b)\nelseif local c = f() where #c > 2 then\n    print(c)\nelseif local d = f() then\n    print(d)\nend\nlocal v = if local x = f() then x else 'z'\nif not local n = f() then\n    return\nend\nif local p = f(); local q = f() then\n    print(p, q)\nend\nif const s, t = f() then\n    print(s, t)\nend\nwhile local line = f() do\n    print(line)\nend\nprint(v, n)\n";
+        let options = EmitOptions {
+            fflags: toml::from_str("AlloyNativeIfLocal = true").unwrap(),
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(src, &options).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+        for want in [
+            "\nif local a = f() then\n",
+            // A `const` binding emits `local`, as the lowered form does.
+            "\nelseif local b: string = f() then\n",
+            "\nelse do local _c1 = f() if _c1 and (#_c1 > 2) then local c = _c1\n",
+            "\nelseif local d = f() then\n",
+            "local v = (if local x = f() then x else 'z')",
+            "local n = f() if not (n) then",
+            "do local _c1 = f() local _c2 = if _c1 then f() else nil if _c1 and _c2 then",
+            "do local _c1, _c2 = f() if _c1 then local s, t = _c1, _c2",
+            "while true do local _c1 = f() if not (_c1) then break end local line = _c1",
+        ] {
+            assert!(out.ship.contains(want), "{want}\n{}", out.ship);
+        }
+
+        assert!(!out.check.contains("if local"), "{}", out.check);
+        // Off, the default, no branch stays native.
+        let off = crate::compile(src).unwrap();
+        assert!(!off.ship.contains("if local"), "{}", off.ship);
+    }
 
     fn messages(src: &str) -> Vec<String> {
         crate::compile(src)

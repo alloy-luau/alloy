@@ -15,6 +15,7 @@ pub mod desugar;
 pub mod directives;
 pub mod docs;
 pub mod extensions;
+pub mod fflags;
 pub mod flux;
 pub mod fmt;
 pub mod game_import;

@@ -190,6 +190,12 @@ fn run() -> ExitCode {
         .cloned()
         .unwrap_or(serde_json::Value::Null);
 
+    // The Luau flags of `[fflags]` in alloy.toml go first, so the
+    // editor's own list wins over them.
+    if let Some(c) = &config {
+        child_args.extend(c.fflags.luau_args());
+    }
+
     for flag in settings::child_flags(&editor_options) {
         if flag == "--flag:LuauSolverV2=true" && !new_solver {
             continue;

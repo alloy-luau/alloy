@@ -23,6 +23,9 @@ pub struct Config {
     pub test: TestConfig,
     pub project: Project,
     pub std: StdConfig,
+    /// The `[fflags]` table: the flags of Alloy, by an `Alloy` name, and
+    /// the Luau flags luau-lsp runs under. See `crate::fflags`.
+    pub fflags: crate::fflags::FFlags,
     /// The `[mount]` table: alias to `[path, mount]`. The folder at
     /// `path` lands at `mount` in the DataModel. The table is the tree
     /// when the project writes one, over any project file at the root.
@@ -1174,6 +1177,12 @@ impl Config {
         {
             out.push(format!(
                 "`{name}` is now `naming_convention`; write `[lint.rules] naming_convention`, and set the case of each kind of name in `[lint.naming]`"
+            ));
+        }
+
+        for name in self.fflags.unknown() {
+            out.push(format!(
+                "`[fflags] {name}` names no flag of this version of Alloy: the name is wrong, or the feature is the default now. Remove the key"
             ));
         }
 

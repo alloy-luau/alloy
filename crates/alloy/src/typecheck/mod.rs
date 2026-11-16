@@ -711,6 +711,9 @@ pub fn analyze(
         cmd.arg("--flag:LuauSolverV2=true");
     }
 
+    // The Luau flags of `[fflags]` go last, so each one wins.
+    cmd.args(config.fflags.luau_args());
+
     for d in &definitions {
         cmd.arg(format!("--definitions={}", d.display()));
     }

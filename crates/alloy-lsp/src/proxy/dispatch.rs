@@ -216,6 +216,7 @@ impl Server {
 
                 if let Some(options) = message.pointer("/params/initializationOptions") {
                     st.editor = settings::editor(options, st.editor);
+                    st.fflags = settings::alloy_fflags(options).unwrap_or(st.fflags.clone());
                     let over = settings::from_editor(options);
                     settings::merge(&mut st.settings, &over);
                 }
@@ -350,6 +351,7 @@ impl Server {
 
                 if let Some(settings) = message.pointer("/params/settings") {
                     st.editor = settings::editor(settings, st.editor);
+                    st.fflags = settings::alloy_fflags(settings).unwrap_or(st.fflags.clone());
                     let over = settings::from_editor(settings);
                     settings::merge(&mut st.settings, &over);
                 }

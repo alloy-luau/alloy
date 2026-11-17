@@ -7,7 +7,42 @@ use super::*;
 impl<'a> Parser<'a> {
     // --- expressions -------------------------------------------------------
 
+    /// An expression, with the pipes it holds. `|>` binds more loosely
+    /// than every other operator and joins to the left, so each stage
+    /// is an expression with no pipe of its own at its top level.
     pub(super) fn expr(&mut self) -> Result<Expr, ParseError> {
+        let start = self.pos;
+        let mut left = self.stage_expr()?;
+
+        while self.at_pipe() {
+            let op = self.pos;
+            self.pos += 2;
+
+            if self.at_end() || matches!(self.text(), ")" | "," | "]" | "}" | ";" | "end") {
+                return Err(self.err("expected an expression after `|>`"));
+            }
+
+            let body = self.stage_expr()?;
+
+            left = Expr::Pipe {
+                value: Box::new(left),
+                op: TokSpan::new(op, op + 2),
+                body: Box::new(body),
+                span: TokSpan::new(start, self.pos),
+            };
+        }
+
+        Ok(left)
+    }
+
+    /// Whether the cursor is at `|>`: a `|` with a `>` right after it. The
+    /// lexer keeps them apart, since a type writes `|` and `>` too.
+    fn at_pipe(&self) -> bool {
+        self.at("|") && self.adjacent(0) && self.text_at(1) == ">"
+    }
+
+    /// One stage of a pipe: an expression that stops at a `|>`.
+    pub(super) fn stage_expr(&mut self) -> Result<Expr, ParseError> {
         let start = self.pos;
         let cond = self.sub_expr(0)?;
 
@@ -42,7 +77,9 @@ impl<'a> Parser<'a> {
             self.no_method_call -= 1;
             let then_value = then_value?;
             self.expect(":")?;
-            let else_value = self.expr()?;
+            // The last branch has no end of its own, so a `|>` after it
+            // pipes the whole ternary.
+            let else_value = self.stage_expr()?;
 
             return Ok(Expr::Ternary {
                 cond: Box::new(cond),
@@ -1267,7 +1304,9 @@ impl<'a> Parser<'a> {
         }
 
         self.expect("else")?;
-        let else_value = self.expr()?;
+        // The `else` branch has no end of its own, so a `|>` after it
+        // pipes the whole `if`.
+        let else_value = self.stage_expr()?;
         Ok(Expr::IfElse {
             branches,
             else_value: Box::new(else_value),

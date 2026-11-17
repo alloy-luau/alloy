@@ -808,6 +808,13 @@ impl<'s> Desugar<'s> {
             return true;
         }
 
+        // Inside the body of a `|>` each `_` takes the name of the stage
+        // local, so the walk has to reach a statement of a function
+        // literal there.
+        if !self.pipe_topics.is_empty() {
+            return true;
+        }
+
         // A module past the budget of locals reads its exported values
         // off the exports table, so every reference has to be reached.
         if !self.table_exports.is_empty() {
@@ -1790,6 +1797,14 @@ impl<'s> Desugar<'s> {
             && let [e @ Expr::Await { .. }] = r.values.as_slice()
         {
             self.one_value.insert(std::ptr::from_ref(e) as usize);
+        }
+
+        self.check_topic_write(stmt);
+
+        if let Some((head_end, value)) = self.hoisted_pipe(stmt) {
+            self.pipe_stmt(stmt, head_end, value);
+
+            return;
         }
 
         match stmt {

@@ -509,7 +509,7 @@ fn mark_names(items: &mut [Item]) {
 
 /// The lexer emits `?`, `<`, and `>` one character at a time. The
 /// operators built from them are one item here: `?.`, `?:`, `?[`, `?(`,
-/// `??`, `??=`, and the `<<` `>>` of explicit type arguments.
+/// `??`, `??=`, `|>`, and the `<<` `>>` of explicit type arguments.
 fn merge_operators(items: Vec<Item>) -> Vec<Item> {
     let mut out: Vec<Item> = Vec::with_capacity(items.len());
     let mut open_shl = 0usize;
@@ -521,6 +521,9 @@ fn merge_operators(items: Vec<Item>) -> Vec<Item> {
 
                 (a == "?" && matches!(b, "." | ":" | "[" | "(" | "?"))
                     || (a == "??" && b == "=")
+                    // The pipe operator. No type writes a `|` with a
+                    // `>` right after it.
+                    || (a == "|" && b == ">")
                     // Luau has no `<<` operator, so two `<` with nothing
                     // between them after a name are the type-argument
                     // bracket, whatever stands before the first one.

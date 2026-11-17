@@ -36,6 +36,7 @@ mod expressions;
 mod macros;
 mod modules;
 pub(crate) mod namespaces;
+mod pipes;
 mod remotes;
 pub mod statements;
 mod structs;
@@ -770,6 +771,8 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         enum_payloads: HashMap::new(),
         impl_methods: HashMap::new(),
         contract_gaps: Vec::new(),
+        pipe_topics: Vec::new(),
+        pipe_next: 0,
         contract_names: HashSet::new(),
         field_body: HashMap::new(),
         method_body: HashMap::new(),
@@ -1657,6 +1660,11 @@ struct Desugar<'s> {
     /// source order. The report names each one; this is what the editor
     /// writes in.
     contract_gaps: Vec<ContractGap>,
+    /// The piped value of each `|>` whose body is rendering, innermost
+    /// last.
+    pipe_topics: Vec<pipes::Topic>,
+    /// The number of the last stage local, `__pipe1` and on.
+    pipe_next: u32,
     /// See [`Rendered::contract_names`].
     contract_names: HashSet<u32>,
     /// Where a member of a type goes, by the type's name: the span of
@@ -2277,6 +2285,8 @@ pub(crate) fn expr_children(e: &Expr) -> Vec<Child<'_>> {
             Child::Expr(else_value),
         ],
 
+        Expr::Pipe { value, body, .. } => vec![Child::Expr(value), Child::Expr(body)],
+
         Expr::Array { items, .. } => items.iter().map(Child::Expr).collect(),
 
         Expr::MethodRef { object, .. } => vec![Child::Expr(object)],
@@ -2875,6 +2885,7 @@ fn expr_needs_desugar(e: &Expr) -> bool {
         | Expr::Child { .. }
         | Expr::NonNil { .. }
         | Expr::Ternary { .. }
+        | Expr::Pipe { .. }
         | Expr::Is { .. }
         | Expr::Satisfies { .. }
         | Expr::Array { .. }

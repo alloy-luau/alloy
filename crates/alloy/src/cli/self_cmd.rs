@@ -273,6 +273,22 @@ fn update(dir: &Path, version: Option<&str>, prerelease: bool) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // A candidate is ahead of the latest release. An update with no
+    // version named never goes back to an older one.
+    if version.is_none()
+        && compare_versions(crate::alloy_version(), &wanted) == std::cmp::Ordering::Greater
+    {
+        println!(
+            "{}",
+            p.ok(&format!(
+                "alloy {} is newer than {wanted}, the latest release; --prerelease looks for a newer candidate",
+                crate::alloy_version()
+            ))
+        );
+
+        return ExitCode::SUCCESS;
+    }
+
     println!(
         "{}",
         p.note(&format!("fetching alloy {wanted} for {target}"))

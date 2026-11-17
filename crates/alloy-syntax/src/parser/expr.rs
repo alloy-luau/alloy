@@ -7,7 +7,63 @@ use super::*;
 impl<'a> Parser<'a> {
     // --- expressions -------------------------------------------------------
 
+    /// An expression, with the pipes it holds. `|>` binds more loosely
+    /// than every other operator and joins to the left, so each stage
+    /// is an expression with no pipe of its own at its top level.
+    ///
+    /// `stage` is inlined here, at its one call, and the rest of a pipe
+    /// parses in `pipe_tail`. A debug build spends kilobytes of stack on
+    /// each level of a nested expression, so a frame more for each one,
+    /// or a larger one, overflows the stack before the depth limit stops
+    /// the parse.
     pub(super) fn expr(&mut self) -> Result<Expr, ParseError> {
+        let start = self.pos;
+        let mut left = self.stage()?;
+
+        while self.at_pipe() {
+            left = self.pipe_tail(start, left)?;
+        }
+
+        Ok(left)
+    }
+
+    /// The `|>` at the cursor and the stage after it, with `value` as
+    /// what the pipe passes in.
+    #[inline(never)]
+    fn pipe_tail(&mut self, start: usize, value: Expr) -> Result<Expr, ParseError> {
+        let op = self.pos;
+        self.pos += 2;
+
+        if self.at_end() || matches!(self.text(), ")" | "," | "]" | "}" | ";" | "end") {
+            return Err(self.err("expected an expression after `|>`"));
+        }
+
+        let body = self.stage_expr()?;
+
+        Ok(Expr::Pipe {
+            value: Box::new(value),
+            op: TokSpan::new(op, op + 2),
+            body: Box::new(body),
+            span: TokSpan::new(start, self.pos),
+        })
+    }
+
+    /// Whether the cursor is at `|>`: a `|` with a `>` right after it. The
+    /// lexer keeps them apart, since a type writes `|` and `>` too.
+    fn at_pipe(&self) -> bool {
+        self.at("|") && self.adjacent(0) && self.text_at(1) == ">"
+    }
+
+    /// One stage of a pipe, for a caller other than `expr`: the last
+    /// branch of a ternary and of an `if` expression.
+    #[inline(never)]
+    pub(super) fn stage_expr(&mut self) -> Result<Expr, ParseError> {
+        self.stage()
+    }
+
+    /// One stage of a pipe: an expression that stops at a `|>`.
+    #[inline(always)]
+    fn stage(&mut self) -> Result<Expr, ParseError> {
         let start = self.pos;
         let cond = self.sub_expr(0)?;
 
@@ -42,7 +98,9 @@ impl<'a> Parser<'a> {
             self.no_method_call -= 1;
             let then_value = then_value?;
             self.expect(":")?;
-            let else_value = self.expr()?;
+            // The last branch has no end of its own, so a `|>` after it
+            // pipes the whole ternary.
+            let else_value = self.stage_expr()?;
 
             return Ok(Expr::Ternary {
                 cond: Box::new(cond),
@@ -1267,7 +1325,9 @@ impl<'a> Parser<'a> {
         }
 
         self.expect("else")?;
-        let else_value = self.expr()?;
+        // The `else` branch has no end of its own, so a `|>` after it
+        // pipes the whole `if`.
+        let else_value = self.stage_expr()?;
         Ok(Expr::IfElse {
             branches,
             else_value: Box::new(else_value),

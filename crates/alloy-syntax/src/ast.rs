@@ -1138,6 +1138,15 @@ pub enum Expr {
         span: TokSpan,
     },
 
+    /// `value |> body`. Inside `body`, the name `_` reads `value`.
+    Pipe {
+        value: Box<Expr>,
+        /// The `|` and the `>` of the operator.
+        op: TokSpan,
+        body: Box<Expr>,
+        span: TokSpan,
+    },
+
     /// `c ? a : b`.
     Ternary {
         cond: Box<Expr>,
@@ -1254,6 +1263,7 @@ impl Expr {
             | Expr::Child { span, .. }
             | Expr::NonNil { span, .. }
             | Expr::Ternary { span, .. }
+            | Expr::Pipe { span, .. }
             | Expr::Is { span, .. }
             | Expr::Satisfies { span, .. }
             | Expr::Array { span, .. }

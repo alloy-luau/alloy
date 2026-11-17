@@ -848,6 +848,12 @@ pub const TABLES: &[Table] = &[
                 "false",
                 crate::fflags::SUPERTYPES.doc,
             ),
+            key(
+                crate::fflags::PIPE_OPERATOR.name,
+                BOOL,
+                "false",
+                crate::fflags::PIPE_OPERATOR.doc,
+            ),
         ],
         open: Some(luau_flag_value),
     },

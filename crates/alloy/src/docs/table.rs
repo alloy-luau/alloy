@@ -29,6 +29,10 @@ pub const TABLE: &[(&str, &str)] = &[
         "```\na ?? b\n```\nNil coalescing: `a` when it is not nil, else `b`. Unlike `or`, `false` passes through.",
     ),
     (
+        "|>",
+        "```\na |> f(_)\n```\nThe pipe: `a` runs once, and `_` in the right side reads its value. A chain reads top to bottom in the order it runs, and `_` goes in any place a name can be read. The right side must read `_`, and cannot assign it. `|>` binds more loosely than every other operator.\n\n```\nlocal label = humanoid.Health\n    |> math.clamp(_, 0, humanoid.MaxHealth)\n    |> math.floor(_)\n    |> string.format(\"%d / %d\", _, humanoid.MaxHealth)\n```\n\nEmits one local for each stage, on the line of the stage. A pipe that is the one value of a `local`, a `const`, a `return`, or a plain assignment puts the locals in front of the statement. In any other place they go inside a function called in place.\n\nNot final: the `AlloyExperimentalPipeOperator` flag under `[fflags]` in alloy.toml turns it on.",
+    ),
+    (
         "?.",
         "```\na?.b\n```\nSafe index: nil when `a` is nil, else `a.b`. The `?` guards the rest of the chain, and `!` ends the guard.\n\nEmits `a.b` under a nil check on a temp. The temp runs in front of the statement. Where that would change the result, the chain keeps its temps: after `and`, `or` and `??`, in a later branch or a guard, in a loop condition, or after an earlier call. There a path of fields reads again, `(if a == nil or a.b == nil then nil else a.b.c)`, and any other chain runs in a closure called in place.",
     ),

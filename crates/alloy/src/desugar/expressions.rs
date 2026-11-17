@@ -457,10 +457,14 @@ impl<'s> Desugar<'s> {
                 self.message_call(e);
             }
 
+            Expr::Pipe { op, .. } => self.pipe_expr(e, *op),
+
             Expr::Name(span) => {
                 let name = self.text_of(*span);
 
-                if let Some(path) = self.renamed(name) {
+                if let Some(topic) = self.topic_read(name) {
+                    self.generate(anchor, &topic);
+                } else if let Some(path) = self.renamed(name) {
                     self.generate(anchor, &path);
                 } else if AMBIENT.contains(&name) && !self.is_local(name) {
                     self.check_std_name(*span, name);

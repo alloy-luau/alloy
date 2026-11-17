@@ -988,6 +988,32 @@ impl Server {
             Some(m @ "textDocument/rename") => {
                 let uri = text_document_uri(&message).unwrap_or_default();
 
+                // The `_` of a pipe is not a name the author chose.
+                if let Some(id) = message.get("id").cloned()
+                    && let Some((line, character)) = position_of_message(&message)
+                    && self
+                        .state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .docs
+                        .get(&uri)
+                        .is_some_and(|doc| {
+                            offset_of(&doc.source, line, character)
+                                .is_some_and(|at| doc.on_pipe_token(at))
+                        })
+                {
+                    self.to_client(&json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {
+                            "code": -32803,
+                            "message": "`_` is the piped value of `|>`; it has no name to change",
+                        },
+                    }));
+
+                    return true;
+                }
+
                 if let Some(id) = message.get("id").cloned()
                     && (self.prop_answer(m, &uri, &message, &id)
                         || self.rename_answer(&uri, &message, &id))
@@ -1600,7 +1626,9 @@ impl Server {
                                 .and_then(Value::as_str)
                                 .map(str::to_string)
                         {
-                            let mut text = value.clone();
+                            // A stage local of a pipe is the `_` the
+                            // author wrote.
+                            let mut text = pipes::show_topic(&value);
 
                             // Before any pass reads the `where` clause of
                             // a solver variable as a type of its own.
@@ -1871,6 +1899,18 @@ impl Server {
                                     .and_then(|(l, c)| offset_of(&doc.shadow, l, c));
                                 let generated = offset
                                     .is_some_and(|o| doc.generated_offset(o.saturating_sub(1)));
+
+                                // The local of a pipe stage: its type
+                                // reads at the end of the stage.
+                                if let Some((line, character)) = pipes::stage_hint_position(doc, h)
+                                {
+                                    h[NAME_END] = json!({
+                                        "line": line,
+                                        "character": character,
+                                    });
+
+                                    return !error_type;
+                                }
 
                                 if error_type || generated {
                                     return false;

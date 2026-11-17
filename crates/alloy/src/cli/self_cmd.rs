@@ -60,7 +60,12 @@ pub(crate) fn run(args: &[String]) -> ExitCode {
     match args.first().map(String::as_str) {
         Some("install") => install(&dir),
 
-        Some("update") => update(&dir, option(args, "--version")),
+        Some("update") => update(
+            &dir,
+            option(args, "--version"),
+            args.iter()
+                .any(|a| matches!(a.as_str(), "--prerelease" | "--beta" | "--rc")),
+        ),
 
         Some("uninstall") => uninstall(&dir),
 
@@ -107,19 +112,94 @@ fn pick_asset<'a>(
         .find(|a| a["name"].as_str() == Some(wanted.as_str()))
 }
 
-/// The release from GitHub: the latest, or the one a version names.
-fn release_json(version: Option<&str>) -> Result<serde_json::Value, String> {
+/// The release from GitHub: the one a version names, else the latest.
+/// With `prerelease`, the newest of all the releases, so a release
+/// candidate wins while no later release stands over it.
+fn release_json(version: Option<&str>, prerelease: bool) -> Result<serde_json::Value, String> {
     let url = match version {
         Some(v) => format!(
             "https://api.github.com/repos/{REPO}/releases/tags/v{}",
             v.trim_start_matches('v')
         ),
 
+        // GitHub leaves a prerelease out of `latest`, so the list is
+        // the one place that names it.
+        None if prerelease => format!("https://api.github.com/repos/{REPO}/releases?per_page=30"),
+
         None => format!("https://api.github.com/repos/{REPO}/releases/latest"),
     };
     let body = alloy::net::get(&url).map_err(|e| format!("no release at {url}: {e}"))?;
+    let answer: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("cannot read the release: {e}"))?;
 
-    serde_json::from_str(&body).map_err(|e| format!("cannot read the release: {e}"))
+    match answer {
+        serde_json::Value::Array(list) => {
+            newest_release(&list).ok_or_else(|| format!("no release at {url}"))
+        }
+
+        one => Ok(one),
+    }
+}
+
+/// The release with the highest version of a list. A draft is not out
+/// yet, so it never counts.
+fn newest_release(list: &[serde_json::Value]) -> Option<serde_json::Value> {
+    list.iter()
+        .filter(|r| r["draft"].as_bool() != Some(true))
+        .filter(|r| r["tag_name"].is_string())
+        .max_by(|a, b| {
+            compare_versions(
+                a["tag_name"].as_str().unwrap_or(""),
+                b["tag_name"].as_str().unwrap_or(""),
+            )
+        })
+        .cloned()
+}
+
+/*
+The order of two versions, as semver reads it. `0.2.0-rc` is below
+`0.2.0-rc.2`, and both are below `0.2.0`: a version with no suffix is the
+release its candidates lead to.
+
+The numbers before the `-` compare first. Then the parts of the suffix
+compare one by one: two numbers by value, two words by their letters, and
+a number below a word. The shorter suffix is the lower one.
+*/
+fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    let split = |v: &str| {
+        let v = v.trim_start_matches('v');
+        let (core, pre) = v.split_once('-').map_or((v, None), |(c, p)| (c, Some(p)));
+        let core: Vec<u64> = core.split('.').map(|n| n.parse().unwrap_or(0)).collect();
+        let pre: Option<Vec<String>> = pre.map(|p| p.split('.').map(str::to_string).collect());
+
+        (core, pre)
+    };
+    let ((core_a, pre_a), (core_b, pre_b)) = (split(a), split(b));
+
+    core_a.cmp(&core_b).then_with(|| match (pre_a, pre_b) {
+        (None, None) => Ordering::Equal,
+
+        (None, Some(_)) => Ordering::Greater,
+
+        (Some(_), None) => Ordering::Less,
+
+        (Some(x), Some(y)) => x
+            .iter()
+            .zip(&y)
+            .map(|(p, q)| match (p.parse::<u64>(), q.parse::<u64>()) {
+                (Ok(m), Ok(n)) => m.cmp(&n),
+
+                (Ok(_), Err(_)) => Ordering::Less,
+
+                (Err(_), Ok(_)) => Ordering::Greater,
+
+                (Err(_), Err(_)) => p.cmp(q),
+            })
+            .find(|o| *o != Ordering::Equal)
+            .unwrap_or_else(|| x.len().cmp(&y.len())),
+    })
 }
 
 /// Downloads and unpacks the zips of one release under `work`, and
@@ -157,9 +237,10 @@ fn stage(
 }
 
 /// `alloy self update`: the latest release from GitHub, or the one
-/// named, into the install directory. Every zip is downloaded and
-/// unpacked before anything is replaced.
-fn update(dir: &Path, version: Option<&str>) -> ExitCode {
+/// named, into the install directory. With `prerelease`, a release
+/// candidate that is newer than the latest release. Every zip is
+/// downloaded and unpacked before anything is replaced.
+fn update(dir: &Path, version: Option<&str>, prerelease: bool) -> ExitCode {
     let p = Painter::for_stdout();
     let Some(target) = alloy::target::label() else {
         fail(&format!(
@@ -170,7 +251,7 @@ fn update(dir: &Path, version: Option<&str>) -> ExitCode {
 
         return ExitCode::FAILURE;
     };
-    let release = match release_json(version) {
+    let release = match release_json(version, prerelease) {
         Ok(r) => r,
 
         Err(e) => {
@@ -471,7 +552,7 @@ fn from_release(dir: &Path, which: &[&str]) {
         ))
     );
 
-    let release = match release_json(Some(version)) {
+    let release = match release_json(Some(version), false) {
         Ok(r) => r,
 
         Err(e) => {
@@ -610,6 +691,46 @@ mod tests {
         }
 
         out
+    }
+
+    #[test]
+    fn a_candidate_is_below_its_release_and_above_the_one_before() {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+
+        for (a, b, want) in [
+            ("v0.2.0-rc", "v0.1.10", Greater),
+            ("v0.2.0-rc", "v0.2.0", Less),
+            ("v0.2.0-rc", "v0.2.0-rc.2", Less),
+            ("v0.2.0-rc.2", "v0.2.0-rc.10", Less),
+            ("v0.2.0-beta", "v0.2.0-rc", Less),
+            ("v0.1.10", "v0.1.9", Greater),
+            ("0.2.0", "v0.2.0", Equal),
+        ] {
+            assert_eq!(compare_versions(a, b), want, "{a} against {b}");
+        }
+    }
+
+    /// `--prerelease` takes the highest version of the list, whatever
+    /// its order, and never a draft. With no candidate past the latest
+    /// release, that release is the answer.
+    #[test]
+    fn the_newest_release_is_the_highest_version() {
+        let release = |tag: &str, draft: bool| serde_json::json!({ "tag_name": tag, "draft": draft, "prerelease": tag.contains('-') });
+        let tag = |list: &[serde_json::Value]| {
+            newest_release(list).map(|r| r["tag_name"].as_str().unwrap_or("").to_string())
+        };
+
+        let list = [
+            release("v0.1.10", false),
+            release("v0.2.0-rc.2", false),
+            release("v0.2.0-rc", false),
+            release("v0.3.0-rc", true),
+        ];
+        assert_eq!(tag(&list).as_deref(), Some("v0.2.0-rc.2"));
+
+        let list = [release("v0.2.0-rc", false), release("v0.2.0", false)];
+        assert_eq!(tag(&list).as_deref(), Some("v0.2.0"));
+        assert_eq!(tag(&[]), None);
     }
 
     #[test]

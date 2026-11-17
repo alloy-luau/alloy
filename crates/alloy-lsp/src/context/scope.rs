@@ -599,6 +599,12 @@ pub fn locals_in_scope(src: &str, offset: usize) -> Vec<Local> {
         scope.push((depth, bind, local));
     }
 
+    // A declaration whose value runs on to the caret's line has bound
+    // nothing yet: `const health = a` then `|> f(hea|` reads no `health`.
+    for name in unfinished_names(src, line_start, offset) {
+        scope.retain(|(_, _, l)| l.name != name);
+    }
+
     // One entry per name, the deepest of them: a binding an inner block
     // made shadows the one around it.
     let mut out: Vec<Local> = Vec::new();
@@ -612,6 +618,73 @@ pub fn locals_in_scope(src: &str, offset: usize) -> Vec<Local> {
     out.reverse();
 
     out
+}
+
+/*
+The names of the `local` or `const` above the caret's line whose value
+the caret still sits in.
+
+Two shapes carry a value past its first line. Each line down to the
+caret opens with `|>`, the next stage of a pipe. Or a bracket the value
+opened is still open at the caret, as in a call written one argument to
+a line.
+
+ponytail: a value that carries on with a binary operator, `a` then
+`+ b`, is not seen. Read the statement off the parse when a file shows
+the name in its own value.
+*/
+fn unfinished_names(src: &str, line_start: usize, offset: usize) -> Vec<String> {
+    let piped = |line: &str| code_of(line).trim_start().starts_with("|>");
+    let mut all_piped = piped(&src[line_start..offset]);
+    let mut at = line_start;
+
+    // A value seldom runs past this many lines; the walk stops there.
+    for _ in 0..40 {
+        if at == 0 {
+            break;
+        }
+
+        let start = src[..at - 1].rfind('\n').map_or(0, |i| i + 1);
+        let line = code_of(&src[start..at - 1]);
+        let head = line.trim_start();
+        let head = head.strip_prefix("export ").unwrap_or(head);
+
+        if head.starts_with("local ") || head.starts_with("const ") {
+            // The value is still open while no line since has ended
+            // with every bracket closed.
+            let mut depth = 0i32;
+            let mut closed = false;
+
+            for c in src[start..offset].chars() {
+                match c {
+                    '(' | '[' | '{' => depth += 1,
+
+                    ')' | ']' | '}' => depth -= 1,
+
+                    '\n' if depth <= 0 => closed = true,
+
+                    _ => {}
+                }
+            }
+
+            let open = i32::from(!closed && depth > 0);
+
+            return match all_piped || open > 0 {
+                true => bindings_of(line)
+                    .into_iter()
+                    .filter(|(_, bind)| *bind == Bind::Outer)
+                    .map(|(local, _)| local.name)
+                    .collect(),
+
+                false => Vec::new(),
+            };
+        }
+
+        all_piped &= piped(line);
+        at = start;
+    }
+
+    Vec::new()
 }
 
 /// The binding `name` has at the caret: the one the enclosing blocks

@@ -67,6 +67,64 @@ pub(crate) fn stage_hint_position(doc: &Doc, hint: &Value) -> Option<(u32, u32)>
     Some(position_of(&doc.source, stage_end))
 }
 
+/// Whether the caret sits in the body of a pipe: a `|>` stands before
+/// it on its line.
+///
+/// ponytail: a body that runs past its first line, such as a function
+/// literal, is not seen. Read the pipe off the parse when that matters.
+fn in_pipe_body(src: &str, offset: usize) -> bool {
+    let line_start = src[..offset].rfind('\n').map_or(0, |i| i + 1);
+
+    context::code_of(&src[line_start..offset]).contains("|>")
+}
+
+impl State {
+    /// Adds `_` to a completion list in the body of a pipe. The name is
+    /// no local of the shadow, so the child never lists it.
+    pub(crate) fn topic_item(&self, uri: &str, line: u32, character: u32, result: &mut Value) {
+        let Some(doc) = self.docs.get(uri) else {
+            return;
+        };
+        let Some(offset) = offset_of(&doc.source, line, character) else {
+            return;
+        };
+        let word = imports::word_before(&doc.source, offset);
+        let head = &doc.source[..offset - word.len()];
+
+        // After a `.` or a `:` the list holds members, and a word that
+        // does not open with `_` filters the name out anyway.
+        if !in_pipe_body(&doc.source, offset)
+            || head.ends_with(['.', ':'])
+            || !"_".starts_with(word.as_str()) && !word.is_empty()
+        {
+            return;
+        }
+
+        let Some(items) = (match result {
+            Value::Array(items) => Some(items),
+
+            _ => result.get_mut("items").and_then(Value::as_array_mut),
+        }) else {
+            return;
+        };
+
+        if items.iter().any(|i| i["label"] == "_") {
+            return;
+        }
+
+        items.push(json!({
+            "label": "_",
+            "kind": 6,
+            "detail": "the piped value",
+            "sortText": "0_",
+            "documentation": {
+                "kind": "markdown",
+                "value": "The value on the left of this `|>`.",
+            },
+        }));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::show_topic;

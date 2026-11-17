@@ -2359,6 +2359,44 @@ pub(crate) fn a_call_table_names_its_key_column() {
     assert!(!key("start({ list = [ "));
 }
 
+/// The body of a pipe lists `_`, and no other place does. The name
+/// a statement declares is not in scope in its own value, on any
+/// line of it.
+#[test]
+pub(crate) fn a_pipe_body_completes_the_topic_and_not_its_own_name() {
+    let src = "const health = math.clamp(0, 1, 100)\n  |> math.floor(_)\n  |> string.format('%d', )\nconst wide = math.max(\n  1,\n  \n)\nprint(health, )\n";
+    let (st, uri) = one_file(src);
+    let labels = |head: &str| -> Vec<String> {
+        let at = src.find(head).expect("the head") + head.len();
+        let (line, character) = position_of(src, at);
+        let mut result = json!([]);
+        st.topic_item(uri, line, character, &mut result);
+
+        result
+            .as_array()
+            .expect("items")
+            .iter()
+            .map(|i| i["label"].as_str().unwrap_or_default().to_string())
+            .collect()
+    };
+    assert_eq!(labels("'%d', "), ["_"]);
+    assert_eq!(labels("math.floor("), ["_"]);
+    assert!(labels("print(health, ").is_empty());
+    assert!(labels("math.clamp(").is_empty());
+
+    let names = |head: &str| -> Vec<String> {
+        let at = src.find(head).expect("the head") + head.len();
+
+        context::locals_in_scope(src, at)
+            .into_iter()
+            .map(|l| l.name)
+            .collect()
+    };
+    assert!(names("'%d', ").is_empty());
+    assert_eq!(names("  1,\n  "), ["health"]);
+    assert_eq!(names("print(health, "), ["health", "wide"]);
+}
+
 /// A half-written member stops the compile. The members the contract
 /// asks for still complete, by the word and by the whole head.
 #[test]

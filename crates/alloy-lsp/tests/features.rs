@@ -2768,7 +2768,12 @@ fn a_space_in_code_completes_nothing() {
             "context": { "triggerKind": 2, "triggerCharacter": " " }
         }),
     );
-    assert_eq!(plain, json!([]), "{plain}");
+    // Empty, and not complete: the editor asks again at the next word.
+    assert_eq!(
+        plain,
+        json!({ "isIncomplete": true, "items": [] }),
+        "{plain}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

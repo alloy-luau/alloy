@@ -346,7 +346,7 @@ impl Server {
             }
         };
         let (options, jsx, ingots) = self.compile_options(uri, &text);
-        let doc = Doc::new(text, version, &options, &jsx, ingots.as_deref());
+        let mut doc = Doc::new(text, version, &options, &jsx, ingots.as_deref());
         let fresh_exports = export_surface(&doc);
         let (shadow, existed) = {
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -375,6 +375,7 @@ impl Server {
 
             let existed = st.docs.contains_key(uri);
             st.shadows.insert(shadow.clone(), uri.to_string());
+            doc.inherit_gaps(st.docs.get(uri));
             st.docs.insert(uri.to_string(), doc);
 
             (shadow, existed)
@@ -441,7 +442,7 @@ impl Server {
             return;
         };
         let (options, jsx, ingots) = self.compile_options(uri, &source);
-        let fresh = Doc::new(source.clone(), version, &options, &jsx, ingots.as_deref());
+        let mut fresh = Doc::new(source.clone(), version, &options, &jsx, ingots.as_deref());
         let message = {
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let shadow = st.child_uri(uri);
@@ -457,6 +458,7 @@ impl Server {
             }
 
             let text = fresh.shadow.clone();
+            fresh.inherit_gaps(st.docs.get(uri));
             st.docs.insert(uri.to_string(), fresh);
 
             if let Some(path) = uri_to_path(uri) {
@@ -545,6 +547,7 @@ impl Server {
             st.write_mirror(&path, &shadow_text);
         }
 
+        doc.inherit_gaps(st.docs.get(uri));
         st.docs.insert(uri.to_string(), doc);
 
         let message = json!({

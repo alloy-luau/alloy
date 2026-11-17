@@ -16,6 +16,8 @@ mod namespaces;
 mod scope;
 mod std_completions;
 
+#[cfg(test)]
+pub(crate) use context_items::at_call_table_key;
 pub(crate) use context_items::{MatchKind, readable_type};
 pub(crate) use deprecated::says_deprecated;
 #[cfg(test)]

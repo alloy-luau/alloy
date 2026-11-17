@@ -25,6 +25,10 @@ pub struct Doc {
     pub source: String,
     pub version: i64,
     pub output: Option<Output>,
+    /// The contract gaps of the last compile that gave an output, and
+    /// the length the source had then. A half-written member stops the
+    /// compile, and the completion of that member reads these.
+    pub last_gaps: (Vec<alloy::desugar::ContractGap>, usize),
     /// The text the child sees: the check artifact, or the source when
     /// the compile failed outright.
     pub shadow: String,
@@ -414,6 +418,7 @@ impl Doc {
             source,
             version,
             output: None,
+            last_gaps: (Vec::new(), 0),
             shadow: String::new(),
             exports: Vec::new(),
             decls: Vec::new(),
@@ -441,6 +446,17 @@ impl Doc {
         doc.compile(options, jsx, ingots);
 
         doc
+    }
+
+    /// Takes the contract gaps of the document this one replaces, when
+    /// its own parse was not whole and so found none. Each edit makes a
+    /// new document, and a half-written member is what the gaps complete.
+    pub fn inherit_gaps(&mut self, old: Option<&Doc>) {
+        let whole = self.output.as_ref().is_some_and(|o| o.parsed_clean);
+
+        if !whole && let Some(old) = old {
+            self.last_gaps = old.last_gaps.clone();
+        }
     }
 
     /// Recompiles after an edit.
@@ -570,6 +586,12 @@ impl Doc {
 
                     None => out.check.clone(),
                 };
+                // A recovered tree carries no gaps, so it keeps the
+                // ones the last whole parse found.
+                if out.parsed_clean {
+                    self.last_gaps = (out.contract_gaps.clone(), self.source.len());
+                }
+
                 self.output = Some(out);
                 self.error = None;
             }

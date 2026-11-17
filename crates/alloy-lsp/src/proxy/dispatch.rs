@@ -761,6 +761,24 @@ impl Server {
                     return true;
                 }
 
+                // `private function In|` under a contract: the members
+                // the contract asks for, before the rules below answer
+                // nothing for a space and for a name being declared.
+                if m == "textDocument/completion"
+                    && let Some(id) = message.get("id").cloned()
+                    && let Some(items) =
+                        position_of_message(&message).and_then(|(line, character)| {
+                            self.state
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .contract_head_completion(&uri, line, character)
+                        })
+                {
+                    self.respond(&id, items);
+
+                    return true;
+                }
+
                 // A space triggers a completion for the field after the
                 // comma of an object initializer, and for the next name
                 // of an import list; every other space answers nothing,
@@ -770,7 +788,10 @@ impl Server {
                     && message.pointer("/params/context/triggerCharacter") == Some(&json!(" "))
                     && !self.opens_a_list(&uri, &message)
                 {
-                    self.respond(&id, json!([]));
+                    // Not complete: an editor that keeps a complete
+                    // list would filter this empty one by the word
+                    // typed next, and never ask for that word.
+                    self.respond(&id, json!({ "isIncomplete": true, "items": [] }));
 
                     return true;
                 }
@@ -2552,6 +2573,7 @@ impl Server {
                         // spells no type.
                         st.rewrite_child_auto_imports(uri, result);
                         st.keyword_first(uri, line, character, result);
+                        st.keys_alone(uri, line, character, trigger.as_deref(), result);
                     }
                 }
 

@@ -43,7 +43,7 @@ Commands:
   install         Copy alloy and alloy-lsp to ~/.alloy/bin; what is not
                   beside this binary comes from the GitHub release
   update          Fetch a release and install its binaries: the latest,
-                  or the one --version names
+                  the one --version names, or a candidate with --rc
   uninstall       Remove the binaries from ~/.alloy/bin
   code            Write ~/.alloy/alloy.schema.json and point VS Code and Zed at it
   schema          Print the JSON Schema of alloy.toml
@@ -51,6 +51,8 @@ Commands:
 Options:
   --dir <path>    Install to, or remove from, <path>; code writes beside it
   --version <v>   With update: fetch this release instead of the latest
+  --prerelease    With update: take a release candidate or a beta while
+                  it is newer than the latest release; also --rc, --beta
   --dry-run       With code: print the edits and write nothing
 ";
 

@@ -388,6 +388,22 @@ impl State {
                         "newText": "~=",
                     }]),
                 ))
+            } else if d.message.starts_with("the body of `|>` never reads `_`")
+                && doc.source.get(start..end).is_some_and(|body| {
+                    !body.is_empty()
+                        && body
+                            .chars()
+                            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | ':'))
+                })
+            {
+                // A name or a field as the body: the call takes the value.
+                Some((
+                    "Call it with `_`".to_string(),
+                    json!([{
+                        "range": { "start": { "line": el, "character": ec }, "end": { "line": el, "character": ec } },
+                        "newText": "(_)",
+                    }]),
+                ))
             } else if d.message.starts_with("`as` is not a cast here")
                 && doc.source.get(start..start + 2) == Some("as")
             {
@@ -1923,6 +1939,16 @@ pub(crate) fn friendly_message(d: &mut Value, doc: &Doc, st: &State) {
             .unwrap_or_default();
         let rewritten = message.replace(&outside, "").replace(&mirror, &root);
         d["message"] = json!(rewritten);
+    }
+
+    // A report that names a stage local of a pipe names the `_`.
+    if let Some(shown) = d
+        .get("message")
+        .and_then(Value::as_str)
+        .filter(|m| m.contains("__pipe"))
+        .map(pipes::show_topic)
+    {
+        d["message"] = json!(shown);
     }
 }
 

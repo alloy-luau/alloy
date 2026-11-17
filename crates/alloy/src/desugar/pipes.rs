@@ -186,6 +186,7 @@ impl<'s> Desugar<'s> {
             let op = self.byte_start(ops[i]);
             self.copy(self.byte_end(stage.span()), op);
             self.generate(op, " ");
+            self.pipe_ops.push((op, name.clone()));
             topic = Some(name);
         }
 

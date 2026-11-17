@@ -664,6 +664,14 @@ impl<'s> Formatter<'s> {
             }
         }
 
+        // A pipe of three stages or more takes a line for each stage.
+        for c in chains.iter().filter(|c| c.always) {
+            for i in c.ops.iter().filter_map(item) {
+                self.forced[i] = true;
+                self.items[i].newlines_before = self.items[i].newlines_before.max(1);
+            }
+        }
+
         self.chains = chains
             .iter()
             .filter_map(|c| {
@@ -1006,6 +1014,7 @@ fn continues(text: &str) -> bool {
             | "<="
             | ">="
             | "??"
+            | "|>"
             | "?"
             | ":"
             | "."
@@ -1410,6 +1419,24 @@ mod tests {
 
         assert_eq!(fmt(src), want);
         assert_eq!(fmt(want), want);
+    }
+
+    /// A pipe of three stages or more takes a line for each stage, with
+    /// `|>` first on the line and one level in. A pipe of two stages
+    /// stays on its line while it fits, and breaks before the `|>` when
+    /// it does not.
+    #[test]
+    fn a_pipe_takes_a_line_for_each_stage() {
+        let src = "local function f(h: Humanoid): string\n  print(1|>_ + 1)\n\n  return h.Health |> math.floor(_) |> tostring(_) -- whole\nend\n";
+        let want = "local function f(h: Humanoid): string\n  print(1 |> _ + 1)\n\n  return h.Health\n    |> math.floor(_)\n    |> tostring(_) -- whole\nend\n";
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want);
+
+        let (a, b) = ("a".repeat(50), "b".repeat(50));
+        let src = format!("local function g()\n  local x = {a} |> {b}(_)\n\n  x += 1\nend\n");
+        let want = format!("local function g()\n  local x = {a}\n    |> {b}(_)\n\n  x += 1\nend\n");
+        assert_eq!(fmt(&src), want);
+        assert_eq!(fmt(&want), want);
     }
 
     /// A function in a branch of a broken ternary opens its body on a

@@ -716,6 +716,15 @@ impl Doc {
         })
     }
 
+    /// Whether the source byte sits on the `_` of a pipe or on a `|>`.
+    pub fn on_pipe_token(&self, offset: usize) -> bool {
+        self.mapping().is_some_and(|out| {
+            let at = self.repaired_offset(offset);
+
+            pipe_local_at(out, self.compiled(), &self.shadow, at).is_some()
+        })
+    }
+
     /// A source position as a shadow position.
     pub fn to_shadow(&self, line: u32, character: u32) -> (u32, u32) {
         let Some(out) = self.mapping() else {
@@ -727,6 +736,12 @@ impl Doc {
         let Some(offset) = offset_of(text, line, character) else {
             return (line, character);
         };
+
+        // The `_` of a pipe and its `|>` are the stage local in the
+        // shadow, so a hover and a reference read that local.
+        if let Some(at) = pipe_local_at(out, text, &self.shadow, offset) {
+            return position_of(&self.shadow, at);
+        }
 
         // A byte a desugar replaced has no output position: take the next
         // copied byte on the line, else the previous one.
@@ -807,6 +822,52 @@ impl Doc {
             .iter()
             .any(|(start, end)| (*start..*end).contains(&offset))
     }
+}
+
+/// The shadow offset of the stage local a pipe token stands for: the
+/// `_` at `offset` of the source, or the `|>` there. `None` for any
+/// other token.
+///
+/// A `_` the emit renamed is generated text anchored at the `_`, and it
+/// spells the local. A `|>` has an entry in `pipe_ops`, with the local
+/// that holds the value it passes on.
+fn pipe_local_at(out: &Output, text: &str, shadow: &str, offset: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+
+    for &(op, ref name) in &out.pipe_ops {
+        let op = op as usize;
+
+        if (op..op + 2).contains(&offset) {
+            return shadow
+                .find(&format!("local {name} = "))
+                .map(|at| at + "local ".len());
+        }
+    }
+
+    // The caret may stand right after the `_`.
+    let at = [offset, offset.wrapping_sub(1)].into_iter().find(|&at| {
+        bytes.get(at) == Some(&b'_')
+            && !at.checked_sub(1).is_some_and(|p| word(bytes[p]))
+            && !bytes.get(at + 1).is_some_and(|&n| word(n))
+    })?;
+
+    out.map
+        .chunks()
+        .iter()
+        .enumerate()
+        .find_map(|(i, chunk)| match *chunk {
+            alloy::render::Chunk::Generated { anchor, len } if anchor as usize == at => {
+                let start = out.map.chunk_start(i) as usize;
+
+                shadow
+                    .get(start..start + len as usize)?
+                    .starts_with("__pipe")
+                    .then_some(start)
+            }
+
+            _ => None,
+        })
 }
 
 /// Applies one LSP content change to a source and its mark flag. A

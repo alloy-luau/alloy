@@ -571,6 +571,8 @@ pub struct Rendered {
     pub tests: Vec<(String, bool)>,
     /// The members an attribute contract asked for and did not find.
     pub contract_gaps: Vec<ContractGap>,
+    /// See [`crate::Output::pipe_ops`].
+    pub pipe_ops: Vec<(u32, String)>,
     /// The byte each member name starts at that an attribute contract
     /// asks for. The contract fixes the name, so the naming lint leaves
     /// that member alone, and reads another member of the same name.
@@ -773,6 +775,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         contract_gaps: Vec::new(),
         pipe_topics: Vec::new(),
         pipe_next: 0,
+        pipe_ops: Vec::new(),
         contract_names: HashSet::new(),
         field_body: HashMap::new(),
         method_body: HashMap::new(),
@@ -1064,6 +1067,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         ext_used: d.ext_hit,
         tests: d.test_names,
         contract_gaps: d.contract_gaps,
+        pipe_ops: d.pipe_ops,
         contract_names: d.contract_names,
     }
 }
@@ -1665,6 +1669,8 @@ struct Desugar<'s> {
     pipe_topics: Vec<pipes::Topic>,
     /// The number of the last stage local, `__pipe1` and on.
     pipe_next: u32,
+    /// See [`crate::Output::pipe_ops`].
+    pipe_ops: Vec<(u32, String)>,
     /// See [`Rendered::contract_names`].
     contract_names: HashSet<u32>,
     /// Where a member of a type goes, by the type's name: the span of

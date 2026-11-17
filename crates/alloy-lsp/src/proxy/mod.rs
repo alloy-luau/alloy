@@ -23,6 +23,7 @@ mod ingots_bridge;
 mod navigation;
 mod outline;
 mod patterns;
+mod pipes;
 mod state;
 mod typing;
 

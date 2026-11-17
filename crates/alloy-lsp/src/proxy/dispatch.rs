@@ -2614,6 +2614,7 @@ impl Server {
                         st.rewrite_child_auto_imports(uri, result);
                         st.keyword_first(uri, line, character, result);
                         st.keys_alone(uri, line, character, trigger.as_deref(), result);
+                        st.topic_item(uri, line, character, result);
                     }
                 }
 

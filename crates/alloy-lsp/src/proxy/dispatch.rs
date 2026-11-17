@@ -761,6 +761,24 @@ impl Server {
                     return true;
                 }
 
+                // `private function In|` under a contract: the members
+                // the contract asks for, before the rules below answer
+                // nothing for a space and for a name being declared.
+                if m == "textDocument/completion"
+                    && let Some(id) = message.get("id").cloned()
+                    && let Some(items) =
+                        position_of_message(&message).and_then(|(line, character)| {
+                            self.state
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .contract_head_completion(&uri, line, character)
+                        })
+                {
+                    self.respond(&id, items);
+
+                    return true;
+                }
+
                 // A space triggers a completion for the field after the
                 // comma of an object initializer, and for the next name
                 // of an import list; every other space answers nothing,
@@ -770,7 +788,10 @@ impl Server {
                     && message.pointer("/params/context/triggerCharacter") == Some(&json!(" "))
                     && !self.opens_a_list(&uri, &message)
                 {
-                    self.respond(&id, json!([]));
+                    // Not complete: an editor that keeps a complete
+                    // list would filter this empty one by the word
+                    // typed next, and never ask for that word.
+                    self.respond(&id, json!({ "isIncomplete": true, "items": [] }));
 
                     return true;
                 }
@@ -966,6 +987,32 @@ impl Server {
 
             Some(m @ "textDocument/rename") => {
                 let uri = text_document_uri(&message).unwrap_or_default();
+
+                // The `_` of a pipe is not a name the author chose.
+                if let Some(id) = message.get("id").cloned()
+                    && let Some((line, character)) = position_of_message(&message)
+                    && self
+                        .state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .docs
+                        .get(&uri)
+                        .is_some_and(|doc| {
+                            offset_of(&doc.source, line, character)
+                                .is_some_and(|at| doc.on_pipe_token(at))
+                        })
+                {
+                    self.to_client(&json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {
+                            "code": -32803,
+                            "message": "`_` is the piped value of `|>`; it has no name to change",
+                        },
+                    }));
+
+                    return true;
+                }
 
                 if let Some(id) = message.get("id").cloned()
                     && (self.prop_answer(m, &uri, &message, &id)
@@ -1579,7 +1626,9 @@ impl Server {
                                 .and_then(Value::as_str)
                                 .map(str::to_string)
                         {
-                            let mut text = value.clone();
+                            // A stage local of a pipe is the `_` the
+                            // author wrote.
+                            let mut text = pipes::show_topic(&value);
 
                             // Before any pass reads the `where` clause of
                             // a solver variable as a type of its own.
@@ -1850,6 +1899,18 @@ impl Server {
                                     .and_then(|(l, c)| offset_of(&doc.shadow, l, c));
                                 let generated = offset
                                     .is_some_and(|o| doc.generated_offset(o.saturating_sub(1)));
+
+                                // The local of a pipe stage: its type
+                                // reads at the end of the stage.
+                                if let Some((line, character)) = pipes::stage_hint_position(doc, h)
+                                {
+                                    h[NAME_END] = json!({
+                                        "line": line,
+                                        "character": character,
+                                    });
+
+                                    return !error_type;
+                                }
 
                                 if error_type || generated {
                                     return false;
@@ -2552,6 +2613,8 @@ impl Server {
                         // spells no type.
                         st.rewrite_child_auto_imports(uri, result);
                         st.keyword_first(uri, line, character, result);
+                        st.keys_alone(uri, line, character, trigger.as_deref(), result);
+                        st.topic_item(uri, line, character, result);
                     }
                 }
 

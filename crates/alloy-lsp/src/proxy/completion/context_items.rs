@@ -1,5 +1,28 @@
 use super::*;
 
+/// The supertypes a type slot offers: the word, its completion kind,
+/// its detail, and its text.
+const SUPERTYPES: &[(&str, u64, &str, &str)] = &[
+    (
+        "struct",
+        22,
+        "struct<T>",
+        "```alloy\nstruct<T>\nstruct\n```\n`struct<T>` is the struct whose values are `T`, and `struct` alone is any struct. A value of the type constructs with `.new(fields)`. After `is`, the test holds for a struct itself.",
+    ),
+    (
+        "enum",
+        13,
+        "enum",
+        "```alloy\nenum\n```\nAny enum. It takes no type argument. After `is`, the test holds for an enum itself.",
+    ),
+    (
+        "object",
+        7,
+        "object",
+        "```alloy\nx is object\n```\nHolds for a value a struct made.",
+    ),
+];
+
 impl State {
     /// The items for a completion context, less the names its list
     /// already holds: `@derive(Serialize, |` offers no second
@@ -342,6 +365,43 @@ impl State {
                     .or_else(|| doc.import_decls.iter().find(|d| d.name == key))
                     .map(|d| alloy::declarations::attribute_params(&d.hover))
                     .unwrap_or_default();
+                let line_start = doc.source[..from].rfind('\n').map_or(0, |i| i + 1);
+                let head = &doc.source[line_start..from];
+
+                // `@Provider({ |`: a key of the record. The names are
+                // the parameters the attribute declares, less the ones
+                // the record already holds. The grammar takes a name
+                // only inside the braces: `@Provider(a = 1)` is a
+                // syntax error, so the parenthesis offers none.
+                if quote.is_none() && at_record_key(head) {
+                    for (name, ty) in &params {
+                        let written = head
+                            .match_indices(name.as_str())
+                            .any(|(i, _)| head[i + name.len()..].trim_start().starts_with('='));
+
+                        if written {
+                            continue;
+                        }
+
+                        let mut item = word(name, 5, None, from);
+                        item["textEdit"]["newText"] = json!(format!("{name} = "));
+                        item["detail"] = json!(ty);
+                        items.push(item);
+                    }
+
+                    return items;
+                }
+
+                // `Lifecycle.St|`: an item writes the whole path, so
+                // its edit starts where the path does. An edit from the
+                // word alone would leave `Lifecycle.Lifecycle.Start`.
+                let from = match quote {
+                    Some(_) => from,
+
+                    None => doc.source[..from]
+                        .trim_end_matches(|c: char| c.is_alphanumeric() || c == '_' || c == '.')
+                        .len(),
+                };
                 let ty = match param {
                     Some(name) => params.iter().find(|(p, _)| p == name).map(|(_, t)| t),
 
@@ -1017,6 +1077,37 @@ impl State {
                     items.push(item);
                 }
 
+                // The supertypes, under their flag: `struct` and `enum`
+                // are types, and all three follow `is`. A type the file
+                // declares under one of the words is already in the list.
+                let flags = uri_to_path(uri)
+                    .and_then(|p| self.config_at(p.parent()?))
+                    .map(|project| project.1.fflags.clone())
+                    .unwrap_or_default()
+                    .with(&self.fflags);
+
+                if flags.on(&alloy::fflags::SUPERTYPES) {
+                    let head = doc.source[..from].trim_end();
+                    let after_is = ["is", "is not"].iter().any(|word| {
+                        head.strip_suffix(word).is_some_and(|rest| {
+                            !rest.ends_with(|c: char| c.is_alphanumeric() || c == '_')
+                        })
+                    });
+
+                    for (name, kind, detail, text) in SUPERTYPES {
+                        if (*name == "object" && !after_is)
+                            || items.iter().any(|i| i["label"] == json!(name))
+                        {
+                            continue;
+                        }
+
+                        let mut item = word(name, *kind, Some((*text).to_string()), from);
+                        item["detail"] = json!(detail);
+                        item["sortText"] = json!(format!("{}{name}", type_rank(*prefers, detail)));
+                        items.push(item);
+                    }
+                }
+
                 // `stor: Scri|`: the module `Scribe` is no type itself,
                 // and `Scribe.Store` is one. The slot offers the name
                 // as the head of that path, beside the plain types and
@@ -1326,6 +1417,11 @@ impl State {
 
             Context::MemberStart { prefix } => {
                 let from = offset - prefix.len();
+                // `private function In`: the head of a member, which
+                // `contract_head_completion` passes whole. A row stays
+                // while it starts with what the author wrote.
+                let typed = prefix.to_lowercase();
+                let whole_head = prefix.contains(' ');
 
                 // A contract on this declaration says what is missing.
                 // Those members rank first: the author is here to write
@@ -1341,6 +1437,10 @@ impl State {
                             gap_params(gap)
                         ),
                     };
+                    if whole_head && !insert.to_lowercase().starts_with(&typed) {
+                        continue;
+                    }
+
                     let mut item = snippet(
                         &gap.member,
                         &format!("{insert}\n\t$0\nend"),
@@ -1364,6 +1464,12 @@ impl State {
                     ("public", "A method everything calls, the default."),
                     ("end", "Closes the body."),
                 ] {
+                    let written = typed.trim_end();
+
+                    if whole_head && !(name.len() > written.len() && name.starts_with(written)) {
+                        continue;
+                    }
+
                     items.push(word(name, 14, Some(what.to_string()), from));
                 }
             }
@@ -2370,7 +2476,19 @@ impl Server {
             return false;
         };
 
-        context::detect(&doc.source, offset).is_some_and(|c| takes_a_list(&c))
+        // In an attribute's arguments a space opens a list only after
+        // what opens an entry: `{ `, `[ `, `, `, `( `, and `= `.
+        let opens_entry = doc.source[..offset]
+            .trim_end()
+            .ends_with(['{', '[', ',', '(', '=']);
+
+        // The table a call takes: the child knows its keys, and
+        // `keys_alone` drops an answer that holds none.
+        at_call_table_key(&doc.source, offset)
+            || context::detect(&doc.source, offset).is_some_and(|c| {
+                takes_a_list(&c)
+                    || (opens_entry && matches!(c, context::Context::AttributeArg { .. }))
+            })
     }
 
     pub(crate) fn context_completion(&self, uri: &str, message: &Value, id: &Value) -> bool {
@@ -2414,9 +2532,13 @@ impl Server {
             // globals. A string in a call the emit rewrote,
             // `$todo("why")`, maps to no byte of its own, and the child
             // would list the scope of the line it lands on.
+            if at_call_table_key(&doc.source, offset) {
+                return false;
+            }
+
             if matches!(trigger, Some("(" | "{")) || string_left_behind(doc, line, character) {
                 drop(st);
-                self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": [] }));
+                self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": { "isIncomplete": true, "items": [] } }));
 
                 return true;
             }
@@ -2435,12 +2557,17 @@ impl Server {
         }
 
         // `{` opens the field list of an object initializer and the
-        // name list of an import. Every other `{`, a table literal, a
-        // type, or a markup hole, takes no list, so nothing pops up
-        // where the author writes a value.
-        if trigger == Some("{") && !takes_a_list(&ctx) {
+        // name list of an import, and the record of an attribute takes
+        // its keys. Every other `{`, a table literal, a type, or a
+        // markup hole, takes no list, so nothing pops up where the
+        // author writes a value.
+        if trigger == Some("{")
+            && !takes_a_list(&ctx)
+            && !matches!(ctx, context::Context::AttributeArg { .. })
+            && !at_call_table_key(&doc.source, offset)
+        {
             drop(st);
-            self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": [] }));
+            self.to_client(&json!({ "jsonrpc": "2.0", "id": id, "result": { "isIncomplete": true, "items": [] } }));
 
             return true;
         }
@@ -2609,7 +2736,9 @@ fn written_keys(src: &str, at: usize) -> Vec<String> {
 /// give `Lifecycle`. Any other type is its own element, so a parameter
 /// that takes one value completes the same way.
 fn element_type(ty: &str) -> String {
-    let ty = ty.trim();
+    // `Lifecycle[] = []`: the default is a value, and its `[]` would
+    // read as the list suffix.
+    let ty = ty.split(" = ").next().unwrap_or(ty).trim();
     let inner = ty
         .strip_suffix("[]")
         .or_else(|| ty.strip_prefix("Array<").and_then(|r| r.strip_suffix('>')))
@@ -2624,6 +2753,88 @@ fn element_type(ty: &str) -> String {
 }
 
 impl State {
+    /*
+    `start({ |`: the keys of the table alone. The child lists them with
+    the whole scope, since a table entry can be a value too, and the
+    keys are what the author opened the table for.
+
+    An answer with no key keeps the scope when the author typed a word.
+    After a `{` or a space it is empty: the scope there would open on
+    every table a call takes.
+    */
+    pub(crate) fn keys_alone(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        trigger: Option<&str>,
+        result: &mut Value,
+    ) {
+        let at_key = self.docs.get(uri).is_some_and(|doc| {
+            offset_of(&doc.source, line, character)
+                .is_some_and(|offset| at_call_table_key(&doc.source, offset))
+        });
+
+        if !at_key {
+            return;
+        }
+
+        let Some(items) = (match result {
+            Value::Array(items) => Some(items),
+
+            _ => result.get_mut("items").and_then(Value::as_array_mut),
+        }) else {
+            return;
+        };
+
+        if items.iter().any(|i| i["kind"] == 5) {
+            items.retain(|i| i["kind"] == 5);
+        } else if matches!(trigger, Some("{" | " ")) {
+            // Not complete, so the editor asks again at the next word.
+            *result = json!({ "isIncomplete": true, "items": [] });
+        }
+    }
+
+    /*
+    `private function In|` in an `impl` a contract has gaps in: the
+    members the contract asks for that start with what the line holds.
+
+    The words before the caret's word are all member keywords. The name
+    after `function` is one the author declares, so every other rule
+    answers nothing there, and this one answers first. `None` when no
+    gap fits, which leaves the name to the author.
+    */
+    pub(crate) fn contract_head_completion(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Option<Value> {
+        let doc = self.docs.get(uri)?;
+        let offset = offset_of(&doc.source, line, character)?;
+        let line_start = doc.source[..offset].rfind('\n').map_or(0, |i| i + 1);
+        let head = doc.source[line_start..offset].trim_start();
+        let (done, _) = head.rsplit_once(' ')?;
+
+        if !done
+            .split_whitespace()
+            .all(|w| matches!(w, "private" | "public" | "async" | "function"))
+        {
+            return None;
+        }
+
+        let ctx = context::Context::MemberStart {
+            prefix: head.to_string(),
+        };
+        let items = self.context_items(uri, offset, &ctx);
+
+        // A gap row sorts first, and it alone carries this key.
+        items
+            .iter()
+            .any(|i| i["sortText"] == "0")
+            .then(|| json!(items))
+    }
+
     /*
     The literals a type admits, as completion items: the label, the text
     to insert, and the detail that says where the list came from.
@@ -2649,55 +2860,135 @@ impl State {
             .map(|d| imports::quote_for(&d.source, self.fmt_config(uri).quote_style))
             .unwrap_or('"');
 
-        if element.contains('"') || element.contains('\'') {
-            return element
-                .split('|')
-                .filter_map(|part| {
-                    let text = part.trim().trim_matches(['"', '\'']);
+        let shapes = self.known_shapes_at(Some(uri));
+        let mut out = Vec::new();
 
-                    (!text.is_empty() && !part.trim().starts_with(|c: char| c.is_alphanumeric()))
-                        .then(|| {
-                            let insert = match quote {
-                                // The editor's word starts after the
-                                // quote, so the insert carries no quote
-                                // of its own.
-                                Some(_) => text.to_string(),
+        // `Lifecycle | "custom"`: each member of the union gives its
+        // own literals.
+        for part in element.split('|').map(str::trim) {
+            if part.starts_with(['"', '\'']) {
+                let text = part.trim_matches(['"', '\'']);
 
-                                None => format!("{q}{text}{q}"),
-                            };
+                if text.is_empty() {
+                    continue;
+                }
 
-                            (text.to_string(), insert, detail.clone())
-                        })
-                })
-                .collect();
-        }
+                let insert = match quote {
+                    // The editor's word starts after the quote, so the
+                    // insert carries no quote of its own.
+                    Some(_) => text.to_string(),
 
-        // A quote is open, so an enum path does not fit there.
-        if quote.is_some() {
-            return Vec::new();
-        }
+                    None => format!("{q}{text}{q}"),
+                };
 
-        for shape in &self.known_shapes_at(Some(uri)).shapes {
-            let alloy::declarations::Shape::Enum { name, variants, .. } = shape else {
-                continue;
-            };
+                out.push((text.to_string(), insert, detail.clone()));
 
-            if name != element {
                 continue;
             }
 
-            return variants
-                .iter()
-                .map(|(v, _)| {
+            // A quote is open, so an enum path does not fit there.
+            if quote.is_some() {
+                continue;
+            }
+
+            for shape in &shapes.shapes {
+                let alloy::declarations::Shape::Enum { name, variants, .. } = shape else {
+                    continue;
+                };
+
+                if name != part {
+                    continue;
+                }
+
+                out.extend(variants.iter().map(|(v, _)| {
                     let path = format!("{name}.{v}");
 
                     (path.clone(), path, detail.clone())
-                })
-                .collect();
+                }));
+
+                break;
+            }
         }
 
-        Vec::new()
+        out
     }
+}
+
+/*
+Whether the caret stands at a key of a record argument: `@a({ |`, or
+`@a({ x = 1, |`.
+
+`head` is the line up to the word at the caret. The innermost open
+bracket is a `{`, and no `=` stands between the caret and the `{` or the
+`,` that opened the entry.
+*/
+fn at_record_key(head: &str) -> bool {
+    let mut open = Vec::new();
+    let mut key = false;
+
+    for c in head.chars() {
+        match c {
+            '(' | '[' | '{' => {
+                open.push(c);
+                key = true;
+            }
+
+            ')' | ']' | '}' => {
+                open.pop();
+                key = false;
+            }
+
+            ',' => key = true,
+
+            '=' => key = false,
+
+            _ => {}
+        }
+    }
+
+    key && open.last() == Some(&'{')
+}
+
+/*
+Whether the caret stands at a key of a table a call takes: `start({ |`,
+and `start({ map = m, |` on any line of the table.
+
+The walk goes back from the word at the caret to the `{` that is still
+open. A `,` before an `=` says a new entry starts here; an `=` first
+says the caret stands at a value. The `{` follows the `(` or a `,` of
+the call.
+
+ponytail: a bracket inside a string or a comment counts as a bracket,
+and the walk reads 4000 characters back. Lex the text when a real file
+shows a wrong answer.
+*/
+pub(crate) fn at_call_table_key(src: &str, offset: usize) -> bool {
+    let Some(before) = src.get(..offset) else {
+        return false;
+    };
+    let before = before.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_');
+    let mut depth = 0;
+    let mut entry_opened = false;
+
+    for (i, c) in before.char_indices().rev().take(4000) {
+        match c {
+            ')' | ']' | '}' => depth += 1,
+
+            '{' if depth == 0 => return before[..i].trim_end().ends_with(['(', ',']),
+
+            '(' | '[' if depth == 0 => return false,
+
+            '(' | '[' | '{' => depth -= 1,
+
+            ',' if depth == 0 => entry_opened = true,
+
+            '=' if depth == 0 && !entry_opened => return false,
+
+            _ => {}
+        }
+    }
+
+    false
 }
 
 /*
@@ -2706,21 +2997,22 @@ in. `kind` is `function` for a method column and `field` for a field
 column: a `requires field` clause goes on the struct, and the same
 declaration can carry gaps of both kinds.
 
-A half-written member stops the compile, so the list is empty there. The
-items carry a `filterText` of the whole clause instead, which keeps the
-row while the editor filters by the word the author types.
+A half-written member stops the compile, so the gaps are the ones of the
+last compile that gave an output. The text typed since moved the `end`
+each gap names, by the change in the length of the source. The items
+carry a `filterText` of the whole clause, which keeps the row while the
+editor filters by the word the author types.
 */
 fn contract_gaps_at<'a>(
     doc: &'a Doc,
     offset: usize,
     kind: &str,
 ) -> Vec<&'a alloy::desugar::ContractGap> {
-    doc.output
-        .as_ref()
-        .map(|o| o.contract_gaps.as_slice())
-        .unwrap_or_default()
-        .iter()
-        .filter(|g| g.kind == kind && holds_the_gap(&doc.source, offset, g))
+    let (gaps, len) = &doc.last_gaps;
+    let moved = doc.source.len() as i64 - *len as i64;
+
+    gaps.iter()
+        .filter(|g| g.kind == kind && holds_the_gap(&doc.source, offset, g, moved))
         .collect()
 }
 
@@ -2730,14 +3022,13 @@ fn contract_gaps_at<'a>(
 /// caret to that `end` belongs to the body, so each one sits deeper
 /// than the `end` does. A line back at that column closes another
 /// block, which puts the caret outside.
-fn holds_the_gap(src: &str, offset: usize, gap: &alloy::desugar::ContractGap) -> bool {
-    let insert_at = gap.insert_at as usize;
-
-    if offset > insert_at || insert_at > src.len() {
+fn holds_the_gap(src: &str, offset: usize, gap: &alloy::desugar::ContractGap, moved: i64) -> bool {
+    let insert_at = (gap.insert_at as i64 + moved).max(0) as usize;
+    let Some(rest) = src.get(offset..insert_at) else {
         return false;
-    }
+    };
 
-    src[offset..insert_at].lines().skip(1).all(|line| {
+    rest.lines().skip(1).all(|line| {
         let text = line.trim_start();
 
         text.is_empty() || line.len() - text.len() > gap.indent as usize

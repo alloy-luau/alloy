@@ -36,6 +36,7 @@ mod expressions;
 mod macros;
 mod modules;
 pub(crate) mod namespaces;
+mod pipes;
 mod remotes;
 pub mod statements;
 mod structs;
@@ -570,6 +571,8 @@ pub struct Rendered {
     pub tests: Vec<(String, bool)>,
     /// The members an attribute contract asked for and did not find.
     pub contract_gaps: Vec<ContractGap>,
+    /// See [`crate::Output::pipe_ops`].
+    pub pipe_ops: Vec<(u32, String)>,
     /// The byte each member name starts at that an attribute contract
     /// asks for. The contract fixes the name, so the naming lint leaves
     /// that member alone, and reads another member of the same name.
@@ -770,6 +773,9 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         enum_payloads: HashMap::new(),
         impl_methods: HashMap::new(),
         contract_gaps: Vec::new(),
+        pipe_topics: Vec::new(),
+        pipe_next: 0,
+        pipe_ops: Vec::new(),
         contract_names: HashSet::new(),
         field_body: HashMap::new(),
         method_body: HashMap::new(),
@@ -1061,6 +1067,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         ext_used: d.ext_hit,
         tests: d.test_names,
         contract_gaps: d.contract_gaps,
+        pipe_ops: d.pipe_ops,
         contract_names: d.contract_names,
     }
 }
@@ -1657,6 +1664,13 @@ struct Desugar<'s> {
     /// source order. The report names each one; this is what the editor
     /// writes in.
     contract_gaps: Vec<ContractGap>,
+    /// The piped value of each `|>` whose body is rendering, innermost
+    /// last.
+    pipe_topics: Vec<pipes::Topic>,
+    /// The number of the last stage local, `__pipe1` and on.
+    pipe_next: u32,
+    /// See [`crate::Output::pipe_ops`].
+    pipe_ops: Vec<(u32, String)>,
     /// See [`Rendered::contract_names`].
     contract_names: HashSet<u32>,
     /// Where a member of a type goes, by the type's name: the span of
@@ -2277,6 +2291,8 @@ pub(crate) fn expr_children(e: &Expr) -> Vec<Child<'_>> {
             Child::Expr(else_value),
         ],
 
+        Expr::Pipe { value, body, .. } => vec![Child::Expr(value), Child::Expr(body)],
+
         Expr::Array { items, .. } => items.iter().map(Child::Expr).collect(),
 
         Expr::MethodRef { object, .. } => vec![Child::Expr(object)],
@@ -2875,6 +2891,7 @@ fn expr_needs_desugar(e: &Expr) -> bool {
         | Expr::Child { .. }
         | Expr::NonNil { .. }
         | Expr::Ternary { .. }
+        | Expr::Pipe { .. }
         | Expr::Is { .. }
         | Expr::Satisfies { .. }
         | Expr::Array { .. }
@@ -3326,6 +3343,35 @@ impl<'s> Desugar<'s> {
 
                 if self.is_local(&name) || self.declared_types.contains(&name) {
                     self.r.copy(ns, ne);
+
+                    return self.copy(ne, end);
+                }
+
+                // A supertype: `struct<T>` is the struct whose values
+                // are `T`, `struct` alone is any struct, and `enum` is
+                // any enum. Off the flag the word stays as written, and
+                // Luau reports a type it does not know.
+                if matches!(name.as_str(), "struct" | "enum") {
+                    if !self.options.fflags.on(&crate::fflags::SUPERTYPES)
+                        || self.options.definitions
+                    {
+                        self.r.copy(ns, ne);
+
+                        return self.copy(ne, end);
+                    }
+
+                    let std = self.type_std();
+                    let takes_arguments = self.src[ne as usize..end as usize]
+                        .trim_start()
+                        .starts_with('<');
+                    let text = match (name.as_str(), takes_arguments) {
+                        ("struct", true) => format!("{std}Struct"),
+
+                        ("struct", false) => format!("{std}Struct<any>"),
+
+                        _ => format!("{std}Enum"),
+                    };
+                    self.generate(ns, &text);
 
                     return self.copy(ne, end);
                 }

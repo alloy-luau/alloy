@@ -65,7 +65,8 @@ impl Export {
 fn default_kind(stmt: &Stmt) -> u64 {
     match stmt {
         Stmt::Function(_) | Stmt::LocalFunction(_) | Stmt::Macro(_) => 3,
-        Stmt::Struct(_) => 7,
+        Stmt::Struct(_) | Stmt::Attribute(_) => 7,
+        Stmt::Remote(_) | Stmt::Message(_) => 23,
         Stmt::Enum(_) => 13,
         Stmt::Trait(_) | Stmt::Interface(_) | Stmt::TypeAlias(_) => 8,
         Stmt::Class(_) => 7,
@@ -155,13 +156,16 @@ pub fn exports_of(src: &str, is_alx: bool) -> Vec<Export> {
 
             Stmt::TypeAlias(t) if t.exported => push(name_of(t.name), true, false, false, 8),
 
-            Stmt::Remote(r) if r.exported => push(name_of(r.name), false, false, false, 6),
+            // A remote and a message are events, as the outline lists
+            // them. Kind 6 made the menu call each one a local.
+            Stmt::Remote(r) if r.exported => push(name_of(r.name), false, false, false, 23),
 
-            Stmt::Message(m) if m.exported => push(name_of(m.name), false, false, false, 6),
+            Stmt::Message(m) if m.exported => push(name_of(m.name), false, false, false, 23),
 
             // An attribute is a value the module exports, and the `@`
-            // is how the list writes it.
-            Stmt::Attribute(a) if a.exported => push(name_of(a.name), false, false, true, 6),
+            // is how the list writes it. Kind 7 is the kind the
+            // completion after `@` gives a declared attribute.
+            Stmt::Attribute(a) if a.exported => push(name_of(a.name), false, false, true, 7),
 
             Stmt::Macro(m) if m.exported => push(name_of(m.name), false, false, false, 3),
 
@@ -1274,6 +1278,26 @@ namespace Inner as end
         let names: Vec<String> = exports_of(src, false).into_iter().map(|e| e.name).collect();
 
         assert_eq!(names, ["Widgets"]);
+    }
+
+    /// A remote, a message, and an attribute each carry their own kind,
+    /// so an import list does not show them as locals.
+    #[test]
+    fn a_remote_a_message_and_an_attribute_are_not_locals() {
+        let src = "export remote Toast(text: string) from server\nexport message Step(dt: number) as parallel\nexport attribute tagged on function\nexport local plain = 1\n";
+        let kinds: Vec<(String, u64)> = exports_of(src, false)
+            .into_iter()
+            .map(|e| (e.name, e.kind))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("Toast".to_string(), 23),
+                ("Step".to_string(), 23),
+                ("tagged".to_string(), 7),
+                ("plain".to_string(), 6),
+            ]
+        );
     }
 
     #[test]

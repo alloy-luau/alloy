@@ -19,11 +19,13 @@ impl State {
         }
 
         let bound = markup_bound(&doc.source);
-        let files: Vec<(PathBuf, &[imports::Export])> = self
+        let passed = self.passed_on_exports();
+        let mut files: Vec<(PathBuf, &[imports::Export])> = self
             .docs
             .iter()
             .filter_map(|(u, d)| uri_to_path(u).map(|p| (p, d.exports.as_slice())))
             .collect();
+        files.extend(passed.iter().map(|(p, e)| (p.clone(), e.as_slice())));
 
         let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
         let aliases = project_aliases(&dir, self.root.as_deref());
@@ -53,17 +55,40 @@ impl State {
         let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
         let aliases = project_aliases(&dir, self.root.as_deref());
         let reached = self.alias_modules(&dir, &aliases);
+        let passed = self.passed_on_exports();
         let mut files: Vec<(PathBuf, &[imports::Export])> = self
             .docs
             .iter()
             .filter_map(|(u, d)| uri_to_path(u).map(|p| (p, d.exports.as_slice())))
             .collect();
+        files.extend(passed.iter().map(|(p, e)| (p.clone(), e.as_slice())));
 
         files.extend(reached.iter().map(|(p, e)| (p.clone(), e.as_slice())));
 
         imports::auto_import_candidates(&doc.source, &path, &files, prefix, &bound, &aliases)
             .into_iter()
             .map(|(spec, export)| (spec, export.clone()))
+            .collect()
+    }
+
+    /// The names each open module passes on with `export { a } from
+    /// "./x"`. A document's own export list holds none of them, and a
+    /// package's link file holds nothing else, so without these no name
+    /// of a package completes in an import.
+    ///
+    /// ponytail: each request parses every open file that writes
+    /// `export {`. Keep the names on the document when a project holds
+    /// enough link files for that to show.
+    fn passed_on_exports(&self) -> Vec<(PathBuf, Vec<imports::Export>)> {
+        self.docs
+            .iter()
+            .filter(|(_, d)| d.source.contains("export {") || d.source.contains("export type {"))
+            .filter_map(|(u, d)| {
+                let path = uri_to_path(u)?;
+                let exports = imports::passed_on(&d.source, &path, 0);
+
+                (!exports.is_empty()).then_some((path, exports))
+            })
             .collect()
     }
 
@@ -124,11 +149,13 @@ impl State {
             return actions;
         };
         let bound = markup_bound(&doc.source);
-        let files: Vec<(PathBuf, &[imports::Export])> = self
+        let passed = self.passed_on_exports();
+        let mut files: Vec<(PathBuf, &[imports::Export])> = self
             .docs
             .iter()
             .filter_map(|(u, d)| uri_to_path(u).map(|p| (p, d.exports.as_slice())))
             .collect();
+        files.extend(passed.iter().map(|(p, e)| (p.clone(), e.as_slice())));
         let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
         let aliases = project_aliases(&dir, self.root.as_deref());
         let quote = imports::quote_for(&doc.source, self.fmt_config(uri).quote_style);

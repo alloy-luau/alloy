@@ -1148,20 +1148,43 @@ pub(crate) fn keep_innermost(diagnostics: &mut Vec<TypeDiag>) {
     });
 }
 
-/// A method call on an optional value draws `could be nil` and then
-/// `Expected this to be 'T', but got 'nil'` at the same spot. The first
-/// names the problem; the second says it again, so it goes.
+/// Whether `message` says again what a `could be nil` report at the
+/// same spot said. A method call on an optional value draws `Value of
+/// type 'T?' could be nil` and then, for the receiver, `Expected this to
+/// be 'U', but got 'nil'` or `but got 'T?'`. The second reads as a wrong
+/// argument, and the argument is right. `nil_reports` holds the `could
+/// be nil` messages at the spot.
+pub fn nil_echo(message: &str, nil_reports: &[&str]) -> bool {
+    let Some(got) = message
+        .contains("Expected this to be ")
+        .then(|| message.rsplit_once(", but got '"))
+        .flatten()
+        .and_then(|(_, got)| got.strip_suffix('\''))
+    else {
+        return false;
+    };
+
+    nil_reports
+        .iter()
+        .any(|r| got == "nil" || r.contains(&format!("Value of type '{got}' could be nil")))
+}
+
+/// Drops each report that `nil_echo` names.
 pub(crate) fn drop_nil_echo(diagnostics: &mut Vec<TypeDiag>) {
-    let nil_spots: Vec<(PathBuf, usize, usize)> = diagnostics
+    let nil_spots: Vec<(PathBuf, usize, usize, String)> = diagnostics
         .iter()
         .filter(|d| d.message.contains("could be nil"))
-        .map(|d| (d.rel.clone(), d.line, d.col))
+        .map(|d| (d.rel.clone(), d.line, d.col, d.message.clone()))
         .collect();
 
     diagnostics.retain(|d| {
-        !(d.message.starts_with("Expected this to be ")
-            && d.message.ends_with(", but got 'nil'")
-            && nil_spots.contains(&(d.rel.clone(), d.line, d.col)))
+        let here: Vec<&str> = nil_spots
+            .iter()
+            .filter(|(rel, line, col, _)| (rel, *line, *col) == (&d.rel, d.line, d.col))
+            .map(|(_, _, _, m)| m.as_str())
+            .collect();
+
+        !nil_echo(&d.message, &here)
     });
 }
 
@@ -3680,6 +3703,11 @@ end
             diag(12, "Value of type 'Instance?' could be nil"),
             diag(12, "Expected this to be 'Instance', but got 'nil'"),
             diag(30, "Expected this to be 'number', but got 'nil'"),
+            // The receiver of `folder:GetChildren()` with `folder: Folder?`.
+            diag(40, "Value of type 'Folder?' could be nil"),
+            diag(40, "Expected this to be 'Instance', but got 'Folder?'"),
+            // Another type at the spot is a report of its own.
+            diag(40, "Expected this to be '{Instance}', but got 'Folder'"),
         ];
         drop_nil_echo(&mut diagnostics);
         let got: Vec<(usize, &str)> = diagnostics
@@ -3692,6 +3720,8 @@ end
             [
                 (12, "Value of type 'Instance?' could be nil"),
                 (30, "Expected this to be 'number', but got 'nil'"),
+                (40, "Value of type 'Folder?' could be nil"),
+                (40, "Expected this to be '{Instance}', but got 'Folder'"),
             ]
         );
     }

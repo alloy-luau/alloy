@@ -457,10 +457,14 @@ impl<'s> Desugar<'s> {
                 self.message_call(e);
             }
 
+            Expr::Pipe { op, .. } => self.pipe_expr(e, *op),
+
             Expr::Name(span) => {
                 let name = self.text_of(*span);
 
-                if let Some(path) = self.renamed(name) {
+                if let Some(topic) = self.topic_read(name) {
+                    self.generate(anchor, &topic);
+                } else if let Some(path) = self.renamed(name) {
                     self.generate(anchor, &path);
                 } else if AMBIENT.contains(&name) && !self.is_local(name) {
                     self.check_std_name(*span, name);
@@ -1152,6 +1156,37 @@ impl<'s> Desugar<'s> {
                 format!("({x} ~= nil)")
             } else {
                 format!("({x} == nil)")
+            };
+        }
+
+        // `x is struct`, `x is enum`, `x is object`: the kind of an
+        // Alloy declaration, which the runtime reads from the shape the
+        // emit gives each one. A type the file declares under one of
+        // these names is that type, and the chain below tests it.
+        if SUPERTYPES.contains(&n.as_str())
+            && !self.structs.contains(&n)
+            && !self.enums.contains_key(&n)
+            && self.alias_head(&n).is_none()
+        {
+            if !self.options.fflags.on(&crate::fflags::SUPERTYPES) {
+                self.diagnose(
+                    name,
+                    &format!(
+                        "`is {n}` is not final; set `{} = true` under `[fflags]` in alloy.toml to use it",
+                        crate::fflags::SUPERTYPES.name
+                    ),
+                );
+
+                return "false".to_string();
+            }
+
+            let std = self.std();
+            let test = format!("{std}.kind({x}) == \"{n}\"");
+
+            return match negated {
+                true => format!("(not ({test}))"),
+
+                false => format!("({test})"),
             };
         }
 
@@ -2290,7 +2325,8 @@ impl<'s> Desugar<'s> {
     /// reports nothing. A child lookup after it needs a receiver that is
     /// not nil: a `->` or a timed `=>` guards it, and a `=>` with no
     /// timeout gives one. Only a `->` before an unguarded `=>` casts to
-    /// `Instance`. `bare` drops every guard, see `require_arg`.
+    /// `Instance`. `bare` drops every guard, see `require_arg`. A `!`
+    /// that ends the chain counts as the end: `->Folder!` is the child.
     ///
     /// luau-lsp types a timed `WaitForChild` by the sourcemap alone and
     /// drops the nil the timeout gives. `?` casts the last link to its
@@ -2309,7 +2345,37 @@ impl<'s> Desugar<'s> {
             return None;
         };
 
-        let cast = match links.get(i + 1) {
+        // `->child!` at the end of a chain is the child itself, with the
+        // nil taken off: no field and no method reads it, so it needs no
+        // `any`, and the name keeps the class the sourcemap gives.
+        let ends_in_non_nil = links[i + 1..]
+            .iter()
+            .all(|l| matches!(l, Link::NonNil { .. }));
+        // `->child!:GetChildren()` reads a member every Instance has,
+        // past the `!`. The plain call types it, whatever class the
+        // child is, so the result keeps its type too.
+        let past_non_nil = links[i + 1..]
+            .iter()
+            .find(|l| !matches!(l, Link::NonNil { .. }));
+        let instance_member = matches!(links.get(i + 1), Some(Link::NonNil { .. }))
+            && match past_non_nil {
+                Some(Link::Plain(
+                    Step::Field(member)
+                    | Step::Call {
+                        method: Some(member),
+                        ..
+                    },
+                )) => INSTANCE_MEMBERS.contains(&self.text_of(*member)),
+
+                _ => false,
+            };
+        let next = match ends_in_non_nil || instance_member {
+            true => None,
+
+            false => links.get(i + 1),
+        };
+
+        let cast = match next {
             None if target => Some("any"),
 
             None => (timed && *wait && !bare).then_some("?"),
@@ -2783,6 +2849,53 @@ fn reads_field(e: &Expr) -> bool {
     }
 }
 
+/// The kinds `is` tests under the `AlloyExperimentalSupertypes` flag: a
+/// struct, an enum, and a value a struct made.
+const SUPERTYPES: &[&str] = &["struct", "enum", "object"];
+
+/// The members of `Instance` itself: every child has them, whatever
+/// its class. A member of a subclass, such as `CFrame`, is not here.
+const INSTANCE_MEMBERS: &[&str] = &[
+    "Name",
+    "Parent",
+    "ClassName",
+    "Archivable",
+    "AddTag",
+    "ClearAllChildren",
+    "Clone",
+    "Destroy",
+    "FindFirstAncestor",
+    "FindFirstAncestorOfClass",
+    "FindFirstAncestorWhichIsA",
+    "FindFirstChild",
+    "FindFirstChildOfClass",
+    "FindFirstChildWhichIsA",
+    "FindFirstDescendant",
+    "GetAttribute",
+    "GetAttributeChangedSignal",
+    "GetAttributes",
+    "GetChildren",
+    "GetDescendants",
+    "GetFullName",
+    "GetPropertyChangedSignal",
+    "GetTags",
+    "HasTag",
+    "IsA",
+    "IsAncestorOf",
+    "IsDescendantOf",
+    "RemoveTag",
+    "SetAttribute",
+    "WaitForChild",
+    "AncestryChanged",
+    "AttributeChanged",
+    "Changed",
+    "ChildAdded",
+    "ChildRemoved",
+    "DescendantAdded",
+    "DescendantRemoving",
+    "Destroying",
+];
+
 #[cfg(test)]
 mod tests {
     use crate::EmitOptions;
@@ -3111,6 +3224,80 @@ mod tests {
         ] {
             assert!(out.contains(want), "{want}\n{out}");
         }
+    }
+
+    /// The supertypes, behind their flag: `is struct`, `is enum`, and
+    /// `is object` ask the runtime for the kind of a value, and
+    /// `struct<T>`, `struct`, and `enum` are types of the std. Off, a
+    /// test reports and names the flag, and a type stays as written.
+    #[test]
+    fn the_supertypes_test_and_type_under_their_flag() {
+        let src = "struct Point\n    x: number\nend\nlocal function f(class: struct<Point>, any_class: struct, e: enum, v: unknown)\n    print(class, any_class, e, v is struct, v is enum, v is not object)\nend\nprint(f)\n";
+        let options = EmitOptions {
+            fflags: toml::from_str("AlloyExperimentalSupertypes = true").unwrap(),
+            ..EmitOptions::default()
+        };
+        let out = crate::compile_with(src, &options).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+
+        for want in [
+            "(class: __alloy.Struct<Point>, any_class: __alloy.Struct<any>, e: __alloy.Enum, v: unknown)",
+            "(__alloy.kind(v) == \"struct\"), (__alloy.kind(v) == \"enum\"), (not (__alloy.kind(v) == \"object\"))",
+        ] {
+            assert!(out.ship.contains(want), "{want}\n{}", out.ship);
+        }
+
+        let off = crate::compile(src).unwrap();
+        assert!(
+            off.ship
+                .contains("(class: struct<Point>, any_class: struct, e: enum, v: unknown)"),
+            "{}",
+            off.ship
+        );
+        let messages: Vec<&str> = off.diagnostics.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(messages.len(), 3, "{messages:?}");
+        assert!(
+            messages[0]
+                .starts_with("`is struct` is not final; set `AlloyExperimentalSupertypes = true`"),
+            "{messages:?}"
+        );
+
+        // A type the file declares under one of the words is that type.
+        let own = crate::compile_with(
+            "struct object\n    x: number\nend\nlocal function g(v: unknown)\n    return v is object\nend\nprint(g)\n",
+            &options,
+        )
+        .unwrap();
+        assert!(own.ship.contains("getmetatable("), "{}", own.ship);
+        assert!(!own.ship.contains("__alloy.kind"), "{}", own.ship);
+    }
+
+    /// `p->Folder!` cast the lookup to `any`, as a child before a field
+    /// does, so the name it bound read as `any` in the editor. A `!` that
+    /// ends the chain reads no member: the lookup stays plain, and the
+    /// name keeps the class the sourcemap gives. A member of `Instance`
+    /// after the `!` types the same way; any other member still casts.
+    #[test]
+    fn a_child_under_a_last_non_nil_keeps_its_type() {
+        let options = EmitOptions {
+            check: true,
+            ..EmitOptions::default()
+        };
+        let src = "local a = p->Folder!\nlocal b = p->Folder!:GetChildren()\nlocal c = p=>Folder!\nlocal d = p->Spawn!.CFrame\n";
+        let out = crate::compile_with(src, &options).unwrap().check;
+
+        for want in [
+            "local _1 = (if p == nil then nil else p:FindFirstChild(\"Folder\")) local a = (if _1 == nil then (error(\"p->Folder is nil\") :: never) else _1)\n",
+            // A member of every Instance: the plain call types it.
+            "else _1):GetChildren()",
+            "p:WaitForChild(\"Folder\")",
+            // `CFrame` is a member of a subclass, so the cast stays.
+            "(p:FindFirstChild(\"Spawn\") :: any)",
+        ] {
+            assert!(out.contains(want), "{want}\n{out}");
+        }
+
+        assert_eq!(out.matches(":: any").count(), 1, "{out}");
     }
 
     /// Under a timeout, `=>` on a name that may be nil guards it, as `->`

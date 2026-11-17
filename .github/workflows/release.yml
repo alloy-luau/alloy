@@ -177,9 +177,17 @@ jobs:
         run: |
           # The title is the tag: a reader scanning the releases page
           # matches it against the tag they install by.
+          # A version with a suffix, `v0.2.0-rc`, is a prerelease.
+          # GitHub then keeps it out of `latest`, so `alloy self update`
+          # stays on the last release and `--prerelease` asks for it.
+          kind=""
+          case "$GITHUB_REF_NAME" in
+            *-*) kind="--prerelease" ;;
+          esac
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
+            $kind \
             dist/*.zip
 
   publish:

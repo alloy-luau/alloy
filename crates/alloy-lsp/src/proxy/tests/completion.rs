@@ -2278,6 +2278,56 @@ pub(crate) fn an_attribute_argument_completes_its_own_literals() {
         ]
     );
 
+    // A union with a default, as Forge declares its provider: the enum
+    // member gives its variants, and `string` gives nothing.
+    let forge = format!(
+        "{enums}attribute Provider(lifecycles: (Lifecycle | string)[] = [], priority: number = 0) on impl\n\n"
+    );
+    let variants = [
+        ("Lifecycle.Init".to_string(), "Lifecycle.Init".to_string()),
+        ("Lifecycle.Start".to_string(), "Lifecycle.Start".to_string()),
+    ];
+    let src = format!("{forge}@Provider({{ lifecycles = [  ] }})\nimpl S as\nend\n");
+    assert_eq!(items(&src, "lifecycles = [ "), variants);
+
+    // After the dot the edit still writes the whole path, from where
+    // the path starts.
+    for typed in ["Lifecycle.", "Lifecycle.St"] {
+        let src = format!("{forge}@Provider({{ lifecycles = [ {typed} ] }})\nimpl S as\nend\n");
+        let at = src.rfind(typed).expect("the path") + typed.len();
+        let (st, uri) = one_file(&src);
+        let ctx = context::detect(&src, at).expect("an argument context");
+        let got = st.context_items(uri, at, &ctx);
+        assert_eq!(got.len(), 2, "{typed}: {got:?}");
+        assert_eq!(
+            got[0]["textEdit"]["range"]["start"]["character"],
+            json!(
+                src.lines()
+                    .find(|l| l.starts_with("@Provider"))
+                    .unwrap()
+                    .find(typed)
+                    .unwrap()
+            ),
+            "{typed}"
+        );
+    }
+
+    // A key of the record: the parameters, less the ones written.
+    let src = format!("{forge}@Provider({{  }})\nimpl S as\nend\n");
+    assert_eq!(
+        items(&src, "@Provider({ "),
+        [
+            ("lifecycles".to_string(), "lifecycles = ".to_string()),
+            ("priority".to_string(), "priority = ".to_string()),
+        ]
+    );
+    let src =
+        format!("{forge}@Provider({{ lifecycles = [ Lifecycle.Init ],  }})\nimpl S as\nend\n");
+    assert_eq!(
+        items(&src, "Lifecycle.Init ], "),
+        [("priority".to_string(), "priority = ".to_string())]
+    );
+
     // A single value takes the same list.
     let src = format!("{enums}attribute one(stage: Lifecycle) on impl\n\n@one()\nimpl S as\nend\n");
     assert_eq!(items(&src, "@one(").len(), 2);
@@ -2290,6 +2340,114 @@ pub(crate) fn an_attribute_argument_completes_its_own_literals() {
     // A built-in attribute has no declaration to read, and the list is
     // empty rather than the whole scope.
     assert!(items("@ratelimit()\nremote P() from server\n", "@ratelimit(").is_empty());
+}
+
+/// The key column of a table a call takes, on one line and on several.
+#[test]
+pub(crate) fn a_call_table_names_its_key_column() {
+    use crate::proxy::completion::at_call_table_key as at;
+    let key = |src: &str| at(src, src.len());
+
+    assert!(key("start({ "));
+    assert!(key("start({ ma"));
+    assert!(key("start({ map = workspace, "));
+    assert!(key("start(a, {\n  map = f(1, 2),\n  vo"));
+    assert!(!key("start({ map = "));
+    assert!(!key("start({ map = wor"));
+    assert!(!key("local t = { "));
+    assert!(!key("start("));
+    assert!(!key("start({ list = [ "));
+}
+
+/// The body of a pipe lists `_`, and no other place does. The name
+/// a statement declares is not in scope in its own value, on any
+/// line of it.
+#[test]
+pub(crate) fn a_pipe_body_completes_the_topic_and_not_its_own_name() {
+    let src = "const health = math.clamp(0, 1, 100)\n  |> math.floor(_)\n  |> string.format('%d', )\nconst wide = math.max(\n  1,\n  \n)\nprint(health, )\n";
+    let (st, uri) = one_file(src);
+    let labels = |head: &str| -> Vec<String> {
+        let at = src.find(head).expect("the head") + head.len();
+        let (line, character) = position_of(src, at);
+        let mut result = json!([]);
+        st.topic_item(uri, line, character, &mut result);
+
+        result
+            .as_array()
+            .expect("items")
+            .iter()
+            .map(|i| i["label"].as_str().unwrap_or_default().to_string())
+            .collect()
+    };
+    assert_eq!(labels("'%d', "), ["_"]);
+    assert_eq!(labels("math.floor("), ["_"]);
+    assert!(labels("print(health, ").is_empty());
+    assert!(labels("math.clamp(").is_empty());
+
+    let names = |head: &str| -> Vec<String> {
+        let at = src.find(head).expect("the head") + head.len();
+
+        context::locals_in_scope(src, at)
+            .into_iter()
+            .map(|l| l.name)
+            .collect()
+    };
+    assert!(names("'%d', ").is_empty());
+    assert_eq!(names("  1,\n  "), ["health"]);
+    assert_eq!(names("print(health, "), ["health", "wide"]);
+}
+
+/// A half-written member stops the compile. The members the contract
+/// asks for still complete, by the word and by the whole head.
+#[test]
+pub(crate) fn a_contract_member_completes_while_it_is_typed() {
+    let whole = "enum Lifecycle as\n    Init\n    Start\nend\nattribute provider(lifecycles: Lifecycle[]) on impl as\n    requires private function each lifecycles(self)\nend\nstruct S as\n    n: number\nend\n\n@provider({ lifecycles = [ Lifecycle.Init, Lifecycle.Start ] })\nimpl S as\n    \nend\n";
+    let (mut st, uri) = one_file(whole);
+    let rows = |st: &State, typed: &str| -> Vec<String> {
+        let src = &st.docs[uri].source;
+        let at = src.rfind(typed).expect("the typed text") + typed.len();
+        let (line, character) = position_of(src, at);
+
+        match st.contract_head_completion(uri, line, character) {
+            Some(items) => items
+                .as_array()
+                .expect("items")
+                .iter()
+                .map(|i| i["label"].as_str().unwrap_or_default().to_string())
+                .collect(),
+
+            None => {
+                // No context: the name is the author's own.
+                let Some(ctx) = context::detect(src, at) else {
+                    return Vec::new();
+                };
+
+                st.context_items(uri, at, &ctx)
+                    .iter()
+                    .filter(|i| i["sortText"] == "0")
+                    .map(|i| i["label"].as_str().unwrap_or_default().to_string())
+                    .collect()
+            }
+        }
+    };
+
+    for (typed, want) in [
+        ("    I", vec!["Init", "Start"]),
+        ("    private ", vec!["Init", "Start", "private function"]),
+        ("    private function ", vec!["Init", "Start"]),
+        ("    private function I", vec!["Init"]),
+        ("    private function Z", vec![]),
+    ] {
+        let src = whole.replace("impl S as\n    \n", &format!("impl S as\n{typed}\n"));
+        let doc = st.docs.get_mut(uri).expect("the file");
+        doc.source = src;
+        doc.compile(
+            &EmitOptions::default(),
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        assert_eq!(rows(&st, typed), want, "{typed:?}");
+    }
 }
 
 /// The member column of a declaration under a contract offers what the

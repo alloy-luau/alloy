@@ -96,6 +96,10 @@ pub struct Output {
     /// under the attribute does not carry. The language server writes
     /// them in and completes their names.
     pub contract_gaps: Vec<desugar::ContractGap>,
+    /// Each `|>` of a pipe, by the byte it starts at, with the name of
+    /// the local that holds the value it passes on. The language server
+    /// hovers the operator as that local.
+    pub pipe_ops: Vec<(u32, String)>,
 }
 
 /// One `import ... from "path"` of a file, or one data path with the
@@ -488,6 +492,7 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         lowered: None,
         parsed_clean,
         contract_gaps: rendered.contract_gaps,
+        pipe_ops: rendered.pipe_ops,
     })
 }
 

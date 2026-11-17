@@ -64,6 +64,9 @@ pub(crate) struct Chain {
     pub ops: Vec<usize>,
     pub then: Option<usize>,
     pub list: bool,
+    /// A pipe of three stages or more: it breaks before each `|>`
+    /// whatever its width, one stage to a line.
+    pub always: bool,
 }
 
 /// The precedence of a binary operator, as the parser reads it. `??`
@@ -105,14 +108,24 @@ pub(crate) fn binary_chains(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Chain
             ops: ops.into_iter().map(byte).collect(),
             then: walk.conds.get(&(span.start, span.end)).map(|&t| byte(t)),
             list: false,
+            always: false,
         })
         .collect();
+    out.extend(walk.pipes.into_iter().map(|(span, ops)| Chain {
+        first: byte(span.start as usize),
+        last: byte(span.end as usize - 1),
+        always: ops.len() > 1,
+        ops: ops.into_iter().map(byte).collect(),
+        then: None,
+        list: false,
+    }));
     out.extend(walk.lists.into_iter().map(|(span, starts)| Chain {
         first: byte(span.start as usize),
         last: byte(span.end as usize - 1),
         ops: starts.into_iter().map(byte).collect(),
         then: None,
         list: true,
+        always: false,
     }));
     out.sort_by_key(|c| (c.first, std::cmp::Reverse(c.last)));
 
@@ -160,6 +173,8 @@ struct Walk<'a> {
     spans: Vec<TokSpan>,
     ifs: Vec<usize>,
     chains: Vec<(TokSpan, Vec<usize>)>,
+    /// Each pipe with the `|` of each `|>` it holds, first to last.
+    pipes: Vec<(TokSpan, Vec<usize>)>,
     lists: Vec<(TokSpan, Vec<usize>)>,
     conds: HashMap<(u32, u32), usize>,
     /// The first token of each `while` condition, with its `do`. A long
@@ -179,6 +194,7 @@ impl<'a> Walk<'a> {
             spans: Vec::new(),
             ifs: Vec::new(),
             chains: Vec::new(),
+            pipes: Vec::new(),
             lists: Vec::new(),
             conds: HashMap::new(),
             whiles: Vec::new(),
@@ -382,6 +398,22 @@ impl<'a> Walk<'a> {
                     self.chain_ops(e, prec, &mut ops);
                     self.chains.push((*span, ops));
                 }
+            }
+
+            // `a |> f(_) |> g(_)` is one chain of its `|>`. It joins to
+            // the left, so the stages before the last sit under `value`.
+            Expr::Pipe { op, span, .. } if !self.in_chain.contains(&op.start) => {
+                let mut ops = Vec::new();
+                let mut at = e;
+
+                while let Expr::Pipe { value, op, .. } = at {
+                    self.in_chain.insert(op.start);
+                    ops.push(op.start as usize);
+                    at = value;
+                }
+
+                ops.reverse();
+                self.pipes.push((*span, ops));
             }
 
             // `c ? a : b` is a chain of its `?` and its `:`, so a long one

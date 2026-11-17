@@ -390,7 +390,9 @@ impl Server {
         };
 
         // A copied byte has a shadow position; the child answers there.
-        if doc.maps_to_shadow(offset) {
+        // So does the `_` of a pipe and its `|>`: each reads as the
+        // stage local, and the hover is the type of the value.
+        if doc.maps_to_shadow(offset) || doc.on_pipe_token(offset) {
             return false;
         }
 

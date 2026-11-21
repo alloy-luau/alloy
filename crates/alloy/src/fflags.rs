@@ -123,6 +123,16 @@ pub const GENERATOR_ANALYSIS: Flag = Flag {
     doc: "The types of a generator. The checker reads the item type from the first `yield`, or from a declared return type such as `Iter<number>`, and reports a `yield` that does not fit it. With this flag off, a call of a generator reads as `any`. It reads `AlloyExperimentalGeneratorSyntax`, and does nothing without it.",
 };
 
+pub const WIDTH_TYPES: Flag = Flag {
+    name: "AlloyExperimentalWidthTypes",
+    doc: "The width types: `u8`, `u16`, `u32`, `i8`, `i16`, `i32`, `f32`, and `f64` as type names. Each one is a `number` to the checker, so arithmetic needs no call. On a remote parameter or a struct field the name sets the wire width, as the `@u16` attribute does. A type of the file with the same name comes first. No value wraps or rounds outside a buffer: the `Width` module of the std, behind this flag too, has `wrap`, `saturate`, `fits`, `size`, `min`, and `max` for that.",
+};
+
+pub const NET_LIBRARY: Flag = Flag {
+    name: "AlloyExperimentalNetLibrary",
+    doc: "The `Net` module of the std: HTTP requests over HttpService. `Net.get(url)` starts a request, a chain of calls fills it, and `send` returns a Future that holds a Result, so a failure of the network is a value and raises nothing. With this flag off, a call of `Net` reports.",
+};
+
 /// Every flag this version of the compiler reads.
 pub const FLAGS: &[&Flag] = &[
     &NATIVE_IF_LOCAL,
@@ -143,6 +153,8 @@ pub const FLAGS: &[&Flag] = &[
     &STRING_UNION_MATCH,
     &GENERATOR_SYNTAX,
     &GENERATOR_ANALYSIS,
+    &WIDTH_TYPES,
+    &NET_LIBRARY,
 ];
 
 /// The value of one flag. An Alloy flag is `true` or `false`; a Luau

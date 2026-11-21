@@ -792,14 +792,28 @@ impl<'s> Desugar<'s> {
                         .then_some((a.span, word))
                 })
                 .collect();
+            let fname = self.text_of(f.name).to_string();
+            let fty = self.text_of(f.ty).trim();
+            // A default the width cannot hold fails every value built
+            // without the field, the way a remote default does. A width
+            // type on the field counts as the attribute does.
+            let label = widths
+                .first()
+                .map(|(_, w)| format!("@{w}"))
+                .or_else(|| self.width_type(fty).map(str::to_string));
+
+            if let (Some(label), Some(d)) = (&label, &f.default)
+                && let Some(message) = self.default_misfit(label, d.span(), &fname)
+            {
+                hits.push((d.span(), message));
+            }
+
             let Some((_, first)) = widths.first() else {
                 continue;
             };
-            let fname = self.text_of(f.name).to_string();
             // A width packs a number. The wire spec read the field's own
             // type and dropped the width, so an array field took one and
             // crossed at 64 bits.
-            let fty = self.text_of(f.ty).trim();
             let seen = self
                 .alias_values
                 .get(fty.trim_end_matches('?').trim())
@@ -809,22 +823,6 @@ impl<'s> Desugar<'s> {
                 hits.push((
                     f.name,
                     format!("`@{first}` packs a `number`; field `{fname}` is `{base}`"),
-                ));
-            }
-
-            // A default the width cannot hold fails every value built
-            // without the field, the way a remote default does.
-            if let (Some(d), Some((lo, hi))) = (&f.default, super::remotes::width_range(first))
-                && let Ok(v) = self
-                    .text_of(d.span())
-                    .replace(['_', ' '], "")
-                    .parse::<f64>()
-                && (v < lo || v > hi || v.fract() != 0.0)
-            {
-                let shown = self.text_of(d.span()).to_string();
-                hits.push((
-                    d.span(),
-                    format!("`@{first}` holds a whole number from {lo} to {hi}; the default of `{fname}`, {shown}, does not fit"),
                 ));
             }
 

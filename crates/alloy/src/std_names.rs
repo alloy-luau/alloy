@@ -26,6 +26,11 @@ pub const MODULES: &[(&str, &[&str])] = &[
         ],
     ),
     ("iter", &["Iter"]),
+    (
+        "net",
+        &["Net", "NetClient", "NetRequest", "NetResponse", "NetError"],
+    ),
+    ("width", &["Width"]),
     ("result", &["Result", "Ok", "Err"]),
     ("async", &["Future", "Scope"]),
     ("signal", &["Signal", "SignalConnection", "Signalish"]),

@@ -1115,20 +1115,15 @@ impl<'s> Desugar<'s> {
 
             // A default fills before the pack, so one the width cannot
             // hold fails every fire that leaves the argument out.
-            if let (Some(w), Some(d)) = (&width, &p.default)
-                && let Some((lo, hi)) = width_range(w)
-                && let Ok(v) = self
-                    .text_of(d.span())
-                    .replace(['_', ' '], "")
-                    .parse::<f64>()
-                && (v < lo || v > hi || v.fract() != 0.0)
+            let label = width
+                .as_ref()
+                .map(|w| format!("@{w}"))
+                .or_else(|| self.width_type(&ty).map(str::to_string));
+
+            if let (Some(label), Some(d)) = (&label, &p.default)
+                && let Some(message) = self.default_misfit(label, d.span(), self.text_of(p.name))
             {
-                let pname = self.text_of(p.name).to_string();
-                let shown = self.text_of(d.span()).to_string();
-                self.diagnose(
-                    d.span(),
-                    &format!("`@{w}` holds a whole number from {lo} to {hi}; the default of `{pname}`, {shown}, does not fit"),
-                );
+                self.diagnose(d.span(), &message);
             }
 
             // A default fills before the pack and after the read, so the
@@ -1151,6 +1146,61 @@ impl<'s> Desugar<'s> {
     imports reach, one of the two engine names a file never shadows, a
     datatype, or a value the layout leaves alone.
     */
+    /// The width a type name gives under `AlloyExperimentalWidthTypes`:
+    /// `u8` for `u8` and `u8?`. A type the file declares or imports
+    /// under the same name is that type and no width.
+    pub(crate) fn width_type(&self, ty: &str) -> Option<&'static str> {
+        let base = ty.trim_end_matches('?').trim();
+
+        if !self.options.fflags.on(&crate::fflags::WIDTH_TYPES)
+            || self.declared_types.contains(base)
+            || self.imported_names.contains(base)
+        {
+            return None;
+        }
+
+        WIRE_WIDTHS.iter().copied().find(|w| *w == base)
+    }
+
+    /// Each width type the file names, in the order of `WIRE_WIDTHS`.
+    pub(crate) fn width_types_used(&self) -> Vec<&'static str> {
+        let mut used: Vec<&'static str> = Vec::new();
+
+        for span in &self.type_name_spans {
+            // `M.u8` is a type of the module `M`.
+            let after_dot = span.start > 0
+                && self.text_of(TokSpan::new(span.start as usize - 1, span.start as usize)) == ".";
+
+            if let Some(w) = self.width_type(self.text_of(*span))
+                && !after_dot
+                && !used.contains(&w)
+            {
+                used.push(w);
+            }
+        }
+
+        used.sort_by_key(|w| WIRE_WIDTHS.iter().position(|x| x == w));
+
+        used
+    }
+
+    /// The report for a default that a width cannot hold. `label` is the
+    /// width as the source wrote it: `@u8` or `u8`.
+    pub(crate) fn default_misfit(
+        &self,
+        label: &str,
+        default: TokSpan,
+        name: &str,
+    ) -> Option<String> {
+        let (lo, hi) = width_range(label.trim_start_matches('@'))?;
+        let shown = self.text_of(default);
+        let v = shown.replace(['_', ' '], "").parse::<f64>().ok()?;
+
+        (v < lo || v > hi || v.fract() != 0.0).then(|| {
+            format!("`{label}` holds a whole number from {lo} to {hi}; the default of `{name}`, {shown}, does not fit")
+        })
+    }
+
     pub(crate) fn wire_of_type(
         &self,
         text: &str,
@@ -1191,6 +1241,10 @@ impl<'s> Desugar<'s> {
             "boolean" => return scalar("bool"),
             "string" => return scalar("str"),
             _ => {}
+        }
+
+        if let Some(w) = self.width_type(ty) {
+            return scalar(w);
         }
 
         let array = |item: &str| Wire::Array {

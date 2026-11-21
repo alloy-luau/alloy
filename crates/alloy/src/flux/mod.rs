@@ -1483,8 +1483,8 @@ mod tests {
                 "import { HashMap } from \"@alloy/std/collections\"\nlocal m = new HashMap<<number, { BasePart }>>()\n",
             ),
             (
-                "local r = Net.Route.new(\"hit\")\n",
-                "local r = new Net.Route(\"hit\")\n",
+                "local r = Lib.Route.new(\"hit\")\n",
+                "local r = new Lib.Route(\"hit\")\n",
             ),
             (
                 "local p = Instance.new('Part')\n",

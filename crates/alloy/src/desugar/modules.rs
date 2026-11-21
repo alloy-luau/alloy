@@ -462,15 +462,23 @@ impl<'s> Desugar<'s> {
         };
         let (module, name) = (self.text_of(*module), self.text_of(*field));
 
-        if STD_ADDITIONS.contains(&(module, name))
-            && !self.is_local(module)
-            && !self.options.fflags.on(&crate::fflags::STD_ADDITIONS)
-        {
+        // A module that is not final as a whole has a flag of its own.
+        let flag = match module {
+            "Net" => &crate::fflags::NET_LIBRARY,
+
+            "Width" => &crate::fflags::WIDTH_TYPES,
+
+            _ if STD_ADDITIONS.contains(&(module, name)) => &crate::fflags::STD_ADDITIONS,
+
+            _ => return,
+        };
+
+        if !self.is_local(module) && !self.options.fflags.on(flag) {
             self.diagnose(
                 *field,
                 &format!(
                     "`{module}.{name}` is not final; set `{} = true` under `[fflags]` in alloy.toml to use it",
-                    crate::fflags::STD_ADDITIONS.name
+                    flag.name
                 ),
             );
         }

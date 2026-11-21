@@ -5114,4 +5114,668 @@ function alloy.remote(spec: any): Remote
 	return (remote :: any) :: Remote
 end
 
+-- ---------------------------------------------------------------------------
+-- Width: the range, the size, and the wrap of a wire width. A number is
+-- a 64-bit float, so it holds each 32-bit value exactly. These bring a
+-- result back into a width after the arithmetic.
+-- ---------------------------------------------------------------------------
+
+export type WidthName = "u8" | "u16" | "u32" | "i8" | "i16" | "i32" | "f32" | "f64"
+
+local Width = {}
+local F32_MAX = 3.4028234663852886e38
+local f32_cell = buffer.create(4)
+
+-- The value an f32 holds for `n`. Luau has no `fround`, so the buffer
+-- does the rounding.
+local function to_f32(n: number): number
+	buffer.writef32(f32_cell, 0, n)
+	return buffer.readf32(f32_cell, 0)
+end
+
+local function int_range(width: string): { number }?
+	local range = WIRE_RANGE[width]
+	if range == nil and width ~= "f32" and width ~= "f64" then
+		error(`Width: "{width}" is no width; the widths are u8, u16, u32, i8, i16, i32, f32, f64`, 3)
+	end
+	return range
+end
+
+local function truncate(n: number): number
+	return if n >= 0 then math.floor(n) else math.ceil(n)
+end
+
+--- The bytes a value of `width` takes in a buffer.
+function Width.size(width: WidthName): number
+	int_range(width)
+	return WIRE_SIZE[width]
+end
+
+--- The least value `width` holds.
+function Width.min(width: WidthName): number
+	local range = int_range(width)
+	return if range then range[1] elseif width == "f32" then -F32_MAX else -math.huge
+end
+
+--- The greatest value `width` holds.
+function Width.max(width: WidthName): number
+	local range = int_range(width)
+	return if range then range[2] elseif width == "f32" then F32_MAX else math.huge
+end
+
+--- Whether `width` holds `n` as it is: a whole number in the range for
+--- an integer width, a value with no rounding for `f32`.
+function Width.fits(width: WidthName, n: number): boolean
+	local range = int_range(width)
+	if range then
+		return n == math.floor(n) and n >= range[1] and n <= range[2]
+	end
+	return width == "f64" or n ~= n or to_f32(n) == n
+end
+
+--- `n` as `width` holds it after an overflow. An integer width drops
+--- the fraction and wraps, as a write to a buffer does: `wrap("u8", 300)`
+--- is 44. `f32` rounds to the nearest value an f32 holds.
+function Width.wrap(width: WidthName, n: number): number
+	local range = int_range(width)
+	if range == nil then
+		return if width == "f32" then to_f32(n) else n
+	end
+	if n ~= n or n == math.huge or n == -math.huge then
+		return 0
+	end
+	local span = range[2] - range[1] + 1
+	return (truncate(n) - range[1]) % span + range[1]
+end
+
+--- `n` held to the range of `width`: `saturate("u8", 300)` is 255. An
+--- integer width drops the fraction.
+function Width.saturate(width: WidthName, n: number): number
+	local range = int_range(width)
+	if range == nil then
+		return if width == "f32" then to_f32(math.clamp(n, -F32_MAX, F32_MAX)) else n
+	end
+	if n ~= n then
+		return 0
+	end
+	return truncate(math.clamp(n, range[1], range[2]))
+end
+
+alloy.Width = Width
+
+-- ---------------------------------------------------------------------------
+-- Net: HTTP requests over HttpService. A request is a builder, `send`
+-- returns a Future, and the Future holds a Result, so no failure of the
+-- network raises. The error names its kind.
+-- ---------------------------------------------------------------------------
+
+export type NetErrorKind =
+	"Tls"
+	| "Connect"
+	| "Timeout"
+	| "Limit"
+	| "Disabled"
+	| "Blocked"
+	| "Status"
+	| "Encode"
+	| "Decode"
+	| "Other"
+
+export type NetResponse = {
+	read status: number,
+	read status_text: string,
+	read ok: boolean,
+	read headers: { [string]: string },
+	read body: string,
+	read url: string,
+	header: (self: NetResponse, name: string) -> string?,
+	text: (self: NetResponse) -> string,
+	json: (self: NetResponse) -> Result<any, NetError>,
+	error_for_status: (self: NetResponse) -> Result<NetResponse, NetError>,
+}
+
+export type NetError = {
+	read kind: NetErrorKind,
+	read message: string,
+	read method: string,
+	read url: string,
+	read status: number?,
+	read retryable: boolean,
+	read attempts: number,
+	read response: NetResponse?,
+}
+
+-- What `send` returns: a Future, under a type of its own. Two members
+-- of NetRequest that return `Future<Result<T, NetError>>` cost the
+-- checker 15000 nodes of its 10000 (`LuauTarjanChildLimit`) under the
+-- Roblox definitions, and past the limit a user file reads the whole
+-- std as `any` with no report. The callbacks read `any` here, and
+-- `await` reads the value off `__values`.
+export type NetFuture<T> = {
+	read __value: T,
+	read __values: (T) -> (),
+	read andThen: (self: any, on_resolve: any, on_reject: any) -> any,
+	read and_then: (self: any, on_resolve: any, on_reject: any) -> any,
+	read finally: (self: any, f: () -> ...any) -> any,
+	read cancel: (self: any) -> (),
+	read is_settled: (self: any) -> boolean,
+}
+
+export type NetRequest = {
+	header: (self: NetRequest, name: string, value: string) -> NetRequest,
+	headers: (self: NetRequest, headers: { [string]: string }) -> NetRequest,
+	bearer: (self: NetRequest, token: string) -> NetRequest,
+	query: (self: NetRequest, fields: { [string]: any }) -> NetRequest,
+	json: (self: NetRequest, value: any) -> NetRequest,
+	form: (self: NetRequest, fields: { [string]: any }) -> NetRequest,
+	body: (self: NetRequest, text: string, content_type: string?) -> NetRequest,
+	timeout: (self: NetRequest, seconds: number) -> NetRequest,
+	retries: (self: NetRequest, times: number, backoff: number?) -> NetRequest,
+	send: (self: NetRequest) -> NetFuture<Result<NetResponse, NetError>>,
+	send_json: (self: NetRequest) -> NetFuture<Result<any, NetError>>,
+}
+
+export type NetOptions = {
+	base: string?,
+	fallbacks: { string }?,
+	headers: { [string]: string }?,
+	timeout: number?,
+	retries: number?,
+	backoff: number?,
+}
+
+export type NetClient = {
+	get: (self: NetClient, url: string) -> NetRequest,
+	post: (self: NetClient, url: string) -> NetRequest,
+	put: (self: NetClient, url: string) -> NetRequest,
+	patch: (self: NetClient, url: string) -> NetRequest,
+	delete: (self: NetClient, url: string) -> NetRequest,
+	head: (self: NetClient, url: string) -> NetRequest,
+	request: (self: NetClient, method: string, url: string) -> NetRequest,
+}
+
+local Net = {}
+local NetErrorMeta = {}
+local Response = {}
+Response.__index = Response
+local Request = {}
+Request.__index = Request
+local Client = {}
+Client.__index = Client
+
+function NetErrorMeta.__tostring(self)
+	return `Net {self.kind}: {self.message} ({self.method} {self.url})`
+end
+
+-- A spec sets `Net._service` to a stand-in. The real service resolves
+-- on first use, so the module loads where `game` does not exist.
+local function http_service(): any
+	return (Net :: any)._service or game:GetService("HttpService")
+end
+
+local function net_error(kind: string, message: string, request: any, fields: any?): NetError
+	local err = {
+		kind = kind,
+		message = message,
+		method = request._method,
+		url = request._url,
+		retryable = false,
+		attempts = 1,
+	}
+	if fields then
+		for key, value in fields do
+			err[key] = value
+		end
+	end
+	return (table.freeze(setmetatable(err, NetErrorMeta)) :: any) :: NetError
+end
+
+-- The engine raises a transport failure as text: `HttpError:
+-- TlsVerificationFail`. The table reads top to bottom, and the first
+-- word the text holds names the kind.
+local TRANSPORT_KINDS = {
+	{ "tls", "Tls" },
+	{ "ssl", "Tls" },
+	{ "certificate", "Tls" },
+	{ "trust check", "Tls" },
+	{ "timedout", "Timeout" },
+	{ "timed out", "Timeout" },
+	{ "timeout", "Timeout" },
+	{ "connectfail", "Connect" },
+	{ "netfail", "Connect" },
+	{ "dnsresolve", "Connect" },
+	{ "connection", "Connect" },
+	{ "exceeded limit", "Limit" },
+	{ "not enabled", "Disabled" },
+	{ "only be executed", "Disabled" },
+	{ "not allowed to access", "Blocked" },
+}
+
+local function transport_kind(message: string): string
+	local text = string.lower(message)
+	for _, pair in TRANSPORT_KINDS do
+		if string.find(text, pair[1], 1, true) then
+			return pair[2]
+		end
+	end
+	return "Other"
+end
+
+local IDEMPOTENT = { GET = true, HEAD = true, PUT = true, DELETE = true, OPTIONS = true }
+local RETRY_STATUS = { [429] = true, [502] = true, [503] = true, [504] = true }
+
+local function percent(text: any): string
+	return (
+		string.gsub(tostring(text), "[^%w%-_%.~]", function(c)
+			return string.format("%%%02X", string.byte(c))
+		end)
+	)
+end
+
+-- `{ page = 2, tag = { "a", "b" } }` is `page=2&tag=a&tag=b`. The keys
+-- sort, so one table gives one text.
+local function encode_fields(fields: { [string]: any }): string
+	local keys = {}
+	for key in fields do
+		table.insert(keys, tostring(key))
+	end
+	table.sort(keys)
+	local parts = {}
+	for _, key in keys do
+		local value = fields[key]
+		if type(value) == "table" then
+			for _, item in value do
+				table.insert(parts, `{percent(key)}={percent(item)}`)
+			end
+		else
+			table.insert(parts, `{percent(key)}={percent(value)}`)
+		end
+	end
+	return table.concat(parts, "&")
+end
+
+local function host_of(url: string): string
+	return string.match(url, "^%a[%w+.-]*://([^/?#]+)") or url
+end
+
+local function join_url(base: string, path: string): string
+	if string.sub(base, -1) == "/" then
+		base = string.sub(base, 1, -2)
+	end
+	if path ~= "" and string.sub(path, 1, 1) ~= "/" then
+		path = "/" .. path
+	end
+	return base .. path
+end
+
+-- Header names compare without case. A later write under another
+-- spelling replaces the first one.
+local function set_header(headers: { [string]: string }, name: string, value: string)
+	local lower = string.lower(name)
+	for key in headers do
+		if string.lower(key) == lower then
+			headers[key] = nil
+		end
+	end
+	headers[name] = value
+end
+
+local function has_header(headers: { [string]: string }, name: string): boolean
+	local lower = string.lower(name)
+	for key in headers do
+		if string.lower(key) == lower then
+			return true
+		end
+	end
+	return false
+end
+
+--- The value of a header, read without case: `res:header("content-type")`.
+function Response.header(self, name: string): string?
+	local lower = string.lower(name)
+	for key, value in self.headers do
+		if string.lower(key) == lower then
+			return value
+		end
+	end
+	return nil
+end
+
+--- The body as text.
+function Response.text(self): string
+	return self.body
+end
+
+--- The body read as JSON, or an Err of kind `Decode`.
+function Response.json(self)
+	local ok, value = pcall(function()
+		return http_service():JSONDecode(self.body)
+	end)
+	if ok then
+		return Ok(value)
+	end
+	return Err(net_error("Decode", `the body is no JSON: {value}`, self._request, { status = self.status, response = self }))
+end
+
+--- Ok with the response when the status is 2xx, else an Err of kind
+--- `Status` that holds the response.
+function Response.error_for_status(self)
+	if self.ok then
+		return Ok(self)
+	end
+	return Err(net_error("Status", `{self.status} {self.status_text}`, self._request, {
+		status = self.status,
+		response = self,
+		retryable = RETRY_STATUS[self.status] == true,
+		attempts = self._attempts,
+	}))
+end
+
+--- Sets one header.
+function Request.header(self, name: string, value: string)
+	set_header(self._headers, name, value)
+	return self
+end
+
+--- Sets each header of the table.
+function Request.headers(self, headers: { [string]: string })
+	for name, value in headers do
+		set_header(self._headers, name, value)
+	end
+	return self
+end
+
+--- Sets `Authorization: Bearer <token>`.
+function Request.bearer(self, token: string)
+	return self:header("Authorization", "Bearer " .. token)
+end
+
+--- Adds fields to the query of the URL. A list value writes its key
+--- one time for each item.
+function Request.query(self, fields: { [string]: any })
+	for key, value in fields do
+		self._query[key] = value
+	end
+	return self
+end
+
+--- Sends `value` as a JSON body.
+function Request.json(self, value: any)
+	self._json = { value }
+	self._body = nil
+	return self
+end
+
+--- Sends the fields as a URL-encoded form.
+function Request.form(self, fields: { [string]: any })
+	return self:body(encode_fields(fields), "application/x-www-form-urlencoded")
+end
+
+--- Sends `text` as the body. `content_type` defaults to `text/plain`.
+function Request.body(self, text: string, content_type: string?)
+	self._body = text
+	self._json = nil
+	self._content_type = content_type or "text/plain"
+	return self
+end
+
+--- The seconds one attempt may take. Past them the attempt is an Err
+--- of kind `Timeout`.
+function Request.timeout(self, seconds: number)
+	self._timeout = seconds
+	return self
+end
+
+--- The attempts after the first one, and the wait in seconds after the
+--- first failure. Each later wait is twice the one before it.
+function Request.retries(self, times: number, backoff: number?)
+	self._retries = times
+	self._backoff = backoff or self._backoff
+	return self
+end
+
+-- One call of the service. A second value is the error.
+local function attempt(self, url: string, headers, body: string?): (any, NetError?)
+	local found, service = pcall(http_service)
+	if not found then
+		return nil, net_error("Disabled", "HttpService is not here; a request runs on a Roblox server", self)
+	end
+	local request = { Url = url, Method = self._method, Headers = headers, Body = body }
+	local done = new_future()
+	task_lib.spawn(function()
+		local ok, out = pcall(service.RequestAsync, service, request)
+		settle(done, RESOLVED, { ok, out }, nil)
+	end)
+	-- The delay comes second, so a call that returns at once wins in
+	-- the test VM, where a delay runs at once.
+	if self._timeout then
+		task_lib.delay(self._timeout, function()
+			settle(done, RESOLVED, { false, `Timedout: no answer in {self._timeout} seconds` }, nil)
+		end)
+	end
+	local pair = (alloy.await :: any)(done)
+	if pair[1] then
+		return pair[2], nil
+	end
+	local message = tostring(pair[2])
+	local kind = transport_kind(message)
+	if kind == "Tls" then
+		-- The server of the place does not trust the certificate of
+		-- the host. A new attempt meets the same server, so the host
+		-- is done for this request.
+		message ..= `; this server does not trust the certificate of {host_of(url)}, and a retry does not help. Give the client a "fallbacks" host, or try in a new server`
+	end
+	local retryable = kind == "Connect" or kind == "Limit" or (kind == "Timeout" and IDEMPOTENT[self._method] == true)
+	return nil, net_error(kind, message, self, { url = url, retryable = retryable })
+end
+
+-- The URLs a request tries, in order. A whole URL is the one target.
+-- A path joins the base and then each fallback, and a host whose
+-- certificate failed on this server goes last.
+local function targets(self): { string }
+	local url = self._url
+	local client = self._client
+	if string.match(url, "^%a[%w+.-]*://") or client._base == nil then
+		return { url }
+	end
+	local good, bad = {}, {}
+	for _, base in { client._base, table.unpack(client._fallbacks) } do
+		table.insert(if client._distrusted[host_of(base)] then bad else good, join_url(base, url))
+	end
+	return table.move(bad, 1, #bad, #good + 1, good)
+end
+
+local function perform(self): Result<NetResponse, NetError>
+	local client = self._client
+	local headers = table.clone(client._headers)
+	for name, value in self._headers do
+		set_header(headers, name, value)
+	end
+	local body: string? = self._body
+	local content_type = self._content_type
+	if self._json then
+		local ok, text = pcall(function()
+			return http_service():JSONEncode(self._json[1])
+		end)
+		if not ok then
+			return Err(net_error("Encode", `the value is no JSON: {text}`, self))
+		end
+		body, content_type = text, "application/json"
+	end
+	if body and not has_header(headers, "Content-Type") then
+		headers["Content-Type"] = content_type
+	end
+	local query = encode_fields(self._query)
+	local last: NetError? = nil
+	local attempts = 0
+	for _, target in targets(self) do
+		local url = target
+		if query ~= "" then
+			url ..= (if string.find(url, "?", 1, true) then "&" else "?") .. query
+		end
+		for try = 1, self._retries + 1 do
+			attempts += 1
+			local out, err = attempt(self, url, headers, body)
+			local wait = self._backoff * 2 ^ (try - 1)
+			if out then
+				local again = RETRY_STATUS[out.StatusCode] and IDEMPOTENT[self._method] and try <= self._retries
+				if not again then
+					return Ok((setmetatable({
+						status = out.StatusCode,
+						status_text = out.StatusMessage or "",
+						ok = out.Success == true,
+						headers = out.Headers or {},
+						body = out.Body or "",
+						url = url,
+						_request = self,
+						_attempts = attempts,
+					}, Response) :: any) :: NetResponse)
+				end
+				-- `Retry-After` in seconds wins over the backoff, up to
+				-- half a minute.
+				local after = tonumber(out.Headers and (out.Headers["Retry-After"] or out.Headers["retry-after"]))
+				task_lib.wait(if after then math.min(after, 30) else wait)
+				continue
+			end
+			last = setmetatable(table.clone(err :: any), NetErrorMeta) :: any;
+			(last :: any).attempts = attempts
+			table.freeze(last :: any)
+			if (err :: NetError).kind == "Tls" then
+				client._distrusted[host_of(url)] = true
+				break
+			end
+			if not (err :: NetError).retryable or try > self._retries then
+				-- A host that does not answer leaves the next host to
+				-- try. Any other failure is the answer.
+				if (err :: NetError).kind ~= "Connect" then
+					return Err(last)
+				end
+				break
+			end
+			task_lib.wait(wait)
+		end
+	end
+	return Err(last)
+end
+
+--- Sends the request. The Future holds Ok with the response for any
+--- status, or an Err when no response came.
+function Request.send(self)
+	return alloy.future(function()
+		return perform(self)
+	end)
+end
+
+--- Sends the request and reads a 2xx body as JSON. Any other status
+--- is an Err of kind `Status`.
+function Request.send_json(self)
+	if not has_header(self._headers, "Accept") then
+		self._headers.Accept = "application/json"
+	end
+	return alloy.future(function()
+		local sent = perform(self) :: any
+		if sent.tag == "Err" then
+			return sent
+		end
+		local checked = sent._1:error_for_status()
+		if checked.tag == "Err" then
+			return checked
+		end
+		return sent._1:json()
+	end)
+end
+
+--- A request of any method: `client:request("OPTIONS", "/items")`.
+function Client.request(self, method: string, url: string)
+	return setmetatable({
+		_client = self,
+		_method = string.upper(method),
+		_url = url,
+		_headers = {},
+		_query = {},
+		_timeout = self._timeout,
+		_retries = self._retries,
+		_backoff = self._backoff,
+	}, Request)
+end
+
+for _, method in { "get", "post", "put", "patch", "delete", "head" } do
+	Client[method] = function(self, url: string)
+		return Client.request(self, method, url)
+	end
+end
+
+--- A client: the base URL, the headers, and the retry rules that each
+--- of its requests starts with.
+---
+--- `fallbacks` are more hosts for a path. A request moves to the next
+--- one when a host does not answer or when this server does not trust
+--- its certificate.
+function Net.client(options: NetOptions?): NetClient
+	local o: NetOptions = options or {}
+	return (setmetatable({
+		_base = o.base,
+		_fallbacks = o.fallbacks or {},
+		_headers = table.clone(o.headers or {}),
+		_timeout = o.timeout,
+		_retries = o.retries or 0,
+		_backoff = o.backoff or 0.5,
+		_distrusted = {},
+	}, Client) :: any) :: NetClient
+end
+
+local shared_client = Net.client()
+
+--- A request with no client: `Net.get("https://example.com/items")`.
+function Net.request(method: string, url: string): NetRequest
+	return shared_client:request(method, url)
+end
+
+function Net.get(url: string): NetRequest
+	return shared_client:get(url)
+end
+
+function Net.post(url: string): NetRequest
+	return shared_client:post(url)
+end
+
+function Net.put(url: string): NetRequest
+	return shared_client:put(url)
+end
+
+function Net.patch(url: string): NetRequest
+	return shared_client:patch(url)
+end
+
+function Net.delete(url: string): NetRequest
+	return shared_client:delete(url)
+end
+
+function Net.head(url: string): NetRequest
+	return shared_client:head(url)
+end
+
+local JSON_REQUEST = { _method = "JSON", _url = "" }
+
+--- A value as JSON text, or an Err of kind `Encode`.
+-- The Ok side is `any`, and holds a string. `Result<string, NetError>`
+-- costs the checker 14000 nodes of its 10000 (`LuauTarjanChildLimit`),
+-- since each method of Result then walks the string library.
+function Net.to_json(value: any): Result<any, NetError>
+	local ok, text = pcall(function()
+		return http_service():JSONEncode(value)
+	end)
+	return if ok then Ok(text) else Err(net_error("Encode", `the value is no JSON: {text}`, JSON_REQUEST))
+end
+
+--- JSON text as a value, or an Err of kind `Decode`.
+function Net.from_json(text: string): Result<any, NetError>
+	local ok, value = pcall(function()
+		return http_service():JSONDecode(text)
+	end)
+	return if ok then Ok(value) else Err(net_error("Decode", `the text is no JSON: {value}`, JSON_REQUEST))
+end
+
+alloy.Net = Net
+
 return table.freeze(alloy)

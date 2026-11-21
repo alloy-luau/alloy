@@ -713,7 +713,7 @@ pub fn complete(offset: u32) -> String {
                     }
                 }
 
-                for name in ["HashMap", "Set", "BitSet", "Queue", "Heap", "Scope", "Signal", "Symbol", "Array"] {
+                for name in ["HashMap", "Set", "BitSet", "Queue", "Heap", "Scope", "Signal", "Symbol", "Array", "Net", "Width"] {
                     items.push(word(name, "class", keywords::doc(name).map(str::to_string), from));
                 }
 

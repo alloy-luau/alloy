@@ -623,6 +623,8 @@ pub const AMBIENT: &[&str] = &[
     "Heap",
     "Scope",
     "Iter",
+    "Net",
+    "Width",
 ];
 
 /// The std type names that are ambient in a type position. The list
@@ -647,6 +649,10 @@ pub const AMBIENT_TYPES: &[&str] = &[
     "Iter",
     "R15Character",
     "R6Character",
+    "NetClient",
+    "NetRequest",
+    "NetResponse",
+    "NetError",
 ];
 
 pub const PRIMITIVES: &[&str] = &[
@@ -1038,6 +1044,19 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
 
     for kind in d.mapped_used.clone() {
         let line = format!("{} ", Desugar::mapped_type_function(kind));
+        d.generate(insert_at, &line);
+    }
+
+    // A width type is a `number` under its own name. The alias sits on
+    // the first line, so every type position reads it and no line
+    // count moves.
+    let widths = d.width_types_used();
+
+    if !widths.is_empty() && !options.definitions {
+        let line: String = widths
+            .iter()
+            .map(|w| format!("type {w} = number "))
+            .collect();
         d.generate(insert_at, &line);
     }
 

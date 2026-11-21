@@ -328,6 +328,10 @@ impl<'a> Parser<'a> {
                             | "Iter"
                             | "R15Character"
                             | "R6Character"
+                            | "NetClient"
+                            | "NetRequest"
+                            | "NetResponse"
+                            | "NetError"
                             // The supertypes: `struct<T>`, `struct`, and
                             // `enum`. The emit writes them only under
                             // their flag, and copies them otherwise.

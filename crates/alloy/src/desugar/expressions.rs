@@ -2529,6 +2529,33 @@ impl<'s> Desugar<'s> {
                     }
                 }
 
+                // A name of the `table` library that no extension took.
+                // The ship artifact asks the value for its own method
+                // first. The check artifact wraps the receiver in a type
+                // that carries the library, and keeps the call.
+                let wrapped;
+                let mut prefix = prefix;
+
+                if let Some(m) = method
+                    && type_args.is_none()
+                    && self.is_table_method(self.text_of(*m))
+                {
+                    let mname = self.text_of(*m).to_string();
+                    let std = self.std();
+                    self.ext_hit = true;
+
+                    if !self.options.check {
+                        let a = self.args_text(args);
+                        let inner = a.trim_start_matches('(').trim_end_matches(')');
+                        let sep = if inner.is_empty() { "" } else { ", " };
+
+                        return format!("{std}.table_call({prefix}, \"{mname}\"{sep}{inner})");
+                    }
+
+                    wrapped = format!("{std}.table_std({prefix})");
+                    prefix = &wrapped;
+                }
+
                 let m = match method {
                     Some(m) => format!(":{}", self.text_of(*m)),
 

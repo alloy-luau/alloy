@@ -119,6 +119,8 @@ pub fn friendly_text(message: &str) -> String {
         .or_else(|| pack_mismatch(message))
         .or_else(|| unsolved_generic(message))
         .or_else(|| solver_gave_up(message))
+        .or_else(|| append_target(message))
+        .or_else(|| open_table_method(message))
         .unwrap_or_else(|| cut_explanation(message));
     let text = without_import_temp(&text);
     let text = negation_failure(&text).unwrap_or_else(|| without_neg(&text));
@@ -240,6 +242,38 @@ fn without_import_temp(text: &str) -> String {
     }
 
     out
+}
+
+/// `xs := v` on a target that holds no items. The std types the value
+/// as a string no source writes, and the report names the target.
+fn append_target(message: &str) -> Option<String> {
+    const CLAUSE: &str = "Expected this to be '\"__append_none\"'";
+
+    let at = message.find(CLAUSE)?;
+
+    Some(format!(
+        "{}`:=` takes a list, or a value with a `push` or an `add` method; this target is neither",
+        &message[..at]
+    ))
+}
+
+/// `t:insert(v)` on a table whose type holds an open generic. The type
+/// that gives a table the `table` library waits for the generic, so
+/// the checker finds no method.
+fn open_table_method(message: &str) -> Option<String> {
+    const OPENER: &str = "Type '__table_std<";
+
+    let at = message.find(OPENER)?;
+    let key = message[at..]
+        .split("does not have key '")
+        .nth(1)?
+        .split('\'')
+        .next()?;
+
+    Some(format!(
+        "{}the checker gives a table no `{key}` method while its type holds an open generic; write `table.{key}(...)` here",
+        &message[..at]
+    ))
 }
 
 /// The checker's own step limit, worded as an order to the reader. It
@@ -500,6 +534,22 @@ mod tests {
                 "TypeError: No valid instantiation could be inferred for generic type parameter T. It was expected to be at least: number | nil and at most: number & nil but these types are not compatible with one another."
             ),
             "TypeError: these values give `T` no one type; make them agree, or write `T` out"
+        );
+    }
+
+    #[test]
+    fn an_append_to_no_list_names_the_target() {
+        assert_eq!(
+            friendly_text("TypeError: Expected this to be '\"__append_none\"', but got 'number'"),
+            "TypeError: `:=` takes a list, or a value with a `push` or an `add` method; this target is neither"
+        );
+    }
+
+    #[test]
+    fn a_table_method_on_an_open_generic_names_the_library() {
+        assert_eq!(
+            friendly_text("TypeError: Type '__table_std<{T}>' does not have key 'insert'"),
+            "TypeError: the checker gives a table no `insert` method while its type holds an open generic; write `table.insert(...)` here"
         );
     }
 

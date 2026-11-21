@@ -359,7 +359,9 @@ impl ConstWalk<'_> {
                 self.deferred -= 1;
             }
 
-            Stmt::Assign(a) => {
+            // `xs := v` writes into the value and leaves the name as it is,
+            // so a `const` takes it.
+            Stmt::Assign(a) if self.text(a.op) != ":=" => {
                 for t in &a.targets {
                     // `Cfg.LIMIT`: the path of a namespace `const`.
                     let mut path = Vec::new();

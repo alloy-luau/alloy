@@ -2205,12 +2205,35 @@ impl<'s> Desugar<'s> {
                 || name == "Instance")
     }
 
+    /// Whether `name` is a method the `table` library gives a table.
+    pub(crate) fn is_table_method(&self, name: &str) -> bool {
+        self.table_std && TABLE_METHODS.contains(&name)
+    }
+
     pub(crate) fn chain_has_ext(&self, e: &Expr) -> bool {
-        if self.ext_methods.is_empty() && self.ext_statics.is_empty() {
+        if self.ext_methods.is_empty() && self.ext_statics.is_empty() && !self.table_std {
             return false;
         }
 
         let (base, links) = flatten(e);
+
+        // Both artifacts rewrite a call by a name of the `table` library.
+        if links.iter().any(|l| match l {
+            Link::Plain(Step::Call {
+                method: Some(m),
+                type_args: None,
+                ..
+            })
+            | Link::Optional(Step::Call {
+                method: Some(m),
+                type_args: None,
+                ..
+            }) => self.is_table_method(self.text_of(*m)),
+
+            _ => false,
+        }) {
+            return true;
+        }
 
         // The check artifact keeps a call on a class as written; only a
         // primitive needs the helper table rewrite.

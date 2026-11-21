@@ -49,6 +49,87 @@ impl State {
             .collect()
     }
 
+    /// The functions of the `table` library as methods, after `t:`,
+    /// under `AlloyExperimentalTableStdInheritance`. The child knows no
+    /// such method, so the proxy lists them.
+    pub(crate) fn table_method_completions(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        result: &Value,
+    ) -> Vec<Value> {
+        let Some(doc) = self.docs.get(uri) else {
+            return Vec::new();
+        };
+        let Some(offset) = offset_of(&doc.source, line, character) else {
+            return Vec::new();
+        };
+        let taken = labels_of(result);
+
+        if !table_receiver(&doc.source, offset, &taken)
+            || !self.flag_on(uri, &alloy::fflags::TABLE_STD_INHERITANCE)
+        {
+            return Vec::new();
+        }
+
+        let snippets = self.snippets;
+
+        TABLE_METHODS
+            .iter()
+            .filter(|(label, _, _)| !taken.iter().any(|t| t == label))
+            .map(|(label, signature, doc)| {
+                let mut item = json!({
+                    "label": label,
+                    "kind": 2,
+                    "detail": format!("function {label}{signature}"),
+                    "sortText": format!("1{label}"),
+                    "documentation": {
+                        "kind": "markdown",
+                        "value": format!("{doc}\n\nFrom the `table` library: `table.{label}`."),
+                    },
+                });
+                set_call(&mut item, label, &as_type(signature), snippets);
+
+                item
+            })
+            .collect()
+    }
+
+    /// The hover of a method the `table` library gives a table. The
+    /// check artifact types it with no name for the receiver, so the
+    /// child prints `(any, number) -> ()`; the list here has the words.
+    /// A method of the value's own names its `self`, and stays.
+    pub(crate) fn table_method_hover(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        child: &str,
+    ) -> Option<String> {
+        let doc = self.docs.get(uri)?;
+        let src = &doc.source;
+        let offset = offset_of(src, line, character)?;
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        let start = src[..offset].trim_end_matches(is_word).len();
+        let rest = &src[offset..];
+        let end = offset + rest.len() - rest.trim_start_matches(is_word).len();
+        let (label, signature, about) = TABLE_METHODS
+            .iter()
+            .find(|(label, _, _)| *label == &src[start..end])?;
+
+        if !src[..start].ends_with(':')
+            || !(child.contains("(any,") || child.contains("(any)"))
+            || !self.flag_on(uri, &alloy::fflags::TABLE_STD_INHERITANCE)
+        {
+            return None;
+        }
+
+        Some(format!(
+            "```alloy\nfunction {label}{signature}\n```\n{about}\n\nFrom the `table` library: `table.{label}`."
+        ))
+    }
+
     /// The methods of every `impl` of the struct `self` stands for.
     ///
     /// `impl Point` in a file that imports `Point` writes the methods on
@@ -1130,6 +1211,103 @@ fn labels_of(result: &Value) -> Vec<String> {
 }
 
 /// Whether the caret takes a member of `self`, after a `.` or a `:`.
+/// The methods a table takes from the `table` library: the name, the
+/// signature with no receiver, and what the method does. The names are
+/// `alloy::desugar::TABLE_METHODS`; a test holds the two lists equal.
+const TABLE_METHODS: &[(&str, &str, &str)] = &[
+    (
+        "insert",
+        "(value: T)",
+        "Adds a value at the end. `t:insert(index, value)` puts it at `index` and moves the rest up.",
+    ),
+    (
+        "remove",
+        "(index: number?): T?",
+        "Takes out the value at `index`, the last one with no index, and returns it.",
+    ),
+    (
+        "find",
+        "(value: T, init: number?): number?",
+        "The index of the first item equal to `value`, from `init` on, or nil.",
+    ),
+    (
+        "sort",
+        "(less: ((T, T) -> boolean)?)",
+        "Sorts the items in place, by `<` or by `less`.",
+    ),
+    (
+        "concat",
+        "(sep: string?, i: number?, j: number?): string",
+        "Joins the items `i` to `j` into one string, with `sep` between them.",
+    ),
+    (
+        "clear",
+        "()",
+        "Removes every key. The table keeps its capacity.",
+    ),
+    (
+        "clone",
+        "(): { T }",
+        "A copy of the table one level deep, not frozen.",
+    ),
+    (
+        "freeze",
+        "(): { T }",
+        "Makes the table read only, and returns it.",
+    ),
+    ("isfrozen", "(): boolean", "Whether the table is read only."),
+    (
+        "unpack",
+        "(i: number?, j: number?): ...T",
+        "The items `i` to `j` as separate values.",
+    ),
+    (
+        "move",
+        "(from: number, to: number, at: number, into: { T }?): { T }",
+        "Copies the items `from` to `to` to index `at`, of this table or of `into`.",
+    ),
+    (
+        "maxn",
+        "(): number",
+        "The largest positive number key of the table.",
+    ),
+];
+
+/// Whether the caret follows a `:` on a value that takes the methods of
+/// the `table` library. The child lists no member for a plain table, so
+/// an empty answer after `x:` reads as one. An Array has members of its
+/// own, and takes the rest from the library.
+///
+/// ponytail: the proxy reads no type here, so a number or a name that
+/// does not resolve gets the list too. Ask the child for the hover of
+/// the receiver if that matters.
+fn table_receiver(source: &str, offset: usize, taken: &[String]) -> bool {
+    let head = source[..offset].trim_end_matches(|c: char| c.is_alphanumeric() || c == '_');
+
+    // A `::` is a cast, and a `:` after a space starts a type.
+    let Some(before) = head.strip_suffix(':') else {
+        return false;
+    };
+    if !before.ends_with(|c: char| c.is_alphanumeric() || matches!(c, '_' | ')' | ']')) {
+        return false;
+    }
+
+    // `local x:` and `function f(a:` name a type next, with or without
+    // the space.
+    let line = &before[before.rfind('\n').map_or(0, |i| i + 1)..];
+    let words = line.trim_start();
+    let declares =
+        (words.starts_with("local ") || words.starts_with("const ")) && !words.contains('=');
+    let in_params =
+        words.contains("function") && words.matches('(').count() > words.matches(')').count();
+
+    if declares || in_params {
+        return false;
+    }
+
+    taken.is_empty() || taken.iter().any(|t| t == "swap_remove")
+}
+
 fn takes_a_self_member(source: &str, offset: usize) -> bool {
     let head = source[..offset].trim_end_matches(|c: char| c.is_alphanumeric() || c == '_');
 
@@ -1240,4 +1418,38 @@ fn as_type(signature: &str) -> String {
     }
 
     signature.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The emit routes a call by the names of one list, and the editor
+    /// lists the names of the other.
+    #[test]
+    fn the_table_methods_are_the_ones_the_emit_routes() {
+        let listed: Vec<&str> = TABLE_METHODS.iter().map(|(label, _, _)| *label).collect();
+        assert_eq!(listed, alloy::desugar::TABLE_METHODS);
+    }
+
+    #[test]
+    fn a_colon_on_a_value_with_no_member_takes_the_table_methods() {
+        let none: [String; 0] = [];
+        let array = ["push".to_string(), "swap_remove".to_string()];
+        let set = ["add".to_string(), "has".to_string()];
+        let at = |src: &str, taken: &[String]| table_receiver(src, src.len(), taken);
+
+        assert!(at("xs:", &none));
+        assert!(at("local n = t.items:ins", &none));
+        assert!(at("f():", &none));
+        assert!(at("xs:", &array));
+        // A value with members of its own, and no Array, keeps its list.
+        assert!(!at("seen:", &set));
+        // A type goes here, and a field, and a cast.
+        assert!(!at("local x:", &none));
+        assert!(!at("local function f(a:", &none));
+        assert!(!at("xs.", &none));
+        assert!(!at("x ::", &none));
+        assert!(!at("c ? a :", &none));
+    }
 }

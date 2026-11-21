@@ -363,6 +363,11 @@ print(head, #rest, f(xs), x, others.y)
 /// The analyzer's `TypeError` and `SyntaxError` lines for one source,
 /// or `None` when luau-lsp or the Roblox definitions are missing.
 fn reports(src: &str, name: &str) -> Option<Vec<String>> {
+    reports_under(src, name, "")
+}
+
+/// `reports`, with the `[fflags]` table a project would write.
+fn reports_under(src: &str, name: &str, fflags: &str) -> Option<Vec<String>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let defs = root.join("../tools/types/globalTypes.d.luau");
 
@@ -377,6 +382,7 @@ fn reports(src: &str, name: &str) -> Option<Vec<String>> {
         file_name: format!("{name}.aly"),
         // The runtime lands beside the artifact, so the require is a path.
         std_require: "./alloy".to_string(),
+        fflags: toml::from_str(fflags).unwrap(),
         ..EmitOptions::default()
     };
     let out = alloy::compile_with(src, &options).unwrap();
@@ -1964,4 +1970,124 @@ fn a_luau_project_reads_the_ship_types_of_a_package() {
     assert_eq!(errors("bad.luau"), vec![3, 4, 5, 6, 7, 8], "{text}");
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+const WALRUS_FLAGS: &str =
+    "AlloyExperimentalWalrusSyntax = true\nAlloyExperimentalWalrusAnalysis = true\n";
+
+/// `:=` on each kind of target, with a value that fits.
+const APPENDS: &str = r#"struct Bag as
+    items: number[]
+end
+
+impl Bag as
+    function push(self, v: number)
+        self.items := v
+    end
+end
+
+local plain = { 1, 2 }
+plain := 3
+
+local arr = [ "a" ]
+arr := "b"
+
+local seen: Set<string> = Set.new()
+seen := "a"
+
+local queue: Queue<number> = Queue.new()
+queue := 1
+
+local bag = new Bag { items = [] }
+bag := 4
+
+function add_to<T>(xs: { T }, v: T)
+    xs := v
+end
+
+print(plain, arr, seen, queue, bag, add_to)
+"#;
+
+#[test]
+fn an_append_checks_on_every_kind_of_target() {
+    let Some(bad) = reports_under(APPENDS, "appends", WALRUS_FLAGS) else {
+        return;
+    };
+
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+/// A value that does not fit the items reports on the value, and a
+/// target that holds no items reports too. A string is the hard case:
+/// the checker gave up on the file when the target and the value went
+/// in one call.
+#[test]
+fn an_append_of_the_wrong_value_reports() {
+    let src = "local xs = { 1, 2 }\nxs := \"three\"\nlocal seen: Set<string> = Set.new()\nseen := 4\nlocal n = 5\nn := 1\nprint(xs, seen, n)\n";
+    let Some(bad) = reports_under(src, "appends-bad", WALRUS_FLAGS) else {
+        return;
+    };
+
+    assert_eq!(bad.len(), 3, "{}", bad.join("\n"));
+    assert!(
+        bad[0].contains("(2,") && bad[0].contains("'number', but got 'string'"),
+        "{}",
+        bad[0]
+    );
+    assert!(
+        bad[1].contains("(4,") && bad[1].contains("'string', but got 'number'"),
+        "{}",
+        bad[1]
+    );
+    assert!(
+        bad[2].contains("(6,") && bad[2].contains("__append_none"),
+        "{}",
+        bad[2]
+    );
+
+    // With the syntax flag alone the checker reads no type of the append.
+    let syntax = reports_under(src, "appends-any", "AlloyExperimentalWalrusSyntax = true\n");
+    assert_eq!(syntax, Some(Vec::new()));
+}
+
+const TABLE_FLAG: &str = "AlloyExperimentalTableStdInheritance = true\n";
+
+/// The `table` library as methods: a plain table and an Array take
+/// them, and a method the value has under the same name stays.
+#[test]
+fn a_table_has_the_table_library_as_methods() {
+    let src = r#"local xs = { 3, 1, 2 }
+xs:insert(4)
+xs:insert(1, 0)
+xs:sort(function(a, b) return a < b end)
+local last: number? = xs:remove()
+local at: number? = xs:find(2)
+local text: string = xs:concat(", ")
+local copy: { number } = xs:clone()
+
+local arr = [ 1, 2 ]
+arr:insert(3)
+local hit: number? = arr:find(function(v) return v > 1 end)
+
+local module = {}
+function module.insert(self: typeof(module), name: string): boolean
+    return name ~= ""
+end
+local ok: boolean = module:insert("x")
+
+print(last, at, text, copy, hit, ok)
+"#;
+    let Some(bad) = reports_under(src, "table-methods", TABLE_FLAG) else {
+        return;
+    };
+
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+
+    let wrong = "local xs = { 1 }\nxs:insert(\"two\")\nprint(xs)\n";
+    let Some(bad) = reports_under(wrong, "table-methods-bad", TABLE_FLAG) else {
+        return;
+    };
+
+    assert_eq!(bad.len(), 1, "{}", bad.join("\n"));
+    assert!(bad[0].contains("'number', but got 'string'"), "{}", bad[0]);
 }

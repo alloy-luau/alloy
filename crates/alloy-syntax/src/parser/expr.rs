@@ -764,6 +764,10 @@ impl<'a> Parser<'a> {
                 // a name, `x:upper()`, is the method call it looks like.
                 ":" if self.no_method_call > 0 && !self.colon_fuses() => break,
 
+                // `xs := v` appends. The `:` with a `=` right after it is
+                // the operator, and the assignment parser reads it.
+                ":" if self.text_at(1) == "=" && self.adjacent(0) => break,
+
                 ":" => {
                     self.bump();
 

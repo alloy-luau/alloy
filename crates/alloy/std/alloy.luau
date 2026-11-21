@@ -3096,6 +3096,145 @@ function alloy.static(kind: string, name: string)
 end
 
 -- ---------------------------------------------------------------------------
+-- `:=`, and the `table` library as methods.
+-- ---------------------------------------------------------------------------
+
+-- The type of the value `target := value` takes: what `push` takes,
+-- else what `add` takes, else the items of a list. A target that holds
+-- no items takes a string no source writes, so every value reports, and
+-- `friendly_text` words the report.
+type function __append_item(X: type)
+	if X:is("any") or X:is("unknown") then
+		return types.any
+	end
+	if not X:is("table") then
+		return types.singleton("__append_none")
+	end
+	local function method(name: string): type?
+		local key = types.singleton(name)
+		local f = X:readproperty(key)
+		local mt = X:metatable()
+		if f == nil and mt ~= nil then
+			local index = mt:readproperty(types.singleton("__index"))
+			if index ~= nil and index:is("table") then
+				f = index:readproperty(key)
+			end
+		end
+		if f == nil or not f:is("function") then
+			return nil
+		end
+		local params = f:parameters()
+		local head = params.head
+		if head ~= nil and head[2] ~= nil then
+			return head[2]
+		end
+		-- `push(self, ...T)`: the value is one of the rest.
+		if head ~= nil and head[1] ~= nil and params.tail ~= nil then
+			return params.tail
+		end
+		return types.any
+	end
+	local item = method("push") or method("add")
+	if item ~= nil then
+		return item
+	end
+	local indexer = X:indexer()
+	if indexer ~= nil and (indexer.index:is("number") or indexer.index:is("any")) then
+		return indexer.writeresult or indexer.readresult
+	end
+	return types.singleton("__append_none")
+end
+
+--- `xs := v`. A value with a `push` method takes `xs:push(v)`, one with
+--- an `add` method takes `xs:add(v)`, and any other table takes
+--- `table.insert(xs, v)`.
+function alloy.append(target: any, value: any)
+	local push = target.push
+	if push then
+		(push :: any)(target, value)
+		return
+	end
+	local add = target.add
+	if add then
+		(add :: any)(target, value)
+		return
+	end
+	table.insert(target, value)
+end
+
+--- `alloy.append` with a type, for the check artifact: the value must
+--- fit the items of the target. The target and the value go in two
+--- calls. With both in one call, the checker reads a string value
+--- before it knows the item type, and gives up on the file.
+function alloy.append_checked<X>(target: X): (value: __append_item<X>) -> ()
+	return function(value)
+		alloy.append(target, value)
+	end
+end
+
+-- A table with the functions of the `table` library as methods. A
+-- property the table has under the same name stays. A value that is no
+-- plain table keeps its own type, since its own methods answer first.
+type function __table_std(T: type)
+	if not T:is("table") or T:metatable() ~= nil then
+		return T
+	end
+	local indexer = T:indexer()
+	local V: type = if indexer ~= nil then indexer.readresult else types.any
+	local function opt(t: type): type
+		return types.unionof(t, types.singleton(nil))
+	end
+	-- `self` is `any`: the method is the library's function, which
+	-- reads the table it gets.
+	local function fn(params: { type }, returns: { type }): type
+		local head: { type } = { types.any }
+		for _, p in params do
+			table.insert(head, p)
+		end
+		return types.newfunction({ head = head }, { head = returns })
+	end
+	local less = types.newfunction({ head = { V, V } }, { head = { types.boolean } })
+	local lib: { [string]: type } = {
+		insert = types.intersectionof(fn({ V }, {}), fn({ types.number, V }, {})),
+		remove = fn({ opt(types.number) }, { opt(V) }),
+		find = fn({ V, opt(types.number) }, { opt(types.number) }),
+		sort = fn({ opt(less) }, {}),
+		concat = fn({ opt(types.string), opt(types.number), opt(types.number) }, { types.string }),
+		clear = fn({}, {}),
+		clone = fn({}, { T }),
+		freeze = fn({}, { T }),
+		isfrozen = fn({}, { types.boolean }),
+		unpack = types.newfunction({ head = { types.any, opt(types.number), opt(types.number) } }, { tail = V }),
+		move = fn({ types.number, types.number, types.number, opt(T) }, { T }),
+		maxn = fn({}, { types.number }),
+	}
+	local out = types.copy(T)
+	for name, f in lib do
+		local key = types.singleton(name)
+		if T:readproperty(key) == nil then
+			out:setproperty(key, f)
+		end
+	end
+	return out
+end
+
+--- `t:insert(v)` and the other names of the `table` library, at run
+--- time: the method the value has, else the function of the library.
+function alloy.table_call(receiver: any, name: string, ...: any): ...any
+	local own = receiver[name]
+	if own then
+		return (own :: any)(receiver, ...)
+	end
+	return (table :: any)[name](receiver, ...)
+end
+
+--- The receiver of such a call in the check artifact, typed with the
+--- library's functions as methods.
+function alloy.table_std<T>(t: T): __table_std<T>
+	return t :: any
+end
+
+-- ---------------------------------------------------------------------------
 -- Attributes: declared metadata, readable at runtime.
 -- ---------------------------------------------------------------------------
 

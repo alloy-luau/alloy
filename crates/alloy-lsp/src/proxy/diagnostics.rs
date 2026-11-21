@@ -701,9 +701,14 @@ impl State {
 
                 n => format!("({})", vec!["_"; n].join(", ")),
             };
-            text.push_str(&format!(
-                "{arm}case {owner}.{name}{holes} then\n{arm}    {body}\n"
-            ));
+            // A member of a string union is a literal, and its arm
+            // compares with the literal alone.
+            let pattern = match name.starts_with('"') || name == "nil" {
+                true => name.clone(),
+
+                false => format!("{owner}.{name}{holes}"),
+            };
+            text.push_str(&format!("{arm}case {pattern} then\n{arm}    {body}\n"));
         }
 
         let title = match missing.len() {

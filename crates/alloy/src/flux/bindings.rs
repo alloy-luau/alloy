@@ -21,6 +21,7 @@ const WRITER_NAMES: &[&str] = &[
     "insert",
     "remove",
     "swap_remove",
+    "insert_at",
     "clear",
     "set",
     "add",
@@ -1020,12 +1021,14 @@ impl<'s> Scan<'s> {
     }
 
     /// Whether token `k` assigns: `=`, a compound operator such as `+=`
-    /// or `..=`, or `??=`, which lexes as `?`, `?`, and `=`.
+    /// or `..=`, or `??=`, which lexes as `?`, `?`, and `=`, or `or=`
+    /// and `and=`, which lex as the word and `=`.
     fn assigns_at(&self, k: usize) -> bool {
         matches!(
             self.t(k),
             "=" | "+=" | "-=" | "*=" | "/=" | "//=" | "%=" | "^=" | "..="
         ) || (self.at(k, "?") && self.at(k + 1, "?") && self.at(k + 2, "="))
+            || (matches!(self.t(k), "or" | "and") && self.at(k + 1, "="))
     }
 
     /// The names a `local` at `i` binds, with their tokens. A destructure

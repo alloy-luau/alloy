@@ -123,6 +123,7 @@ pub fn friendly_text(message: &str) -> String {
         .or_else(|| open_table_method(message))
         .unwrap_or_else(|| cut_explanation(message));
     let text = without_import_temp(&text);
+    let text = text.replace(STRING_STD, "string");
     let text = negation_failure(&text).unwrap_or_else(|| without_neg(&text));
 
     table_beside_array(&text).unwrap_or(text)
@@ -256,6 +257,11 @@ fn append_target(message: &str) -> Option<String> {
         &message[..at]
     ))
 }
+
+/// How the checker prints the type that carries the methods of
+/// `AlloyExperimentalStringMethods`. The receiver of `s:trim()` has
+/// this type in the check artifact, and the author wrote a string.
+const STRING_STD: &str = "{ contains: (any, string) -> boolean, ends_with: (any, string) -> boolean, pad_end: (any, number, string?) -> string, pad_start: (any, number, string?) -> string, starts_with: (any, string) -> boolean, trim: (any) -> string, trim_end: (any) -> string, trim_start: (any) -> string }";
 
 /// `t:insert(v)` on a table whose type holds an open generic. The type
 /// that gives a table the `table` library waits for the generic, so
@@ -550,6 +556,16 @@ mod tests {
         assert_eq!(
             friendly_text("TypeError: Type '__table_std<{T}>' does not have key 'insert'"),
             "TypeError: the checker gives a table no `insert` method while its type holds an open generic; write `table.insert(...)` here"
+        );
+    }
+
+    #[test]
+    fn a_string_method_receiver_reads_as_a_string() {
+        assert_eq!(
+            friendly_text(&format!(
+                "TypeError: Value of type '{STRING_STD}?' could be nil"
+            )),
+            "TypeError: Value of type 'string?' could be nil"
         );
     }
 

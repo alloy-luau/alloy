@@ -637,6 +637,15 @@ fn alloy_tokens(doc: &Doc, types: &[String], modifiers: &[String]) -> Vec<Token>
             continue;
         }
 
+        // `yield` in a generator. The emit writes a call in its place,
+        // and the child paints that call on other columns.
+        if text == "yield" && alloy_syntax::contextual::keyword_at(src, toks, i) {
+            push(tok.start, tok.end, "keyword", 0);
+            i += 1;
+
+            continue;
+        }
+
         // The head of a `macro`, an `attribute`, or a `message`
         // declaration. The emit keeps none of them as written, so the
         // child draws nothing on the line: the name reads as its call
@@ -1336,6 +1345,38 @@ mod tests {
         assert_eq!(at("levels:"), Some(("parameter", 0)), "{drawn:?}");
         assert_eq!(at("reply("), None, "{drawn:?}");
         assert_eq!(at("reply = 1"), Some(("variable", 0)), "{drawn:?}");
+    }
+
+    /// `yield` paints as a keyword in a generator, and as the name it
+    /// is in a file with no `function*`.
+    #[test]
+    fn a_yield_paints_as_a_keyword_in_a_generator() {
+        let kind_of_yield = |src: &str| {
+            let doc = Doc::new(
+                src.to_string(),
+                1,
+                &EmitOptions::default(),
+                &alloy::luaux::Config::default(),
+                None,
+            );
+            let types = legend();
+            let drawn = alloy_tokens(&doc, &types, &[]);
+            let (line, column) = position_of(src, src.find("yield").unwrap());
+
+            drawn
+                .iter()
+                .find(|t| (t.0, t.1) == (line, column))
+                .map(|t| types[t.3 as usize].clone())
+        };
+
+        assert_eq!(
+            kind_of_yield("function* ids()\n    yield 1\nend\n").as_deref(),
+            Some("keyword")
+        );
+        assert_eq!(
+            kind_of_yield("local function f()\n    yield(1)\nend\n").as_deref(),
+            Some("variable")
+        );
     }
 
     /// The contract body of an `attribute` declaration carries its own

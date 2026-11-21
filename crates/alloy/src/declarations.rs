@@ -944,10 +944,12 @@ pub fn method_signature(
         _ => "public",
     };
     let name = text(*m.path.first()?);
-    let word = match m.body.is_async {
-        Some(_) => "async function",
+    let word = match (m.body.is_async, m.body.generator) {
+        (Some(_), _) => "async function",
 
-        None => "function",
+        (None, Some(_)) => "function*",
+
+        (None, None) => "function",
     };
     let generics = m.body.generics.map(text).unwrap_or("");
     let params: Vec<String> = m.body.params.iter().map(|p| param_text(p, &text)).collect();
@@ -970,10 +972,12 @@ pub fn head_of_function<'a>(
     body: &alloy_syntax::ast::FunctionBody,
     text: &impl Fn(TokSpan) -> &'a str,
 ) -> String {
-    let word = match body.is_async {
-        Some(_) => "async function",
+    let word = match (body.is_async, body.generator) {
+        (Some(_), _) => "async function",
 
-        None => "function",
+        (None, Some(_)) => "function*",
+
+        (None, None) => "function",
     };
     let generics = body.generics.map(text).unwrap_or("");
     let params: Vec<String> = body.params.iter().map(|p| param_text(p, text)).collect();

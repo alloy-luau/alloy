@@ -162,6 +162,34 @@ describe("Result", function()
 		expect(caught._1.err).toBe("a plain table")
 		expect(tostring(caught.trace)).toContain("table")
 	end)
+
+	it("map_or maps an Ok and gives the default for an Err", function()
+		local function double(n)
+			return n * 2
+		end
+		expect(Ok(2):map_or(0, double)).toBe(4)
+		expect(Err("no"):map_or(0, double)).toBe(0)
+	end)
+
+	it("flatten removes one level", function()
+		expect(Ok(Ok(1)):flatten():unwrap()).toBe(1)
+		expect(Ok(Err("inner")):flatten()._1).toBe("inner")
+		expect(Err("outer"):flatten()._1).toBe("outer")
+		local twice = Ok(Ok(Ok(1))):flatten()
+		expect(twice:unwrap():unwrap()).toBe(1)
+		-- An Ok that holds no Result stays as it is.
+		expect(Ok(1):flatten():unwrap()).toBe(1)
+	end)
+
+	it("all collects every Ok, or gives the first Err", function()
+		local every = Result.all({ Ok(1), Ok(2), Ok(3) })
+		expect(every:is_ok()).toBe(true)
+		expect(every:unwrap():len()).toBe(3)
+		expect(every:unwrap()[2]).toBe(2)
+		local first = Err("first")
+		expect(Result.all({ Ok(1), first, Err("second") })).toBe(first)
+		expect(Result.all({}):unwrap():len()).toBe(0)
+	end)
 end)
 
 return nil

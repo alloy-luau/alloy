@@ -66,16 +66,20 @@ impl State {
             return Vec::new();
         };
         let taken = labels_of(result);
+        let table = table_receiver(&doc.source, offset, &taken)
+            && self.flag_on(uri, &alloy::fflags::TABLE_STD_INHERITANCE);
+        let string = string_receiver(&doc.source, offset, &taken)
+            && self.flag_on(uri, &alloy::fflags::STRING_METHODS);
+        let methods: &[(&str, &str, &str)] = match (table, string) {
+            (true, _) => TABLE_METHODS,
 
-        if !table_receiver(&doc.source, offset, &taken)
-            || !self.flag_on(uri, &alloy::fflags::TABLE_STD_INHERITANCE)
-        {
-            return Vec::new();
-        }
+            (_, true) => STRING_METHODS,
 
+            _ => return Vec::new(),
+        };
         let snippets = self.snippets;
 
-        TABLE_METHODS
+        methods
             .iter()
             .filter(|(label, _, _)| !taken.iter().any(|t| t == label))
             .map(|(label, signature, doc)| {
@@ -86,7 +90,7 @@ impl State {
                     "sortText": format!("1{label}"),
                     "documentation": {
                         "kind": "markdown",
-                        "value": format!("{doc}\n\nFrom the `table` library: `table.{label}`."),
+                        "value": format!("{doc}{}", library_note(table, label)),
                     },
                 });
                 set_call(&mut item, label, &as_type(signature), snippets);
@@ -114,19 +118,29 @@ impl State {
         let start = src[..offset].trim_end_matches(is_word).len();
         let rest = &src[offset..];
         let end = offset + rest.len() - rest.trim_start_matches(is_word).len();
-        let (label, signature, about) = TABLE_METHODS
-            .iter()
-            .find(|(label, _, _)| *label == &src[start..end])?;
+        let word = &src[start..end];
+        let find = |list: &'static [(&str, &str, &str)]| list.iter().find(|m| m.0 == word);
+        let (table, (label, signature, about)) = match find(TABLE_METHODS) {
+            Some(m) => (true, m),
+
+            None => (false, find(STRING_METHODS)?),
+        };
+        let flag = match table {
+            true => &alloy::fflags::TABLE_STD_INHERITANCE,
+
+            false => &alloy::fflags::STRING_METHODS,
+        };
 
         if !src[..start].ends_with(':')
             || !(child.contains("(any,") || child.contains("(any)"))
-            || !self.flag_on(uri, &alloy::fflags::TABLE_STD_INHERITANCE)
+            || !self.flag_on(uri, flag)
         {
             return None;
         }
 
         Some(format!(
-            "```alloy\nfunction {label}{signature}\n```\n{about}\n\nFrom the `table` library: `table.{label}`."
+            "```alloy\nfunction {label}{signature}\n```\n{about}{}",
+            library_note(table, label)
         ))
     }
 
@@ -1273,6 +1287,72 @@ const TABLE_METHODS: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// The methods a string takes on top of the `string` library: the name,
+/// the signature with no receiver, and what the method does. The names
+/// are `alloy::desugar::STRING_METHODS`; a test holds the two lists
+/// equal.
+const STRING_METHODS: &[(&str, &str, &str)] = &[
+    (
+        "trim",
+        "(): string",
+        "The string with no whitespace at its start or its end.",
+    ),
+    (
+        "trim_start",
+        "(): string",
+        "The string with no whitespace at its start.",
+    ),
+    (
+        "trim_end",
+        "(): string",
+        "The string with no whitespace at its end.",
+    ),
+    (
+        "starts_with",
+        "(prefix: string): boolean",
+        "Whether the string starts with `prefix`.",
+    ),
+    (
+        "ends_with",
+        "(suffix: string): boolean",
+        "Whether the string ends with `suffix`.",
+    ),
+    (
+        "contains",
+        "(part: string): boolean",
+        "Whether the string holds `part`. `part` is plain text, not a pattern.",
+    ),
+    (
+        "pad_start",
+        "(width: number, fill: string?): string",
+        "The string with `fill` in front, a space with no `fill`, until it is `width` bytes long.",
+    ),
+    (
+        "pad_end",
+        "(width: number, fill: string?): string",
+        "The string with `fill` after it, a space with no `fill`, until it is `width` bytes long.",
+    ),
+];
+
+/// The last line of the documentation of a method: where a method of
+/// the `table` library comes from.
+fn library_note(table: bool, label: &str) -> String {
+    match table {
+        true => format!("\n\nFrom the `table` library: `table.{label}`."),
+
+        false => String::new(),
+    }
+}
+
+/// Whether the caret follows a `:` on a string. The child lists the
+/// functions of the `string` library there.
+fn string_receiver(source: &str, offset: usize, taken: &[String]) -> bool {
+    after_colon(source, offset)
+        && ["upper", "gsub"]
+            .iter()
+            .all(|m| taken.iter().any(|t| t == m))
+}
+
 /// Whether the caret follows a `:` on a value that takes the methods of
 /// the `table` library. The child lists no member for a plain table, so
 /// an empty answer after `x:` reads as one. An Array has members of its
@@ -1282,6 +1362,12 @@ const TABLE_METHODS: &[(&str, &str, &str)] = &[
 /// does not resolve gets the list too. Ask the child for the hover of
 /// the receiver if that matters.
 fn table_receiver(source: &str, offset: usize, taken: &[String]) -> bool {
+    after_colon(source, offset) && (taken.is_empty() || taken.iter().any(|t| t == "swap_remove"))
+}
+
+/// Whether the caret follows the `:` of a method call, and not the `:`
+/// of a type, a cast, or a ternary.
+fn after_colon(source: &str, offset: usize) -> bool {
     let head = source[..offset].trim_end_matches(|c: char| c.is_alphanumeric() || c == '_');
 
     // A `::` is a cast, and a `:` after a space starts a type.
@@ -1301,11 +1387,7 @@ fn table_receiver(source: &str, offset: usize, taken: &[String]) -> bool {
     let in_params =
         words.contains("function") && words.matches('(').count() > words.matches(')').count();
 
-    if declares || in_params {
-        return false;
-    }
-
-    taken.is_empty() || taken.iter().any(|t| t == "swap_remove")
+    !(declares || in_params)
 }
 
 fn takes_a_self_member(source: &str, offset: usize) -> bool {
@@ -1430,6 +1512,22 @@ mod tests {
     fn the_table_methods_are_the_ones_the_emit_routes() {
         let listed: Vec<&str> = TABLE_METHODS.iter().map(|(label, _, _)| *label).collect();
         assert_eq!(listed, alloy::desugar::TABLE_METHODS);
+    }
+
+    #[test]
+    fn the_string_methods_are_the_ones_the_emit_routes() {
+        let listed: Vec<&str> = STRING_METHODS.iter().map(|(label, _, _)| *label).collect();
+        assert_eq!(listed, alloy::desugar::STRING_METHODS);
+    }
+
+    #[test]
+    fn a_colon_on_a_string_takes_the_string_methods() {
+        let string = ["upper".to_string(), "gsub".to_string()];
+        let array = ["push".to_string(), "swap_remove".to_string()];
+
+        assert!(string_receiver("name:", 5, &string));
+        assert!(!string_receiver("name:", 5, &array));
+        assert!(!string_receiver("local name:", 11, &string));
     }
 
     #[test]

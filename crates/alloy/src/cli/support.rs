@@ -380,7 +380,7 @@ fn data_problems(path: &Path, source: &str) -> Vec<alloy::Diagnostic> {
     let dir = path.parent().unwrap_or(Path::new("."));
     let mut out = Vec::new();
 
-    for r in alloy::data::references(source) {
+    for r in alloy::data::module_references(source) {
         let Some(format) = alloy::data::Format::of(&r.path) else {
             continue;
         };

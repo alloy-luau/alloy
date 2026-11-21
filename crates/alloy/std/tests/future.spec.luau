@@ -170,6 +170,139 @@ describe("Future", function()
 		expect(p).toBe("p")
 		expect(q).toBe("q")
 	end)
+
+	-- A body that yields and is never resumed: the Future stays pending.
+	local function pending()
+		return alloy.future(function()
+			coroutine.yield()
+		end)
+	end
+
+	it("timeout passes a settled Future through", function()
+		expect(alloy.await(Future.timeout(Future.resolve(7), 1))).toBe(7)
+		expect(function()
+			alloy.await(Future.timeout(Future.reject("bad"), 1))
+		end).toThrow("bad")
+		local a, b = alloy.await(Future.timeout(
+			alloy.future(function()
+				return "a", "b"
+			end),
+			1
+		))
+		expect(a).toBe("a")
+		expect(b).toBe("b")
+	end)
+
+	-- A delay runs at once in this VM, so a pending Future times out at once.
+	it("timeout rejects when the Future is still pending", function()
+		local f = Future.timeout(pending(), 1)
+		expect(f:is_settled()).toBe(true)
+		expect(function()
+			alloy.await(f)
+		end).toThrow("timeout")
+	end)
+
+	it("retry calls again after an error, up to the count", function()
+		local calls = 0
+		local f = Future.retry(function()
+			calls += 1
+			if calls < 3 then
+				error("not yet")
+			end
+			return calls
+		end, 5, 0.1)
+		expect(alloy.await(f)).toBe(3)
+		expect(calls).toBe(3)
+	end)
+
+	it("retry rejects with the last error", function()
+		local calls = 0
+		local f = Future.retry(function()
+			calls += 1
+			error(`try {calls}`, 0)
+		end, 2)
+		expect(calls).toBe(2)
+		local ok, err = pcall(alloy.await, f)
+		expect(ok).toBe(false)
+		expect(err).toBe("try 2")
+	end)
+
+	it("finally runs on a value, on a failure, and on a cancel", function()
+		local ran = 0
+		local function count()
+			ran += 1
+		end
+		local ok = Future.resolve(1)
+		expect(ok:finally(count)).toBe(ok)
+		Future.reject("no"):finally(count)
+		expect(ran).toBe(2)
+		local waits = pending()
+		waits:finally(count)
+		expect(ran).toBe(2)
+		waits:cancel()
+		expect(ran).toBe(3)
+	end)
+
+	it("from_signal settles with the next event and disconnects", function()
+		local signal = alloy.Signal.new()
+		local f = Future.from_signal(signal)
+		expect(f:is_settled()).toBe(false)
+		signal:Fire("a", 2)
+		local name, n = alloy.await(f)
+		expect(name).toBe("a")
+		expect(n).toBe(2)
+		expect(signal._head).toBeNil()
+		signal:Fire("b", 3)
+		expect(alloy.await(f)).toBe("a")
+	end)
+
+	it("from_signal takes any source with connect", function()
+		local handler
+		local disconnected = false
+		local source = {
+			connect = function(_, h)
+				handler = h
+				return {
+					disconnect = function()
+						disconnected = true
+					end,
+				}
+			end,
+		}
+		local f = Future.from_signal(source)
+		handler(5)
+		expect(alloy.await(f)).toBe(5)
+		expect(disconnected).toBe(true)
+	end)
+
+	-- A delay runs at once in this VM, so each call reaches `f`. The
+	-- test holds the arguments and the wrapper shape.
+	it("debounce passes the arguments of the call", function()
+		local seen = {}
+		local save = Future.debounce(function(a, b)
+			table.insert(seen, a + b)
+		end, 0.5)
+		expect(save(1, 2)).toBeNil()
+		save(3, 4)
+		expect(seen).toEqual({ 3, 7 })
+	end)
+
+	it("throttle drops a call inside the window", function()
+		local calls = {}
+		local fire = Future.throttle(function(v)
+			table.insert(calls, v)
+		end, 1000)
+		fire("a")
+		fire("b")
+		fire("c")
+		expect(calls).toEqual({ "a" })
+		local every = Future.throttle(function(v)
+			table.insert(calls, v)
+		end, 0)
+		every("d")
+		every("e")
+		expect(calls).toEqual({ "a", "d", "e" })
+	end)
 end)
 
 return nil

@@ -116,6 +116,19 @@ pub(crate) fn is_variant_name(name: &str) -> bool {
 }
 
 /// `MAX` and `MAX_HP`: a constant's name, never a variant's or a binding's.
+/// The report for a match that leaves members of `owner` with no arm.
+/// The language server reads the names between the backticks to write
+/// the missing arms.
+fn no_arm_message(owner: &str, missing: &[String]) -> String {
+    let missing: Vec<&str> = missing.iter().map(|v| v.as_str()).collect();
+
+    format!(
+        "this match is not exhaustive: `{owner}` has no arm for {}; add {} or a `default` arm",
+        list_names(&missing),
+        if missing.len() == 1 { "it" } else { "them" }
+    )
+}
+
 fn is_screaming(name: &str) -> bool {
     name.len() > 1
         && name.chars().any(char::is_uppercase)
@@ -1494,6 +1507,14 @@ impl<'s> Desugar<'s> {
         reported
     }
 
+    /// Whether the arms cover every member of the head's string union.
+    /// The union comes from annotation text, so the value can be wider
+    /// at run time. The emit for a covered match raises on such a
+    /// value, and `unreachable_default` does not read this answer.
+    pub(crate) fn covers_union(gaps: &Option<(String, Vec<String>)>) -> bool {
+        gaps.as_ref().is_some_and(|(_, left)| left.is_empty())
+    }
+
     /// Checks single-level exhaustiveness over a known enum.
     pub(crate) fn match_is_exhaustive(&self, arms: &[&[Pattern]], guards: &[bool]) -> bool {
         // One scrutinee; a guarded arm proves nothing.
@@ -1595,6 +1616,16 @@ impl<'s> Desugar<'s> {
                 ),
                 fix: Some(crate::lint::Fix::new(self.src, from, to, "")),
             });
+        }
+    }
+
+    /// The diagnostic for a match that is not exhaustive: the members
+    /// of the head's string union with no arm, or else the enum report.
+    fn gaps_message(&self, gaps: &Option<(String, Vec<String>)>, arms: &[&[Pattern]]) -> String {
+        match gaps {
+            Some((ty, left)) => no_arm_message(ty, left),
+
+            None => self.not_exhaustive_message(arms),
         }
     }
 
@@ -1700,16 +1731,176 @@ impl<'s> Desugar<'s> {
             }
         }
 
-        let missing: Vec<&str> = missing.iter().map(|v| v.as_str()).collect();
-
         // The reader knows `Geo_Kind` as `Geo.Kind`.
-        let e = self.display_name(&e);
+        no_arm_message(&self.display_name(&e), &missing)
+    }
 
-        format!(
-            "this match is not exhaustive: `{e}` has no arm for {}; add {} or a `default` arm",
-            list_names(&missing),
-            if missing.len() == 1 { "it" } else { "them" }
-        )
+    /// The string union that the type of a match head names, as the
+    /// annotation writes the type, with each member: `"idle"` for a
+    /// literal and `nil` for an optional type. `None` when the head is
+    /// not a plain name, or when the text of this file does not give
+    /// the name one annotation that is such a union.
+    fn scrutinee_union(&self, head: &Expr) -> Option<(String, Vec<String>)> {
+        if !self.options.fflags.on(&crate::fflags::STRING_UNION_MATCH) {
+            return None;
+        }
+
+        match head {
+            Expr::Paren { inner, .. } => self.scrutinee_union(inner),
+
+            Expr::Name(n) => {
+                let name = self.text_of(*n);
+
+                // A match expression substitutes its bindings and adds
+                // none to the scopes, so `renames` holds them.
+                if !self.is_local(name)
+                    || self.untyped_names.contains(name)
+                    || self.renames.iter().any(|m| m.contains_key(name))
+                {
+                    return None;
+                }
+
+                let ty = self.binding_types.get(name)?;
+                let toks = alloy_syntax::lexer::lex(ty).ok()?.toks;
+                let (members, end) = self.string_union(ty, &toks, 0, 0)?;
+
+                (end == toks.len()).then(|| (ty.clone(), members))
+            }
+
+            _ => None,
+        }
+    }
+
+    /// The members of the string union that starts at token `from`,
+    /// and the token after it. A name in the union is a `type` alias
+    /// of this file, and its members take its place.
+    fn string_union(
+        &self,
+        src: &str,
+        toks: &[Tok],
+        from: usize,
+        depth: u8,
+    ) -> Option<(Vec<String>, usize)> {
+        let text = |i: usize| toks.get(i).map(|t| t.text(src));
+        let mut members: Vec<String> = Vec::new();
+        // Luau accepts a `|` before the first member.
+        let mut at = from + usize::from(text(from) == Some("|"));
+
+        loop {
+            let tok = toks.get(at)?;
+
+            match tok.kind {
+                TokKind::Str {
+                    inner_start,
+                    inner_end,
+                } => members.push(format!(
+                    "\"{}\"",
+                    &src[inner_start as usize..inner_end as usize]
+                )),
+
+                TokKind::Ident if tok.text(src) == "nil" => members.push("nil".to_string()),
+
+                TokKind::Ident => members.extend(self.alias_union(tok.text(src), depth)?),
+
+                _ => return None,
+            }
+
+            at += 1;
+
+            if text(at) == Some("?") {
+                members.push("nil".to_string());
+                at += 1;
+            }
+
+            if text(at) != Some("|") {
+                return Some((members, at));
+            }
+
+            at += 1;
+        }
+    }
+
+    /// The members of a `type` alias of this file whose body is a
+    /// string union. `None` for an alias that the file does not declare
+    /// one time, that takes type parameters, or that has another body.
+    fn alias_union(&self, name: &str, depth: u8) -> Option<Vec<String>> {
+        // An alias that names itself has no end.
+        if depth > 8 {
+            return None;
+        }
+
+        let text = |i: usize| self.toks.get(i).map(|t| t.text(self.src));
+        let mut heads = (0..self.toks.len()).filter(|&i| {
+            text(i) == Some("type") && text(i + 1) == Some(name) && text(i + 2) == Some("=")
+        });
+        let head = heads.next()?;
+
+        if heads.next().is_some() {
+            return None;
+        }
+
+        let (members, end) = self.string_union(self.src, self.toks, head + 3, depth + 1)?;
+
+        // These tokens continue the type: `"a" & T`, `M.T`, `T<U>`, `T[]`.
+        (!matches!(text(end), Some("&" | "." | "<" | "["))).then_some(members)
+    }
+
+    /// The members of the head's string union that no arm covers, with
+    /// the type as the annotation writes it. An arm covers a member
+    /// when it has no guard and compares with that literal. `None` when
+    /// the head has no such type, or an arm holds another pattern.
+    pub(crate) fn union_gaps(
+        &self,
+        scrutinees: &[Expr],
+        arms: &[&[Pattern]],
+        guards: &[bool],
+    ) -> Option<(String, Vec<String>)> {
+        let [head] = scrutinees else {
+            return None;
+        };
+        let (ty, mut left) = self.scrutinee_union(head)?;
+
+        for (pats, guarded) in arms.iter().zip(guards) {
+            if *guarded {
+                continue;
+            }
+
+            let [p] = pats else {
+                return None;
+            };
+
+            for q in or_sides(p) {
+                let covered = match q {
+                    Pattern::Literal(v) => match v.as_ref() {
+                        Expr::String(s) => match self.toks[s.start as usize].kind {
+                            TokKind::Str {
+                                inner_start,
+                                inner_end,
+                            } => format!(
+                                "\"{}\"",
+                                &self.src[inner_start as usize..inner_end as usize]
+                            ),
+
+                            _ => continue,
+                        },
+
+                        Expr::Nil(_) => "nil".to_string(),
+
+                        _ => continue,
+                    },
+
+                    _ => return None,
+                };
+
+                left.retain(|m| *m != covered);
+            }
+        }
+
+        // `"a" | "a"` and `T? | nil` write one member two times.
+        let mut seen = HashSet::new();
+        left.retain(|m| seen.insert(m.clone()));
+
+        Some((ty, left))
     }
 
     /// The path of one case the arms leave out, `Some(Err(_))`, read
@@ -2265,14 +2456,16 @@ impl<'s> Desugar<'s> {
         let guards: Vec<bool> = arms.iter().map(|a| a.guard.is_some()).collect();
 
         let exhaustive = self.match_is_exhaustive(&pats, &guards);
+        let gaps = self.union_gaps(scrutinees, &pats, &guards);
+        let total = exhaustive || Self::covers_union(&gaps);
         // A rejected pattern makes the arm list unreliable, so the
         // exhaustiveness message would name the wrong variant.
         let bad_arm = self.check_variant_patterns(&pats, scrutinees, true);
 
         // A match the parse recovered in lost the arm it could not
         // read, so what is left proves nothing about coverage.
-        if default.is_none() && !exhaustive && !bad_arm && !recovered {
-            let msg = self.not_exhaustive_message(&pats);
+        if default.is_none() && !total && !bad_arm && !recovered {
+            let msg = self.gaps_message(&gaps, &pats);
             self.diagnose(span, &msg);
         }
 
@@ -2317,6 +2510,8 @@ impl<'s> Desugar<'s> {
             self.scopes.push(HashSet::new());
 
             for name in self.bind_names(&c.binds) {
+                self.untyped_names.insert(name.clone());
+
                 if let Some(scope) = self.scopes.last_mut() {
                     scope.insert(name);
                 }
@@ -2348,7 +2543,7 @@ impl<'s> Desugar<'s> {
         // checker reads a path that falls through. The raise closes it,
         // and an exhaustive match whose arms all return counts as one. A
         // last arm that takes every value is the `else` already.
-        if default.is_none() && exhaustive && !arms.is_empty() && !catch_all {
+        if default.is_none() && total && !arms.is_empty() && !catch_all {
             self.generate(
                 end_tok.start,
                 "else error(\"match: no arm covers this value\", 2) ",
@@ -2377,12 +2572,14 @@ impl<'s> Desugar<'s> {
         self.guard_lints(m.arms.iter().filter_map(|a| a.guard.as_ref()));
         let guards: Vec<bool> = m.arms.iter().map(|a| a.guard.is_some()).collect();
         let exhaustive = self.match_is_exhaustive(&pats, &guards);
+        let gaps = self.union_gaps(&m.scrutinees, &pats, &guards);
+        let total = exhaustive || Self::covers_union(&gaps);
         // A rejected pattern makes the arm list unreliable, so the
         // exhaustiveness message would name the wrong variant.
         let bad_arm = self.check_variant_patterns(&pats, &m.scrutinees, true);
 
-        if m.default.is_none() && !exhaustive && !bad_arm && !m.recovered {
-            let msg = self.not_exhaustive_message(&pats);
+        if m.default.is_none() && !total && !bad_arm && !m.recovered {
+            let msg = self.gaps_message(&gaps, &pats);
             self.diagnose(m.span, &msg);
         }
 
@@ -2435,7 +2632,7 @@ impl<'s> Desugar<'s> {
             let arm_start = self.byte_start(arm.span);
             self.copy(cursor, arm_start);
             let (test, c) = self.arm_test(&arm.patterns, &paths, arm.guard.as_ref());
-            let mut is_last_without_default = m.default.is_none() && i == last_index && exhaustive;
+            let mut is_last_without_default = m.default.is_none() && i == last_index && total;
 
             // The ship tests the last arm of an exhaustive match too, and
             // a value no arm names raises. An `else` there gave an old
@@ -2496,7 +2693,7 @@ impl<'s> Desugar<'s> {
                 cursor,
                 " else error(\"match: no arm covers this value\", 2)",
             );
-        } else if !exhaustive {
+        } else if !total {
             self.generate(cursor, " else nil");
         }
 
@@ -4702,5 +4899,217 @@ mod tests {
                 "{body}\n{found:?}"
             );
         }
+    }
+
+    const GENERIC: &str = "this match is not exhaustive; add a `default` arm";
+
+    /// A compile with `AlloyExperimentalStringUnionMatch` on.
+    fn union_compiled(src: &str) -> Result<crate::Output, crate::CompileError> {
+        let options = crate::EmitOptions {
+            fflags: toml::from_str("AlloyExperimentalStringUnionMatch = true").unwrap(),
+            ..crate::EmitOptions::default()
+        };
+
+        crate::compile_with(src, &options)
+    }
+
+    fn union_messages(src: &str) -> Vec<String> {
+        union_compiled(src)
+            .unwrap()
+            .diagnostics
+            .into_iter()
+            .map(|d| d.message)
+            .collect()
+    }
+
+    /// With the flag off a match over a string union keeps the rule of
+    /// any literal match: it needs a `default` arm.
+    #[test]
+    fn a_string_union_match_needs_its_flag() {
+        let src = "type Mode = \"a\" | \"b\"\nlocal function f(m: Mode)\n    match m with\n        case \"a\" then print(1)\n        case \"b\" then print(2)\n    end\nend\nf(\"a\")\n";
+        let got: Vec<String> = crate::compile(src)
+            .unwrap()
+            .diagnostics
+            .into_iter()
+            .map(|d| d.message)
+            .collect();
+        assert_eq!(got, [GENERIC]);
+        assert!(union_messages(src).is_empty());
+    }
+
+    /// A match with no `default` over a name whose annotation is a
+    /// union of string literals names each literal with no arm, in the
+    /// words of the enum report. Each form of the match and of the
+    /// declaration reports.
+    #[test]
+    fn a_match_over_a_string_union_names_the_missing_literals() {
+        let alias = "type Mode = \"idle\" | \"run\" | \"jump\"\n";
+        let jump = "this match is not exhaustive: `Mode` has no arm for `\"jump\"`; add it or a `default` arm";
+        let cases = [
+            // The statement form, on a parameter.
+            "local function f(m: Mode)\n    match m with\n        case \"idle\" then print(1)\n        case \"run\" then print(2)\n    end\nend\nf(\"idle\")\n",
+            // The expression form.
+            "local function f(m: Mode)\n    return match m with\n        case \"idle\" then 1\n        case \"run\" then 2\n    end\nend\nprint(f(\"idle\"))\n",
+            // `or` alternatives in one arm.
+            "local function f(m: Mode)\n    return match m with\n        case \"idle\" or \"run\" then 1\n    end\nend\nprint(f(\"idle\"))\n",
+            // A guarded arm does not cover its literal.
+            "local function f(m: Mode, ok: boolean)\n    return match m with\n        case \"idle\" or \"run\" then 1\n        case \"jump\" where ok then 2\n    end\nend\nprint(f(\"idle\", true))\n",
+            // A local and a `const`.
+            "local m: Mode = \"idle\"\nmatch m with\n    case \"idle\" then print(1)\n    case \"run\" then print(2)\nend\n",
+            "const m: Mode = \"idle\"\nconst r = match m with\n    case \"idle\" then 1\n    case \"run\" then 2\nend\nprint(r)\n",
+        ];
+
+        for body in cases {
+            assert_eq!(union_messages(&format!("{alias}{body}")), [jump], "{body}");
+        }
+
+        // An inline union has no name, so the report writes the type.
+        let inline = "local function f(k: \"a\" | \"b\")\n    match k with\n        case \"a\" then print(1)\n    end\nend\nf(\"a\")\n";
+        assert_eq!(
+            union_messages(inline),
+            [
+                "this match is not exhaustive: `\"a\" | \"b\"` has no arm for `\"b\"`; add it or a `default` arm"
+            ]
+        );
+
+        // An alias of an alias, with members of its own.
+        let chain = "type Ground = \"idle\" | \"run\"\ntype Mode = Ground | \"jump\" | \"fall\"\nlocal function f(m: Mode)\n    match m with\n        case \"idle\" then print(1)\n        case \"jump\" then print(2)\n    end\nend\nf(\"idle\")\n";
+        assert_eq!(
+            union_messages(chain),
+            [
+                "this match is not exhaustive: `Mode` has no arm for `\"run\"` and `\"fall\"`; add them or a `default` arm"
+            ]
+        );
+
+        assert_eq!(crate::docs::kind_for(jump), "ExhaustiveMatch");
+    }
+
+    /// `T?` and `T | nil` add `nil` to the union, and `case nil` is its
+    /// arm.
+    #[test]
+    fn an_optional_string_union_needs_an_arm_for_nil() {
+        let alias = "type Mode = \"idle\" | \"run\"\ntype Maybe = Mode?\n";
+
+        for ty in ["Maybe", "Mode?", "Mode | nil", "\"idle\" | \"run\" | nil"] {
+            let head = format!(
+                "{alias}local function f(m: {ty})\n    return match m with\n        case \"idle\" then 1\n        case \"run\" then 2\n"
+            );
+            let tail = "    end\nend\nprint(f(\"idle\"))\n";
+
+            assert_eq!(
+                union_messages(&format!("{head}{tail}")),
+                [format!(
+                    "this match is not exhaustive: `{ty}` has no arm for `nil`; add it or a `default` arm"
+                )]
+            );
+            let full = format!("{head}        case nil then 3\n{tail}");
+            assert!(
+                union_messages(&full).is_empty(),
+                "{ty}: {:?}",
+                union_messages(&full)
+            );
+        }
+    }
+
+    /// Arms that cover every literal of the union need no `default`.
+    /// The type comes from annotation text and the value can be wider
+    /// at run time, so the emit raises on a value with no arm, and a
+    /// `default` under such arms draws no `unreachable_default`.
+    #[test]
+    fn a_match_that_covers_a_string_union_is_exhaustive() {
+        let alias = "type Mode = \"idle\" | \"run\" | \"jump\"\n";
+        let statement = format!(
+            "{alias}local function f(m: Mode)\n    match m with\n        case \"idle\" then print(1)\n        case \"run\" or \"jump\" then print(2)\n    end\nend\nf(\"idle\")\n"
+        );
+        let value = format!(
+            "{alias}local function f(m: Mode)\n    return match m with\n        case \"idle\" then 1\n        case 'run' then 2\n        case \"jump\" then 3\n    end\nend\nprint(f(\"idle\"))\n"
+        );
+        let with_default = format!(
+            "{alias}local function f(m: Mode)\n    match m with\n        case \"idle\" then print(1)\n        case \"run\" or \"jump\" then print(2)\n        default print(3)\n    end\nend\nf(\"idle\")\n"
+        );
+        let binding = format!(
+            "{alias}local function f(m: Mode)\n    match m with\n        case \"idle\" then print(1)\n        case other then print(other)\n    end\nend\nf(\"idle\")\n"
+        );
+
+        for src in [&statement, &value, &with_default, &binding] {
+            assert!(
+                union_messages(src).is_empty(),
+                "{src}\n{:?}",
+                union_messages(src)
+            );
+            assert!(!lint_names(src).contains(&"unreachable_default"), "{src}");
+        }
+
+        for src in [&statement, &value] {
+            let out = union_compiled(src).unwrap().ship;
+            assert!(
+                out.contains("else error(\"match: no arm covers this value\", 2)"),
+                "{out}"
+            );
+        }
+    }
+
+    /// The check reads text. When the text does not give the head one
+    /// annotation that resolves in this file, the report names no
+    /// literal: a wrong name is worse than the plain report.
+    #[test]
+    fn a_string_union_the_text_cannot_resolve_names_no_literal() {
+        let alias = "type Mode = \"idle\" | \"run\" | \"jump\"\n";
+        let arms = "        case \"idle\" then print(1)\n        case \"run\" then print(2)\n    end\nend\nprint(f)\n";
+        let heads = [
+            // A local with no annotation hides the parameter.
+            "local function f(m: Mode)\n    local m = tostring(m)\n    match m with\n",
+            // No annotation at all.
+            "local function f(m)\n    match m with\n",
+            // The same name with another annotation in this file.
+            "local function g(m: string)\n    print(m)\nend\nprint(g)\nlocal function f(m: Mode)\n    match m with\n",
+            // A destructured field has no annotation slot.
+            "local function g(m: Mode)\n    print(m)\nend\nprint(g)\nlocal function f(t: { m: string })\n    local { m } = t\n    match m with\n",
+            // The name is in no scope here; the annotation is from `g`.
+            "local function g(m: Mode)\n    print(m)\nend\nprint(g)\nlocal function f()\n    match m with\n",
+            // The head is not a plain name.
+            "local function f(t: { m: Mode })\n    match t.m with\n",
+            // The alias is not of this file.
+            "local function f(m: Other.Mode)\n    match m with\n",
+            "local function f(m: Elsewhere)\n    match m with\n",
+            // Type parameters, and a member that is no string literal.
+            "type Pick<T> = \"idle\" | \"run\" | T\nlocal function f(m: Pick<\"jump\">)\n    match m with\n",
+            "type Wide = Mode | number\nlocal function f(m: Wide)\n    match m with\n",
+            "type Both = Mode & string\nlocal function f(m: Both)\n    match m with\n",
+            "local function f(m: Mode | string)\n    match m with\n",
+            "local function f(m: { Mode })\n    match m with\n",
+            // Two declarations of the alias name.
+            "local function g()\n    type Mode = \"idle\" | \"run\"\n    local m: Mode = \"idle\"\n    print(m)\nend\nprint(g)\nlocal function f(m: Mode)\n    match m with\n",
+        ];
+
+        for head in heads {
+            assert_eq!(
+                union_messages(&format!("{alias}{head}{arms}")),
+                [GENERIC],
+                "{head}"
+            );
+        }
+
+        // An arm binds the name again, in each form of the match.
+        let rebound = format!(
+            "{alias}local function f(m: Mode, t: {{ string }})\n    match t with\n        case [ m ] then\n            match m with\n                case \"idle\" then print(1)\n            end\n        default print(2)\n    end\n    print(m)\nend\nprint(f)\n"
+        );
+        assert_eq!(union_messages(&rebound), [GENERIC]);
+        let rebound = format!(
+            "{alias}local function f(m: Mode, t: {{ string }})\n    print(m)\n    return match t with\n        case [ m ] then (match m with\n            case \"idle\" then 1\n        end)\n        default 2\n    end\nend\nprint(f)\n"
+        );
+        assert_eq!(union_messages(&rebound), [GENERIC]);
+
+        // An arm with another kind of pattern.
+        let mixed = format!(
+            "{alias}local function f(m: Mode)\n    match m with\n        case \"idle\" then print(1)\n        case {{ kind = \"x\" }} then print(2)\n    end\nend\nprint(f)\n"
+        );
+        assert_eq!(union_messages(&mixed), [GENERIC]);
+
+        // Two heads.
+        let two = format!(
+            "{alias}local function f(m: Mode, n: Mode)\n    match m, n with\n        case \"idle\", \"idle\" then print(1)\n    end\nend\nprint(f)\n"
+        );
+        assert_eq!(union_messages(&two), [GENERIC]);
     }
 }

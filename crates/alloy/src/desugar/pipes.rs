@@ -126,7 +126,7 @@ impl<'s> Desugar<'s> {
     /// Renders one stage aside, with `topic` as its `_`, and gives back
     /// the hoists it asked for. The hoists go in front of the stage and
     /// not in front of the statement: they may read the stage before.
-    fn pipe_stage(
+    pub(crate) fn pipe_stage(
         &mut self,
         stage: &Expr,
         topic: Option<String>,

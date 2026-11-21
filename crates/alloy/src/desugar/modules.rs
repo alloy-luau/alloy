@@ -442,6 +442,40 @@ impl<'s> Desugar<'s> {
     /// Reports a std name the file writes with no import, once per
     /// name: the first use carries the report, and its fix writes the
     /// import that covers every use.
+    /// Reports `Array.range` and the other functions of `STD_ADDITIONS`
+    /// with `AlloyExperimentalStdAdditions` off. The check reads the
+    /// name of a std module in front of the dot, so it is exact. A
+    /// method call, `xs:zip(ys)`, names no module, and a struct of the
+    /// project can have a `zip` of its own, so the new methods are not
+    /// behind the flag.
+    pub(crate) fn check_std_addition(&mut self, e: &Expr) {
+        let Expr::Index {
+            object,
+            key: IndexKey::Field(field),
+            ..
+        } = e
+        else {
+            return;
+        };
+        let Expr::Name(module) = object.as_ref() else {
+            return;
+        };
+        let (module, name) = (self.text_of(*module), self.text_of(*field));
+
+        if STD_ADDITIONS.contains(&(module, name))
+            && !self.is_local(module)
+            && !self.options.fflags.on(&crate::fflags::STD_ADDITIONS)
+        {
+            self.diagnose(
+                *field,
+                &format!(
+                    "`{module}.{name}` is not final; set `{} = true` under `[fflags]` in alloy.toml to use it",
+                    crate::fflags::STD_ADDITIONS.name
+                ),
+            );
+        }
+    }
+
     pub(crate) fn check_std_name(&mut self, at: TokSpan, name: &str) {
         if crate::std_names::is_std_name(name)
             && !self.options.std_globals.ambient(name)
@@ -567,6 +601,98 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /// `import inline data from "./data.json"`: a `local` with the
+    /// document as a table, on one line. A list in braces takes the
+    /// value of each key it names, so the other keys stay out of the
+    /// emit. A line that reports binds `nil`, so its names still exist.
+    fn inline_import(&mut self, i: &Import, word: TokSpan, bare: &str) {
+        let anchor = self.byte_start(i.span);
+        let on = self.options.fflags.on(&crate::fflags::INLINE_DATA_SYNTAX);
+
+        if !on {
+            self.diagnose(
+                word,
+                &format!(
+                    "`import inline` is not final; set `{} = true` under `[fflags]` in alloy.toml to use it",
+                    crate::fflags::INLINE_DATA_SYNTAX.name
+                ),
+            );
+        }
+
+        let doc = if crate::data::Format::of(bare).is_none() {
+            Err("`import inline` reads a `.json` or `.toml` file".to_string())
+        } else {
+            self.options
+                .import_inline_data
+                .iter()
+                .find(|(s, _)| s == bare)
+                .map_or_else(
+                    || Err(format!("no data file at `{bare}`")),
+                    |(_, d)| d.clone(),
+                )
+        };
+
+        let doc = match doc {
+            Ok(doc) => Some(doc),
+
+            Err(message) => {
+                if on {
+                    self.diagnose(i.path, &message);
+                }
+
+                None
+            }
+        };
+
+        let (names, values): (Vec<String>, Vec<String>) = match &i.kind {
+            ImportKind::Default(n) | ImportKind::Namespace(n, _) | ImportKind::Both(n, _) => {
+                if !matches!(&i.kind, ImportKind::Default(_)) {
+                    self.diagnose(
+                        i.span,
+                        "`import inline` takes one name or one list in braces",
+                    );
+                }
+
+                let whole = doc.map_or("nil".to_string(), |d| d.whole);
+
+                (vec![self.text_of(*n).to_string()], vec![whole])
+            }
+
+            ImportKind::Named(specs) | ImportKind::TypeOnly(specs) => {
+                if specs.iter().any(|s| s.is_type || s.is_attribute) {
+                    self.diagnose(i.span, "a data file has no types and no attributes");
+                }
+
+                specs
+                    .iter()
+                    .map(|s| {
+                        let key = self.text_of(s.name);
+                        let value = match &doc {
+                            Some(d) => match d.keys.iter().find(|(k, _)| k == key) {
+                                Some((_, v)) => v.clone(),
+
+                                None => {
+                                    self.diagnose(s.name, &format!("`{bare}` has no key `{key}`"));
+
+                                    "nil".to_string()
+                                }
+                            },
+
+                            None => "nil".to_string(),
+                        };
+
+                        (self.text_of(s.alias.unwrap_or(s.name)).to_string(), value)
+                    })
+                    .unzip()
+            }
+        };
+
+        self.generate(
+            anchor,
+            &format!("local {} = {}", names.join(", "), values.join(", ")),
+        );
+    }
+
     pub(crate) fn import_stmt(&mut self, i: &Import) {
         let anchor = self.byte_start(i.span);
         // The spec as written: `strip_literal` drops a data extension,
@@ -577,6 +703,12 @@ impl<'s> Desugar<'s> {
         // index is built under: the spec the source wrote.
         let target = self.require_literal(&spec);
         let bare = spec.trim_matches(['"', '\'']);
+
+        if let Some(word) = i.inline {
+            self.inline_import(i, word, bare);
+
+            return;
+        }
 
         if let Some(module) = crate::std_names::module_of_spec(bare) {
             self.std_import(i, bare, module);

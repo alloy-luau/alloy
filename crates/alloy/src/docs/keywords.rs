@@ -51,4 +51,5 @@ pub const ALLOY_KEYWORDS: &[&str] = &[
     "where",
     "with",
     "write",
+    "yield",
 ];

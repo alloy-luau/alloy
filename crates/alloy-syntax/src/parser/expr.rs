@@ -258,7 +258,8 @@ impl<'a> Parser<'a> {
 
             "function" => {
                 self.bump();
-                let body = self.function_body(start)?;
+                let star = self.generator_star();
+                let body = self.generator_body(start, star)?;
                 Expr::Function {
                     attributes: Vec::new(),
                     body: Box::new(body),
@@ -269,7 +270,8 @@ impl<'a> Parser<'a> {
             "@" => {
                 let attributes = self.attributes()?;
                 let keyword = self.expect("function")?;
-                let body = self.function_body(keyword)?;
+                let star = self.generator_star();
+                let body = self.generator_body(keyword, star)?;
                 Expr::Function {
                     attributes,
                     body: Box::new(body),
@@ -521,6 +523,12 @@ impl<'a> Parser<'a> {
 
             items.push(self.bracketed(|p| p.expr())?);
 
+            // `[ value for ...`: no array literal has `for` after its
+            // first item.
+            if items.len() == 1 && self.at("for") {
+                return self.comprehension(start, items);
+            }
+
             if !self.eat(",") && !self.eat(";") {
                 break;
             }
@@ -532,6 +540,61 @@ impl<'a> Parser<'a> {
             items,
             span: TokSpan::new(start, self.pos),
         })
+    }
+
+    /// The loop of a comprehension, from its `for` to the `]`. `items`
+    /// holds the value. Out of line, and with the value behind a
+    /// pointer, so the frame of a nested array literal stays as small
+    /// as it was: the depth limit counts on it.
+    #[inline(never)]
+    fn comprehension(&mut self, start: usize, mut items: Vec<Expr>) -> Result<Expr, ParseError> {
+        let value = items.pop().expect("one item");
+        let saved = (self.no_method_call, self.match_head);
+        (self.no_method_call, self.match_head) = (0, 0);
+        self.groups += 1;
+        let parsed = self.comprehension_loop(start, value);
+        self.groups -= 1;
+        (self.no_method_call, self.match_head) = saved;
+
+        parsed
+    }
+
+    fn comprehension_loop(&mut self, start: usize, value: Expr) -> Result<Expr, ParseError> {
+        self.expect("for")?;
+        let mut vars = vec![self.binding("loop variable")?];
+        let numeric = self.eat("=");
+
+        if !numeric {
+            while self.eat(",") {
+                vars.push(self.binding("loop variable")?);
+            }
+
+            self.expect("in")?;
+        }
+
+        let exprs = self.expr_list()?;
+        // `if` is the word a reader of other languages expects, and
+        // `where` is the filter of a `for` loop. Both mean the same.
+        let filter = if self.eat("if") || self.eat("where") {
+            Some(self.expr()?)
+        } else {
+            None
+        };
+
+        if !self.at("]") {
+            return Err(self.err("expected `]` to close the comprehension"));
+        }
+
+        self.bump();
+
+        Ok(Expr::Comprehension(Box::new(Comprehension {
+            value,
+            vars,
+            exprs,
+            numeric,
+            filter,
+            span: TokSpan::new(start, self.pos),
+        })))
     }
 
     /// `new Name<<T>>(args) { init }`, `new Name(args)`, `new Name { init }`.

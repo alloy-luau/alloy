@@ -22,10 +22,13 @@ pub(crate) const GROUPS: &[(&str, Pick)] = &[
     ("Keywords", |k| {
         k.chars().all(|c| c.is_ascii_lowercase()) && !k.is_empty()
     }),
+    // `or=` and `and=` start with a word.
     ("Operators", |k| {
-        !k.chars()
-            .next()
-            .is_some_and(|c| c.is_alphanumeric() || c == '$' || c == '@')
+        matches!(k, "or=" | "and=")
+            || !k
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || c == '$' || c == '@')
     }),
     ("Intrinsics", |k| k.starts_with('$')),
     ("Attributes", |k| k.starts_with('@')),

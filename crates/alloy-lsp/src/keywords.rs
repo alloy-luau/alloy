@@ -48,6 +48,23 @@ pub fn hover(source: &str, offset: usize) -> Option<(usize, usize, &'static str)
             }
         }
 
+        // `function*`: the star makes the word the head of a generator.
+        if word == "function"
+            && bytes.get(end) == Some(&b'*')
+            && let Some(text) = lookup("topic:generators")
+        {
+            return Some((start, end + 1, text));
+        }
+
+        // `or=` and `and=`: the `=` touches the word.
+        if matches!(word, "or" | "and")
+            && bytes.get(end) == Some(&b'=')
+            && bytes.get(end + 1) != Some(&b'=')
+            && let Some(text) = lookup(&source[start..=end])
+        {
+            return Some((start, end + 1, text));
+        }
+
         // A keyword used as a name is the name: `function new`, `T.new`,
         // `obj:match`, and `new = ...` in a table. The child answers.
         let before = source[..start].trim_end();
@@ -507,6 +524,7 @@ pub const WORDS: &[&str] = &[
     "while",
     "with",
     "write",
+    "yield",
 ];
 
 /// The keywords a typed word begins, in order.
@@ -548,6 +566,23 @@ mod tests {
         assert!(at("native").unwrap().contains("Luau's own"));
         assert!(at("use =").unwrap().starts_with("The name to call instead"));
         assert_eq!(attribute_argument_hover("local too_many = 1\n", 7), None);
+    }
+
+    #[test]
+    fn a_generator_hovers_its_star_and_its_yield() {
+        let src = "function* ids()\n    yield 1\nend\nlocal yield = 2\n";
+        let (start, end, text) = hover(src, 3).unwrap();
+        assert_eq!(&src[start..end], "function*");
+        assert!(text.contains("Declares a generator"));
+        assert!(
+            hover(src, src.find("yield").unwrap())
+                .unwrap()
+                .2
+                .contains("Hands one value")
+        );
+        // A local named `yield` is the name, and the child answers.
+        assert!(hover(src, src.rfind("yield").unwrap()).is_none());
+        assert!(hover("function ids() end", 3).is_none());
     }
 
     #[test]
@@ -681,6 +716,14 @@ mod tests {
             assert_eq!((s, e), (at, at + 3));
             assert!(text.starts_with("```\na ??= b"));
         }
+    }
+
+    #[test]
+    fn a_logical_assignment_hovers_as_one_operator() {
+        let (s, e, text) = hover("x or= 1", 2).unwrap();
+        assert_eq!((s, e), (2, 5));
+        assert!(text.starts_with("```\na or= b"));
+        assert!(hover("x and= 1", 3).unwrap().2.starts_with("```\na and= b"));
     }
 
     #[test]

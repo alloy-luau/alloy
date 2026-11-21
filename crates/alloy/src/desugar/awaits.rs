@@ -36,6 +36,9 @@ enum Spot {
     Script,
     /// The top level of a module, which runs inside `require`.
     Module,
+    /// The body of a `function*`. Its thread belongs to the reader of
+    /// the generator, which resumes it for the next value.
+    Generator,
     /// A plain function body, under the name it was declared with. A
     /// function boundary resets the context: an ordinary `function` in
     /// an `async function` is a plain one.
@@ -56,6 +59,8 @@ impl Spot {
             ),
 
             Spot::Plain(None) => "`await` needs an async context; mark the function `async`, or wrap the body in `async do ... end`".to_string(),
+
+            Spot::Generator => "`await` in a generator stops the body the way `yield` does, and the reader takes it as the end; `await` the value before the call, or in the loop that reads the generator".to_string(),
 
             _ => "`await` at a module's top level yields inside `require`; wrap it in `async do ... end`".to_string(),
         }
@@ -170,9 +175,28 @@ impl Desugar<'_> {
     fn awaits_in_body(&mut self, body: &FunctionBody, name: Option<String>) {
         let spot = if body.is_async.is_some() {
             Spot::Async
+        } else if body.generator.is_some() {
+            Spot::Generator
         } else {
             Spot::Plain(name)
         };
+
+        // Every function body passes here once, so the reports of a
+        // `function*` sit here and not in the emit, which may run twice.
+        if let Some(star) = body.generator {
+            if !self.options.fflags.on(&crate::fflags::GENERATOR_SYNTAX) {
+                let report = format!(
+                    "`function*` is not final; set `{} = true` under `[fflags]` in alloy.toml to use it",
+                    crate::fflags::GENERATOR_SYNTAX.name
+                );
+                self.diagnose(star, &report);
+            } else if let Some(a) = body.is_async {
+                self.diagnose(
+                    a,
+                    "a generator cannot be `async`; its reader resumes it, and a Future resumes on its own",
+                );
+            }
+        }
 
         self.awaits_in_body_at(body, &spot);
     }

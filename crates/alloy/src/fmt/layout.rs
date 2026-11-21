@@ -160,7 +160,7 @@ impl<'s> Formatter<'s> {
     fn is_loop_head(&self, i: usize) -> bool {
         let t = &self.items[i];
 
-        t.is("while") || (t.is("for") && !self.line_has_before(i, "impl"))
+        t.is("while") || (t.is("for") && !t.name_here && !self.line_has_before(i, "impl"))
     }
 
     /// Whether the item opens its line.
@@ -1272,7 +1272,32 @@ impl<'s> Formatter<'s> {
         let opener = self.items[open].text.as_str();
         let index = opener.ends_with('[') && self.is_index(open);
 
-        self.options.trailing_comma && !matches!(opener, "(" | "?(" | "<<") && !index
+        self.options.trailing_comma
+            && !matches!(opener, "(" | "?(" | "<<")
+            && !index
+            && !self.is_comprehension(open)
+    }
+
+    /// Whether the `[` at `open` holds a comprehension: its `for` sits
+    /// right inside the brackets. `[ v for x in xs, ]` does not parse.
+    fn is_comprehension(&self, open: usize) -> bool {
+        let mut depth = 0usize;
+
+        for it in &self.items[open + 1..] {
+            match it.text.as_str() {
+                t if t.ends_with(['(', '[', '{']) => depth += 1,
+
+                ")" | "]" | "}" if depth == 0 => return false,
+
+                ")" | "]" | "}" => depth -= 1,
+
+                "for" if depth == 0 && it.name_here => return true,
+
+                _ => {}
+            }
+        }
+
+        false
     }
 
     /// The width of item `i` on a flat line, with the space the render

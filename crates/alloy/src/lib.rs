@@ -446,6 +446,8 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
     });
     let imports = desugar::imports_in(&parsed.chunk.block)
         .into_iter()
+        // An `import inline` requires no module.
+        .filter(|i| i.inline.is_none())
         .map(|i| {
             let at = parsed.lexed.toks[i.span.start as usize].start;
             let dropped = rendered
@@ -486,7 +488,7 @@ pub fn compile_with(src: &str, options: &EmitOptions) -> Result<Output, CompileE
         lints,
         uses_std: rendered.uses_std,
         imports,
-        data_refs: data::references(src),
+        data_refs: data::module_references(src),
         tests: rendered.tests,
         expected_hits,
         lowered: None,

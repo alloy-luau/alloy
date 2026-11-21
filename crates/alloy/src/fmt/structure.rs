@@ -122,6 +122,16 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
 
         let top = |stack: &Vec<Frame>| stack.last().map(|f| f.kind);
 
+        // Whether the frame around this token is the `[` of an array,
+        // with any open expression `if` looked through.
+        let in_array = |stack: &Vec<Frame>| {
+            stack
+                .iter()
+                .rev()
+                .find(|f| f.kind != Kind::ExprIf)
+                .is_some_and(|f| f.kind == Kind::Bracket && toks[f.open_at].text(src) == "[")
+        };
+
         // Pops the top frame and records where it closed.
         let mut pop = |stack: &mut Vec<Frame>, closes: &mut usize, opens: &mut usize| {
             if let Some(f) = stack.pop() {
@@ -237,6 +247,13 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
                         push(&mut stack, Kind::Fn, 1, &mut opens, &mut closes);
                     }
                 }
+
+                // `[ v for x in xs if c ]`: the loop and the filter of a
+                // comprehension open no block. Nothing else puts one of
+                // the two words right inside the brackets of an array.
+                "for" if in_array(&stack) => {}
+
+                "if" if in_array(&stack) && !prev.is_some_and(super::expression_context) => {}
 
                 "if" => {
                     // `): number?` ends a signature line; the `if` that

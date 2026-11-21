@@ -302,9 +302,10 @@ impl<'a> Parser<'a> {
         // A missing `end` names `function`, the word the `end` closes,
         // not the `local` or `const` in front of it.
         let keyword = self.expect("function")?;
+        let star = self.generator_star();
 
         let name = self.expect_name()?;
-        let body = self.function_body(keyword)?;
+        let body = self.generator_body(keyword, star)?;
 
         Ok(Stmt::LocalFunction(LocalFunction {
             attributes,
@@ -324,6 +325,7 @@ impl<'a> Parser<'a> {
     ) -> Result<Stmt, ParseError> {
         // A missing `end` names `function`, not the `export` in front.
         let keyword = self.expect("function")?;
+        let star = self.generator_star();
 
         let mut path = vec![self.expect_name()?];
         let mut is_method = false;
@@ -341,7 +343,7 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let body = self.function_body(keyword)?;
+        let body = self.generator_body(keyword, star)?;
         Ok(Stmt::Function(Function {
             attributes,
             attrs: Vec::new(),
@@ -357,6 +359,25 @@ impl<'a> Parser<'a> {
     pub(in super::super) fn function_body(
         &mut self,
         opener: usize,
+    ) -> Result<FunctionBody, ParseError> {
+        self.generator_body(opener, None)
+    }
+
+    /// The `*` of `function*`, when the cursor is at one.
+    pub(in super::super) fn generator_star(&mut self) -> Option<TokSpan> {
+        self.at("*").then(|| {
+            let star = self.bump();
+
+            TokSpan::new(star, star + 1)
+        })
+    }
+
+    /// A function body from its generics on. `star` is the `*` of a
+    /// `function*`, which makes `yield` a statement in the block.
+    pub(in super::super) fn generator_body(
+        &mut self,
+        opener: usize,
+        star: Option<TokSpan>,
     ) -> Result<FunctionBody, ParseError> {
         let start = self.pos;
         let generics = if self.at("<") {
@@ -376,13 +397,26 @@ impl<'a> Parser<'a> {
             (None, None)
         };
 
-        let block = self.block()?;
+        // A plain function inside a generator runs on the thread of its
+        // caller, so a `yield` there has no generator to hand a value to.
+        let inner = match (star, self.yield_spot) {
+            (Some(_), _) => YieldSpot::Generator,
+
+            (None, YieldSpot::Outside) => YieldSpot::Outside,
+
+            (None, _) => YieldSpot::Nested,
+        };
+        let outer = std::mem::replace(&mut self.yield_spot, inner);
+        let block = self.block();
+        self.yield_spot = outer;
+        let block = block?;
         self.expect_end(opener)?;
         // A `:` inside the list is a bound; `<T: Shape>` has no Luau form.
         let has_bounds = generics
             .is_some_and(|g| (g.start..g.end).any(|i| self.toks[i as usize].text(self.src) == ":"));
         Ok(FunctionBody {
             is_async: None,
+            generator: star,
             generics,
             has_bounds,
             params,
@@ -504,7 +538,7 @@ impl<'a> Parser<'a> {
     name, or a `for` variable. `noun` names the place, for the report a
     reserved word draws there.
     */
-    pub(super) fn binding(&mut self, noun: &str) -> Result<Binding, ParseError> {
+    pub(in crate::parser) fn binding(&mut self, noun: &str) -> Result<Binding, ParseError> {
         let start = self.pos;
 
         let destructure = if self.at("{") {

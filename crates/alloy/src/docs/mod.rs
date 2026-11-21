@@ -562,8 +562,11 @@ mod tests {
     /// compile does not either, and an example imports what it reads.
     #[test]
     fn every_member_example_compiles() {
+        // An example of a function that is not final compiles with the
+        // flag of the std additions on, as its text tells the reader.
         let options = crate::EmitOptions {
             std_globals: crate::std_names::Globals::None,
+            fflags: toml::from_str("AlloyExperimentalStdAdditions = true").unwrap(),
             ..crate::EmitOptions::default()
         };
 
@@ -604,9 +607,20 @@ mod tests {
 
         assert!(blocks.len() > 10, "{} blocks", blocks.len());
 
+        // The article shows the forms behind a flag, so each flag is on.
+        let options = crate::EmitOptions {
+            fflags: crate::fflags::FFlags(
+                crate::fflags::FLAGS
+                    .iter()
+                    .map(|f| (f.name.to_string(), crate::fflags::FlagValue::Bool(true)))
+                    .collect(),
+            ),
+            ..crate::EmitOptions::default()
+        };
+
         for block in blocks {
-            let out =
-                crate::compile(block).unwrap_or_else(|e| panic!("{}\n{block}", e.located(block)));
+            let out = crate::compile_with(block, &options)
+                .unwrap_or_else(|e| panic!("{}\n{block}", e.located(block)));
 
             assert!(
                 out.diagnostics.is_empty(),

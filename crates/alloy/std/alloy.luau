@@ -256,6 +256,10 @@ end
 -- without the methods. `Result<T, E>` itself would close the loop
 -- alias to alias, and the solver gives up on it; the data half reads
 -- back as `Result<T, E>` in a hover, and it binds `T` and `E`.
+--
+-- `flatten` answers `T`, the inner Result, for the reason `and_then`
+-- answers `R`: the type names no rung. On a Result whose value is no
+-- Result the type still reads `T`, and the call gives the Result back.
 export type ResultMethods<T, E> = {
 	read unwrap: (self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }) -> T,
 	read expect: (self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }, message: string) -> T,
@@ -268,6 +272,8 @@ export type ResultMethods<T, E> = {
 	read and_then: <R>(self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }, f: (T) -> R) -> R,
 	read or_else: <R>(self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }, f: (E) -> R) -> R,
 	read unwrap_or_else: <D>(self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }, f: (E) -> D) -> T | D,
+	read map_or: <U>(self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }, default: U, f: (T) -> U) -> U,
+	read flatten: (self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }) -> T,
 }
 
 -- `__ok` and `__err` exist in the type alone: they carry `T` and `E` as
@@ -312,6 +318,8 @@ export type ResultMethods2<T, E> = {
 	read and_then: <R>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (T) -> R) -> R,
 	read or_else: <R>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (E) -> R) -> R,
 	read unwrap_or_else: <D>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (E) -> D) -> T | D,
+	read map_or: <U>(self: { read tag: "Ok" | "Err", read _1: T | E }, default: U, f: (T) -> U) -> U,
+	read flatten: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> T,
 }
 
 export type Result2<T, E> = ({ tag: "Ok", read _1: T, read trace: string?, read __ok: T, read __err: E } | { tag: "Err", read _1: E, read trace: string?, read __ok: T, read __err: E }) & ResultMethods2<T, E>
@@ -334,6 +342,8 @@ export type ResultMethods3<T, E> = {
 	read and_then: <R>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (T) -> R) -> R,
 	read or_else: <R>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (E) -> R) -> R,
 	read unwrap_or_else: <D>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (E) -> D) -> T | D,
+	read map_or: <U>(self: { read tag: "Ok" | "Err", read _1: T | E }, default: U, f: (T) -> U) -> U,
+	read flatten: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> T,
 }
 
 export type Result3<T, E> = ({ tag: "Ok", read _1: T, read trace: string?, read __ok: T, read __err: E } | { tag: "Err", read _1: E, read trace: string?, read __ok: T, read __err: E }) & ResultMethods3<T, E>
@@ -408,6 +418,22 @@ function Result.unwrap_or_else(self, f)
 	return self._1
 end
 
+function Result.map_or(self, default, f)
+	if self.tag == "Err" then
+		return default
+	end
+	return f(self._1)
+end
+
+-- One level. An Ok that holds no Result stays as it is.
+function Result.flatten(self)
+	local inner = self._1
+	if self.tag == "Ok" and type(inner) == "table" and getmetatable(inner) == Result then
+		return inner
+	end
+	return self
+end
+
 function Result.is_ok(self)
 	return self.tag == "Ok"
 end
@@ -447,6 +473,25 @@ function Result.pcall<T...>(f: (...any) -> T..., ...: any): Result<__call_value<
 	end
 	local failure = packed[2]
 	return Err(failure.err, failure.trace)
+end
+
+--- One Result of every value, in the order of the list, or the first
+--- Err in it.
+-- The types come off `__ok` and `__err` of the element, as in
+-- `try_await_result`. A `{ Result<T, E> }` parameter binds neither from
+-- an annotated list. The value reads as a plain `{ T }`, and it is an
+-- Array at run time: `Array<index<...>>` puts one reduction in each
+-- method of the Array, and a file that calls `all` passes the limit of
+-- the checker.
+function Result.all<R>(results: { [number]: R }): Result<{ index<R, "__ok"> }, index<R, "__err">>
+	local out = table.create(#results)
+	for i, r in ipairs(results :: { any }) do
+		if r.tag == "Err" then
+			return r
+		end
+		out[i] = r._1
+	end
+	return Ok(setmetatable(out, alloy.Array)) :: any
 end
 
 function Result.__tostring(self)
@@ -666,6 +711,7 @@ export type Future<T, R... = ()> = {
 		on_resolve: ((T, R...) -> ...any)?,
 		on_reject: ((any) -> ...any)?
 	) -> Future<T, R...>,
+	read finally: (self: Future<T, R...>, f: () -> ...any) -> Future<T, R...>,
 	read cancel: (self: Future<T, R...>) -> (),
 	read is_settled: (self: Future<T, R...>) -> boolean,
 }
@@ -827,6 +873,15 @@ function Future.and_then<T>(
 	return Future.andThen(self, on_resolve, on_reject)
 end
 
+--- Runs `f` when the Future settles, on a value, a failure, or a
+--- cancel. It returns the same Future.
+function Future.finally<T>(self: Future<T>, f: () -> ...any): Future<T>
+	local function run()
+		f()
+	end
+	return Future.andThen(self, run, run)
+end
+
 function Future.cancel<T>(self: Future<T>): ()
 	settle(self :: any, CANCELLED, "cancelled", nil)
 end
@@ -982,6 +1037,44 @@ function Future.any<E>(futures: { [number]: E }): Future<index<E, "__value">>
 	return (winner :: any) :: Future<any>
 end
 
+--- A Future that settles as `future` does, or rejects with "timeout"
+--- when `seconds` pass first. The work behind `future` keeps running.
+function Future.timeout<T>(future: Future<T>, seconds: number): Future<T>
+	local out = new_future()
+	Future.andThen(future :: any, function(v, ...)
+		settle(out, RESOLVED, v, nil, table.pack(v, ...))
+	end, function(e)
+		settle(out, REJECTED, e, nil)
+	end)
+	-- The delay comes second. A Future that is already settled wins in
+	-- the test VM, where a delay runs at once.
+	task_lib.delay(seconds, function()
+		settle(out, REJECTED, "timeout", nil)
+	end)
+	return (out :: any) :: Future<T>
+end
+
+--- Calls `f` until it returns without an error, `times` calls at most,
+--- and settles with its value or with the last error. `backoff` is the
+--- wait in seconds after the first failure. Each later wait is twice
+--- the one before it.
+function Future.retry<T>(f: () -> T, times: number, backoff: number?): Future<T>
+	return (alloy.future(function()
+		local last
+		for attempt = 1, math.max(times, 1) do
+			local ok, value = pcall(f)
+			if ok then
+				return value
+			end
+			last = value
+			if backoff and attempt < times then
+				task_lib.wait(backoff * 2 ^ (attempt - 1))
+			end
+		end
+		error(last, 0)
+	end) :: any) :: Future<T>
+end
+
 -- The elements are `any`. An Array of `Result<T, any>` or of `Result2`
 -- under a Future reaches the solver's step limit at every call, an
 -- annotated one too. An annotation types the elements:
@@ -1013,31 +1106,66 @@ alloy.Future = Future
 -- Array: a table with the shared metatable, so `xs:map(f)` works.
 -- ---------------------------------------------------------------------------
 
-export type Array<T> = {
+-- `flat_map` and `flatten` answer `Array3`, the last rung, and `any`
+-- on the rungs below. A second method that climbs rung by rung, as
+-- `map` does, takes the checker past its limit of 10000 types in one
+-- substitution. `zip`, `chunk` and `group_by` answer a plain table: an
+-- `Array3` of a pair, or of `Self`, passes the same limit.
+--
+-- The table `chunk` and `group_by` answer reads only. A table that
+-- writes is invariant in its items, and an `Array2<T>` then fits no
+-- `Array<T>`, so `local ys: T[] = xs:map(f)` reports. `ReadArray`
+-- carries the same signatures for the same reason: an Array must fit a
+-- `read T[]`.
+--
+-- `Self` is the array type the methods give back, `Array<T>` in the
+-- alias below. The checker makes one constraint for each alias it
+-- reads in a type it opens, and it stops at 1000 in one file. With
+-- `Array<T>` written out in each method, the runtime stood at 680 and a
+-- method that returned the array cost 70 more. A file that requires a
+-- runtime over the limit reads every Array as `any`, with no report.
+-- The parameter is read one time for each `Array<T>`.
+type ArrayShape<T, Self> = {
 	[number]: T,
 	len: (self: { read [number]: T }) -> number,
 	is_empty: (self: { read [number]: T }) -> boolean,
-	push: (self: { read [number]: T }, ...T) -> Array<T>,
+	push: (self: { read [number]: T }, ...T) -> Self,
 	pop: (self: { read [number]: T }) -> T?,
 	remove: (self: { read [number]: T }, index: number) -> T?,
 	swap_remove: (self: { read [number]: T }, index: number) -> T?,
 	first: (self: { read [number]: T }) -> T?,
 	last: (self: { read [number]: T }) -> T?,
 	map: <U>(self: { read [number]: T }, f: (T, number) -> U) -> Array2<U>,
-	filter: (self: { read [number]: T }, f: (T, number) -> boolean) -> Array<T>,
+	filter: (self: { read [number]: T }, f: (T, number) -> boolean) -> Self,
 	find: (self: { read [number]: T }, f: (T, number) -> boolean) -> T?,
 	find_index: (self: { read [number]: T }, f: (T, number) -> boolean) -> number?,
 	contains: (self: { read [number]: T }, value: T) -> boolean,
 	index_of: (self: { read [number]: T }, value: T) -> number?,
 	for_each: (self: { read [number]: T }, f: (T, number) -> ()) -> (),
 	reduce: <U>(self: { read [number]: T }, f: (U, T, number) -> U, init: U) -> U,
-	slice: (self: { read [number]: T }, from: number, to: number?) -> Array<T>,
-	concat: (self: { read [number]: T }, other: Array<T>) -> Array<T>,
-	reverse: (self: { read [number]: T }) -> Array<T>,
-	sort_by: (self: { read [number]: T }, f: (T, T) -> boolean) -> Array<T>,
+	slice: (self: { read [number]: T }, from: number, to: number?) -> Self,
+	concat: (self: { read [number]: T }, other: Self) -> Self,
+	reverse: (self: { read [number]: T }) -> Self,
+	sort_by: (self: { read [number]: T }, f: (T, T) -> boolean) -> Self,
+	any: (self: { read [number]: T }, f: (T, number) -> boolean) -> boolean,
+	all: (self: { read [number]: T }, f: (T, number) -> boolean) -> boolean,
+	sum: (self: { read [number]: number }) -> number,
+	min_by: <K>(self: { read [number]: T }, key: (T) -> K) -> T?,
+	max_by: <K>(self: { read [number]: T }, key: (T) -> K) -> T?,
+	flat_map: <U>(self: { read [number]: T }, f: (T, number) -> { read [number]: U }) -> Array3<U>,
+	flatten: <U>(self: { read [number]: { read [number]: U } }) -> Array3<U>,
+	group_by: <K>(self: { read [number]: T }, key: (T, number) -> K) -> { read [K]: Self },
+	chunk: (self: { read [number]: T }, size: number) -> { read [number]: Self },
+	zip: <U>(self: { read [number]: T }, other: { read [number]: U }) -> { { first: T, second: U } },
+	unique: (self: { read [number]: T }) -> Self,
+	take: (self: { read [number]: T }, n: number) -> Self,
+	skip: (self: { read [number]: T }, n: number) -> Self,
+	insert_at: (self: { read [number]: T }, index: number, value: T) -> Self,
+	binary_search: (self: { read [number]: T }, value: T, less: ((T, T) -> boolean)?) -> number?,
 	join: (self: { read [number]: T }, sep: string?) -> string,
 	to_table: (self: { read [number]: T }) -> { T },
 }
+export type Array<T> = ArrayShape<T, Array<T>>
 
 -- Luau rejects an alias that names itself with other arguments, so
 -- `map` cannot return `Array<U>`. `Array2` and `Array3` are the same
@@ -1045,77 +1173,126 @@ export type Array<T> = {
 -- `self` is the bare table: every `self: Array2<T>` is one more
 -- expansion of the alias, and the solver gives up past a few hundred.
 -- A `self: any` is no good either, it turns every inferred `U` to any.
-export type Array2<T> = {
+type Array2Shape<T, Self> = {
 	[number]: T,
 	len: (self: { read [number]: T }) -> number,
 	is_empty: (self: { read [number]: T }) -> boolean,
-	push: (self: { read [number]: T }, ...T) -> Array2<T>,
+	push: (self: { read [number]: T }, ...T) -> Self,
 	pop: (self: { read [number]: T }) -> T?,
 	remove: (self: { read [number]: T }, index: number) -> T?,
 	swap_remove: (self: { read [number]: T }, index: number) -> T?,
 	first: (self: { read [number]: T }) -> T?,
 	last: (self: { read [number]: T }) -> T?,
 	map: <U>(self: { read [number]: T }, f: (T, number) -> U) -> Array3<U>,
-	filter: (self: { read [number]: T }, f: (T, number) -> boolean) -> Array2<T>,
+	filter: (self: { read [number]: T }, f: (T, number) -> boolean) -> Self,
 	find: (self: { read [number]: T }, f: (T, number) -> boolean) -> T?,
 	find_index: (self: { read [number]: T }, f: (T, number) -> boolean) -> number?,
 	contains: (self: { read [number]: T }, value: T) -> boolean,
 	index_of: (self: { read [number]: T }, value: T) -> number?,
 	for_each: (self: { read [number]: T }, f: (T, number) -> ()) -> (),
 	reduce: <U>(self: { read [number]: T }, f: (U, T, number) -> U, init: U) -> U,
-	slice: (self: { read [number]: T }, from: number, to: number?) -> Array2<T>,
-	concat: (self: { read [number]: T }, other: Array2<T>) -> Array2<T>,
-	reverse: (self: { read [number]: T }) -> Array2<T>,
-	sort_by: (self: { read [number]: T }, f: (T, T) -> boolean) -> Array2<T>,
+	slice: (self: { read [number]: T }, from: number, to: number?) -> Self,
+	concat: (self: { read [number]: T }, other: Self) -> Self,
+	reverse: (self: { read [number]: T }) -> Self,
+	sort_by: (self: { read [number]: T }, f: (T, T) -> boolean) -> Self,
+	any: (self: { read [number]: T }, f: (T, number) -> boolean) -> boolean,
+	all: (self: { read [number]: T }, f: (T, number) -> boolean) -> boolean,
+	sum: (self: { read [number]: number }) -> number,
+	min_by: <K>(self: { read [number]: T }, key: (T) -> K) -> T?,
+	max_by: <K>(self: { read [number]: T }, key: (T) -> K) -> T?,
+	flat_map: <U>(self: { read [number]: T }, f: (T, number) -> { read [number]: U }) -> any,
+	flatten: <U>(self: { read [number]: { read [number]: U } }) -> any,
+	group_by: <K>(self: { read [number]: T }, key: (T, number) -> K) -> { read [K]: Self },
+	chunk: (self: { read [number]: T }, size: number) -> { read [number]: Self },
+	zip: <U>(self: { read [number]: T }, other: { read [number]: U }) -> { { first: T, second: U } },
+	unique: (self: { read [number]: T }) -> Self,
+	take: (self: { read [number]: T }, n: number) -> Self,
+	skip: (self: { read [number]: T }, n: number) -> Self,
+	insert_at: (self: { read [number]: T }, index: number, value: T) -> Self,
+	binary_search: (self: { read [number]: T }, value: T, less: ((T, T) -> boolean)?) -> number?,
 	join: (self: { read [number]: T }, sep: string?) -> string,
 	to_table: (self: { read [number]: T }) -> { T },
 }
+export type Array2<T> = Array2Shape<T, Array2<T>>
 
-export type Array3<T> = {
+type Array3Shape<T, Self> = {
 	[number]: T,
 	len: (self: { read [number]: T }) -> number,
 	is_empty: (self: { read [number]: T }) -> boolean,
-	push: (self: { read [number]: T }, ...T) -> Array3<T>,
+	push: (self: { read [number]: T }, ...T) -> Self,
 	pop: (self: { read [number]: T }) -> T?,
 	remove: (self: { read [number]: T }, index: number) -> T?,
 	swap_remove: (self: { read [number]: T }, index: number) -> T?,
 	first: (self: { read [number]: T }) -> T?,
 	last: (self: { read [number]: T }) -> T?,
 	map: <U>(self: { read [number]: T }, f: (T, number) -> U) -> any,
-	filter: (self: { read [number]: T }, f: (T, number) -> boolean) -> Array3<T>,
+	filter: (self: { read [number]: T }, f: (T, number) -> boolean) -> Self,
 	find: (self: { read [number]: T }, f: (T, number) -> boolean) -> T?,
 	find_index: (self: { read [number]: T }, f: (T, number) -> boolean) -> number?,
 	contains: (self: { read [number]: T }, value: T) -> boolean,
 	index_of: (self: { read [number]: T }, value: T) -> number?,
 	for_each: (self: { read [number]: T }, f: (T, number) -> ()) -> (),
 	reduce: <U>(self: { read [number]: T }, f: (U, T, number) -> U, init: U) -> U,
-	slice: (self: { read [number]: T }, from: number, to: number?) -> Array3<T>,
-	concat: (self: { read [number]: T }, other: Array3<T>) -> Array3<T>,
-	reverse: (self: { read [number]: T }) -> Array3<T>,
-	sort_by: (self: { read [number]: T }, f: (T, T) -> boolean) -> Array3<T>,
+	slice: (self: { read [number]: T }, from: number, to: number?) -> Self,
+	concat: (self: { read [number]: T }, other: Self) -> Self,
+	reverse: (self: { read [number]: T }) -> Self,
+	sort_by: (self: { read [number]: T }, f: (T, T) -> boolean) -> Self,
+	any: (self: { read [number]: T }, f: (T, number) -> boolean) -> boolean,
+	all: (self: { read [number]: T }, f: (T, number) -> boolean) -> boolean,
+	sum: (self: { read [number]: number }) -> number,
+	min_by: <K>(self: { read [number]: T }, key: (T) -> K) -> T?,
+	max_by: <K>(self: { read [number]: T }, key: (T) -> K) -> T?,
+	flat_map: <U>(self: { read [number]: T }, f: (T, number) -> { read [number]: U }) -> any,
+	flatten: <U>(self: { read [number]: { read [number]: U } }) -> any,
+	group_by: <K>(self: { read [number]: T }, key: (T, number) -> K) -> { read [K]: Self },
+	chunk: (self: { read [number]: T }, size: number) -> { read [number]: Self },
+	zip: <U>(self: { read [number]: T }, other: { read [number]: U }) -> { { first: T, second: U } },
+	unique: (self: { read [number]: T }) -> Self,
+	take: (self: { read [number]: T }, n: number) -> Self,
+	skip: (self: { read [number]: T }, n: number) -> Self,
+	insert_at: (self: { read [number]: T }, index: number, value: T) -> Self,
+	binary_search: (self: { read [number]: T }, value: T, less: ((T, T) -> boolean)?) -> number?,
 	join: (self: { read [number]: T }, sep: string?) -> string,
 	to_table: (self: { read [number]: T }) -> { T },
 }
+export type Array3<T> = Array3Shape<T, Array3<T>>
 
 -- `read T[]`: the Array methods that do not mutate.
-export type ReadArray<T> = {
+-- `Arr` is `Array<T>`, a parameter for the reason `Self` is one in
+-- `ArrayShape`.
+type ReadArrayShape<T, Arr> = {
 	read [number]: T,
 	len: (self: { read [number]: T }) -> number,
 	is_empty: (self: { read [number]: T }) -> boolean,
 	first: (self: { read [number]: T }) -> T?,
 	last: (self: { read [number]: T }) -> T?,
 	map: <U>(self: { read [number]: T }, f: (T, number) -> U) -> Array<U>,
-	filter: (self: { read [number]: T }, f: (T, number) -> boolean) -> Array<T>,
+	filter: (self: { read [number]: T }, f: (T, number) -> boolean) -> Arr,
 	find: (self: { read [number]: T }, f: (T, number) -> boolean) -> T?,
 	find_index: (self: { read [number]: T }, f: (T, number) -> boolean) -> number?,
 	contains: (self: { read [number]: T }, value: T) -> boolean,
 	index_of: (self: { read [number]: T }, value: T) -> number?,
 	for_each: (self: { read [number]: T }, f: (T, number) -> ()) -> (),
 	reduce: <U>(self: { read [number]: T }, f: (U, T, number) -> U, init: U) -> U,
-	slice: (self: { read [number]: T }, from: number, to: number?) -> Array<T>,
-	concat: (self: { read [number]: T }, other: Array<T>) -> Array<T>,
+	slice: (self: { read [number]: T }, from: number, to: number?) -> Arr,
+	concat: (self: { read [number]: T }, other: Arr) -> Arr,
+	any: (self: { read [number]: T }, f: (T, number) -> boolean) -> boolean,
+	all: (self: { read [number]: T }, f: (T, number) -> boolean) -> boolean,
+	sum: (self: { read [number]: number }) -> number,
+	min_by: <K>(self: { read [number]: T }, key: (T) -> K) -> T?,
+	max_by: <K>(self: { read [number]: T }, key: (T) -> K) -> T?,
+	flat_map: <U>(self: { read [number]: T }, f: (T, number) -> { read [number]: U }) -> Array3<U>,
+	flatten: <U>(self: { read [number]: { read [number]: U } }) -> Array3<U>,
+	group_by: <K>(self: { read [number]: T }, key: (T, number) -> K) -> { read [K]: Arr },
+	chunk: (self: { read [number]: T }, size: number) -> { read [number]: Arr },
+	zip: <U>(self: { read [number]: T }, other: { read [number]: U }) -> { { first: T, second: U } },
+	unique: (self: { read [number]: T }) -> Arr,
+	take: (self: { read [number]: T }, n: number) -> Arr,
+	skip: (self: { read [number]: T }, n: number) -> Arr,
+	binary_search: (self: { read [number]: T }, value: T, less: ((T, T) -> boolean)?) -> number?,
 	join: (self: { read [number]: T }, sep: string?) -> string,
 }
+export type ReadArray<T> = ReadArrayShape<T, Array<T>>
 
 -- `write T[]`: a sink. Push and index assignment only.
 export type WriteArray<T> = {
@@ -1286,6 +1463,167 @@ end
 function Array.sort_by(xs, f)
 	table.sort(xs, f)
 	return xs
+end
+
+-- The functions from here to `range` carry their types, so the free
+-- form, `Array.sum(t)`, checks a plain table as the method checks an
+-- Array.
+
+function Array.any<T>(xs: { read [number]: T }, f: (T, number) -> boolean): boolean
+	for i, v in ipairs(xs) do
+		if f(v, i) then
+			return true
+		end
+	end
+	return false
+end
+
+function Array.all<T>(xs: { read [number]: T }, f: (T, number) -> boolean): boolean
+	for i, v in ipairs(xs) do
+		if not f(v, i) then
+			return false
+		end
+	end
+	return true
+end
+
+function Array.sum(xs: { read [number]: number }): number
+	local total = 0
+	for _, v in ipairs(xs) do
+		total += v
+	end
+	return total
+end
+
+-- The first item wins a tie, in `min_by` and in `max_by`.
+local function extreme(xs, key, greatest: boolean)
+	local best, best_key = nil, nil
+	for _, v in ipairs(xs) do
+		local k = key(v)
+		if best_key == nil or (if greatest then k > best_key else k < best_key) then
+			best, best_key = v, k
+		end
+	end
+	return best
+end
+
+function Array.min_by<T, K>(xs: { read [number]: T }, key: (T) -> K): T?
+	return extreme(xs, key, false)
+end
+
+function Array.max_by<T, K>(xs: { read [number]: T }, key: (T) -> K): T?
+	return extreme(xs, key, true)
+end
+
+function Array.flat_map<T, U>(xs: { read [number]: T }, f: (T, number) -> { read [number]: U }): Array<U>
+	local out = {}
+	for i, v in ipairs(xs) do
+		local part = f(v, i)
+		table.move(part :: { U }, 1, #part, #out + 1, out)
+	end
+	return setmetatable(out, Array) :: any
+end
+
+-- One level: `[[1], [2, 3]]` gives `[1, 2, 3]`.
+function Array.flatten<U>(xs: { read [number]: { read [number]: U } }): Array<U>
+	local out = {}
+	for _, part in ipairs(xs) do
+		table.move(part :: { U }, 1, #part, #out + 1, out)
+	end
+	return setmetatable(out, Array) :: any
+end
+
+-- The answer is a plain table. `HashMap<K, Array<T>>` in the Array
+-- type leads back to `Array` with other arguments, and the checker
+-- then reads every Array in a file that requires this module as `any`,
+-- with no report.
+function Array.group_by<T, K>(xs: { read [number]: T }, key: (T, number) -> K): { [K]: Array<T> }
+	local groups = {}
+	for i, v in ipairs(xs) do
+		local k = key(v, i)
+		local group = groups[k]
+		if group == nil then
+			group = setmetatable({}, Array)
+			groups[k] = group
+		end
+		table.insert(group, v)
+	end
+	return groups :: any
+end
+
+function Array.chunk<T>(xs: { read [number]: T }, size: number): Array<Array<T>>
+	if size < 1 then
+		error("Array.chunk: the size must be 1 or more", 2)
+	end
+	local out = {}
+	for from = 1, #xs, size do
+		table.insert(out, Array.slice(xs :: { T }, from, math.min(from + size - 1, #xs)))
+	end
+	return setmetatable(out, Array) :: any
+end
+
+-- The result has the length of the shorter input.
+function Array.zip<T, U>(xs: { read [number]: T }, ys: { read [number]: U }): Array<{ first: T, second: U }>
+	local n = math.min(#xs, #ys)
+	local out = table.create(n)
+	for i = 1, n do
+		out[i] = { first = xs[i], second = ys[i] }
+	end
+	return setmetatable(out, Array) :: any
+end
+
+-- The first of each equal run of items stays, so the order holds.
+function Array.unique<T>(xs: { read [number]: T }): Array<T>
+	local seen, out = {}, {}
+	for _, v in ipairs(xs) do
+		if not seen[v] then
+			seen[v] = true
+			table.insert(out, v)
+		end
+	end
+	return setmetatable(out, Array) :: any
+end
+
+function Array.take<T>(xs: { read [number]: T }, n: number): Array<T>
+	return Array.slice(xs :: { T }, 1, math.min(n, #xs))
+end
+
+function Array.skip<T>(xs: { read [number]: T }, n: number): Array<T>
+	return Array.slice(xs :: { T }, math.max(n, 0) + 1)
+end
+
+-- `table.insert`: the items from `index` move up one. It returns the
+-- array, as `push` does.
+function Array.insert_at<T>(xs: { T }, index: number, value: T): { T }
+	table.insert(xs, index, value)
+	return xs
+end
+
+-- The array must be sorted by `less`, which defaults to `<`. The answer
+-- is the index of an item equal to `value`, or nil.
+function Array.binary_search<T>(xs: { read [number]: T }, value: T, less: ((T, T) -> boolean)?): number?
+	local lo, hi = 1, #xs
+	while lo <= hi do
+		local mid = (lo + hi) // 2
+		local item = xs[mid]
+		if if less then less(item, value) else (item :: any) < value then
+			lo = mid + 1
+		elseif if less then less(value, item) else (value :: any) < item then
+			hi = mid - 1
+		else
+			return mid
+		end
+	end
+	return nil
+end
+
+-- Both ends are in the range, as in `Iter.range`.
+function Array.range(from: number, to: number, step: number?): Array<number>
+	local out = {}
+	for i = from, to, step or 1 do
+		table.insert(out, i)
+	end
+	return setmetatable(out, Array) :: any
 end
 
 function Array.join(xs, sep: string?)
@@ -2185,6 +2523,52 @@ end
 
 alloy.Signal = Signal
 
+-- These three sit on Future and are written here, below
+-- `connect_any`, which `from_signal` calls.
+
+--- A Future of the next event `signal` fires. It settles with every
+--- value of the event, and it disconnects after that event.
+function Future.from_signal<T, R...>(signal: Signalish<(T, R...)>): Future<T, R...>
+	local out = new_future()
+	local connection
+	connection = connect_any(signal :: any, function(v, ...)
+		-- A source that fires inside `Connect` has given no connection yet.
+		if connection ~= nil then
+			alloy.delete(connection)
+		end
+		settle(out, RESOLVED, v, nil, table.pack(v, ...))
+	end)
+	return (out :: any) :: Future<T, R...>
+end
+
+--- A function that calls `f` when `seconds` pass with no further call.
+--- `f` gets the arguments of the last call.
+function Future.debounce<A...>(f: (A...) -> ...any, seconds: number): (A...) -> ()
+	local calls = 0
+	return function(...)
+		calls += 1
+		local mine = calls
+		task_lib.delay(seconds, function(...)
+			if calls == mine then
+				f(...)
+			end
+		end, ...)
+	end
+end
+
+--- A function that calls `f` at most one time in `seconds`. The first
+--- call runs at once, and a call inside the window does nothing.
+function Future.throttle<A...>(f: (A...) -> ...any, seconds: number): (A...) -> ()
+	local last = -math.huge
+	return function(...)
+		local now = os.clock()
+		if now - last >= seconds then
+			last = now
+			f(...)
+		end
+	end
+end
+
 -- ---------------------------------------------------------------------------
 -- Queue, Heap, Scope, Iter: what a game loop reaches for next.
 -- ---------------------------------------------------------------------------
@@ -2901,6 +3285,42 @@ end
 
 alloy.Iter = Iter
 
+-- A generator, the lowering of `function*`: an Iter over the values a
+-- body yields. The body runs on a coroutine of its own and takes the
+-- yield function as its first parameter, so the checker can give that
+-- parameter a type. Nothing runs until the reader asks for a value.
+--
+-- A `nil` is the end of an Iter, so a body that yields `nil` ends the
+-- sequence for the reader. An error in the body reaches the reader, and
+-- the Iter is at its end after it: `done` is set across the resume.
+local function generator(body, ...)
+	local resume = coroutine.wrap(body)
+	local args = table.pack(...)
+	local done = false
+	return iter_of(function()
+		if done then
+			return nil
+		end
+		done = true
+		-- Each resume sends the same values. The first one starts the
+		-- body with them, and a `yield` call drops them.
+		local value = resume(coroutine.yield, table.unpack(args, 1, args.n))
+		done = value == nil
+		return value
+	end)
+end
+
+--- The lowering of `function*`. `body` takes the yield function and the
+--- arguments after it. The call reads as `any`.
+alloy.generator = (generator :: any) :: (body: (...any) -> (), ...any) -> any
+
+--- `alloy.generator` with a type, for the check artifact: `T` is the
+--- type of the value each `yield` hands over.
+alloy.generator_checked = (generator :: any) :: <T>(
+	body: (yield: (T) -> (), ...any) -> (),
+	...any
+) -> typeof(iter_steps((nil :: any) :: T))
+
 -- ---------------------------------------------------------------------------
 -- Operators and sugar.
 -- ---------------------------------------------------------------------------
@@ -3218,14 +3638,110 @@ type function __table_std(T: type)
 	return out
 end
 
---- `t:insert(v)` and the other names of the `table` library, at run
---- time: the method the value has, else the function of the library.
+-- The methods a string has on top of the `string` library.
+local text = {}
+
+function text.trim(s: string): string
+	return (string.match(s, "^%s*(.-)%s*$")) :: string
+end
+
+function text.trim_start(s: string): string
+	return (string.gsub(s, "^%s+", ""))
+end
+
+function text.trim_end(s: string): string
+	return (string.match(s, "^(.-)%s*$")) :: string
+end
+
+function text.starts_with(s: string, prefix: string): boolean
+	return string.sub(s, 1, #prefix) == prefix
+end
+
+function text.ends_with(s: string, suffix: string): boolean
+	return suffix == "" or string.sub(s, -#suffix) == suffix
+end
+
+-- A plain find: `part` is text, not a pattern.
+function text.contains(s: string, part: string): boolean
+	return string.find(s, part, 1, true) ~= nil
+end
+
+-- The fill that takes `s` to `width` bytes. An empty fill adds nothing.
+local function padding(s: string, width: number, fill: string?): string
+	local with = fill or " "
+	local missing = width - #s
+	if missing <= 0 or with == "" then
+		return ""
+	end
+	return string.sub(string.rep(with, math.ceil(missing / #with)), 1, missing)
+end
+
+function text.pad_start(s: string, width: number, fill: string?): string
+	return padding(s, width, fill) .. s
+end
+
+function text.pad_end(s: string, width: number, fill: string?): string
+	return s .. padding(s, width, fill)
+end
+
+-- The methods of `text`, for a value that is a string.
+type function __string_std(T: type)
+	-- `string?` keeps its `nil`, so the checker still asks for a guard.
+	if T:is("union") then
+		local parts: { type } = {}
+		for _, part in T:components() do
+			table.insert(parts, __string_std(part))
+		end
+		return types.unionof(table.unpack(parts))
+	end
+	local is_text = T:is("string") or (T:is("singleton") and type(T:value()) == "string")
+	if not is_text then
+		return T
+	end
+	-- `self` is `any`: the checker passes the wrapped receiver, and
+	-- the function reads a string.
+	local function fn(params: { type }, result: type): type
+		local head: { type } = { types.any }
+		for _, p in params do
+			table.insert(head, p)
+		end
+		return types.newfunction({ head = head }, { head = { result } })
+	end
+	local fill = types.unionof(types.string, types.singleton(nil))
+	local out = types.newtable()
+	for name, f in
+		{
+			trim = fn({}, types.string),
+			trim_start = fn({}, types.string),
+			trim_end = fn({}, types.string),
+			starts_with = fn({ types.string }, types.boolean),
+			ends_with = fn({ types.string }, types.boolean),
+			contains = fn({ types.string }, types.boolean),
+			pad_start = fn({ types.number, fill }, types.string),
+			pad_end = fn({ types.number, fill }, types.string),
+		} :: { [string]: type }
+	do
+		out:setproperty(types.singleton(name), f)
+	end
+	return out
+end
+
+--- `t:insert(v)` and `s:trim()`, at run time: the method the value
+--- has, else the function of the `table` library for a table, or of
+--- `text` for a string.
 function alloy.table_call(receiver: any, name: string, ...: any): ...any
 	local own = receiver[name]
 	if own then
 		return (own :: any)(receiver, ...)
 	end
-	return (table :: any)[name](receiver, ...)
+	local lib: any = if type(receiver) == "string" then text else table
+	return lib[name](receiver, ...)
+end
+
+--- The receiver of a call by a name of `text` in the check artifact,
+--- typed with those methods when it is a string.
+function alloy.string_std<T>(s: T): __string_std<T>
+	return s :: any
 end
 
 --- The receiver of such a call in the check artifact, typed with the

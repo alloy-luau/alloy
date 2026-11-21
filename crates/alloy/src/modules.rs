@@ -1262,6 +1262,47 @@ pub fn import_types(
     out
 }
 
+/// The document of each `import inline` line, by the spec as written,
+/// or why the compiler cannot read it. The file can be outside every
+/// mount: the emit holds the values, so no module has to ship.
+pub fn import_inline_data(
+    source: &str,
+    from: &Path,
+    aliases: &[(String, PathBuf)],
+) -> Vec<(String, Result<crate::data::Inline, String>)> {
+    let mut out = Vec::new();
+
+    for r in crate::data::references(source) {
+        if !crate::data::is_inline(source, r.start) || out.iter().any(|(s, _)| *s == r.path) {
+            continue;
+        }
+
+        let Some(format) = crate::data::Format::of(&r.path) else {
+            continue;
+        };
+        let file = if r.path.starts_with("./") || r.path.starts_with("../") {
+            from.parent().map(|dir| dir.join(&r.path))
+        } else {
+            resolve(&r.path, from, aliases)
+        };
+        let doc = match file.as_deref().map(std::fs::read_to_string) {
+            Some(Ok(text)) => crate::data::inline(&text, format).map_err(|e| {
+                format!(
+                    "data file `{}` does not parse as {}: {e}",
+                    r.path,
+                    format.name()
+                )
+            }),
+
+            _ => Err(format!("no data file at `{}`", r.path)),
+        };
+
+        out.push((r.path, doc));
+    }
+
+    out
+}
+
 /// The aliases an import may copy instead of reading them off the
 /// module: `export type Meters = number`, whose body is one type name
 /// that the module does not declare or import. Luau's compiler reads an
@@ -3092,6 +3133,7 @@ impl crate::EmitOptions {
     pub fn imports(mut self, source: &str, from: &Path, aliases: &[(String, PathBuf)]) -> Self {
         self.import_types = import_types(source, from, aliases);
         self.import_inline_types = import_inline_types(source, from, aliases);
+        self.import_inline_data = import_inline_data(source, from, aliases);
         self.import_enums = import_enums(source, from, aliases);
         self.import_remotes = import_remotes(source, from, aliases);
         self.import_messages = import_messages(source, from, aliases);

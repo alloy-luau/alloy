@@ -349,6 +349,8 @@ impl<'s> Desugar<'s> {
     `expr_in_place`.
     */
     pub(crate) fn expr(&mut self, e: &Expr) {
+        self.check_std_addition(e);
+
         // `Step.fire(actor)` and `Step.on(handler)` of a message: the
         // checks run in both artifacts, and the ship artifact rewrites
         // the call in `expr_node`.
@@ -458,6 +460,13 @@ impl<'s> Desugar<'s> {
             }
 
             Expr::Pipe { op, .. } => self.pipe_expr(e, *op),
+
+            Expr::Comprehension(c) => self.comprehension(e, c),
+
+            Expr::Binary { .. } if self.chain_of(e).is_some() => {
+                let (operands, ops) = self.chain_of(e).expect("a chain");
+                self.comparison_chain(e, &operands, &ops);
+            }
 
             Expr::Name(span) => {
                 let name = self.text_of(*span);
@@ -2538,7 +2547,7 @@ impl<'s> Desugar<'s> {
 
                 if let Some(m) = method
                     && type_args.is_none()
-                    && self.is_table_method(self.text_of(*m))
+                    && let Some(receiver) = self.std_receiver(self.text_of(*m))
                 {
                     let mname = self.text_of(*m).to_string();
                     let std = self.std();
@@ -2552,7 +2561,7 @@ impl<'s> Desugar<'s> {
                         return format!("{std}.table_call({prefix}, \"{mname}\"{sep}{inner})");
                     }
 
-                    wrapped = format!("{std}.table_std({prefix})");
+                    wrapped = format!("{std}.{receiver}({prefix})");
                     prefix = &wrapped;
                 }
 

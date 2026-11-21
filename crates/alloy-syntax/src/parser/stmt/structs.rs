@@ -342,6 +342,7 @@ impl<'a> Parser<'a> {
 
                 Some(FunctionBody {
                     is_async,
+                    generator: None,
                     generics: None,
                     has_bounds: false,
                     params: Vec::new(),

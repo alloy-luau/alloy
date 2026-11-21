@@ -3,7 +3,101 @@
 //! `where` clause the child cut short but that still names one.
 
 use super::parse_bindings;
-use super::strings::{balanced_len, enclosing_open, group_len, head_of, outside_angles, type_len};
+use super::strings::{
+    balanced_len, enclosing_open, group_len, head_of, outside_angles, split_at_depth, type_len,
+};
+
+/// The std writes each Array alias over a shape that takes the array
+/// itself as its last argument, so the checker prints `Array<number>`
+/// as `ArrayShape<number, ArrayShape>`. The source wrote the first
+/// form. `Array2` and `Array3` are the same type to a reader, so the
+/// three shapes read as `Array`.
+pub(crate) fn fold_array_shapes(text: &mut String) {
+    // A type that holds itself prints under a `where` clause, and the
+    // checker names the variable after the alias: `X where ArrayShape
+    // = { ... }`. The folds below read a variable as `tN`.
+    for (k, shape) in ["ReadArrayShape", "Array3Shape", "Array2Shape", "ArrayShape"]
+        .iter()
+        .enumerate()
+    {
+        if !text.contains(&format!(" {shape} = {{")) {
+            continue;
+        }
+
+        let var = format!("t900{k}");
+        let mut from = 0;
+
+        while let Some(i) = text[from..].find(shape) {
+            let start = from + i;
+            let end = start + shape.len();
+            let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+            let whole = !text[..start].chars().next_back().is_some_and(word)
+                && !text[end..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| word(c) || c == '<');
+
+            if whole {
+                text.replace_range(start..end, &var);
+                from = start + var.len();
+            } else {
+                from = end;
+            }
+        }
+    }
+
+    // The rungs by name, which a method that returns one prints.
+    for rung in ["Array2<", "Array3<"] {
+        let mut from = 0;
+
+        while let Some(i) = text[from..].find(rung) {
+            let start = from + i;
+            let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+
+            if !text[..start].chars().next_back().is_some_and(word) {
+                text.replace_range(start..start + rung.len(), "Array<");
+            }
+
+            from = start + "Array<".len();
+        }
+    }
+
+    // `ReadArrayShape<` ends with `ArrayShape<`, so it goes first.
+    for (shape, name) in [
+        ("ReadArrayShape<", "ReadArray<"),
+        ("Array3Shape<", "Array<"),
+        ("Array2Shape<", "Array<"),
+        ("ArrayShape<", "Array<"),
+    ] {
+        let mut from = 0;
+
+        while let Some(i) = text[from..].find(shape) {
+            let start = from + i;
+            let open = start + shape.len() - 1;
+
+            let Some(len) = group_len(&text[open..], '<', '>') else {
+                break;
+            };
+
+            let args = &text[open + 1..open + len - 1];
+            let own = split_at_depth(args, ", ", true)
+                .last()
+                .map_or(0, |last| last.len() + 2);
+
+            // The scan starts again at the same place: the element may
+            // be a shape too.
+            match args.len().checked_sub(own) {
+                Some(end) if end > 0 => {
+                    let named = format!("{name}{}>", &args[..end]);
+                    text.replace_range(start..open + len, &named);
+                    from = start + name.len();
+                }
+
+                _ => from = open,
+            }
+        }
+    }
+}
 
 /// The arity report names a declaration, not a value: `Array<T>` is the
 /// alias the source has to give one argument to, and the `T[]` sugar
@@ -359,6 +453,40 @@ fn fold_array_alias_once(text: &mut String) {
 mod tests {
     use super::super::{Known, fold};
     use super::*;
+
+    #[test]
+    fn an_array_shape_reads_as_the_alias_the_source_wrote() {
+        let known = Known::default();
+
+        assert_eq!(
+            fold("got 'Array2Shape<number, Array2Shape>'", &known),
+            "got 'number[]'"
+        );
+        assert_eq!(
+            fold(
+                ": ArrayShape<ArrayShape<string, ArrayShape>, ArrayShape>",
+                &known
+            ),
+            ": string[][]"
+        );
+        assert_eq!(fold("got 'Array3<number>'", &known), "got 'number[]'");
+        // A type that holds itself: the checker names the variable
+        // after the alias.
+        assert_eq!(
+            fold(
+                "got '{read Array2Shape} where Array2Shape = { [number]: string, concat: ({read string}, Array2Shape) -> Array2Shape, push: ({read string}, ...string) -> Array2Shape }'",
+                &known
+            ),
+            "got 'read string[][]'"
+        );
+        assert_eq!(
+            fold(
+                ": ReadArrayShape<HashMap<string, number>, Array<HashMap<string, number>>>",
+                &known
+            ),
+            ": ReadArray<HashMap<string, number>>"
+        );
+    }
 
     /// Only the first slot of a method is its receiver; an `Iter` in
     /// another slot keeps no name.

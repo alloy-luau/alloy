@@ -790,7 +790,18 @@ impl<'s> Desugar<'s> {
         // The `:` sits between the two names, so the copy stops at the
         // owner and the emit writes the dot.
         let owner_end = self.byte_end(f.path[0]);
-        self.copy(start, owner_end);
+
+        match f.body.generator {
+            // The `*` of `function*` sits in front of the owner.
+            Some(star) => {
+                self.copy(start, self.byte_start(star));
+                self.generate(self.byte_start(star), " ");
+                self.copy(self.byte_start(f.path[0]), owner_end);
+            }
+
+            None => self.copy(start, owner_end),
+        }
+
         self.generate(owner_end, ".");
         self.self_inject = Some(target.to_string());
         let rest = TokSpan::new(name.start as usize, f.span.end as usize);
@@ -897,6 +908,8 @@ impl<'s> Desugar<'s> {
 
             _ if !self.elem_bounds.is_empty() && self.holds_element_index(s) => return true,
 
+            _ if self.holds_chain(s) => return true,
+
             _ => {}
         }
 
@@ -910,6 +923,7 @@ impl<'s> Desugar<'s> {
             || WORD_OPS.iter().any(|w| text.contains(w))
             || self.ext_methods.iter().any(|m| text.contains(m.as_str()))
             || (self.table_std && TABLE_METHODS.iter().any(|m| text.contains(m)))
+            || (self.string_std && STRING_METHODS.iter().any(|m| text.contains(m)))
             || self.messages.keys().any(|m| text.contains(m.as_str()))
             || self
                 .ext_statics
@@ -2155,6 +2169,15 @@ impl<'s> Desugar<'s> {
                 self.generate(close, &tail);
             }
 
+            // `yield v` calls the function the generator hands its body.
+            // The value renders in place, so a report on it keeps its
+            // column.
+            Stmt::Yield { value, span } => {
+                self.generate(self.byte_start(*span), &format!("{YIELD}("));
+                self.expr(value);
+                self.generate(self.byte_end(*span), ")");
+            }
+
             Stmt::Destroy { expr, delay, span } => self.destroy(*span, expr, delay.as_ref()),
 
             Stmt::After(a) => self.after_block(a),
@@ -2460,7 +2483,23 @@ impl<'s> Desugar<'s> {
     pub(crate) fn assign_needs_rewrite(&self, a: &Assign) -> bool {
         self.is_coalesce_assign(a.op)
             || self.is_append(a.op)
+            || self.logical_assign(a.op).is_some()
             || a.targets.iter().any(chain_has_alloy)
+    }
+
+    /// The word of `or=` or `and=`, when `op` is one of the two.
+    pub(crate) fn logical_assign(&self, op: TokSpan) -> Option<&'static str> {
+        if op.end - op.start != 2 {
+            return None;
+        }
+
+        match self.text_of(op) {
+            "or=" => Some("or"),
+
+            "and=" => Some("and"),
+
+            _ => None,
+        }
     }
 
     /// Whether an assignment operator is `:=`: a `:` and a `=`.
@@ -2527,6 +2566,9 @@ impl<'s> Desugar<'s> {
     computed key or a call in the target hoists first. A plain name takes
     `x = if x == nil then v else x` instead: the value still evaluates only
     when `x` is nil, and the checker reads `x` as narrowed after it.
+
+    `t or= v` becomes `T = T or v`, and `and=` the same with `and`. `T`
+    reads twice there also.
     */
     pub(crate) fn assign(&mut self, a: &Assign) {
         if self.is_append(a.op) {
@@ -2540,7 +2582,7 @@ impl<'s> Desugar<'s> {
         if a.targets.len() != 1 || a.values.len() != 1 {
             self.diagnose(
                 a.span,
-                "an assignment through `?` or with `??=` takes one target and one value",
+                "an assignment through `?` or with `??=`, `or=`, or `and=` takes one target and one value",
             );
             self.copy_span(a.span);
 
@@ -2548,10 +2590,28 @@ impl<'s> Desugar<'s> {
         }
 
         let coalesce = self.is_coalesce_assign(a.op);
+        let logical = self.logical_assign(a.op);
+
+        if let Some(word) = logical
+            && !self
+                .options
+                .fflags
+                .on(&crate::fflags::LOGICAL_ASSIGN_SYNTAX)
+        {
+            self.diagnose(
+                a.op,
+                &format!(
+                    "`{word}=` is not final; set `{} = true` under `[fflags]` in alloy.toml to use it",
+                    crate::fflags::LOGICAL_ASSIGN_SYNTAX.name
+                ),
+            );
+        }
+
         self.chain_anchor = anchor;
-        let (guard, target) = self.target_parts(&a.targets[0], coalesce);
-        // `??=` and a target past `?` write the value on some paths only.
-        let value = if coalesce || !guard.is_empty() {
+        let (guard, target) = self.target_parts(&a.targets[0], coalesce || logical.is_some());
+        // `??=`, `or=`, `and=`, and a target past `?` write the value on
+        // some paths only.
+        let value = if coalesce || logical.is_some() || !guard.is_empty() {
             self.render_lazy(&a.values[0])
         } else {
             self.render_to_string(&a.values[0])
@@ -2565,6 +2625,10 @@ impl<'s> Desugar<'s> {
         let plain = coalesce && matches!(&a.targets[0], Expr::Name(_));
 
         let body = match (coalesce, plain) {
+            _ if logical.is_some() => {
+                format!("{target} = {target} {} {value}", logical.unwrap())
+            }
+
             (_, true) => format!("{target} = if {target} == nil then {value} else {target}"),
 
             (true, false) => format!("if {target} == nil then {target} = {value} end"),
@@ -3328,6 +3392,22 @@ impl<'s> Desugar<'s> {
             cursor = self.toks[a.end as usize].start;
         }
 
+        // The `*` of `function*` goes. An impl method drops it with the
+        // gap in front of its name.
+        if let Some(star) = body.generator
+            && self.byte_start(star) >= start
+        {
+            self.copy(cursor, self.byte_start(star));
+            cursor = self.byte_end(star);
+
+            // `function*ids` leaves no space between the two words.
+            if self.src.as_bytes()[cursor as usize].is_ascii_alphanumeric()
+                || self.src.as_bytes()[cursor as usize] == b'_'
+            {
+                self.generate(cursor, " ");
+            }
+        }
+
         self.check_bounds(body.generics);
 
         // A bound `<T: Shape>` has no Luau form: the generic list loses it
@@ -3595,7 +3675,9 @@ impl<'s> Desugar<'s> {
         let mut lead = String::new();
         // A prologue ends in an expression. The async wrapper ends in
         // `function()`, and a `;` there opens the body with no statement.
+        let generator = body.generator.is_some() && body.is_async.is_none();
         let ends_open = body.is_async.is_none()
+            && !generator
             && (self.self_prologue.is_some() || prologue.iter().any(|p| !p.is_empty()));
 
         if let Some(p) = self.self_prologue.take() {
@@ -3660,6 +3742,51 @@ impl<'s> Desugar<'s> {
             ));
         }
 
+        // A generator body runs on a thread of its own, and the function
+        // returns the Iter that resumes it. The body takes `__yield` as
+        // a parameter, so the checker reads the item type from each
+        // `yield` and the two artifacts keep one shape.
+        if generator {
+            let std = self.std();
+            let checked =
+                self.options.check && self.options.fflags.on(&crate::fflags::GENERATOR_ANALYSIS);
+            let name = match checked {
+                true => "generator_checked",
+
+                false => "generator",
+            };
+            // The checker reads the item type from the first `yield`,
+            // and does not read it from the return type of the header.
+            // So a declared `Iter<A | B>` reported its second `yield`.
+            // With a declared type, the parameter takes the item type
+            // from it: the type of an item of `to_table()`.
+            let item = match body.ret_type {
+                Some(rt) if checked => {
+                    let declared = self.lower_type(self.text_of(rt).trim());
+
+                    format!(": (typeof(((nil :: any) :: {declared}):to_table()[1])) -> ()")
+                }
+
+                _ => String::new(),
+            };
+
+            // The rest parameter of the body takes the type the header
+            // gives its own. With none, the body reads `...` as `any`.
+            let rest = match body.params.iter().find(|p| p.is_vararg) {
+                Some(p) => match p.ty {
+                    Some(t) => format!(", ...: {}", self.lower_type(self.text_of(t).trim())),
+
+                    None => ", ...".to_string(),
+                },
+
+                None => String::new(),
+            };
+
+            lead.push_str(&format!(
+                " return {std}.{name}(function({YIELD}{item}{rest})"
+            ));
+        }
+
         if !lead.is_empty() {
             self.generate(cursor, &lead);
         }
@@ -3694,6 +3821,11 @@ impl<'s> Desugar<'s> {
                 format!("{close} ")
             };
             self.generate(end_tok.start, &text);
+        }
+
+        if generator {
+            let close = if has_vararg { "end, ...) " } else { "end) " };
+            self.generate(end_tok.start, close);
         }
 
         self.copy(end_tok.start, end_tok.end);

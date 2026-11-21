@@ -232,6 +232,14 @@ pub(crate) fn import_context(src: &str, line_start: usize, offset: usize) -> Opt
         .strip_prefix("type")
         .map(str::trim_start)
         .unwrap_or(rest);
+    // `import inline |`: the head after the modifier is a head still.
+    let inline =
+        rest.starts_with("inline ") && !rest["inline".len()..].trim_start().starts_with("from");
+    let rest = match inline {
+        true => rest["inline".len()..].trim_start(),
+
+        false => rest,
+    };
     // The path the statement names, from the whole statement: a
     // multi-line list carries it on the line after the cursor.
     let spec = || import_path(&src[start..statement_end(src, offset)]);

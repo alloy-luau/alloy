@@ -2229,6 +2229,15 @@ mod tests {
                 spec: None
             })
         );
+        // `inline` is a modifier: the head after it is a head still.
+        assert_eq!(
+            at("import inline | from \"./d.json\""),
+            Some(Context::ImportHead {
+                prefix: String::new(),
+                type_only: false,
+                spec: Some("./d.json".to_string())
+            })
+        );
         // The path is already written: the default of that module is
         // what belongs before `from`.
         assert_eq!(

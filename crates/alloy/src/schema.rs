@@ -932,6 +932,18 @@ pub const TABLES: &[Table] = &[
                 "false",
                 crate::fflags::GENERATOR_ANALYSIS.doc,
             ),
+            key(
+                crate::fflags::WIDTH_TYPES.name,
+                BOOL,
+                "false",
+                crate::fflags::WIDTH_TYPES.doc,
+            ),
+            key(
+                crate::fflags::NET_LIBRARY.name,
+                BOOL,
+                "false",
+                crate::fflags::NET_LIBRARY.doc,
+            ),
         ],
         open: Some(luau_flag_value),
     },

@@ -1126,6 +1126,26 @@ impl State {
                     }
                 }
 
+                // The width types, under their flag. The file holds an
+                // alias only for a width it names, so the child lists
+                // the rest of them never.
+                if flags.on(&alloy::fflags::WIDTH_TYPES) {
+                    for name in ["u8", "u16", "u32", "i8", "i16", "i32", "f32", "f64"] {
+                        if items.iter().any(|i| i["label"] == json!(name)) {
+                            continue;
+                        }
+
+                        let detail = "width type";
+                        let text = format!(
+                            "A `number` that packs as `{name}` on a remote parameter or a struct field. Not final: `AlloyExperimentalWidthTypes`."
+                        );
+                        let mut item = word(name, 22, Some(text), from);
+                        item["detail"] = json!(detail);
+                        item["sortText"] = json!(format!("{}{name}", type_rank(*prefers, detail)));
+                        items.push(item);
+                    }
+                }
+
                 // `stor: Scri|`: the module `Scribe` is no type itself,
                 // and `Scribe.Store` is one. The slot offers the name
                 // as the head of that path, beside the plain types and
@@ -1178,7 +1198,7 @@ impl State {
 
                 for name in [
                     "HashMap", "Set", "BitSet", "Queue", "Heap", "Scope", "Signal", "Symbol",
-                    "Array",
+                    "Array", "Net", "Width",
                 ] {
                     let mut item = word(name, 7, keywords::doc(name).map(str::to_string), from);
                     let row = super::std_completions::std_item(&doc.source, &reach, name, 7, None);

@@ -121,12 +121,26 @@ pub fn friendly_text(message: &str) -> String {
         .or_else(|| solver_gave_up(message))
         .or_else(|| append_target(message))
         .or_else(|| open_table_method(message))
+        .or_else(|| width_type_off(message))
         .unwrap_or_else(|| cut_explanation(message));
     let text = without_import_temp(&text);
     let text = text.replace(STRING_STD, "string");
     let text = negation_failure(&text).unwrap_or_else(|| without_neg(&text));
 
     table_beside_array(&text).unwrap_or(text)
+}
+
+/// `Unknown type 'u16'`: the name is a width type, and its flag is off.
+/// With the flag on the file holds the alias, so the report means the
+/// flag.
+fn width_type_off(message: &str) -> Option<String> {
+    let name = quoted_from(message.split_once("Unknown type ")?.1)?;
+
+    ["u8", "u16", "u32", "i8", "i16", "i32", "f32", "f64"]
+        .contains(&name)
+        .then(|| {
+            format!("`{name}` as a type is not final; set `AlloyExperimentalWidthTypes = true` under `[fflags]` in alloy.toml to use it")
+        })
 }
 
 /// `<T: ~nil>` makes the parameter `T & ~nil`, and a `nil` argument

@@ -337,6 +337,24 @@ import inline limits from "../config/limits.toml"
 import inline { coins, pets } from "../config/game.json"
 ```
 
+Use a width type on a field or a remote parameter that crosses the network. The name replaces the attribute and the `number`. The flag is `AlloyExperimentalWidthTypes`.
+
+```luau
+-- before
+struct Shot
+    @f32 x: number
+    @u8 power: number
+end
+```
+
+```alloy
+-- after
+struct Shot
+    x: f32
+    power: u8
+end
+```
+
 **Networking**
 
 Use the `remote` keyword or yetanothernet routes. Do not call `Instance.new("RemoteEvent")`. A `remote` is a typed channel between the server and the client.

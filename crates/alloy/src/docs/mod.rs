@@ -566,7 +566,12 @@ mod tests {
         // flag of the std additions on, as its text tells the reader.
         let options = crate::EmitOptions {
             std_globals: crate::std_names::Globals::None,
-            fflags: toml::from_str("AlloyExperimentalStdAdditions = true").unwrap(),
+            fflags: crate::fflags::FFlags(
+                crate::fflags::FLAGS
+                    .iter()
+                    .map(|f| (f.name.to_string(), crate::fflags::FlagValue::Bool(true)))
+                    .collect(),
+            ),
             ..crate::EmitOptions::default()
         };
 

@@ -2210,8 +2210,25 @@ impl<'s> Desugar<'s> {
         self.table_std && TABLE_METHODS.contains(&name)
     }
 
+    /// The std function that types the receiver of a call by `name` in
+    /// the check artifact, when a flag gives that method to a table or
+    /// to a string. The two lists share no name.
+    pub(crate) fn std_receiver(&self, name: &str) -> Option<&'static str> {
+        if self.is_table_method(name) {
+            Some("table_std")
+        } else if self.string_std && STRING_METHODS.contains(&name) {
+            Some("string_std")
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn chain_has_ext(&self, e: &Expr) -> bool {
-        if self.ext_methods.is_empty() && self.ext_statics.is_empty() && !self.table_std {
+        if self.ext_methods.is_empty()
+            && self.ext_statics.is_empty()
+            && !self.table_std
+            && !self.string_std
+        {
             return false;
         }
 
@@ -2228,7 +2245,7 @@ impl<'s> Desugar<'s> {
                 method: Some(m),
                 type_args: None,
                 ..
-            }) => self.is_table_method(self.text_of(*m)),
+            }) => self.std_receiver(self.text_of(*m)).is_some(),
 
             _ => false,
         }) {

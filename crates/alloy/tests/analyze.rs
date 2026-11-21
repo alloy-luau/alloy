@@ -2091,3 +2091,108 @@ print(last, at, text, copy, hit, ok)
     assert_eq!(bad.len(), 1, "{}", bad.join("\n"));
     assert!(bad[0].contains("'number', but got 'string'"), "{}", bad[0]);
 }
+
+const GENERATOR_FLAGS: &str =
+    "AlloyExperimentalGeneratorSyntax = true\nAlloyExperimentalGeneratorAnalysis = true\n";
+
+/// The item type of a generator reaches the reader: through
+/// `to_table`, a `for` loop, and a `map`. A declared union takes each
+/// of its members.
+#[test]
+fn a_generator_gives_its_item_type_to_the_reader() {
+    let src = r#"function* ids(n: number)
+    for i = 1, n do
+        yield i
+    end
+end
+local function* both(): Iter<number | string>
+    yield 1
+    yield "x"
+end
+local Counter = { limit = 2 }
+function* Counter:steps()
+    for i = 1, self.limit do
+        yield i
+    end
+end
+
+local all: { number } = ids(3):to_table()
+local texts: { string } = ids(3):map(function(x) return tostring(x) end):to_table()
+local mixed: { number | string } = both():to_table()
+local steps: { number } = Counter:steps():to_table()
+for id in ids(2) do
+    local n: number = id
+    print(n)
+end
+print(all, texts, mixed, steps)
+"#;
+    let Some(bad) = reports_under(src, "generators", GENERATOR_FLAGS) else {
+        return;
+    };
+
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+/// A reader that asks for the wrong item type reports on its own line,
+/// and a `yield` that does not fit the generator reports on the value.
+#[test]
+fn a_generator_of_the_wrong_item_type_reports() {
+    let src = r#"function* ids(n: number)
+    for i = 1, n do
+        yield i
+    end
+end
+local wrong: { string } = ids(3):to_table()
+local function* words(): Iter<string>
+    yield "a"
+    yield 7
+end
+local function* drifts()
+    yield 1
+    yield "x"
+end
+local function* rest(...: number)
+    for _, v in { ... } do
+        yield v
+    end
+end
+local texts: { string } = rest(1, 2):to_table()
+print(wrong, words, drifts, texts)
+"#;
+    let Some(bad) = reports_under(src, "generators-bad", GENERATOR_FLAGS) else {
+        return;
+    };
+
+    assert_eq!(bad.len(), 4, "{}", bad.join("\n"));
+    assert!(
+        bad[0].contains("(6,") && bad[0].contains("'{string}', but got '{number}'"),
+        "{}",
+        bad[0]
+    );
+    assert!(
+        bad[1].contains("(9,") && bad[1].contains("'string', but got 'number'"),
+        "{}",
+        bad[1]
+    );
+    // With no declared type, the first `yield` sets the item type.
+    assert!(
+        bad[2].contains("(13,") && bad[2].contains("'number', but got 'string'"),
+        "{}",
+        bad[2]
+    );
+
+    // The rest parameter keeps its type inside the body.
+    assert!(
+        bad[3].contains("(20,") && bad[3].contains("'{string}', but got '{number}'"),
+        "{}",
+        bad[3]
+    );
+
+    // With the syntax flag alone, a call of a generator reads as `any`.
+    let syntax = reports_under(
+        src,
+        "generators-any",
+        "AlloyExperimentalGeneratorSyntax = true\n",
+    );
+    assert_eq!(syntax, Some(Vec::new()));
+}

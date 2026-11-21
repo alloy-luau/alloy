@@ -130,6 +130,20 @@ impl<'s> Formatter<'s> {
             return true;
         }
 
+        // `function*`: the star holds to the word. A name takes a space
+        // after it, and the `(` of an expression takes none.
+        if at == "function" && bt == "*" {
+            return false;
+        }
+
+        if at == "*"
+            && self
+                .prev_code(ai)
+                .is_some_and(|p| self.items[p].is("function"))
+        {
+            return bt != "(" && bt != "<";
+        }
+
         // Openers: nothing after them, unless the option pads the inside.
         if opens(at) {
             return self.inner_space(ai) && !closes(bt);
@@ -386,6 +400,9 @@ impl<'s> Formatter<'s> {
                         | "case"
                         | "default"
                 )
+                // `yield -1` in a generator. A local named `yield`
+                // keeps the binary reading of `yield - 1`.
+                || (t == "yield" && !self.items[p].name_here)
         })
     }
 

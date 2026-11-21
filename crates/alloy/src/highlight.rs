@@ -68,6 +68,7 @@ const KEYWORDS: &[&str] = &[
     "with",
     "async",
     "await",
+    "yield",
     "try",
     "new",
     "delete",

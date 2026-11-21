@@ -136,6 +136,7 @@ pub fn parse_with(src: &str, toks: &[Tok], options: ParseOptions) -> Result<Chun
         options,
         lenient: false,
         diagnostics: Vec::new(),
+        yield_spot: YieldSpot::Outside,
         method_context: 0,
         type_edits: Vec::new(),
         type_names: Vec::new(),
@@ -204,6 +205,7 @@ pub fn parse_lenient(src: &str, toks: &[Tok], options: ParseOptions) -> (Chunk, 
         options,
         lenient: true,
         diagnostics: Vec::new(),
+        yield_spot: YieldSpot::Outside,
         method_context: 0,
         type_edits: Vec::new(),
         type_names: Vec::new(),
@@ -265,6 +267,17 @@ pub fn parse_lenient(src: &str, toks: &[Tok], options: ParseOptions) -> (Chunk, 
     (chunk, p.diagnostics)
 }
 
+/// Where a statement stands for a `yield`.
+#[derive(Clone, Copy, PartialEq)]
+enum YieldSpot {
+    /// No `function*` is open. `yield` is a name.
+    Outside,
+    /// The body of a `function*` itself.
+    Generator,
+    /// A plain function inside a `function*`.
+    Nested,
+}
+
 struct Parser<'a> {
     options: ParseOptions,
     src: &'a str,
@@ -275,6 +288,8 @@ struct Parser<'a> {
     lenient: bool,
     /// The errors a lenient parse recovered from, in source order.
     diagnostics: Vec<ParseError>,
+    /// Where the cursor stands for a `yield`.
+    yield_spot: YieldSpot,
     /// Above zero inside an `impl` or `trait` body, where a method named
     /// `new` is the constructor and no reserved word applies.
     method_context: u32,
@@ -582,7 +597,20 @@ impl<'a> Parser<'a> {
             return Some(2);
         }
 
+        // `or=` and `and=`. `x or = v` is no Luau, so the two tokens
+        // must touch.
+        if (self.at("or") || self.at("and")) && self.text_at(1) == "=" && self.adjacent(0) {
+            return Some(2);
+        }
+
         None
+    }
+
+    /// Reports if the `yield` at the cursor is the statement, inside a
+    /// `function*`. The rule lives in [`crate::contextual`].
+    fn yield_stmt_here(&self) -> bool {
+        self.yield_spot != YieldSpot::Outside
+            && !crate::contextual::yield_is_name(self.src, self.toks, self.pos)
     }
 
     /// Records a diagnostic at a byte offset, up to the cap.

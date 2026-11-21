@@ -1125,6 +1125,40 @@ pub(crate) fn the_compiler_errors_carry_their_quick_fixes() {
         );
     }
 
+    // A match over a string union: each new arm is the literal.
+    let src = "type Mode = \"idle\" | \"run\"\n\nlocal function show(m: Mode?)\n    match m with\n        case \"idle\" then print(1)\n    end\nend\n\nshow(nil)\n";
+    let (mut st, uri) = one_file(src);
+    // The check sits behind a flag, so the file compiles again with it.
+    let options = EmitOptions {
+        fflags: alloy::fflags::FFlags(
+            [(
+                alloy::fflags::STRING_UNION_MATCH.name.to_string(),
+                alloy::fflags::FlagValue::Bool(true),
+            )]
+            .into(),
+        ),
+        ..EmitOptions::default()
+    };
+    st.docs.insert(
+        uri.to_string(),
+        Doc::new(
+            src.to_string(),
+            1,
+            &options,
+            &alloy::luaux::Config::default(),
+            None,
+        ),
+    );
+    let actions = st.compiler_actions(uri, whole);
+    assert_eq!(title(&actions), "Add the missing arms");
+    assert_eq!(
+        edit(&actions, uri),
+        json!([{
+            "range": { "start": { "line": 5, "character": 0 }, "end": { "line": 5, "character": 0 } },
+            "newText": "        case \"run\" then\n            \n        case nil then\n            \n",
+        }])
+    );
+
     // A variant one edit away from a name the enum has.
     let (st, uri) = one_file(
         "enum Color as\n    Red\n    Green\n    Blue\nend\n\nlocal c = Color.Gren\nprint(c)\n",

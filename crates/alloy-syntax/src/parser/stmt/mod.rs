@@ -480,11 +480,61 @@ impl<'a> Parser<'a> {
             // then `const = const + 1` keeps the name.
             "const" if self.const_decl_follows() => self.local_stmt(start),
 
+            // `yield value`, inside a `function*`. The word is a name in
+            // every other function, as Luau reads it.
+            "yield" if self.yield_stmt_here() => {
+                if self.yield_spot == YieldSpot::Nested {
+                    return Err(self.err(
+                        "`yield` is in a plain function inside a generator; only the body of the `function*` itself yields",
+                    ));
+                }
+
+                if self.newline_after(0) {
+                    return Err(self.err("`yield` takes a value on the same line"));
+                }
+
+                self.bump();
+                let value = self.expr()?;
+
+                // An Iter carries one value a step.
+                if self.at(",") {
+                    return Err(self.err(
+                        "`yield` takes one value; put the values in a table to yield them together",
+                    ));
+                }
+
+                Ok(Stmt::Yield {
+                    value,
+                    span: TokSpan::new(start, self.pos),
+                })
+            }
+
+            // `yield x` with no `function*` open. Luau reads no statement
+            // of a name and then a name or a number, so the report can
+            // say what the author meant.
+            "yield"
+                if self.yield_spot == YieldSpot::Outside
+                    && !self.newline_after(0)
+                    && (self.name_at(1)
+                        || self.toks.get(self.pos + 1).map(|t| t.kind)
+                            == Some(TokKind::Number)) =>
+            {
+                Err(self.err(
+                    "`yield` is a statement of a generator; declare the function with `function*`",
+                ))
+            }
+
             "return" => {
                 self.bump();
                 let values = if self.at_end() || self.at_block_end() || self.at(";") {
                     Vec::new()
                 } else {
+                    if self.yield_spot == YieldSpot::Generator {
+                        return Err(self.err(
+                            "a generator returns no value; `yield` gives a value, and a `return` alone ends the generator",
+                        ));
+                    }
+
                     self.expr_list()?
                 };
 

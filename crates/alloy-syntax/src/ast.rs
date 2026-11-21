@@ -172,6 +172,11 @@ pub enum Stmt {
         expr: Expr,
         span: TokSpan,
     },
+    /// `yield expr` in the body of a `function*`.
+    Yield {
+        value: Expr,
+        span: TokSpan,
+    },
     /// `destroy expr` and `destroy expr after seconds`.
     Destroy {
         expr: Expr,
@@ -244,6 +249,7 @@ impl Stmt {
             | Stmt::Error(s)
             | Stmt::Call(_, s)
             | Stmt::Delete { span: s, .. }
+            | Stmt::Yield { span: s, .. }
             | Stmt::Destroy { span: s, .. }
             | Stmt::Attributed { span: s, .. }
             | Stmt::ExportDefault { span: s, .. } => *s,
@@ -531,6 +537,9 @@ impl NamespaceMember {
 #[derive(Debug)]
 pub struct Import {
     pub kind: ImportKind,
+    /// The `inline` of `import inline data from "./data.json"`: the
+    /// emit writes the document in place of a `require`.
+    pub inline: Option<TokSpan>,
     /// The string token of the path.
     pub path: TokSpan,
     pub span: TokSpan,
@@ -789,6 +798,20 @@ pub struct Local {
     pub span: TokSpan,
 }
 
+/// The parts of `[ value for vars in exprs if filter ]`.
+#[derive(Debug)]
+pub struct Comprehension {
+    pub value: Expr,
+    pub vars: Vec<Binding>,
+    /// The iterator expressions of `in`. With `numeric`, the start,
+    /// the limit, and the step when the loop gives one.
+    pub exprs: Vec<Expr>,
+    /// `for i = a, b` and not `for x in xs`.
+    pub numeric: bool,
+    pub filter: Option<Expr>,
+    pub span: TokSpan,
+}
+
 #[derive(Debug)]
 pub struct Binding {
     /// The name token, or the whole `{ ... }` / `[ ... ]` of a destructure.
@@ -929,6 +952,8 @@ pub struct LocalFunction {
 pub struct FunctionBody {
     /// `async function`: the `async` token.
     pub is_async: Option<TokSpan>,
+    /// `function*`: the `*` token. The function is a generator.
+    pub generator: Option<TokSpan>,
     pub generics: Option<TokSpan>,
     /// A generic carries a bound, `<T: Shape>`; emit rewrites it.
     pub has_bounds: bool,
@@ -1176,6 +1201,13 @@ pub enum Expr {
         span: TokSpan,
     },
 
+    /// `[ value for x in xs if cond ]` and `[ value for i = 1, n ]`: an
+    /// Array of `value`, one for each pass of the loop that `filter`
+    /// keeps.
+    /// The parts sit behind one pointer: inline, they would be the
+    /// largest variant, and every frame of the parser would grow.
+    Comprehension(Box<Comprehension>),
+
     /// `obj:name` with no call: a bound method reference.
     MethodRef {
         object: Box<Expr>,
@@ -1274,6 +1306,8 @@ impl Expr {
             | Expr::AsyncBlock { span, .. }
             | Expr::TryBlock { span, .. }
             | Expr::Macro { span, .. } => *span,
+
+            Expr::Comprehension(c) => c.span,
 
             Expr::Match(m) => m.span,
         }

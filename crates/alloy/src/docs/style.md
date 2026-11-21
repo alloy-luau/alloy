@@ -189,6 +189,154 @@ end
 print(Shop.price(10))
 ```
 
+**Forms behind a flag**
+
+Some forms are not final. Each one is behind a flag under `[fflags]` in `alloy.toml`, and the doc page of each form names its flag: `alloy doc '|>'`, `alloy doc comprehension`. Read the `[fflags]` table of the project before you write code. Where a flag is on, write its form: a project that turns a flag on wants the form in its code. Where a flag is off, the compiler reports the form, so write the older one.
+
+Use the pipe `|>` for a value that goes through a chain of calls. `_` reads the value of the stage before. The flag is `AlloyExperimentalPipeOperator`.
+
+```luau
+-- before
+local function label(humanoid: Humanoid): string
+    local health = math.clamp(humanoid.Health, 0, humanoid.MaxHealth)
+    return string.format("%d / %d", math.floor(health), humanoid.MaxHealth)
+end
+```
+
+```alloy
+-- after
+local function label(humanoid: Humanoid) -> string
+    return humanoid.Health
+        |> math.clamp(_, 0, humanoid.MaxHealth)
+        |> math.floor(_)
+        |> string.format("%d / %d", _, humanoid.MaxHealth)
+end
+```
+
+Use the append `:=` to add an item to a list, a `Set`, or a `Queue`. The flag is `AlloyExperimentalWalrusSyntax`.
+
+```luau
+-- before
+local names = { "ada" }
+table.insert(names, "grace")
+```
+
+```alloy
+-- after
+const names = { "ada" }
+names := "grace"
+```
+
+Use the table library and the string methods as methods. The flags are `AlloyExperimentalTableStdInheritance` and `AlloyExperimentalStringMethods`.
+
+```luau
+-- before
+local function command(input: string, history: { string }): string?
+    local name = string.match(input, "^%s*(.-)%s*$")
+    if string.sub(name, 1, 1) ~= "/" then
+        return nil
+    end
+    table.insert(history, name)
+    return name
+end
+```
+
+```alloy
+-- after
+local function command(input: string, history: { string }) -> string?
+    const name = input:trim()
+    if not name:starts_with("/") then
+        return nil
+    end
+    history:insert(name)
+    return name
+end
+```
+
+Use `??=` for a default on nil. Use `or=` for a default on nil or false, and `and=` for the opposite. The flag of `or=` and `and=` is `AlloyExperimentalLogicalAssignSyntax`; `??=` needs no flag.
+
+```luau
+-- before
+local function setup(options: { retries: number?, label: string? })
+    if options.retries == nil then
+        options.retries = 3
+    end
+    options.label = options.label or "none"
+end
+```
+
+```alloy
+-- after
+local function setup(options: { retries: number?, label: string? }) -> ()
+    options.retries ??= 3
+    options.label or= "none"
+end
+```
+
+Use a chained comparison for a range test. The flag is `AlloyExperimentalChainedComparisonSyntax`.
+
+```luau
+-- before
+local function pick(items: { string }, index: number): string?
+    if 1 <= index and index <= #items then
+        return items[index]
+    end
+    return nil
+end
+```
+
+```alloy
+-- after
+local function pick(items: { string }, index: number) -> string?
+    if 1 <= index <= #items then
+        return items[index]
+    end
+    return nil
+end
+```
+
+Use a comprehension for a list that one loop builds. The flag is `AlloyExperimentalComprehensionSyntax`.
+
+```luau
+-- before
+local scores = { 3, 8, 5 }
+local high = {}
+for _, score in scores do
+    if score > 4 then
+        table.insert(high, score * 2)
+    end
+end
+print(high)
+```
+
+```alloy
+-- after
+const scores = { 3, 8, 5 }
+const high = [ score * 2 for _, score in scores if score > 4 ]
+print(high)
+```
+
+Use a generator for a sequence that a loop reads one value at a time. The flag is `AlloyExperimentalGeneratorSyntax`.
+
+```alloy
+function* countdown(from: number)
+    for i = from, 1, -1 do
+        yield i
+    end
+end
+
+for n in countdown(3) do
+    print(n)
+end
+```
+
+Use `import inline` for a small `.json` or `.toml` file that one module reads. The table goes into the output of that module, and the file needs no mount. The flag is `AlloyExperimentalInlineDataSyntax`. `alloy doc inline-data` has the rules.
+
+```
+import inline limits from "../config/limits.toml"
+import inline { coins, pets } from "../config/game.json"
+```
+
 **Networking**
 
 Use the `remote` keyword or yetanothernet routes. Do not call `Instance.new("RemoteEvent")`. A `remote` is a typed channel between the server and the client.

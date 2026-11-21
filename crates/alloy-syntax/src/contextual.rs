@@ -62,6 +62,7 @@ pub fn is_contextual(word: &str) -> bool {
             | "default"
             | "with"
             | "where"
+            | "yield"
     )
 }
 
@@ -151,6 +152,8 @@ pub fn keyword_at(src: &str, toks: &[Tok], i: usize) -> bool {
         "delete" | "destroy" => delete_operand_follows(src, toks, i),
 
         "after" => after_delay_follows(src, toks, i),
+
+        "yield" => yield_follows(src, toks, i),
 
         // A declaration opens with its own name: `enum State as`,
         // `struct Vec2 as`, `interface Named as`.
@@ -591,6 +594,44 @@ pub fn delete_operand_follows(src: &str, toks: &[Tok], i: usize) -> bool {
         )
 }
 
+/// Reports if the `yield` at token `i` is a name by what follows it:
+/// `yield = 1`, `yield, a = f()`, `yield.x`, `yield:f()`, `yield += 1`.
+/// The parser asks this inside a `function*`, where every other `yield`
+/// that opens a statement is the keyword, `yield (a + b)` included.
+pub fn yield_is_name(src: &str, toks: &[Tok], i: usize) -> bool {
+    let next = text(src, toks, i + 1);
+
+    matches!(next, "=" | "," | "." | ":") || is_compound_op(next)
+}
+
+/*
+Reports if the `yield` at token `i` reads as the statement of a
+generator.
+
+The parser knows the function a statement stands in. This reader has the
+tokens alone, so it takes a `function*` earlier in the file as the sign
+of a generator. It reads the word as the statement when the word opens a
+line, or follows `do`, `then`, `else`, or `;`, and its value starts on
+the same line. A file with no `function*` keeps every `yield` a name.
+*/
+pub fn yield_follows(src: &str, toks: &[Tok], i: usize) -> bool {
+    let opens_statement = i == 0
+        || newline_after(src, toks, i - 1)
+        || matches!(
+            text(src, toks, i - 1),
+            "do" | "then" | "else" | ";" | "repeat"
+        );
+
+    opens_statement
+        && !newline_after(src, toks, i)
+        && !yield_is_name(src, toks, i)
+        && (1..i).any(|k| {
+            text(src, toks, k) == "*"
+                && text(src, toks, k - 1) == "function"
+                && toks[k - 1].kind == TokKind::Ident
+        })
+}
+
 /*
 Reports if a delay follows the `after` at token `i`.
 
@@ -1008,6 +1049,29 @@ mod tests {
         assert!(!is_kw("local function destroy(self)\nend\n", "destroy"));
         assert!(!is_kw("self:destroy()\n", "destroy"));
         assert!(!is_kw("t.destroy = print\n", "destroy"));
+    }
+
+    /// `yield` is the statement only in a file with a `function*`, at
+    /// the start of a statement, with its value on the same line.
+    #[test]
+    fn a_yield_needs_a_generator_and_a_value() {
+        const GEN: &str = "function* f()\n";
+
+        assert!(is_kw(&format!("{GEN}    yield 1\nend\n"), "yield"));
+        assert!(is_kw(&format!("{GEN}    yield (a + b)\nend\n"), "yield"));
+        assert!(is_kw(
+            &format!("{GEN}    if x then yield -1 end\nend\n"),
+            "yield"
+        ));
+
+        assert!(!is_kw(&format!("{GEN}    yield = 1\nend\n"), "yield"));
+        assert!(!is_kw(&format!("{GEN}    yield.n = 1\nend\n"), "yield"));
+        assert!(!is_kw(
+            &format!("{GEN}    print(yield - 1)\nend\n"),
+            "yield"
+        ));
+        assert!(!is_kw("local function f()\n    yield(1)\nend\n", "yield"));
+        assert!(!is_kw("local x = a * yield\n", "yield"));
     }
 
     /// A declaration opens with its own name; a table named for the word

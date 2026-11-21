@@ -39,6 +39,18 @@ pub(crate) fn annotation_colons(src: &str, toks: &[Tok], chunk: &Chunk) -> HashS
     out
 }
 
+/// The byte offsets of the words of every comprehension that would
+/// open a block in a statement: its `for`, and the `if` or the `where`
+/// of its filter.
+pub(crate) fn comprehension_words(src: &str, toks: &[Tok], chunk: &Chunk) -> HashSet<usize> {
+    let walk = Walk::new(src, toks, chunk);
+
+    walk.comprehension_words
+        .iter()
+        .map(|&i| toks[i].start as usize)
+        .collect()
+}
+
 /// The byte offsets of the `if` of every `if` expression in the chunk.
 /// The tail of a macro opens its line like a statement does, so only
 /// the tree tells that `if` from a statement.
@@ -172,6 +184,8 @@ struct Walk<'a> {
     toks: &'a [Tok],
     spans: Vec<TokSpan>,
     ifs: Vec<usize>,
+    /// The `for` and the filter word of each comprehension.
+    comprehension_words: Vec<usize>,
     chains: Vec<(TokSpan, Vec<usize>)>,
     /// Each pipe with the `|` of each `|>` it holds, first to last.
     pipes: Vec<(TokSpan, Vec<usize>)>,
@@ -193,6 +207,7 @@ impl<'a> Walk<'a> {
             toks,
             spans: Vec::new(),
             ifs: Vec::new(),
+            comprehension_words: Vec::new(),
             chains: Vec::new(),
             pipes: Vec::new(),
             lists: Vec::new(),
@@ -383,6 +398,14 @@ impl<'a> Walk<'a> {
     fn expr(&mut self, e: &Expr) {
         match e {
             Expr::TypeAssert { ty, .. } | Expr::Satisfies { ty, .. } => self.spans.push(*ty),
+
+            Expr::Comprehension(c) => {
+                self.comprehension_words.push(c.value.span().end as usize);
+
+                if let Some(f) = &c.filter {
+                    self.comprehension_words.push(f.span().start as usize - 1);
+                }
+            }
 
             Expr::IfElse { branches, span, .. } => {
                 self.ifs.push(span.start as usize);

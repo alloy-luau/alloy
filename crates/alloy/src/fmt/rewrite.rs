@@ -139,7 +139,12 @@ impl<'s> Formatter<'s> {
         let mut i = 0;
 
         while i < self.items.len() {
-            if self.items[i].is_comment() || !self.callee_before(i) || self.in_luau_attr_list(i) {
+            // `import inline { a } from`: the list is no table call.
+            if self.items[i].is_comment()
+                || !self.callee_before(i)
+                || self.in_luau_attr_list(i)
+                || self.is_import_list(i)
+            {
                 i += 1;
 
                 continue;

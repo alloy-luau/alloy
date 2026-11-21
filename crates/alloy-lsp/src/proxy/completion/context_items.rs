@@ -740,6 +740,24 @@ impl State {
                     ));
                 }
 
+                // A data file, or no path yet: `inline` writes the
+                // document into this file.
+                if !*type_only
+                    && spec
+                        .as_deref()
+                        .is_none_or(|s| alloy::data::Format::of(s).is_some())
+                {
+                    items.push(word(
+                        "inline",
+                        14,
+                        Some(
+                            "An inline data import: the `.json` or `.toml` document goes into this file as a table, with no module and no mount. Not final: `AlloyExperimentalInlineDataSyntax`."
+                                .to_string(),
+                        ),
+                        from,
+                    ));
+                }
+
                 if !*type_only {
                     items.push(word(
                         "type",

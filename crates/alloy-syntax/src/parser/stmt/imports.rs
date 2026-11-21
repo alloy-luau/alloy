@@ -7,12 +7,21 @@ use super::super::*;
 impl<'a> Parser<'a> {
     // --- modules -----------------------------------------------------------
 
-    /// `import` is a keyword before `*`, `{`, `type {`, or `Name from`.
+    /// `import` is a keyword before `*`, `{`, `type {`, `Name from`, or
+    /// `inline` and one of those.
     pub(super) fn import_follows(&self) -> bool {
         match self.text_at(1) {
             "*" | "{" => true,
 
             "type" => self.text_at(2) == "{",
+
+            // `import inline data from` and `import inline { a } from`.
+            // `import inline from` is the default arm: a module under
+            // the name `inline`.
+            "inline" if self.text_at(2) != "from" => {
+                matches!(self.text_at(2), "*" | "{")
+                    || (self.name_at(2) && matches!(self.text_at(3), "from" | ","))
+            }
 
             // `import M from` and `import M, { a } from`.
             _ => {
@@ -25,6 +34,15 @@ impl<'a> Parser<'a> {
 
     pub(super) fn import_stmt(&mut self, start: usize) -> Result<Stmt, ParseError> {
         self.bump();
+
+        // `import inline from "./m"` binds a default under the name
+        // `inline`, so the word is the modifier before any other head.
+        let inline = (self.at("inline") && !matches!(self.text_at(1), "from" | ",")).then(|| {
+            let at = self.pos;
+            self.bump();
+
+            TokSpan::new(at, at + 1)
+        });
 
         let kind = if self.eat("*") {
             self.expect("as")?;
@@ -78,6 +96,7 @@ impl<'a> Parser<'a> {
 
         Ok(Stmt::Import(Import {
             kind,
+            inline,
             path,
             span: TokSpan::new(start, self.pos),
         }))

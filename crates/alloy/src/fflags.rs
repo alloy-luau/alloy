@@ -73,6 +73,56 @@ pub const TABLE_STD_INHERITANCE: Flag = Flag {
     doc: "A table has the functions of the `table` library as methods: `t:insert(v)` is `table.insert(t, v)`, and so on for `remove`, `find`, `sort`, `concat`, `clear`, `clone`, `freeze`, `isfrozen`, `unpack`, `move`, and `maxn`. A method the value has under the same name comes first, so an Array keeps its own `remove`, `find`, and `concat`.",
 };
 
+pub const COMPREHENSION_SYNTAX: Flag = Flag {
+    name: "AlloyExperimentalComprehensionSyntax",
+    doc: "The comprehension. `[ x * 2 for _, x in xs if x > 0 ]` is an Array of the value in front of `for`, one for each pass of the loop that the condition keeps. The loop header means what it means in a `for` loop. `[ i * i for i = 1, 10 ]` counts. `where` means the same as `if`.",
+};
+
+pub const COMPREHENSION_ANALYSIS: Flag = Flag {
+    name: "AlloyExperimentalComprehensionAnalysis",
+    doc: "The types of a comprehension. The checker reads the type of the value in front of `for` as the type of the items. With this flag off, the items are `any`. It reads `AlloyExperimentalComprehensionSyntax`, and does nothing without it.",
+};
+
+pub const CHAINED_COMPARISON_SYNTAX: Flag = Flag {
+    name: "AlloyExperimentalChainedComparisonSyntax",
+    doc: "The chained comparison. `a < b <= c` is `a < b and b <= c`, and each operand runs one time. `<` chains with `<=`, and `>` with `>=`. The emit is plain Luau, so the feature has no analysis flag.",
+};
+
+pub const LOGICAL_ASSIGN_SYNTAX: Flag = Flag {
+    name: "AlloyExperimentalLogicalAssignSyntax",
+    doc: "The logical assignments. `a or= b` is `a = a or b`, and `a and= b` is `a = a and b`. An index on the left runs one time. The emit is plain Luau, so the feature has no analysis flag.",
+};
+
+pub const INLINE_DATA_SYNTAX: Flag = Flag {
+    name: "AlloyExperimentalInlineDataSyntax",
+    doc: "The inline data import. `import inline data from \"./data.json\"` writes the document as a table in place of a `require`, so the build writes no module for the file and the file needs no mount. `import inline { a, b } from` writes the values of the keys it names. The emit is plain Luau, so the feature has no analysis flag.",
+};
+
+pub const STRING_UNION_MATCH: Flag = Flag {
+    name: "AlloyExperimentalStringUnionMatch",
+    doc: "The exhaustive match over a union of string literals. When the annotation of the match head is such a union, written inline or as a `type` alias of the same file, a match with an arm for each literal needs no `default` arm, and a match that misses one names it. With this flag off, a match over literals needs a `default` arm.",
+};
+
+pub const STD_ADDITIONS: Flag = Flag {
+    name: "AlloyExperimentalStdAdditions",
+    doc: "The functions of the std that are not final: `Array.range`, `Result.all`, `Future.timeout`, `Future.retry`, `Future.from_signal`, `Future.debounce`, and `Future.throttle`. With this flag off, a call of one reports. The new methods, such as `xs:zip(ys)` and `result:map_or(default, f)`, are not behind the flag: a method call names no module, so the compiler cannot tell one from a method of the project.",
+};
+
+pub const STRING_METHODS: Flag = Flag {
+    name: "AlloyExperimentalStringMethods",
+    doc: "More methods on a string: `s:trim()`, `s:trim_start()`, `s:trim_end()`, `s:starts_with(prefix)`, `s:ends_with(suffix)`, `s:contains(part)`, `s:pad_start(width, fill)`, and `s:pad_end(width, fill)`. A method the value has under the same name comes first.",
+};
+
+pub const GENERATOR_SYNTAX: Flag = Flag {
+    name: "AlloyExperimentalGeneratorSyntax",
+    doc: "Generators. `function* ids(n)` declares a function whose call returns a lazy `Iter` of the values its body yields. `yield v` hands one value to the reader and stops the body until the reader asks for the next. A `return` alone ends the generator.",
+};
+
+pub const GENERATOR_ANALYSIS: Flag = Flag {
+    name: "AlloyExperimentalGeneratorAnalysis",
+    doc: "The types of a generator. The checker reads the item type from the first `yield`, or from a declared return type such as `Iter<number>`, and reports a `yield` that does not fit it. With this flag off, a call of a generator reads as `any`. It reads `AlloyExperimentalGeneratorSyntax`, and does nothing without it.",
+};
+
 /// Every flag this version of the compiler reads.
 pub const FLAGS: &[&Flag] = &[
     &NATIVE_IF_LOCAL,
@@ -83,6 +133,16 @@ pub const FLAGS: &[&Flag] = &[
     &WALRUS_SYNTAX,
     &WALRUS_ANALYSIS,
     &TABLE_STD_INHERITANCE,
+    &COMPREHENSION_SYNTAX,
+    &COMPREHENSION_ANALYSIS,
+    &CHAINED_COMPARISON_SYNTAX,
+    &LOGICAL_ASSIGN_SYNTAX,
+    &INLINE_DATA_SYNTAX,
+    &STRING_METHODS,
+    &STD_ADDITIONS,
+    &STRING_UNION_MATCH,
+    &GENERATOR_SYNTAX,
+    &GENERATOR_ANALYSIS,
 ];
 
 /// The value of one flag. An Alloy flag is `true` or `false`; a Luau

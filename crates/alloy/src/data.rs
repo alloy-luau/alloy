@@ -319,6 +319,91 @@ fn parse(text: &str, format: Format) -> Result<Node, String> {
     }
 }
 
+/// A document for `import inline`, as Luau on one line: the whole
+/// value, and the value of each top-level key.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Inline {
+    pub whole: String,
+    pub keys: Vec<(String, String)>,
+}
+
+/// Lowers a document for `import inline`. The emit keeps the line
+/// count of the source, so each value is one line.
+pub fn inline(text: &str, format: Format) -> Result<Inline, String> {
+    let node = parse(text, format)?;
+    let flat = |n: &Node| {
+        let mut out = String::new();
+        render_flat(n, &mut out);
+
+        out
+    };
+    let keys = match &node {
+        Node::Object(fields) => fields.iter().map(|(k, v)| (k.clone(), flat(v))).collect(),
+
+        _ => Vec::new(),
+    };
+
+    Ok(Inline {
+        whole: flat(&node),
+        keys,
+    })
+}
+
+fn render_flat(node: &Node, out: &mut String) {
+    match node {
+        Node::Array(items) if !items.is_empty() => {
+            out.push_str("{ ");
+
+            for item in items {
+                render_flat(item, out);
+                out.push_str(", ");
+            }
+
+            out.truncate(out.len() - 2);
+            out.push_str(" }");
+        }
+
+        Node::Object(fields) if !fields.is_empty() => {
+            out.push_str("{ ");
+
+            for (key, value) in fields {
+                out.push_str(&luau_key(key));
+                out.push_str(" = ");
+                render_flat(value, out);
+                out.push_str(", ");
+            }
+
+            out.truncate(out.len() - 2);
+            out.push_str(" }");
+        }
+
+        // A value with no items is one line in `render` also.
+        _ => render(node, 0, out),
+    }
+}
+
+/// Whether the line at `start` is an `import inline`. Such a line
+/// requires no module, so the build writes none for its file.
+pub fn is_inline(source: &str, start: u32) -> bool {
+    let head = &source[..start as usize];
+    let line = &head[head.rfind('\n').map_or(0, |i| i + 1)..];
+
+    line.trim_start()
+        .strip_prefix("import")
+        .is_some_and(|rest| {
+            rest.trim_start().starts_with("inline ") && rest.starts_with([' ', '\t'])
+        })
+}
+
+/// The data files a source requires as modules: `references` without
+/// the `import inline` lines.
+pub fn module_references(source: &str) -> Vec<crate::ImportRef> {
+    let mut refs = references(source);
+    refs.retain(|r| !is_inline(source, r.start));
+
+    refs
+}
+
 /// Lowers a document to the text of a Luau module: `return { ... }`.
 pub fn convert(text: &str, format: Format) -> Result<String, String> {
     let node = parse(text, format)?;

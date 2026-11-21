@@ -18,8 +18,8 @@ use crate::declarations::Shape;
 use serde_json::Value;
 
 use arrays::{
-    fold_array_alias, fold_array_parens, fold_cut_array, fold_generic_arity, fold_iter_shapes,
-    fold_read_arrays,
+    fold_array_alias, fold_array_parens, fold_array_shapes, fold_cut_array, fold_generic_arity,
+    fold_iter_shapes, fold_read_arrays,
 };
 use enums::{fold_enum_unions, fold_enums, fold_variant_tables};
 use metatables::{fold_empty_metatables, fold_metatable_groups};
@@ -733,6 +733,8 @@ pub fn fold(text: &str, known: &Known) -> String {
         // the reader wrote `Future`.
         .replace("function Awaitable:", "function Future:")
         .replace("function Awaitable.", "function Future.");
+
+    fold_array_shapes(&mut out);
 
     // A hover may hold several types, one per line; each `where` is
     // handled in turn, from the last so the offsets before it hold.

@@ -317,6 +317,14 @@ fn format_tokens(src: &str, options: &FmtConfig) -> Result<String, String> {
     let (chunk, _) = alloy_syntax::parser::parse_lenient(src, &toks, parse_options());
     let annotation = colons::annotation_colons(src, &toks, &chunk);
     let expr_ifs = colons::expr_ifs(src, &toks, &chunk);
+    // The `for` and the filter word of a comprehension open no block,
+    // so the layout reads each one as a name.
+    let words = colons::comprehension_words(src, &toks, &chunk);
+    let mut items = items;
+
+    for it in &mut items {
+        it.name_here |= words.contains(&it.start);
+    }
 
     let mut f = Formatter {
         items,
@@ -509,7 +517,7 @@ fn mark_names(items: &mut [Item]) {
 
 /// The lexer emits `?`, `<`, and `>` one character at a time. The
 /// operators built from them are one item here: `?.`, `?:`, `?[`, `?(`,
-/// `??`, `??=`, `:=`, `|>`, and the `<<` `>>` of explicit type arguments.
+/// `??`, `??=`, `or=`, `and=`, `:=`, `|>`, and the `<<` `>>` of explicit type arguments.
 fn merge_operators(items: Vec<Item>) -> Vec<Item> {
     let mut out: Vec<Item> = Vec::with_capacity(items.len());
     let mut open_shl = 0usize;
@@ -521,6 +529,8 @@ fn merge_operators(items: Vec<Item>) -> Vec<Item> {
 
                 (a == "?" && matches!(b, "." | ":" | "[" | "(" | "?"))
                     || (a == "??" && b == "=")
+                    // `or=` and `and=`. `or =` with no space is no Luau.
+                    || (matches!(a, "or" | "and") && b == "=" && !last.name_here)
                     // The append operator. An annotation writes a type
                     // between its `:` and its `=`.
                     || (a == ":" && b == "=")
@@ -941,6 +951,7 @@ pub(crate) fn is_keyword(text: &str) -> bool {
             | "after"
             | "async"
             | "await"
+            | "yield"
             | "try"
             | "macro"
             | "namespace"
@@ -1955,6 +1966,12 @@ const deeper = HashMap.new<<string, HashMap<string, Pair<number, string>[]>[]>>(
     #[test]
     fn leading_zeros_follow_the_option() {
         assert_eq!(fmt("local x = .5\n"), "local x = 0.5\n");
+    }
+
+    #[test]
+    fn an_inline_import_list_is_no_table_call() {
+        let src = "import inline { a, b } from './d.json'\nimport inline d from './d.json'\nprint(a, b, d)\n";
+        assert_eq!(format(src).unwrap(), src);
     }
 
     #[test]

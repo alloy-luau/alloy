@@ -30,6 +30,7 @@ use crate::render::{NewlineInGenerated, Renderer, SpanMap};
 mod actors;
 pub(crate) mod attributes;
 mod awaits;
+mod comprehensions;
 pub(crate) mod contracts;
 mod enums;
 mod expressions;
@@ -156,6 +157,9 @@ pub struct EmitOptions {
     /// type, as `(spec, name, body)`. See
     /// `crate::modules::import_inline_types`.
     pub import_inline_types: Vec<(String, String, String)>,
+    /// The document of each `import inline` line, by its spec. See
+    /// `crate::modules::import_inline_data`.
+    pub import_inline_data: Vec<(String, Result<crate::data::Inline, String>)>,
     /// The enums the imported modules declare, with their variants and
     /// payload counts. A `match` over an imported enum covers it.
     /// See `crate::modules::import_enums`.
@@ -523,6 +527,7 @@ impl Default for EmitOptions {
             test_runner: true,
             import_types: Vec::new(),
             import_inline_types: Vec::new(),
+            import_inline_data: Vec::new(),
             import_enums: Vec::new(),
             import_remotes: Vec::new(),
             import_messages: Vec::new(),
@@ -648,12 +653,40 @@ pub const PRIMITIVES: &[&str] = &[
     "boolean", "number", "string", "table", "function", "thread", "buffer", "vector", "userdata",
 ];
 
+/// The parameter a generator body takes its `yield` function under.
+pub(crate) const YIELD: &str = "__yield";
+
 /// The functions of the `table` library a table has as methods under
 /// `AlloyExperimentalTableStdInheritance`. Each takes the table first.
 /// `create` and `pack` take none, so they stay out.
 pub const TABLE_METHODS: &[&str] = &[
     "insert", "remove", "find", "sort", "concat", "clear", "clone", "freeze", "isfrozen", "unpack",
     "move", "maxn",
+];
+
+/// The functions of the std that sit behind
+/// `AlloyExperimentalStdAdditions`: the module and the name.
+pub const STD_ADDITIONS: &[(&str, &str)] = &[
+    ("Array", "range"),
+    ("Result", "all"),
+    ("Future", "timeout"),
+    ("Future", "retry"),
+    ("Future", "from_signal"),
+    ("Future", "debounce"),
+    ("Future", "throttle"),
+];
+
+/// The methods a string has under `AlloyExperimentalStringMethods`, on
+/// top of the ones the `string` library gives it.
+pub const STRING_METHODS: &[&str] = &[
+    "trim",
+    "trim_start",
+    "trim_end",
+    "starts_with",
+    "ends_with",
+    "contains",
+    "pad_start",
+    "pad_end",
 ];
 
 pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> Rendered {
@@ -777,12 +810,15 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         fn_ret_types: HashMap::new(),
         plain_fns: HashSet::new(),
         binding_types: HashMap::new(),
+        untyped_names: HashSet::new(),
         enum_decls: HashMap::new(),
         enum_payloads: HashMap::new(),
         impl_methods: HashMap::new(),
         contract_gaps: Vec::new(),
         pipe_topics: Vec::new(),
         pipe_next: 0,
+        comp_next: 0,
+        chained: options.fflags.on(&crate::fflags::CHAINED_COMPARISON_SYNTAX),
         pipe_ops: Vec::new(),
         contract_names: HashSet::new(),
         field_body: HashMap::new(),
@@ -817,6 +853,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         elem_bounds: Vec::new(),
         ext_methods: HashSet::new(),
         table_std: options.fflags.on(&crate::fflags::TABLE_STD_INHERITANCE),
+        string_std: options.fflags.on(&crate::fflags::STRING_METHODS),
         ext_statics: HashMap::new(),
         self_type: None,
         ext_primitive: HashMap::new(),
@@ -1659,6 +1696,11 @@ struct Desugar<'s> {
     /// Result itself. The map is flat, the way `fn_ret_types` is; a
     /// name reused with another type gives up its entry.
     binding_types: HashMap<String, String>,
+    /// Each name that a declaration with no annotation slot binds: a
+    /// destructured field, a pattern binding, a function, an import.
+    /// `binding_types` does not see these declarations, so the type it
+    /// holds for such a name can be the type of a different binding.
+    untyped_names: HashSet<String>,
     /// The enums this file declares, from the prescan, so a use before
     /// the declaration still checks. `enums` also holds `Result`, which
     /// the std owns and whose table carries more than its variants.
@@ -1678,6 +1720,10 @@ struct Desugar<'s> {
     pipe_topics: Vec<pipes::Topic>,
     /// The number of the last stage local, `__pipe1` and on.
     pipe_next: u32,
+    /// The number of the last comprehension, for the name of its list.
+    comp_next: u32,
+    /// `AlloyExperimentalChainedComparisonSyntax` is on.
+    chained: bool,
     /// See [`crate::Output::pipe_ops`].
     pipe_ops: Vec<(u32, String)>,
     /// See [`Rendered::contract_names`].
@@ -1786,6 +1832,8 @@ struct Desugar<'s> {
     /// Whether a call by a name of `TABLE_METHODS` routes through the
     /// table dispatcher.
     table_std: bool,
+    /// The same for a name of `STRING_METHODS`.
+    string_std: bool,
     /// Foreign types with statics declared on them: `Vector3.zero()`.
     ext_statics: HashMap<String, HashSet<String>>,
     /// The type an untyped `self` parameter gets while a foreign impl
@@ -2307,6 +2355,14 @@ pub(crate) fn expr_children(e: &Expr) -> Vec<Child<'_>> {
 
         Expr::Array { items, .. } => items.iter().map(Child::Expr).collect(),
 
+        Expr::Comprehension(c) => c
+            .exprs
+            .iter()
+            .chain(c.filter.as_ref())
+            .chain(std::iter::once(&c.value))
+            .map(Child::Expr)
+            .collect(),
+
         Expr::MethodRef { object, .. } => vec![Child::Expr(object)],
 
         Expr::New {
@@ -2353,7 +2409,9 @@ pub(crate) fn stmt_children(s: &Stmt) -> Vec<Child<'_>> {
             .map(Child::Expr)
             .collect(),
 
-        Stmt::Call(e, _) | Stmt::Delete { expr: e, .. } => vec![Child::Expr(e)],
+        Stmt::Call(e, _) | Stmt::Delete { expr: e, .. } | Stmt::Yield { value: e, .. } => {
+            vec![Child::Expr(e)]
+        }
 
         Stmt::Destroy { expr, delay, .. } => {
             let mut v = vec![Child::Expr(expr)];
@@ -2705,6 +2763,7 @@ fn child_function_spans(c: Child<'_>, out: &mut Vec<TokSpan>) {
 /// Reports if a function header itself needs rewriting.
 fn function_needs_rewrite(body: &FunctionBody) -> bool {
     body.is_async.is_some()
+        || body.generator.is_some()
         || body.ret_arrow.is_some()
         || body.has_bounds
         || body
@@ -2793,7 +2852,11 @@ fn stmt_needs_desugar(s: &Stmt) -> bool {
 
         Stmt::Local(l) if local_needs_rewrite(l) => return true,
 
-        Stmt::Delete { .. } | Stmt::Destroy { .. } | Stmt::After(_) | Stmt::Parallel(_) => {
+        Stmt::Delete { .. }
+        | Stmt::Yield { .. }
+        | Stmt::Destroy { .. }
+        | Stmt::After(_)
+        | Stmt::Parallel(_) => {
             return true;
         }
 
@@ -2908,6 +2971,7 @@ fn expr_needs_desugar(e: &Expr) -> bool {
         | Expr::Is { .. }
         | Expr::Satisfies { .. }
         | Expr::Array { .. }
+        | Expr::Comprehension(_)
         | Expr::MethodRef { .. }
         | Expr::New { .. }
         | Expr::Await { .. }
@@ -3587,6 +3651,13 @@ impl<'s> Desugar<'s> {
     // --- scopes for ambient names -------------------------------------------
 
     fn declare_name(&mut self, span: TokSpan) {
+        self.untyped_names.insert(self.text_of(span).to_string());
+        self.declare_annotated(span);
+    }
+
+    /// `declare_name` for a binding that has an annotation slot. The
+    /// caller records the type first.
+    fn declare_annotated(&mut self, span: TokSpan) {
         // A namespace member is in scope under its rendered name, so a
         // local of the member's own name still shadows it.
         let name = self.decl_name(span);
@@ -3620,7 +3691,7 @@ impl<'s> Desugar<'s> {
         match &b.destructure {
             None => {
                 self.record_binding_type(b.name, b.ty);
-                self.declare_name(b.name);
+                self.declare_annotated(b.name);
             }
 
             Some(d) => self.declare_destructure(d),
@@ -3664,7 +3735,7 @@ impl<'s> Desugar<'s> {
             match &p.destructure {
                 None => {
                     self.record_binding_type(p.name, p.ty);
-                    self.declare_name(p.name);
+                    self.declare_annotated(p.name);
                 }
 
                 Some(d) => self.declare_destructure(d),

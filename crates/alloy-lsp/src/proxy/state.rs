@@ -648,6 +648,18 @@ impl State {
         Self::markup_for(config.as_ref(), &config_dir).err()
     }
 
+    /// Whether a flag is on for a file: `[fflags]` of its project, with
+    /// the editor's list over it.
+    pub(crate) fn flag_on(&self, uri: &str, flag: &alloy::fflags::Flag) -> bool {
+        let path = uri_to_path(uri).unwrap_or_else(|| PathBuf::from(uri));
+
+        match self.project_for(&path).0 {
+            Some(found) => found.1.fflags.clone().with(&self.fflags).on(flag),
+
+            None => self.fflags.on(flag),
+        }
+    }
+
     /// The emit options and markup config for a file, from the nearest
     /// `alloy.toml`: its `[alx]` table, or a `luaux.toml` beside it.
     pub(crate) fn options_for(&self, uri: &str) -> (EmitOptions, alloy::luaux::Config) {

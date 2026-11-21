@@ -576,6 +576,12 @@ impl<'a> Parser<'a> {
             return Some(3);
         }
 
+        // `:=`, the append operator. The lexer keeps the `:` single, as
+        // a type annotation and a method call write it.
+        if self.at(":") && self.text_at(1) == "=" && self.adjacent(0) {
+            return Some(2);
+        }
+
         None
     }
 

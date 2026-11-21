@@ -7,6 +7,14 @@
 //! that starts with `Alloy` is a flag of this compiler. Any other name
 //! is a Luau flag, and goes to luau-lsp as it is.
 //!
+//! A feature that adds syntax takes two flags. The `Syntax` flag turns
+//! on the parse and the emit. The `Analysis` flag turns on the types
+//! the check artifact carries for it, and what the editor says about
+//! it. With `Syntax` alone the feature runs and the checker reads its
+//! values as `any`, so a wrong report points at one layer. `Analysis`
+//! alone does nothing. A feature with no syntax of its own takes one
+//! flag.
+//!
 //! An Alloy flag leaves `FLAGS` when its feature becomes the default. A
 //! configuration that still names it gets a warning, not an error, so
 //! an old file keeps loading.
@@ -50,6 +58,21 @@ pub const PIPE_OPERATOR: Flag = Flag {
     doc: "The pipe operator. `a |> f(_)` evaluates `a` once, binds it to `_`, and evaluates the right side with it. The right side must read `_`. The RFC is `syntax-pipe-operator` in alloy-luau/rfcs.",
 };
 
+pub const WALRUS_SYNTAX: Flag = Flag {
+    name: "AlloyExperimentalWalrusSyntax",
+    doc: "The append operator. `xs := v` adds `v` to the end of `xs`. A value with a `push` method takes the call `xs:push(v)`, one with an `add` method takes `xs:add(v)`, and any other table takes `table.insert(xs, v)`. So a Luau table, an Array, a Set, a Queue, and a Heap all append the same way.",
+};
+
+pub const WALRUS_ANALYSIS: Flag = Flag {
+    name: "AlloyExperimentalWalrusAnalysis",
+    doc: "The types of `:=`. The checker reports a value that does not fit the items of the target, and a target that holds no items. With this flag off, `:=` takes any target and any value. It reads `AlloyExperimentalWalrusSyntax`, and does nothing without it.",
+};
+
+pub const TABLE_STD_INHERITANCE: Flag = Flag {
+    name: "AlloyExperimentalTableStdInheritance",
+    doc: "A table has the functions of the `table` library as methods: `t:insert(v)` is `table.insert(t, v)`, and so on for `remove`, `find`, `sort`, `concat`, `clear`, `clone`, `freeze`, `isfrozen`, `unpack`, `move`, and `maxn`. A method the value has under the same name comes first, so an Array keeps its own `remove`, `find`, and `concat`.",
+};
+
 /// Every flag this version of the compiler reads.
 pub const FLAGS: &[&Flag] = &[
     &NATIVE_IF_LOCAL,
@@ -57,6 +80,9 @@ pub const FLAGS: &[&Flag] = &[
     &ENUM_EACH,
     &SUPERTYPES,
     &PIPE_OPERATOR,
+    &WALRUS_SYNTAX,
+    &WALRUS_ANALYSIS,
+    &TABLE_STD_INHERITANCE,
 ];
 
 /// The value of one flag. An Alloy flag is `true` or `false`; a Luau

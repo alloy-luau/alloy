@@ -909,6 +909,7 @@ impl<'s> Desugar<'s> {
             || self.constructs_struct(text)
             || WORD_OPS.iter().any(|w| text.contains(w))
             || self.ext_methods.iter().any(|m| text.contains(m.as_str()))
+            || (self.table_std && TABLE_METHODS.iter().any(|m| text.contains(m)))
             || self.messages.keys().any(|m| text.contains(m.as_str()))
             || self
                 .ext_statics
@@ -2457,7 +2458,63 @@ impl<'s> Desugar<'s> {
     // --- assignment --------------------------------------------------------
 
     pub(crate) fn assign_needs_rewrite(&self, a: &Assign) -> bool {
-        self.is_coalesce_assign(a.op) || a.targets.iter().any(chain_has_alloy)
+        self.is_coalesce_assign(a.op)
+            || self.is_append(a.op)
+            || a.targets.iter().any(chain_has_alloy)
+    }
+
+    /// Whether an assignment operator is `:=`: a `:` and a `=`.
+    pub(crate) fn is_append(&self, op: TokSpan) -> bool {
+        op.end - op.start == 2 && self.text_of(op) == ":="
+    }
+
+    /*
+    `xs := v` becomes `__alloy.append(xs, v)`. The runtime asks the value
+    how it appends, so the emit reads no type.
+
+    Under the analysis flag the check artifact writes
+    `__alloy.append_checked(xs)(v)`, which has a type: the value must fit
+    the items of the target. Both sides keep their source map, so a
+    report sits on the text the author wrote.
+    */
+    fn append_stmt(&mut self, a: &Assign) {
+        let anchor = self.byte_start(a.span);
+
+        if !self.options.fflags.on(&crate::fflags::WALRUS_SYNTAX) {
+            self.diagnose(
+                a.op,
+                &format!(
+                    "`:=` is not final; set `{} = true` under `[fflags]` in alloy.toml to use it",
+                    crate::fflags::WALRUS_SYNTAX.name
+                ),
+            );
+            self.generate(anchor, "");
+
+            return;
+        }
+
+        if a.targets.len() != 1 || a.values.len() != 1 {
+            self.diagnose(a.span, "`:=` takes one target and one value");
+            self.generate(anchor, "");
+
+            return;
+        }
+
+        let checked = self.options.check && self.options.fflags.on(&crate::fflags::WALRUS_ANALYSIS);
+        let target = self.render_to_side(&a.targets[0]);
+        let value = self.render_to_side(&a.values[0]);
+        let std = self.std();
+        let (name, between) = match checked {
+            true => ("append_checked", ")("),
+
+            false => ("append", ", "),
+        };
+
+        self.generate(anchor, &format!("{std}.{name}("));
+        self.r.append(target);
+        self.generate(anchor, between);
+        self.r.append(value);
+        self.generate(anchor, ")");
     }
 
     /*
@@ -2472,6 +2529,12 @@ impl<'s> Desugar<'s> {
     when `x` is nil, and the checker reads `x` as narrowed after it.
     */
     pub(crate) fn assign(&mut self, a: &Assign) {
+        if self.is_append(a.op) {
+            self.append_stmt(a);
+
+            return;
+        }
+
         let anchor = self.byte_start(a.span);
 
         if a.targets.len() != 1 || a.values.len() != 1 {

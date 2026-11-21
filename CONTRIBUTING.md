@@ -24,7 +24,18 @@ default. The branch can then release at any time, with the feature
 unfinished.
 
 The name of a flag starts with `Alloy`, as a Luau flag starts with
-`Luau`: `AlloyNativeIfLocal`, `AlloyExperimentalPipeOperator`.
+`Luau`: `AlloyNativeIfLocal`, `AlloyExperimentalWalrusSyntax`.
+
+A feature that adds syntax takes two flags, so a wrong report points at
+one layer:
+
+- `AlloyExperimental<Name>Syntax` turns on the parse and the emit.
+- `AlloyExperimental<Name>Analysis` turns on the types the check
+  artifact carries for the feature, and what the editor says about it.
+  It reads the `Syntax` flag, and does nothing without it.
+
+With `Syntax` alone the feature runs, and the checker reads its values
+as `any`. A feature with no syntax of its own takes one flag.
 
 1. Add a `Flag` to `crates/alloy/src/fflags.rs` and name it in `FLAGS`.
 2. Add its key to the `fflags` table in `crates/alloy/src/schema.rs`. A

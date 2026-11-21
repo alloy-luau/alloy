@@ -648,6 +648,14 @@ pub const PRIMITIVES: &[&str] = &[
     "boolean", "number", "string", "table", "function", "thread", "buffer", "vector", "userdata",
 ];
 
+/// The functions of the `table` library a table has as methods under
+/// `AlloyExperimentalTableStdInheritance`. Each takes the table first.
+/// `create` and `pack` take none, so they stay out.
+pub const TABLE_METHODS: &[&str] = &[
+    "insert", "remove", "find", "sort", "concat", "clear", "clone", "freeze", "isfrozen", "unpack",
+    "move", "maxn",
+];
+
 pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> Rendered {
     let mut edits = chunk.type_edits.clone();
     // Outer edits first when two start at the same byte, so `T[][]`
@@ -808,6 +816,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         trait_impl_targets: HashSet::new(),
         elem_bounds: Vec::new(),
         ext_methods: HashSet::new(),
+        table_std: options.fflags.on(&crate::fflags::TABLE_STD_INHERITANCE),
         ext_statics: HashMap::new(),
         self_type: None,
         ext_primitive: HashMap::new(),
@@ -1774,6 +1783,9 @@ struct Desugar<'s> {
     /// Extension method names declared on foreign types in this file, so
     /// `x:name(...)` routes through the dispatcher.
     ext_methods: HashSet<String>,
+    /// Whether a call by a name of `TABLE_METHODS` routes through the
+    /// table dispatcher.
+    table_std: bool,
     /// Foreign types with statics declared on them: `Vector3.zero()`.
     ext_statics: HashMap<String, HashSet<String>>,
     /// The type an untyped `self` parameter gets while a foreign impl
@@ -2776,7 +2788,8 @@ fn stmt_needs_desugar(s: &Stmt) -> bool {
         // the emit writes the `return` the source leaves out.
         Stmt::Return(r) if r.value_only => return true,
 
-        Stmt::Assign(a) if a.op.end - a.op.start == 3 => return true,
+        // `??=` is three tokens and `:=` is two. Every other operator is one.
+        Stmt::Assign(a) if a.op.end - a.op.start >= 2 => return true,
 
         Stmt::Local(l) if local_needs_rewrite(l) => return true,
 

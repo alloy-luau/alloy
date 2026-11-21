@@ -1760,6 +1760,11 @@ impl Server {
                             // which the Luau one drops.
                             text = text.replace("```luau", "```alloy");
 
+                            if let Some(shown) = st.table_method_hover(uri, line, character, &value)
+                            {
+                                text = shown;
+                            }
+
                             if let Some(optional) =
                                 optional_index_hover(&text, doc, line, character)
                             {
@@ -2540,6 +2545,7 @@ impl Server {
                             // and the child types that table from the
                             // module alone.
                             extra.extend(st.impl_self_members(uri, line, character, result));
+                            extra.extend(st.table_method_completions(uri, line, character, result));
                         }
 
                         let (from_ingots, incomplete) = st

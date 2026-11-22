@@ -43,6 +43,10 @@ as `any`. A feature with no syntax of its own takes one flag.
 3. Read it where the feature starts: `options.fflags.on(&fflags::NAME)`.
    With the flag off, the output must not change.
 4. Test the feature with the flag on, and one case with it off.
+5. Add the form to `crates/alloy/src/docs/style.md`, with its flag. The
+   article is the style section of the agent guide that `alloy init`
+   writes, and the text of `alloy mcp`. A new function of the std goes
+   in its `Std` part.
 
 A project sets flags in `[fflags]` of alloy.toml or `.config.aly`. The
 table holds Luau flags too. The prefix tells them apart: an `Alloy` name
@@ -53,6 +57,10 @@ stays with the compiler, and any other name goes to luau-lsp.
 AlloyNativeIfLocal = true
 LuauSolverV2 = true
 ```
+
+`OnByDefault = true` in the table turns on each `AlloyExperimental` flag
+with no entry of its own. A new experimental flag needs no code for
+this; an `AlloyNative` flag stays off until a project names it.
 
 The editor has one list of its own, `alloy-luau.fflags.override` in
 VS Code, which goes over the list of the project.

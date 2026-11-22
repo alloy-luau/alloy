@@ -513,6 +513,159 @@ struct Fn {
     in_impl: bool,
 }
 
+/*
+A call of a function the file declares `@must_use`, alone as a
+statement. The marks come from the tree, and the calls from the tokens:
+a call statement opens a line or follows `then`, `do`, `else`, or `;`,
+and nothing reads on after its `)`.
+
+A method is known by its name alone. The lint reads no type, so
+`a:save()` reports for each marked method named `save`.
+*/
+fn unused_must_use(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Lint> {
+    use alloy_syntax::ast::{Attr, Expr};
+
+    let text = |span: alloy_syntax::ast::TokSpan| span.text(src, toks);
+    let reason = |attrs: &[Attr]| {
+        let attr = attrs
+            .iter()
+            .find(|a| a.name.map(text) == Some("must_use"))?;
+
+        Some(match attr.args.first() {
+            Some(Expr::String(s)) => format!("; {}", text(*s).trim_matches(['"', '\''])),
+
+            _ => String::new(),
+        })
+    };
+    let mut free: Vec<(&str, String)> = Vec::new();
+    let mut methods: Vec<(&str, String)> = Vec::new();
+
+    for stmt in &chunk.block.stmts {
+        match stmt.under_default() {
+            Stmt::Function(f) => {
+                if let Some(why) = reason(&f.attrs) {
+                    let name = text(*f.path.last().expect("a function has a name"));
+
+                    match f.path.len() {
+                        1 => free.push((name, why)),
+
+                        _ => methods.push((name, why)),
+                    }
+                }
+            }
+
+            Stmt::LocalFunction(f) => {
+                if let Some(why) = reason(&f.attrs) {
+                    free.push((text(f.name), why));
+                }
+            }
+
+            Stmt::Impl(i) => {
+                for m in &i.methods {
+                    if let Some(why) = reason(&m.attrs) {
+                        methods.push((text(*m.path.last().expect("a method has a name")), why));
+                    }
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    if free.is_empty() && methods.is_empty() {
+        return Vec::new();
+    }
+
+    let word = |i: usize| toks[i].text(src);
+    let line_break =
+        |a: usize, b: usize| src[toks[a].end as usize..toks[b].start as usize].contains('\n');
+    let mut out = Vec::new();
+
+    for i in 0..toks.len() {
+        if toks[i].kind != TokKind::Ident || toks.get(i + 1).map(|t| t.text(src)) != Some("(") {
+            continue;
+        }
+
+        let after_dot = i > 0 && matches!(word(i - 1), "." | ":");
+        let list = if after_dot { &methods } else { &free };
+        let Some((name, why)) = list.iter().find(|(n, _)| *n == word(i)) else {
+            continue;
+        };
+
+        // The chain the call ends: `a.b:save(`.
+        let mut first = i;
+
+        while first >= 2
+            && matches!(word(first - 1), "." | ":")
+            && toks[first - 2].kind == TokKind::Ident
+        {
+            first -= 2;
+        }
+
+        let opens = first == 0
+            || matches!(word(first - 1), "then" | "do" | "else" | ";" | "repeat")
+            || (line_break(first - 1, first)
+                && (matches!(toks[first - 1].kind, TokKind::Ident | TokKind::Number)
+                    || matches!(word(first - 1), ")" | "]" | "}"))
+                && !matches!(
+                    word(first - 1),
+                    "return" | "and" | "or" | "not" | "local" | "const" | "function" | "in"
+                ));
+
+        if !opens {
+            continue;
+        }
+
+        let mut depth = 0usize;
+        let mut close = i + 1;
+
+        while close < toks.len() {
+            match word(close) {
+                "(" => depth += 1,
+
+                ")" => {
+                    depth -= 1;
+
+                    if depth == 0 {
+                        break;
+                    }
+                }
+
+                _ => {}
+            }
+
+            close += 1;
+        }
+
+        let ends = match toks.get(close + 1) {
+            None => true,
+
+            Some(next) => {
+                matches!(next.text(src), "end" | "else" | "elseif" | "until" | ";")
+                    || (line_break(close, close + 1)
+                        && (next.kind == TokKind::Ident
+                            || matches!(next.text(src), "(" | "@" | "$")))
+            }
+        };
+
+        if !ends {
+            continue;
+        }
+
+        out.push(Lint {
+            name: "unused_must_use",
+            start: toks[first].start,
+            end: toks[close.min(toks.len() - 1)].end,
+            message: format!(
+                "the result of `{name}` is dropped{why}; read it, or write `local _ = ...` to drop it"
+            ),
+            fix: None,
+        });
+    }
+
+    out
+}
+
 /// A use of a namespace the file declares `@deprecated`. The attribute
 /// has no Luau form on a namespace, so nothing else reports it.
 fn deprecated_namespaces(src: &str, toks: &[Tok], chunk: &Chunk) -> Vec<Lint> {
@@ -744,6 +897,7 @@ pub fn run(src: &str, toks: &[Tok], chunk: &Chunk, options: &crate::EmitOptions)
     lints.extend(directive_lints(src));
     lints.extend(redundant_as(src, toks, chunk));
     lints.extend(deprecated_namespaces(src, toks, chunk));
+    lints.extend(unused_must_use(src, toks, chunk));
     lints.extend(game_alias(src, toks, chunk));
     lints.extend(stale_exports(src, toks, &chunk.block));
 

@@ -503,6 +503,13 @@ pub const LINTS: &[LintInfo] = &[
         detail: "A call takes its type arguments in `<<...>>`: `id<<number>>(5)`. Luau reads `id<number>(5)` as two comparisons, `(id < number) > 5`, and so does Alloy, because every valid Luau file compiles. Where the tokens read as no Luau, `Signal.new<string>()`, the compiler reports an error instead. The editor offers the `<<...>>` form as a quick fix; `alloy flux --fix` leaves the line, because the rewrite changes what the program does.",
     },
     LintInfo {
+        name: "unused_must_use",
+        group: Group::Suspicious,
+        default: Level::Warn,
+        summary: "a call of a `@must_use` function whose result nothing reads",
+        detail: "A function under `@must_use` returns a value the caller has to read, such as a Result that holds an error. A call that stands alone as a statement drops it. Bind the result, pass it on, or write `local _ = f()` to drop it on purpose. The lint reads the file that declares the function, and it knows a method by its name.",
+    },
+    LintInfo {
         name: "deprecated_namespace",
         group: Group::Suspicious,
         default: Level::Warn,

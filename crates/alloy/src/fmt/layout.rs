@@ -71,6 +71,9 @@ impl<'s> Formatter<'s> {
             // `trait = 1` writes the word as a name, and opens nothing.
             "struct" | "enum" | "trait" | "impl" | "interface" | "macro" | "namespace" => {
                 !self.items[i].name_here
+                    // `struct UserId(number)` has no body.
+                    && !(self.items[i].is("struct")
+                        && self.items.get(i + 2).is_some_and(|it| it.is("(")))
                     && (self.items[i].newlines_before > 0
                         || i == 0
                         || matches!(prev, Some("export" | "global" | "public" | "private"))

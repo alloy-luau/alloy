@@ -137,6 +137,7 @@ pub fn parse_with(src: &str, toks: &[Tok], options: ParseOptions) -> Result<Chun
         lenient: false,
         diagnostics: Vec::new(),
         yield_spot: YieldSpot::Outside,
+        defer_seen: false,
         method_context: 0,
         type_edits: Vec::new(),
         type_names: Vec::new(),
@@ -206,6 +207,7 @@ pub fn parse_lenient(src: &str, toks: &[Tok], options: ParseOptions) -> (Chunk, 
         lenient: true,
         diagnostics: Vec::new(),
         yield_spot: YieldSpot::Outside,
+        defer_seen: false,
         method_context: 0,
         type_edits: Vec::new(),
         type_names: Vec::new(),
@@ -290,6 +292,8 @@ struct Parser<'a> {
     diagnostics: Vec<ParseError>,
     /// Where the cursor stands for a `yield`.
     yield_spot: YieldSpot,
+    /// A `defer` stood in the function under parse.
+    defer_seen: bool,
     /// Above zero inside an `impl` or `trait` body, where a method named
     /// `new` is the constructor and no reserved word applies.
     method_context: u32,
@@ -765,7 +769,7 @@ differs per word:
 */
 pub use crate::contextual::is_contextual;
 
-fn is_reserved(word: &str) -> bool {
+pub(crate) fn is_reserved(word: &str) -> bool {
     crate::contextual::is_luau_reserved(word)
 }
 

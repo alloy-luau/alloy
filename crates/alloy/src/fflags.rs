@@ -15,6 +15,10 @@
 //! alone does nothing. A feature with no syntax of its own takes one
 //! flag.
 //!
+//! `OnByDefault = true` in the list turns on each `AlloyExperimental`
+//! flag that has no entry of its own. luau-lsp turns on each Luau flag
+//! with no help, so the one key gives a project every flag.
+//!
 //! An Alloy flag leaves `FLAGS` when its feature becomes the default. A
 //! configuration that still names it gets a warning, not an error, so
 //! an old file keeps loading.
@@ -25,6 +29,15 @@ use serde::{Deserialize, Serialize};
 
 /// What the name of every flag of this compiler starts with.
 pub const PREFIX: &str = "Alloy";
+
+/// The key that turns on each flag the list does not name. It is
+/// neither a flag of Alloy nor one of Luau, so it never goes to luau-lsp.
+pub const ON_BY_DEFAULT: &str = "OnByDefault";
+
+/// What the name of a flag starts with when `OnByDefault` reaches it. An
+/// `AlloyNative` flag changes the Luau of the ship artifact to syntax
+/// that only some runtimes read, so a project names each one itself.
+const EXPERIMENTAL: &str = "AlloyExperimental";
 
 /// One flag of the compiler: its name, as the configuration writes it,
 /// and what it turns on.
@@ -133,6 +146,41 @@ pub const NET_LIBRARY: Flag = Flag {
     doc: "The `Net` module of the std: HTTP requests over HttpService. `Net.get(url)` starts a request, a chain of calls fills it, and `send` returns a Future that holds a Result, so a failure of the network is a value and raises nothing. With this flag off, a call of `Net` reports.",
 };
 
+pub const LAMBDA_SYNTAX: Flag = Flag {
+    name: "AlloyExperimentalLambdaSyntax",
+    doc: "The short function. `|x| x * 2` is `function(x) return x * 2 end`, and `|| value` takes no parameter. The body is one expression. A parameter takes a type, `|x: number| x * 2`; a union there needs parens.",
+};
+
+pub const DEFER_SYNTAX: Flag = Flag {
+    name: "AlloyExperimentalDeferSyntax",
+    doc: "The `defer` statement. `defer conn:Disconnect()` runs the call when the function it stands in ends: at a `return`, at the last statement, or at an error. `defer do ... end` takes a block. The last `defer` runs first.",
+};
+
+pub const BAIL_SYNTAX: Flag = Flag {
+    name: "AlloyExperimentalBailSyntax",
+    doc: "A way out after `??`. `local x = find(id) ?? return 0` leaves the function when the value is nil, and `x` is not nil on the lines after it. `break` and `continue` stand there too. The form is the whole value of a `local` or a `const` with one name.",
+};
+
+pub const RANGE_PATTERN_SYNTAX: Flag = Flag {
+    name: "AlloyExperimentalRangePatternSyntax",
+    doc: "A range as a pattern. `case 1..10 then` takes a number from 1 up to 10, without 10, and `case 1..=10 then` takes 10 too. Each side is a number. A value that is no number does not match.",
+};
+
+pub const USING_SYNTAX: Flag = Flag {
+    name: "AlloyExperimentalUsingSyntax",
+    doc: "The `using` statement. `using lock = locks:take(id)` binds a name that does not change, and drops its value when the function ends: at a `return`, at the last statement, or at an error. The drop calls the first of `drop`, `Destroy`, `Disconnect`, `close`, and `cancel` the value has. The last `using` drops first.",
+};
+
+pub const MUST_USE: Flag = Flag {
+    name: "AlloyExperimentalMustUse",
+    doc: "The `@must_use` attribute. A call of a function under it that stands alone as a statement drops the result, and the `unused_must_use` lint reports it. `@must_use(\"why\")` adds the reason to the report. The lint reads the file that declares the function; a call from another file is not reported.",
+};
+
+pub const NEWTYPE_SYNTAX: Flag = Flag {
+    name: "AlloyExperimentalNewtypeSyntax",
+    doc: "A struct over one type. `struct UserId(number)` declares a type the checker keeps apart from `number` and from each other struct of this form, so a `PlaceId` does not pass for a `UserId`. `new UserId(5)` makes one and `UserId.raw(id)` gives the number back. The value is the plain number when the code runs.",
+};
+
 /// Every flag this version of the compiler reads.
 pub const FLAGS: &[&Flag] = &[
     &NATIVE_IF_LOCAL,
@@ -155,6 +203,13 @@ pub const FLAGS: &[&Flag] = &[
     &GENERATOR_ANALYSIS,
     &WIDTH_TYPES,
     &NET_LIBRARY,
+    &LAMBDA_SYNTAX,
+    &DEFER_SYNTAX,
+    &BAIL_SYNTAX,
+    &RANGE_PATTERN_SYNTAX,
+    &USING_SYNTAX,
+    &MUST_USE,
+    &NEWTYPE_SYNTAX,
 ];
 
 /// The value of one flag. An Alloy flag is `true` or `false`; a Luau
@@ -186,10 +241,16 @@ impl std::fmt::Display for FlagValue {
 pub struct FFlags(pub BTreeMap<String, FlagValue>);
 
 impl FFlags {
+    /// Whether a flag is on. An entry of the flag decides. With no
+    /// entry, `OnByDefault = true` turns on each experimental flag.
     pub fn on(&self, flag: &Flag) -> bool {
-        self.0
-            .get(flag.name)
-            .is_some_and(|v| v.to_string() == "true")
+        let is_true = |name: &str| self.0.get(name).is_some_and(|v| v.to_string() == "true");
+
+        match self.0.contains_key(flag.name) {
+            true => is_true(flag.name),
+
+            false => flag.name.starts_with(EXPERIMENTAL) && is_true(ON_BY_DEFAULT),
+        }
     }
 
     /// These flags with each entry of `over` on top. The editor's list
@@ -217,7 +278,7 @@ impl FFlags {
     pub fn luau_args(&self) -> Vec<String> {
         self.0
             .iter()
-            .filter(|(k, _)| !k.starts_with(PREFIX))
+            .filter(|(k, _)| !k.starts_with(PREFIX) && *k != ON_BY_DEFAULT)
             .map(|(k, v)| format!("--flag:{k}={v}"))
             .collect()
     }
@@ -242,6 +303,26 @@ impl FFlags {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn on_by_default_turns_on_each_experimental_flag_with_no_entry() {
+        let project: FFlags = toml::from_str(
+            "OnByDefault = true\nAlloyExperimentalDeferSyntax = false\nLuauTypeLength = 200\n",
+        )
+        .unwrap();
+        assert!(project.on(&LAMBDA_SYNTAX));
+        // An entry of the flag wins.
+        assert!(!project.on(&DEFER_SYNTAX));
+        // A native flag changes what ships, so it stays off.
+        assert!(!project.on(&NATIVE_EXPORT));
+        // The key is no flag of Luau and no unknown flag of Alloy.
+        assert_eq!(project.luau_args(), ["--flag:LuauTypeLength=200"]);
+        assert!(project.unknown().is_empty());
+
+        let off: FFlags = toml::from_str("OnByDefault = false\n").unwrap();
+        assert!(!off.on(&LAMBDA_SYNTAX));
+        assert!(off.luau_args().is_empty());
+    }
 
     #[test]
     fn one_list_holds_the_flags_of_alloy_and_of_luau() {

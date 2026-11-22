@@ -225,6 +225,17 @@ fn settled_type(declared: &str) -> Option<String> {
 /// The types inside the parens of a return pack, `(A, B)`, when the
 /// parens hold the whole text. `(A) -> B` is a function type and gives
 /// `None`.
+/// The two sides of `local x = value ?? return`, when the statement is
+/// that form: one name with no pattern, and one value.
+fn bail_of(l: &Local) -> Option<(&Expr, &Expr)> {
+    let ([name], [Expr::Binary { lhs, rhs, .. }]) = (&l.names[..], &l.values[..]) else {
+        return None;
+    };
+
+    (name.destructure.is_none() && !l.exported && matches!(**rhs, Expr::Bail { .. }))
+        .then_some((&**lhs, &**rhs))
+}
+
 pub(crate) fn pack_inner(declared: &str) -> Option<&str> {
     let t = declared.trim();
 
@@ -337,7 +348,9 @@ impl<'s> Desugar<'s> {
         self.ret_types
             .push(body.ret_type.map(|t| self.text_of(t).trim().to_string()));
         self.try_targets.push(None);
+        self.defer_lists.push(body.defers);
         self.block(&body.block);
+        self.defer_lists.pop();
         self.try_targets.pop();
         self.ret_types.pop();
         self.scopes.pop();
@@ -2070,6 +2083,10 @@ impl<'s> Desugar<'s> {
                 self.match_hoisted(m, &sink, "");
             }
 
+            Stmt::Local(l) if l.using => self.local_using(l),
+
+            Stmt::Local(l) if bail_of(l).is_some() => self.local_bail(l),
+
             Stmt::Local(l) if local_needs_rewrite(l) => self.local_stmt(l),
 
             // `return Err(e)` inside a `try do` block: the block fails
@@ -2177,6 +2194,8 @@ impl<'s> Desugar<'s> {
                 self.expr(value);
                 self.generate(self.byte_end(*span), ")");
             }
+
+            Stmt::Defer { block, span } => self.defer_stmt(*span, block),
 
             Stmt::Destroy { expr, delay, span } => self.destroy(*span, expr, delay.as_ref()),
 
@@ -3375,7 +3394,143 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /// `using x = open()` becomes `local x = open()`, and one entry in
+    /// the list of the function that drops `x`. `using` and `local`
+    /// have one length, so each column of the line holds.
+    fn local_using(&mut self, l: &Local) {
+        let start = self.byte_start(l.span);
+        let end = self.byte_end(l.span);
+        let name = self.text_of(l.names[0].name).to_string();
+        self.generate(start, "local");
+        let value = &l.values[0];
+        self.copy(self.byte_end(l.keyword), self.byte_start(value.span()));
+        self.expr(value);
+
+        if self.defer_lists.last() == Some(&true) {
+            let std = self.std();
+            self.generate(
+                end,
+                &format!(" {DEFERS}[#{DEFERS} + 1] = function() {std}.drop({name}) end"),
+            );
+        }
+    }
+
+    /*
+    `local x = value ?? return 0` becomes `local x = value if x == nil
+    then return 0 end`, so the checker reads `x` as not nil below. With
+    an annotation the value goes through a temp first: `local x: T`
+    would refuse the nil the value may hold.
+    */
+    fn local_bail(&mut self, l: &Local) {
+        let (lhs, bail) = bail_of(l).expect("the caller matched");
+        let start = self.byte_start(l.span);
+        let end = self.byte_end(l.span);
+        let name = self.text_of(l.names[0].name).to_string();
+        let value_start = self.byte_start(lhs.span());
+        let tested = match l.names[0].ty {
+            Some(_) => {
+                let n = self.bump_temp();
+                let temp = format!("_v{n}");
+                self.generate(start, &format!("local {temp} = "));
+                self.expr(lhs);
+                temp
+            }
+
+            None => {
+                self.copy(start, value_start);
+                self.expr(lhs);
+                name.clone()
+            }
+        };
+        let at = self.byte_end(lhs.span());
+        self.generate(at, &format!(" if {tested} == nil then "));
+        self.stitch(bail.span(), &expr_children(bail), |d, child| match child {
+            Child::Expr(e) => d.expr(e),
+
+            Child::Block(b) => d.block(b),
+
+            Child::Function(b) => d.function_block(b),
+        });
+        self.generate(end, " end");
+
+        if let Some(ty) = l.names[0].ty {
+            let keyword = self.text_of(l.keyword).to_string();
+            let ty = self.copy_type_to_string(ty);
+            self.generate(end, &format!(" {keyword} {name}: {} = {tested}", ty.trim()));
+        }
+    }
+
+    /*
+    `defer call()` becomes `__defers[#__defers + 1] = function() call()
+    end`, and `defer do ... end` the same with its block. The function
+    the statement stands in holds the list: `function_with_header`
+    writes it, and the std runs it when the body ends.
+
+    With no function open the walk of reports named the statement, and
+    the block runs in place as a `do` block, so the output still parses.
+    */
+    fn defer_stmt(&mut self, span: TokSpan, block: &Block) {
+        let start = self.byte_start(span);
+        let open = match self.defer_lists.last() {
+            Some(true) => format!("{DEFERS}[#{DEFERS} + 1] = function() "),
+
+            _ => "do ".to_string(),
+        };
+        let saved = (self.barrier, self.value_sink.take());
+        self.barrier = self.declared.len();
+        self.ret_types.push(None);
+        self.try_targets.push(None);
+        self.defer_lists.push(false);
+        self.generate(start, &open);
+
+        match self.text_of(TokSpan::new(
+            span.start as usize + 1,
+            span.start as usize + 2,
+        )) == "do"
+        {
+            // `defer do ... end`: the `end` of the source closes the
+            // function.
+            true => {
+                let end_tok = self.toks[span.end as usize - 1];
+                let body_start = self.block_start_or(block, end_tok.start);
+                self.copy(self.toks[span.start as usize + 1].end, body_start);
+                self.block(block);
+                let after = self.block_end_or(block, body_start);
+                self.copy(after, end_tok.end);
+            }
+
+            false => {
+                self.block(block);
+                self.generate(self.byte_end(span), " end");
+            }
+        }
+
+        self.defer_lists.pop();
+        self.try_targets.pop();
+        self.ret_types.pop();
+        (self.barrier, self.value_sink) = saved;
+    }
+
+    /// `|a, b| value` becomes `function(a, b) return value end`. The
+    /// parameters copy as written, and the block writes the `return`.
+    fn lambda(&mut self, span: TokSpan, body: &FunctionBody) {
+        let bar = TokSpan::new(span.start as usize, span.start as usize + 1);
+        let close = self.toks[body.block.span.start as usize - 1];
+        self.generate(self.byte_start(span), "function(");
+        self.copy(self.byte_end(bar), close.start);
+        self.generate(close.start, ")");
+        self.copy(close.end, self.byte_start(body.block.span));
+        let sink = self.value_sink.take();
+        self.function_block(body);
+        self.value_sink = sink;
+        self.generate(self.byte_end(span), " end");
+    }
+
     pub(crate) fn function_with_header(&mut self, span: TokSpan, body: &FunctionBody) {
+        if body.lambda {
+            return self.lambda(span, body);
+        }
+
         let start = self.byte_start(span);
         let end_tok = self.toks[span.end as usize - 1];
         let params_open = self.toks[self.params_open_tok(body) as usize];
@@ -3678,6 +3833,7 @@ impl<'s> Desugar<'s> {
         let generator = body.generator.is_some() && body.is_async.is_none();
         let ends_open = body.is_async.is_none()
             && !generator
+            && !body.defers
             && (self.self_prologue.is_some() || prologue.iter().any(|p| !p.is_empty()));
 
         if let Some(p) = self.self_prologue.take() {
@@ -3787,6 +3943,26 @@ impl<'s> Desugar<'s> {
             ));
         }
 
+        // A body with a `defer` runs as a function of its own, and the
+        // std runs the list when that function returns or raises. The
+        // inner function takes the declared return type, so a wrong
+        // `return` reports on its own line.
+        if body.defers {
+            let std = self.std();
+            let ret = match body.ret_type {
+                Some(rt) if body.is_async.is_none() && !generator => {
+                    format!(": {}", self.lower_type(self.text_of(rt).trim()))
+                }
+
+                _ => String::new(),
+            };
+
+            lead.push_str(&format!(
+                " local {DEFERS} = {{}} return {std}.deferred({DEFERS}, function({}){ret}",
+                if has_vararg { "..." } else { "" }
+            ));
+        }
+
         if !lead.is_empty() {
             self.generate(cursor, &lead);
         }
@@ -3811,6 +3987,11 @@ impl<'s> Desugar<'s> {
 
         let after = self.block_end_or(&body.block, body_start);
         self.copy(after, end_tok.start);
+
+        if body.defers {
+            let close = if has_vararg { "end, ...) " } else { "end) " };
+            self.generate(end_tok.start, close);
+        }
 
         if body.is_async.is_some() {
             let std = self.std();

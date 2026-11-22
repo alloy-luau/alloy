@@ -1386,4 +1386,37 @@ local r = b?.
         apply_edit(&mut doc.source, &mut doc.bom, Some(((0, 1), (1, 1))), "X");
         assert_eq!(doc.source, "aXd\n");
     }
+    /// A member after a lambda's parameter, half typed at the end of
+    /// the line: the caret maps into the function the lambda becomes.
+    #[test]
+    fn a_dangling_member_in_a_lambda_maps_into_its_function() {
+        let src = "local function f(pets: { string })\n    const names = |p: string| p.\n    print(pets, names)\nend\nprint(f)\n";
+        let options = EmitOptions {
+            fflags: alloy::fflags::FFlags(
+                [(
+                    alloy::fflags::LAMBDA_SYNTAX.name.to_string(),
+                    alloy::fflags::FlagValue::Bool(true),
+                )]
+                .into_iter()
+                .collect(),
+            ),
+            ..EmitOptions::default()
+        };
+        let doc = Doc::new(
+            src.to_string(),
+            1,
+            &options,
+            &alloy::luaux::Config::default(),
+            None,
+        );
+        let at = src.find("p.\n").expect("the hole") + 2;
+        let (line, character) = position_of(src, at);
+        let (sl, sc) = doc.to_shadow(line, character);
+        let shadow_line = doc.shadow.lines().nth(sl as usize).unwrap_or_default();
+
+        assert!(
+            shadow_line[..sc as usize].ends_with("return p."),
+            "{sc}: {shadow_line}"
+        );
+    }
 }

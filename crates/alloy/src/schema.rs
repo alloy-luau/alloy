@@ -822,8 +822,14 @@ pub const TABLES: &[Table] = &[
     },
     Table {
         name: "fflags",
-        doc: "Feature flags, by name. A name that starts with `Alloy` is a flag of the compiler: a feature that is not the default yet, off until the project turns it on here. Such a flag leaves the list when its feature becomes the default. Any other name is a Luau flag, and `alloy flux` and the editor pass it to luau-lsp.",
+        doc: "Feature flags, by name. A name that starts with `Alloy` is a flag of the compiler: a feature that is not the default yet, off until the project turns it on here. `OnByDefault = true` turns on every experimental one at once. Such a flag leaves the list when its feature becomes the default. Any other name is a Luau flag, and `alloy flux` and the editor pass it to luau-lsp.",
         keys: &[
+            key(
+                crate::fflags::ON_BY_DEFAULT,
+                BOOL,
+                "false",
+                "Turns on each `AlloyExperimental` flag that has no entry in this table. An entry still wins, so `AlloyExperimentalDeferSyntax = false` under it turns that one off. The `AlloyNative` flags stay off, since each one changes the Luau that ships. luau-lsp turns on each Luau flag with no key here.",
+            ),
             key(
                 crate::fflags::NATIVE_IF_LOCAL.name,
                 BOOL,
@@ -943,6 +949,48 @@ pub const TABLES: &[Table] = &[
                 BOOL,
                 "false",
                 crate::fflags::NET_LIBRARY.doc,
+            ),
+            key(
+                crate::fflags::LAMBDA_SYNTAX.name,
+                BOOL,
+                "false",
+                crate::fflags::LAMBDA_SYNTAX.doc,
+            ),
+            key(
+                crate::fflags::DEFER_SYNTAX.name,
+                BOOL,
+                "false",
+                crate::fflags::DEFER_SYNTAX.doc,
+            ),
+            key(
+                crate::fflags::BAIL_SYNTAX.name,
+                BOOL,
+                "false",
+                crate::fflags::BAIL_SYNTAX.doc,
+            ),
+            key(
+                crate::fflags::RANGE_PATTERN_SYNTAX.name,
+                BOOL,
+                "false",
+                crate::fflags::RANGE_PATTERN_SYNTAX.doc,
+            ),
+            key(
+                crate::fflags::USING_SYNTAX.name,
+                BOOL,
+                "false",
+                crate::fflags::USING_SYNTAX.doc,
+            ),
+            key(
+                crate::fflags::MUST_USE.name,
+                BOOL,
+                "false",
+                crate::fflags::MUST_USE.doc,
+            ),
+            key(
+                crate::fflags::NEWTYPE_SYNTAX.name,
+                BOOL,
+                "false",
+                crate::fflags::NEWTYPE_SYNTAX.doc,
             ),
         ],
         open: Some(luau_flag_value),
@@ -1380,7 +1428,12 @@ mod tests {
         // The schema names each flag of `crate::fflags::FLAGS`, and no
         // other.
         let fflags = TABLES.iter().find(|t| t.name == "fflags").unwrap();
-        let named: Vec<&str> = fflags.keys.iter().map(|k| k.name).collect();
+        let named: Vec<&str> = fflags
+            .keys
+            .iter()
+            .map(|k| k.name)
+            .filter(|n| *n != crate::fflags::ON_BY_DEFAULT)
+            .collect();
         let flags: Vec<&str> = crate::fflags::FLAGS.iter().map(|f| f.name).collect();
         assert_eq!(named, flags);
 

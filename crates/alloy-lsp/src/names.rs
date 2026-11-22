@@ -168,7 +168,7 @@ pub(crate) fn builtin_attribute_targets(key: &str) -> &'static [&'static str] {
         // group a test, nested public namespaces included.
         "@test" => &["function", "namespace"],
 
-        "@native" | "@checked" | "@inline" | "@noinline" => &["function"],
+        "@native" | "@checked" | "@inline" | "@noinline" | "@must_use" => &["function"],
 
         "@unreliable" | "@ratelimit" | "@timeout" | "@validate" | "@immediate" | "@wire" => {
             &["remote"]

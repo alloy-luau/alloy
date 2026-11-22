@@ -136,7 +136,7 @@ impl<'a> Parser<'a> {
     /// `|` and `&` and looser than a suffix, so `~T[]` negates the array.
     /// A type never stands left of `~=`, which lexes as one token, so a
     /// lone `~` here is always the negation.
-    fn type_negated(&mut self) -> Result<(), ParseError> {
+    pub(super) fn type_negated(&mut self) -> Result<(), ParseError> {
         let start = self.pos;
 
         while self.at("~") {

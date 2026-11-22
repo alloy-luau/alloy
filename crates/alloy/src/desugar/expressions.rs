@@ -463,6 +463,18 @@ impl<'s> Desugar<'s> {
 
             Expr::Comprehension(c) => self.comprehension(e, c),
 
+            // `local_bail` takes the form where it may stand. Each
+            // other place has a value to give, and the word gives none.
+            Expr::Bail { span, .. } => {
+                let word = TokSpan::new(span.start as usize, span.start as usize + 1);
+                let report = format!(
+                    "`?? {}` stands as the whole value of a `local` or a `const` with one name",
+                    self.text_of(word)
+                );
+                self.diagnose(word, &report);
+                self.generate(self.byte_start(*span), "nil");
+            }
+
             Expr::Binary { .. } if self.chain_of(e).is_some() => {
                 let (operands, ops) = self.chain_of(e).expect("a chain");
                 self.comparison_chain(e, &operands, &ops);

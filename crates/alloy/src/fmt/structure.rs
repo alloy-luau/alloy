@@ -332,6 +332,9 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
                             && i >= 2
                             && toks[i - 2].text(src) == "export")
                         || after_attributes(src, toks, i))
+                        // `struct UserId(number)` has no body.
+                        && !(text == "struct"
+                            && toks.get(i + 2).is_some_and(|t| t.text(src) == "("))
                         && alloy_syntax::contextual::keyword_at(src, toks, i) =>
                 {
                     push(&mut stack, Kind::Block, 1, &mut opens, &mut closes);

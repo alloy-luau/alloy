@@ -177,6 +177,28 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+
+        // `struct UserId(number)`: a name of its own for one type.
+        if self.at("(") && !self.newline_before_pos() {
+            if generics.is_some() {
+                return Err(self.err("a struct over one type takes no type parameter"));
+            }
+
+            self.bump();
+            let inner = self.type_()?;
+            self.expect(")")?;
+
+            return Ok(Stmt::Struct(StructDecl {
+                attributes,
+                exported,
+                name,
+                generics,
+                fields: Vec::new(),
+                newtype: Some(inner),
+                span: TokSpan::new(start, self.pos),
+            }));
+        }
+
         self.header_as(open);
         let fields = self.fields()?;
         self.expect_end(open)?;
@@ -187,6 +209,7 @@ impl<'a> Parser<'a> {
             name,
             generics,
             fields,
+            newtype: None,
             span: TokSpan::new(start, self.pos),
         }))
     }
@@ -337,12 +360,17 @@ impl<'a> Parser<'a> {
                 && !(self.body_ends_early() && self.column_at(self.pos) <= self.column_at(m_start));
             let body = if has_body {
                 let b_start = self.pos;
-                let block = self.block()?;
+                let outer_defer = std::mem::replace(&mut self.defer_seen, false);
+                let block = self.block();
+                let defers = std::mem::replace(&mut self.defer_seen, outer_defer);
+                let block = block?;
                 self.expect_end(keyword)?;
 
                 Some(FunctionBody {
                     is_async,
                     generator: None,
+                    lambda: false,
+                    defers,
                     generics: None,
                     has_bounds: false,
                     params: Vec::new(),

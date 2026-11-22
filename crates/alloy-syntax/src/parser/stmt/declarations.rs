@@ -286,6 +286,7 @@ impl<'a> Parser<'a> {
             attrs: Vec::new(),
             keyword,
             exported: false,
+            using: false,
             is_const,
             names,
             values,
@@ -407,8 +408,10 @@ impl<'a> Parser<'a> {
             (None, _) => YieldSpot::Nested,
         };
         let outer = std::mem::replace(&mut self.yield_spot, inner);
+        let outer_defer = std::mem::replace(&mut self.defer_seen, false);
         let block = self.block();
         self.yield_spot = outer;
+        let defers = std::mem::replace(&mut self.defer_seen, outer_defer);
         let block = block?;
         self.expect_end(opener)?;
         // A `:` inside the list is a bound; `<T: Shape>` has no Luau form.
@@ -417,6 +420,8 @@ impl<'a> Parser<'a> {
         Ok(FunctionBody {
             is_async: None,
             generator: star,
+            lambda: false,
+            defers,
             generics,
             has_bounds,
             params,

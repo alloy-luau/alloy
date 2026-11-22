@@ -139,6 +139,44 @@ impl Desugar<'_> {
                 ..
             } => self.awaits_in_stmt(inner, spot),
 
+            Stmt::Local(l) if l.using => {
+                if !self.options.fflags.on(&crate::fflags::USING_SYNTAX) {
+                    let report = format!(
+                        "`using` is not final; set `{} = true` under `[fflags]` in alloy.toml to use it",
+                        crate::fflags::USING_SYNTAX.name
+                    );
+                    self.diagnose(l.keyword, &report);
+                } else if self.function_depth == 0 {
+                    self.diagnose(
+                        l.keyword,
+                        "`using` drops its value when its function ends, and no function is open here; put it in a function",
+                    );
+                }
+
+                for c in stmt_children(s) {
+                    self.awaits_in_child(c, spot);
+                }
+            }
+
+            Stmt::Defer { block, span } => {
+                let word = TokSpan::new(span.start as usize, span.start as usize + 1);
+
+                if !self.options.fflags.on(&crate::fflags::DEFER_SYNTAX) {
+                    let report = format!(
+                        "`defer` is not final; set `{} = true` under `[fflags]` in alloy.toml to use it",
+                        crate::fflags::DEFER_SYNTAX.name
+                    );
+                    self.diagnose(word, &report);
+                } else if self.function_depth == 0 {
+                    self.diagnose(
+                        word,
+                        "`defer` runs when its function ends, and no function is open here; put it in a function",
+                    );
+                }
+
+                self.awaits_in_block(block, spot);
+            }
+
             // `after n do ... end` is `task.delay(n, function() ... end)`.
             // The block and the `where` filter run on the timer's own
             // thread; the delay is read where the statement stands.
@@ -198,6 +236,15 @@ impl Desugar<'_> {
             }
         }
 
+        if body.lambda && !self.options.fflags.on(&crate::fflags::LAMBDA_SYNTAX) {
+            let report = format!(
+                "`|x| value` is not final; set `{} = true` under `[fflags]` in alloy.toml to use it",
+                crate::fflags::LAMBDA_SYNTAX.name
+            );
+            let bar = TokSpan::new(body.span.start as usize, body.span.start as usize + 1);
+            self.diagnose(bar, &report);
+        }
+
         self.awaits_in_body_at(body, &spot);
     }
 
@@ -208,7 +255,9 @@ impl Desugar<'_> {
             }
         }
 
+        self.function_depth += 1;
         self.awaits_in_block(&body.block, spot);
+        self.function_depth -= 1;
     }
 
     /// Whether a call starts each function it is handed on a thread of
@@ -252,6 +301,16 @@ impl Desugar<'_> {
                 self.awaits_in_block(block, &Spot::Async);
 
                 return;
+            }
+
+            Expr::Bail { span, .. } if !self.options.fflags.on(&crate::fflags::BAIL_SYNTAX) => {
+                let word = TokSpan::new(span.start as usize, span.start as usize + 1);
+                let report = format!(
+                    "`?? {}` is not final; set `{} = true` under `[fflags]` in alloy.toml to use it",
+                    self.text_of(word),
+                    crate::fflags::BAIL_SYNTAX.name
+                );
+                self.diagnose(word, &report);
             }
 
             Expr::Call {

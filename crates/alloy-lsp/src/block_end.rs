@@ -200,6 +200,9 @@ fn open_blocks(src: &str, until: usize) -> Vec<(u32, usize)> {
             // A local named match opens nothing; `match x with` does.
             "match" if !alloy_syntax::contextual::keyword_at(src, toks, i) => {}
 
+            // `struct UserId(number)` wraps one type and takes no body.
+            "struct" if i + 2 < toks.len() && text(i + 2) == "(" => {}
+
             // `attribute r() on struct` names the target of the
             // declaration; the words open no block there. `local impl =
             // 1` writes the word as a name.
@@ -322,6 +325,8 @@ mod tests {
             "import { a } from './b'\n",
             "export { a, b }\n",
             "if x then return end\n",
+            "struct UserId(number)\n",
+            "export struct Key(string)\n",
         ] {
             assert_eq!(needs_end(src, 0), None, "{src:?}");
         }

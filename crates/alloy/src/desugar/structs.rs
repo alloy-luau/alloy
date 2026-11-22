@@ -338,7 +338,7 @@ impl<'s> Desugar<'s> {
                     Some("native" | "checked" | "deprecated") | None => {}
 
                     // The lints read `@allow`; Luau reads none of it.
-                    Some("allow") => cut.push((range.0, range.1, String::new())),
+                    Some("allow" | "must_use") => cut.push((range.0, range.1, String::new())),
 
                     // An attribute that reaches no function is a
                     // diagnostic already, and Luau reads none of it.
@@ -839,7 +839,55 @@ impl<'s> Desugar<'s> {
         }
     }
 
+    /*
+    `struct UserId(number)` is a `number` when the code runs and a type
+    of its own to the checker: a table type with one field no value
+    has, so neither a `number` nor another struct of this form fits it.
+    `new UserId(5)` and `UserId.raw(id)` cast between the two.
+    */
+    fn newtype_decl(&mut self, st: &StructDecl, inner: TokSpan) {
+        if !self.options.fflags.on(&crate::fflags::NEWTYPE_SYNTAX) {
+            let report = format!(
+                "a struct over one type is not final; set `{} = true` under `[fflags]` in alloy.toml to use it",
+                crate::fflags::NEWTYPE_SYNTAX.name
+            );
+            let at = self.byte_start(st.name);
+
+            if !self
+                .diagnostics
+                .iter()
+                .any(|d| d.start == at && d.message == report)
+            {
+                self.diagnose(st.name, &report);
+            }
+        }
+
+        let name = self.decl_name(st.name);
+        let inner = self.copy_type_to_string(inner);
+        let inner = inner.trim();
+        let export = if st.exported || self.ns_export || self.export_listed_types.contains(&name) {
+            "export "
+        } else {
+            ""
+        };
+        let cast = format!("return (v :: any) :: {name} end");
+        self.generate(
+            self.byte_start(st.span),
+            &format!(
+                "{export}type {name} = {{ read __newtype_{name}: {inner} }} local {name} = setmetatable({{ new = function(v: {inner}): {name} {cast}, raw = function(v: {name}): {inner} return (v :: any) :: {inner} end }}, {{ __call = function(_, v: {inner}): {name} {cast} }})"
+            ),
+        );
+
+        if st.exported {
+            self.exports.push((name.clone(), name));
+        }
+    }
+
     pub(crate) fn struct_decl(&mut self, st: &StructDecl) {
+        if let Some(inner) = st.newtype {
+            return self.newtype_decl(st, inner);
+        }
+
         self.check_field_widths(st);
         self.check_serde_attrs(st);
         self.reject_type_bounds(st.generics, "a struct");
@@ -1457,7 +1505,15 @@ impl<'s> Desugar<'s> {
             // emit the `buffer` library; the runtime reads `pack` instead.
             if matches!(
                 name.as_str(),
-                "derive" | "test" | "native" | "checked" | "deprecated" | "cfg" | "allow" | "wire"
+                "derive"
+                    | "test"
+                    | "native"
+                    | "checked"
+                    | "deprecated"
+                    | "cfg"
+                    | "allow"
+                    | "wire"
+                    | "must_use"
             ) {
                 continue;
             }

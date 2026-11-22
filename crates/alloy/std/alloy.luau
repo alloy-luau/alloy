@@ -5778,4 +5778,58 @@ end
 
 alloy.Net = Net
 
+-- The names a value may give its cleanup, in the order `drop` asks.
+local DROP_NAMES = { "drop", "Destroy", "destroy", "Disconnect", "disconnect", "close", "Close", "cancel" }
+
+--- Drops a value, the lowering of `using`. A function is called, a
+--- thread is cancelled, and a connection or an Instance takes its own
+--- call. A table takes the first of `drop`, `Destroy`, `Disconnect`,
+--- `close`, and `cancel` it has. A value with none of these is left.
+function alloy.drop(value: any)
+	local kind = typeof(value)
+	if kind == "function" then
+		value()
+	elseif kind == "thread" then
+		if task then
+			task.cancel(value)
+		else
+			coroutine.close(value)
+		end
+	elseif kind == "RBXScriptConnection" then
+		value:Disconnect()
+	elseif kind == "Instance" then
+		value:Destroy()
+	elseif kind == "table" then
+		for _, name in DROP_NAMES do
+			local method = value[name]
+			if type(method) == "function" then
+				method(value)
+				return
+			end
+		end
+	end
+end
+
+-- The lowering of `defer`. The function with a `defer` hands its body
+-- over as `body`, and each `defer` adds its block to `defers`. The
+-- blocks run last to first when the body returns or raises. Every block
+-- runs, also after one of them raises. An error of the body passes on
+-- after the blocks; with none, the first error of a block does.
+local function deferred(defers: { () -> () }, body, ...)
+	local results = table.pack(pcall(body, ...))
+	local ok, failure = results[1], results[2]
+	for i = #defers, 1, -1 do
+		local ran, raised = pcall(defers[i])
+		if ok and not ran then
+			ok, failure = false, raised
+		end
+	end
+	if not ok then
+		error(failure, 0)
+	end
+	return table.unpack(results, 2, results.n)
+end
+
+alloy.deferred = (deferred :: any) :: <A..., R...>(defers: { () -> () }, body: (A...) -> R..., A...) -> R...
+
 return table.freeze(alloy)

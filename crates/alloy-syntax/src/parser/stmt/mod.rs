@@ -277,6 +277,105 @@ impl<'a> Parser<'a> {
         self.opens_statement()
     }
 
+    /// Reports if the `defer` at the cursor is the statement: a name or
+    /// a `do` follows on its line.
+    fn defer_follows(&self) -> bool {
+        self.at("defer")
+            && !self.newline_after(0)
+            && (self.text_at(1) == "do" || self.name_at(1) || self.text_at(1) == "self")
+    }
+
+    /// Reports if the `using` at the cursor is the statement: a name
+    /// follows on its line, and then a `=` or the `:` of its type.
+    fn using_follows(&self) -> bool {
+        self.at("using")
+            && !self.newline_after(0)
+            && self.name_at(1)
+            && matches!(self.text_at(2), "=" | ":")
+    }
+
+    fn using_stmt(&mut self, start: usize) -> Result<Stmt, ParseError> {
+        let keyword = self.bump();
+        let name = self.binding("using")?;
+
+        if name.destructure.is_some() {
+            return Err(self.err("`using` takes one name; a pattern has no one value to drop"));
+        }
+
+        self.expect("=")?;
+        let value = self.expr()?;
+
+        if self.at(",") {
+            return Err(self.err("`using` takes one name and one value"));
+        }
+
+        // The drop waits for the function to end, as a `defer` does.
+        self.defer_seen = true;
+
+        Ok(Stmt::Local(Local {
+            attrs: Vec::new(),
+            keyword: TokSpan::new(keyword, keyword + 1),
+            exported: false,
+            using: true,
+            is_const: true,
+            names: vec![name],
+            values: vec![value],
+            span: TokSpan::new(start, self.pos),
+        }))
+    }
+
+    fn defer_stmt(&mut self, start: usize) -> Result<Stmt, ParseError> {
+        self.bump();
+        // The block runs as a function of its own, so a `yield` there
+        // has no generator, and a `defer` there has no function to end.
+        let spot = match self.yield_spot {
+            YieldSpot::Outside => YieldSpot::Outside,
+
+            _ => YieldSpot::Nested,
+        };
+        let outer = std::mem::replace(&mut self.yield_spot, spot);
+        self.defer_seen = false;
+        let parsed = self.defer_block();
+        self.yield_spot = outer;
+        let nested = std::mem::replace(&mut self.defer_seen, true);
+        let block = parsed?;
+
+        if nested {
+            return Err(self.err(
+                "a `defer` inside a `defer` never runs; put the two statements in one `defer do ... end`",
+            ));
+        }
+
+        Ok(Stmt::Defer {
+            block,
+            span: TokSpan::new(start, self.pos),
+        })
+    }
+
+    fn defer_block(&mut self) -> Result<Block, ParseError> {
+        if self.at("do") {
+            let open = self.bump();
+            let block = self.block()?;
+            self.expect_end(open)?;
+
+            return Ok(block);
+        }
+
+        let first = self.pos;
+        let call = self.suffixed_expr()?;
+
+        if !matches!(call, Expr::Call { .. }) {
+            return Err(self.err("`defer` takes a call, or a block as `defer do ... end`"));
+        }
+
+        let span = TokSpan::new(first, self.pos);
+
+        Ok(Block {
+            stmts: vec![Stmt::Call(call, span)],
+            span,
+        })
+    }
+
     /// Reports if the token at the cursor is a keyword that begins a statement.
     fn opens_statement(&self) -> bool {
         matches!(
@@ -287,6 +386,8 @@ impl<'a> Parser<'a> {
             || (self.at("async") && matches!(self.text_at(1), "function" | "do"))
             || (self.at("delete") && self.name_at(1))
             || (self.at("destroy") && self.name_at(1))
+            || self.defer_follows()
+            || self.using_follows()
             || (self.at("after") && self.after_delay_follows())
             || (self.at("import") && self.import_follows())
             || (self.at("enum")
@@ -407,6 +508,14 @@ impl<'a> Parser<'a> {
                     span: TokSpan::new(start, self.pos),
                 })
             }
+
+            // `defer call()` and `defer do ... end`. Luau reads no
+            // statement of a name and then a name, so the word stays a
+            // name in every Luau file: `defer(f)`, `defer = 1`.
+            "defer" if self.defer_follows() => self.defer_stmt(start),
+
+            // `using x = open()`. Luau reads no statement of two names.
+            "using" if self.using_follows() => self.using_stmt(start),
 
             // `destroy x` and `destroy x after n`. The operand rule is
             // `delete`'s, so a string or a number gets the same message.
@@ -601,7 +710,13 @@ impl<'a> Parser<'a> {
                     && (matches!(self.text_at(2), "as" | "end")
                         || self.newline_after(1)
                         || self.name_at(2))
-                    || (self.at("struct") && self.name_at(1) && self.text_at(2) == "<") =>
+                    || (self.at("struct") && self.name_at(1) && self.text_at(2) == "<")
+                    // `struct UserId(number)`. Luau reads no statement
+                    // of two names.
+                    || (self.at("struct")
+                        && self.name_at(1)
+                        && self.text_at(2) == "("
+                        && !self.newline_after(1)) =>
             {
                 self.struct_decl(start, Vec::new(), false)
             }

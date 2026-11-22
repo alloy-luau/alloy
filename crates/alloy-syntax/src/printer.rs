@@ -90,6 +90,8 @@ fn nested_blocks(stmt: &Stmt) -> Vec<&Block> {
     match stmt {
         Stmt::Do(n) => vec![&n.block],
 
+        Stmt::Defer { block, .. } => vec![block],
+
         Stmt::Parallel(n) => vec![&n.block],
 
         Stmt::While(n) => vec![&n.block],

@@ -662,6 +662,9 @@ pub const PRIMITIVES: &[&str] = &[
 /// The parameter a generator body takes its `yield` function under.
 pub(crate) const YIELD: &str = "__yield";
 
+/// The list a `defer` adds its block to, a local of the function.
+pub(crate) const DEFERS: &str = "__defers";
+
 /// The functions of the `table` library a table has as methods under
 /// `AlloyExperimentalTableStdInheritance`. Each takes the table first.
 /// `create` and `pack` take none, so they stay out.
@@ -743,6 +746,8 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         variant_casts: HashMap::new(),
         array_elems: HashMap::new(),
         value_sink: None,
+        function_depth: 0,
+        defer_lists: Vec::new(),
         for_header: 0,
         child_cast: None,
         require_arg: false,
@@ -1553,6 +1558,12 @@ struct Desugar<'s> {
     /// in an arm of `local s = match`, `return ` for a value block. None
     /// writes `return `.
     value_sink: Option<String>,
+    /// How many function bodies the report walk stands in. A `defer`
+    /// at zero has no function to end.
+    function_depth: u32,
+    /// One entry for each function body under render: whether its
+    /// header wrote the list a `defer` adds to.
+    defer_lists: Vec<bool>,
     /// Above zero while the check artifact renders a for-in header; see
     /// the `return` cast in `statements`.
     for_header: u32,
@@ -2406,6 +2417,8 @@ pub(crate) fn expr_children(e: &Expr) -> Vec<Child<'_>> {
 
         Expr::AsyncBlock { block, .. } | Expr::TryBlock { block, .. } => vec![Child::Block(block)],
 
+        Expr::Bail { values, .. } => values.iter().map(Child::Expr).collect(),
+
         Expr::Macro { args, .. } => args.iter().map(Child::Expr).collect(),
     }
 }
@@ -2455,6 +2468,8 @@ pub(crate) fn stmt_children(s: &Stmt) -> Vec<Child<'_>> {
         }
 
         Stmt::Do(d) => vec![Child::Block(&d.block)],
+
+        Stmt::Defer { block, .. } => vec![Child::Block(block)],
 
         Stmt::Parallel(p) => vec![Child::Block(&p.block)],
 
@@ -2783,6 +2798,8 @@ fn child_function_spans(c: Child<'_>, out: &mut Vec<TokSpan>) {
 fn function_needs_rewrite(body: &FunctionBody) -> bool {
     body.is_async.is_some()
         || body.generator.is_some()
+        || body.lambda
+        || body.defers
         || body.ret_arrow.is_some()
         || body.has_bounds
         || body
@@ -2869,10 +2886,11 @@ fn stmt_needs_desugar(s: &Stmt) -> bool {
         // `??=` is three tokens and `:=` is two. Every other operator is one.
         Stmt::Assign(a) if a.op.end - a.op.start >= 2 => return true,
 
-        Stmt::Local(l) if local_needs_rewrite(l) => return true,
+        Stmt::Local(l) if l.using || local_needs_rewrite(l) => return true,
 
         Stmt::Delete { .. }
         | Stmt::Yield { .. }
+        | Stmt::Defer { .. }
         | Stmt::Destroy { .. }
         | Stmt::After(_)
         | Stmt::Parallel(_) => {
@@ -2991,6 +3009,7 @@ fn expr_needs_desugar(e: &Expr) -> bool {
         | Expr::Satisfies { .. }
         | Expr::Array { .. }
         | Expr::Comprehension(_)
+        | Expr::Bail { .. }
         | Expr::MethodRef { .. }
         | Expr::New { .. }
         | Expr::Await { .. }

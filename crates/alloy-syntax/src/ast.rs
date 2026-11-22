@@ -177,6 +177,13 @@ pub enum Stmt {
         value: Expr,
         span: TokSpan,
     },
+    /// `defer call()` and `defer do ... end`: the block runs when the
+    /// function it stands in ends. A call alone is a block of one
+    /// statement.
+    Defer {
+        block: Block,
+        span: TokSpan,
+    },
     /// `destroy expr` and `destroy expr after seconds`.
     Destroy {
         expr: Expr,
@@ -250,6 +257,7 @@ impl Stmt {
             | Stmt::Call(_, s)
             | Stmt::Delete { span: s, .. }
             | Stmt::Yield { span: s, .. }
+            | Stmt::Defer { span: s, .. }
             | Stmt::Destroy { span: s, .. }
             | Stmt::Attributed { span: s, .. }
             | Stmt::ExportDefault { span: s, .. } => *s,
@@ -334,6 +342,9 @@ pub struct StructDecl {
     pub name: TokSpan,
     pub generics: Option<TokSpan>,
     pub fields: Vec<Field>,
+    /// `struct UserId(number)`: the type between the parens. The
+    /// struct has no field and no `end`.
+    pub newtype: Option<TokSpan>,
     pub span: TokSpan,
 }
 
@@ -793,6 +804,9 @@ pub struct Local {
     pub is_const: bool,
     /// `export local x = 1`; the module exposes the binding by value.
     pub exported: bool,
+    /// `using x = open()`: the keyword is `using`, and the value is
+    /// dropped when the function ends.
+    pub using: bool,
     pub names: Vec<Binding>,
     pub values: Vec<Expr>,
     pub span: TokSpan,
@@ -954,6 +968,12 @@ pub struct FunctionBody {
     pub is_async: Option<TokSpan>,
     /// `function*`: the `*` token. The function is a generator.
     pub generator: Option<TokSpan>,
+    /// `|x| x * 2`. The span opens at the first `|`, the block holds
+    /// the value as one `return` with `value_only`, and no `end`
+    /// closes the function.
+    pub lambda: bool,
+    /// A `defer` stands in the body, outside every function under it.
+    pub defers: bool,
     pub generics: Option<TokSpan>,
     /// A generic carries a bound, `<T: Shape>`; emit rewrites it.
     pub has_bounds: bool,
@@ -1208,6 +1228,13 @@ pub enum Expr {
     /// largest variant, and every frame of the parser would grow.
     Comprehension(Box<Comprehension>),
 
+    /// The `return ...`, `break`, or `continue` after a `??`: `local x
+    /// = find() ?? return 0`. The first token is the word.
+    Bail {
+        values: Vec<Expr>,
+        span: TokSpan,
+    },
+
     /// `obj:name` with no call: a bound method reference.
     MethodRef {
         object: Box<Expr>,
@@ -1300,6 +1327,7 @@ impl Expr {
             | Expr::Satisfies { span, .. }
             | Expr::Array { span, .. }
             | Expr::MethodRef { span, .. }
+            | Expr::Bail { span, .. }
             | Expr::New { span, .. }
             | Expr::Await { span, .. }
             | Expr::Try { span, .. }

@@ -43,7 +43,7 @@ pub(crate) fn builtin_attr_targets(name: &str) -> Option<&'static [&'static str]
         // group a test, nested public namespaces included.
         "test" => &["function", "namespace"],
 
-        "native" | "checked" | "inline" | "noinline" => &["function"],
+        "native" | "checked" | "inline" | "noinline" | "must_use" => &["function"],
 
         "unreliable" | "ratelimit" | "timeout" | "validate" | "immediate" | "wire" => &["remote"],
 
@@ -875,6 +875,28 @@ impl<'s> Desugar<'s> {
     /// The arguments of one attribute: the count a built-in takes, and the
     /// count and the literal types a declared one takes.
     pub(crate) fn check_attr_args(&mut self, a: &Attr, name: &str, decl: Option<&AttrDecl>) {
+        if name == "must_use" && decl.is_none() {
+            if !self.options.fflags.on(&crate::fflags::MUST_USE) {
+                let report = format!(
+                    "`@must_use` is not final; set `{} = true` under `[fflags]` in alloy.toml to use it",
+                    crate::fflags::MUST_USE.name
+                );
+                self.diagnose(a.span, &report);
+            } else if a.args.len() > 1
+                || a.args
+                    .first()
+                    .and_then(literal_kind)
+                    .is_some_and(|k| k != "string")
+            {
+                self.diagnose(
+                    a.span,
+                    "`@must_use` takes no argument, or one string that says why",
+                );
+            }
+
+            return;
+        }
+
         const NO_ARGS: &[&str] = &[
             "native",
             "checked",
@@ -1698,6 +1720,12 @@ impl<'s> Desugar<'s> {
 
                 Stmt::Import(i) => self.note_import(i),
 
+                // `struct UserId(number)` constructs through `new`.
+                Stmt::Struct(s) if s.newtype.is_some() => {
+                    let name = self.text_of(s.name).to_string();
+                    self.structs_with_new.insert(name, "new".to_string());
+                }
+
                 // A function body reads an enum declared below it, and
                 // its `match` covers the variants before the
                 // declaration fills them.
@@ -2431,7 +2459,7 @@ impl<'s> Desugar<'s> {
                 // Luau has no `@inline` or `@noinline`; the emit would
                 // report an invalid attribute on the declaration's line.
                 // `@allow` is the lints' alone.
-                Some("inline" | "noinline" | "allow") => {}
+                Some("inline" | "noinline" | "allow" | "must_use") => {}
 
                 // The count and the type checks report on the
                 // attribute; the emit would report again, on the

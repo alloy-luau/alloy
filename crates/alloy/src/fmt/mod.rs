@@ -326,9 +326,13 @@ fn format_tokens(src: &str, options: &FmtConfig) -> Result<String, String> {
         it.name_here |= words.contains(&it.start);
     }
 
+    let (lambda_open, lambda_close) = colons::lambda_bars(src, &toks, &chunk);
+
     let mut f = Formatter {
         items,
         options,
+        lambda_open,
+        lambda_close,
         lines: Vec::new(),
         line: String::new(),
         line_level: 0,
@@ -570,6 +574,10 @@ fn merge_operators(items: Vec<Item>) -> Vec<Item> {
 struct Formatter<'s> {
     items: Vec<Item>,
     options: &'s FmtConfig,
+    /// The bar that opens the parameters of each lambda, by byte.
+    lambda_open: std::collections::HashSet<usize>,
+    /// The bar that closes them.
+    lambda_close: std::collections::HashSet<usize>,
     lines: Vec<String>,
     line: String,
     /// The indentation level of the line under construction.
@@ -952,6 +960,8 @@ pub(crate) fn is_keyword(text: &str) -> bool {
             | "async"
             | "await"
             | "yield"
+            | "defer"
+            | "using"
             | "try"
             | "macro"
             | "namespace"

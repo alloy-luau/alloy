@@ -577,6 +577,82 @@ pub fn in_destructure(src: &str, offset: usize) -> bool {
     })
 }
 
+/*
+The line with the parameters of each closed lambda blanked, bars
+included: `f(|a: Pet| a.` reads as `f(          a.`. The width holds, so
+each offset holds.
+
+A `|` opens a lambda where a value may start: at the start of the
+line, or after `=`, `(`, `,`, `{`, `[`, or a word such as `return`.
+After a type it is a union. The bar that closes stands outside each
+paren the parameters open, so `|x: (A | B)|` closes at its last bar.
+Parameters with no second bar yet stay as written: the caret is still
+between the bars, where a `:` opens a type.
+*/
+fn without_lambda_heads(before: &str) -> std::borrow::Cow<'_, str> {
+    if !before.contains('|') {
+        return std::borrow::Cow::Borrowed(before);
+    }
+
+    let bytes = before.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] != b'|' || bytes.get(i + 1) == Some(&b'>') {
+            i += 1;
+
+            continue;
+        }
+
+        let lead = before[..i].trim_end();
+        let opens = lead.is_empty()
+            || lead.ends_with(['=', '(', ',', '{', '['])
+            || ["return", "then", "else", "and", "or", "not", "do"]
+                .iter()
+                .any(|w| {
+                    lead.strip_suffix(w).is_some_and(|rest| {
+                        !rest.ends_with(|c: char| c.is_alphanumeric() || c == '_')
+                    })
+                });
+
+        if !opens {
+            i += 1;
+
+            continue;
+        }
+
+        let mut depth = 0usize;
+        let close = (i + 1..bytes.len()).find(|&j| match bytes[j] {
+            b'(' | b'{' | b'[' => {
+                depth += 1;
+
+                false
+            }
+
+            b')' | b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+
+                false
+            }
+
+            b'|' => depth == 0,
+
+            _ => false,
+        });
+
+        let Some(close) = close else {
+            break;
+        };
+
+        out[i..=close].fill(b' ');
+        i = close + 1;
+    }
+
+    // Each byte the loop wrote over is ASCII, so the text is still UTF-8.
+    std::borrow::Cow::Owned(String::from_utf8(out).unwrap_or_else(|_| before.to_string()))
+}
+
 pub fn detect(src: &str, offset: usize) -> Option<Context> {
     let offset = offset.min(src.len());
     let line_start = src[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
@@ -596,7 +672,8 @@ pub fn detect(src: &str, offset: usize) -> Option<Context> {
         .find('\n')
         .map(|i| offset + i)
         .unwrap_or(src.len());
-    let before = &src[line_start..offset];
+    let before = without_lambda_heads(&src[line_start..offset]);
+    let before = before.as_ref();
     let line = &src[line_start..line_end];
     let prefix = trailing_word(before);
     let head = &before[..before.len() - prefix.len()];
@@ -1140,6 +1217,32 @@ mod tests {
     fn at(src: &str) -> Option<Context> {
         let offset = src.find('|').unwrap();
         detect(&src.replace('|', ""), offset)
+    }
+
+    /// Past the second bar of a lambda the caret stands in its value,
+    /// and a member there is no type. Between the bars a `:` still
+    /// opens a type.
+    #[test]
+    fn the_value_of_a_lambda_is_no_type_slot() {
+        // The helper above marks the caret with a bar, so this test
+        // puts the caret at the end of the text.
+        let end = |src: &str| detect(src, src.len());
+
+        assert_eq!(end("const names = |p: Pet| p."), None);
+        assert_eq!(end("sort(pets, |a: Pet, b: (A | B)| a."), None);
+        assert!(matches!(
+            end("const g = |p: Pe"),
+            Some(Context::TypeSlot { .. })
+        ));
+        assert!(matches!(
+            end("const g = |p: Pet, q: "),
+            Some(Context::TypeSlot { .. })
+        ));
+        // A union is no lambda: the bar follows a type.
+        assert!(matches!(
+            end("local x: A | B | "),
+            Some(Context::TypeSlot { .. })
+        ));
     }
 
     /*

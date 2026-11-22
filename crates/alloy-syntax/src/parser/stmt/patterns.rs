@@ -48,6 +48,43 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
+    /// A literal pattern, or the range it opens: `1..10` stops before
+    /// 10 and `1..=10` takes it. The range is a literal whose value is
+    /// the two numbers under the operator, so each walk reads it as
+    /// the literal it is.
+    fn range_tail(&mut self, low: Expr, start: usize) -> Result<Pattern, ParseError> {
+        if !(self.at("..") || self.at("..=")) {
+            return Ok(Pattern::Literal(Box::new(low)));
+        }
+
+        let number = |e: &Expr| match e {
+            Expr::Number(_) => true,
+
+            Expr::Unary { operand, .. } => matches!(**operand, Expr::Number(_)),
+
+            _ => false,
+        };
+        let op = self.bump();
+        let high = match self.at("-") {
+            true => self.sub_expr(UNARY_PRIORITY)?,
+
+            false => self.simple_expr()?,
+        };
+
+        if !number(&low) || !number(&high) {
+            return Err(
+                self.err("a range pattern takes a number on each side: `1..10` or `1..=10`")
+            );
+        }
+
+        Ok(Pattern::Literal(Box::new(Expr::Binary {
+            op: TokSpan::new(op, op + 1),
+            lhs: Box::new(low),
+            rhs: Box::new(high),
+            span: TokSpan::new(start, self.pos),
+        })))
+    }
+
     fn pattern_primary(&mut self) -> Result<Pattern, ParseError> {
         let start = self.pos;
 
@@ -67,7 +104,7 @@ impl<'a> Parser<'a> {
             "-" => {
                 let e = self.sub_expr(UNARY_PRIORITY)?;
 
-                Ok(Pattern::Literal(Box::new(e)))
+                self.range_tail(e, start)
             }
 
             "{" => self.struct_pattern(None, start),
@@ -110,7 +147,7 @@ impl<'a> Parser<'a> {
                 | Some(TokKind::InterpStr | TokKind::InterpHead) => {
                     let e = self.simple_expr()?;
 
-                    Ok(Pattern::Literal(Box::new(e)))
+                    self.range_tail(e, start)
                 }
 
                 Some(TokKind::Ident) if self.at_name() => {

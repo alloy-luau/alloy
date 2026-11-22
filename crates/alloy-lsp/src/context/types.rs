@@ -47,8 +47,13 @@ fn in_type_arguments(head: &str) -> bool {
     let before = &head[..open];
     let start = before.len() - before.trim_end_matches(is_word).len();
 
+    // `wrap<<` writes explicit type arguments, which no comparison
+    // spells, so the name before it can be a function in lower case.
+    let named = head[open..].starts_with("<<")
+        || before[before.len() - start..].starts_with(|c: char| c.is_uppercase());
+
     start > 0
-        && before[before.len() - start..].starts_with(|c: char| c.is_uppercase())
+        && named
         && head[open + 1..]
             .chars()
             .all(|c| is_word(c) || " ,<>?[]{}:.&|".contains(c))
@@ -95,6 +100,16 @@ fn after_a_type_word(head: &str) -> bool {
 pub(crate) fn takes_a_type(head: &str) -> bool {
     if in_type_arguments(head) {
         return true;
+    }
+
+    // `struct UserId(`: the one type a newtype wraps.
+    if let Some(decl) = head.strip_suffix('(') {
+        let mut words = decl.split(' ').rev();
+        let name = words.next().unwrap_or_default();
+
+        if !name.is_empty() && name.chars().all(is_word) && words.next() == Some("struct") {
+            return true;
+        }
     }
 
     if head.ends_with("= ") && opens_an_alias(head) {
@@ -175,6 +190,23 @@ mod tests {
         assert!(!takes_a_type("local x = "));
         assert!(!takes_a_type("export type A = number | string "));
         assert!(!takes_a_type("type "));
+    }
+
+    /// `wrap<<` took the values of the child, since the name of a
+    /// function starts in lower case.
+    #[test]
+    fn explicit_type_arguments_take_a_type() {
+        assert!(takes_a_type("const v = wrap<<"));
+        assert!(takes_a_type("const v = charm.atom<<number, "));
+        assert!(takes_a_type("const s = new Stack<<"));
+
+        assert!(takes_a_type("struct UserId("));
+        assert!(takes_a_type("export struct UserId("));
+        assert!(!takes_a_type("local x = struct("));
+
+        // Closed arguments end the slot, and a comparison opens none.
+        assert!(!takes_a_type("const v = wrap<<number>>("));
+        assert!(!takes_a_type("if a < "));
     }
 
     /// `impl Star.` and `extends Star.` fell to the child, which

@@ -51,6 +51,26 @@ pub(crate) fn comprehension_words(src: &str, toks: &[Tok], chunk: &Chunk) -> Has
         .collect()
 }
 
+/// The bars of every lambda, `|a, b| value`, by byte offset: the one
+/// that opens the parameters, and the one that closes them. A `|` is
+/// an operator of a type everywhere else, so only the tree tells.
+pub(crate) fn lambda_bars(
+    src: &str,
+    toks: &[Tok],
+    chunk: &Chunk,
+) -> (HashSet<usize>, HashSet<usize>) {
+    let walk = Walk::new(src, toks, chunk);
+    let at = |i: &usize| toks[*i].start as usize;
+
+    (
+        walk.lambda_bars.iter().map(|(open, _)| at(open)).collect(),
+        walk.lambda_bars
+            .iter()
+            .map(|(_, close)| at(close))
+            .collect(),
+    )
+}
+
 /// The byte offsets of the `if` of every `if` expression in the chunk.
 /// The tail of a macro opens its line like a statement does, so only
 /// the tree tells that `if` from a statement.
@@ -186,6 +206,8 @@ struct Walk<'a> {
     ifs: Vec<usize>,
     /// The `for` and the filter word of each comprehension.
     comprehension_words: Vec<usize>,
+    /// The two bars of each lambda, by token.
+    lambda_bars: Vec<(usize, usize)>,
     chains: Vec<(TokSpan, Vec<usize>)>,
     /// Each pipe with the `|` of each `|>` it holds, first to last.
     pipes: Vec<(TokSpan, Vec<usize>)>,
@@ -208,6 +230,7 @@ impl<'a> Walk<'a> {
             spans: Vec::new(),
             ifs: Vec::new(),
             comprehension_words: Vec::new(),
+            lambda_bars: Vec::new(),
             chains: Vec::new(),
             pipes: Vec::new(),
             lists: Vec::new(),
@@ -398,6 +421,11 @@ impl<'a> Walk<'a> {
     fn expr(&mut self, e: &Expr) {
         match e {
             Expr::TypeAssert { ty, .. } | Expr::Satisfies { ty, .. } => self.spans.push(*ty),
+
+            Expr::Function { body, .. } if body.lambda => {
+                self.lambda_bars
+                    .push((body.span.start as usize, body.block.span.start as usize - 1));
+            }
 
             Expr::Comprehension(c) => {
                 self.comprehension_words.push(c.value.span().end as usize);

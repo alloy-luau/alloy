@@ -992,6 +992,40 @@ impl<'s> Desugar<'s> {
                 }
             }
 
+            // `1..10` and `1..=10`: the parser hands a range over as a
+            // literal of the two numbers under the operator.
+            Pattern::Literal(e) if matches!(&**e, Expr::Binary { op, .. } if matches!(self.text_of(*op), ".." | "..=")) =>
+            {
+                let Expr::Binary { op, lhs, rhs, .. } = &**e else {
+                    unreachable!("matched above");
+                };
+
+                if !self.options.fflags.on(&crate::fflags::RANGE_PATTERN_SYNTAX) {
+                    let report = format!(
+                        "a range pattern is not final; set `{} = true` under `[fflags]` in alloy.toml to use it",
+                        crate::fflags::RANGE_PATTERN_SYNTAX.name
+                    );
+                    let known = self
+                        .diagnostics
+                        .iter()
+                        .any(|d| d.start == self.byte_start(*op) && d.message == report);
+
+                    if !known {
+                        self.diagnose(*op, &report);
+                    }
+                }
+
+                let below = match self.text_of(*op) {
+                    "..=" => "<=",
+
+                    _ => "<",
+                };
+                let (low, high) = (self.render_to_string(lhs), self.render_to_string(rhs));
+                out.tests.push(mute(format!(
+                    "(type({at}) == \"number\" and {at} >= {low} and {at} {below} {high})"
+                )));
+            }
+
             Pattern::Literal(e) => {
                 let lit = self.render_to_string(e);
                 out.tests.push(mute(format!("{at} == {lit}")));

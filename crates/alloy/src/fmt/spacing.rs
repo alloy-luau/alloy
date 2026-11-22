@@ -99,7 +99,9 @@ impl<'s> Formatter<'s> {
             || self.prev_code(i).is_some_and(|p| {
                 let prev = &self.items[p];
 
-                (leaves_open(&prev.text) || (prev.is("where") && !prev.name_here))
+                (leaves_open(&prev.text)
+                    || (prev.is("where") && !prev.name_here)
+                    || self.lambda_close.contains(&prev.start))
                     && !is_closer(&it.text)
             })
     }
@@ -119,6 +121,16 @@ impl<'s> Formatter<'s> {
         }
     }
 
+    /// Whether item `i` stands between a `case` and its `then`.
+    fn in_case_head(&self, i: usize) -> bool {
+        self.items[..i]
+            .iter()
+            .rev()
+            .take(64)
+            .find(|it| it.is("then") || (it.is("case") && !it.name_here))
+            .is_some_and(|it| it.is("case"))
+    }
+
     /// The spacing rule between two adjacent items on one line.
     pub(crate) fn wants_space(&self, ai: usize, bi: usize) -> bool {
         let a = &self.items[ai];
@@ -128,6 +140,25 @@ impl<'s> Formatter<'s> {
 
         if a.is_comment() || b.is_comment() {
             return true;
+        }
+
+        // `|a, b| value`: the bars hold to the parameters as parens do,
+        // and the value takes a space.
+        if self.lambda_open.contains(&a.start) || self.lambda_close.contains(&b.start) {
+            return false;
+        }
+
+        if self.lambda_close.contains(&a.start) {
+            return true;
+        }
+
+        // `case 1..=9 then`: a range pattern holds together. A `..`
+        // past the `then` joins two strings, and Luau reads `1..9`
+        // there as one bad number, so that one keeps its spaces.
+        if (matches!(at, ".." | "..=") && self.in_case_head(ai))
+            || (matches!(bt, ".." | "..=") && self.in_case_head(bi))
+        {
+            return false;
         }
 
         // `function*`: the star holds to the word. A name takes a space

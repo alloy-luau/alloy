@@ -2401,6 +2401,10 @@ fn struct_ctors_of(
             out.push((format!("{}_{name}", path.replace('.', "_")), ctor));
         }
 
+        Stmt::Struct(s) if s.newtype.is_some() && path.is_empty() => {
+            out.push((text(s.name), "new".to_string()));
+        }
+
         Stmt::Namespace(ns) => {
             let inner = match path.is_empty() {
                 true => text(ns.name),

@@ -191,7 +191,7 @@ print(Shop.price(10))
 
 **Forms behind a flag**
 
-Some forms are not final. Each one is behind a flag under `[fflags]` in `alloy.toml`, and the doc page of each form names its flag: `alloy doc '|>'`, `alloy doc comprehension`. Read the `[fflags]` table of the project before you write code. Where a flag is on, write its form: a project that turns a flag on wants the form in its code. Where a flag is off, the compiler reports the form, so write the older one.
+Some forms are not final. Each one is behind a flag under `[fflags]` in `alloy.toml`, and the doc page of each form names its flag: `alloy doc '|>'`, `alloy doc comprehension`. Read the `[fflags]` table of the project before you write code. Where a flag is on, write its form: a project that turns a flag on wants the form in its code. Where a flag is off, the compiler reports the form, so write the older one. `OnByDefault = true` in the table turns on each experimental flag that has no entry of its own, so read it as every flag on.
 
 Use the pipe `|>` for a value that goes through a chain of calls. `_` reads the value of the stage before. The flag is `AlloyExperimentalPipeOperator`.
 
@@ -330,6 +330,154 @@ for n in countdown(3) do
 end
 ```
 
+Use a lambda for a callback of one expression. The flag is `AlloyExperimentalLambdaSyntax`. A callback with statements keeps `function`.
+
+```luau
+-- before
+table.sort(players, function(a, b)
+    return a.score > b.score
+end)
+```
+
+```alloy
+-- after
+local players = { { score = 2 }, { score = 5 } }
+table.sort(players, |a, b| a.score > b.score)
+```
+
+Use `defer` for the cleanup of a function with more than one exit. The flag is `AlloyExperimentalDeferSyntax`. The block runs at each `return` and at an error.
+
+```luau
+-- before
+local function probe(part: BasePart): boolean
+    local touch = part.Touched:Connect(print)
+    if part.Anchored then
+        touch:Disconnect()
+        return false
+    end
+    task.wait(1)
+    touch:Disconnect()
+    return true
+end
+```
+
+```alloy
+-- after
+local function probe(part: BasePart) -> boolean
+    const touch = part.Touched:Connect(print)
+    defer touch:Disconnect()
+
+    if part.Anchored then
+        return false
+    end
+
+    task.wait(1)
+    return true
+end
+```
+
+Use `using` for a value that the function must drop when it ends: a connection, an Instance, a lock. The flag is `AlloyExperimentalUsingSyntax`. The drop runs at each `return` and at an error, in one order with each `defer`.
+
+```luau
+-- before
+local function flash(part: BasePart)
+    local marker = Instance.new("Highlight")
+    marker.Parent = part
+    task.wait(1)
+    marker:Destroy()
+end
+```
+
+```alloy
+-- after
+local function flash(part: BasePart) -> ()
+    using marker = new Instance("Highlight") { Parent = part }
+    task.wait(1)
+end
+```
+
+Leave on nil with a `return`, a `break`, or a `continue` after `??`. The flag is `AlloyExperimentalBailSyntax`. The name is not nil on the lines after it.
+
+```luau
+-- before
+local function title(player: Player): string
+    local character = player.Character
+    if character == nil then
+        return ""
+    end
+    return character.Name
+end
+```
+
+```alloy
+-- after
+local function title(player: Player) -> string
+    const character = player.Character ?? return ""
+    return character.Name
+end
+```
+
+Use a range arm in a `match` on a number. `1..10` stops before 10, and `1..=10` takes 10 too. The flag is `AlloyExperimentalRangePatternSyntax`.
+
+```luau
+-- before
+local function rank(level: number): string
+    if level >= 1 and level < 10 then
+        return "bronze"
+    elseif level >= 10 and level <= 49 then
+        return "silver"
+    end
+    return "unranked"
+end
+```
+
+```alloy
+-- after
+local function rank(level: number) -> string
+    match level with
+        case 1..10 then return "bronze"
+        case 10..=49 then return "silver"
+        default return "unranked"
+    end
+end
+```
+
+Use a newtype for a number or a string that must not mix with another one: an id, an amount, a key. `new` wraps the value, and `raw` reads it. The flag is `AlloyExperimentalNewtypeSyntax`.
+
+```luau
+-- before
+local function pay(user_id: number, coins: number)
+    print(user_id, coins)
+end
+
+pay(5, 42)
+```
+
+```alloy
+-- after
+struct UserId(number)
+struct Coins(number)
+
+local function pay(id: UserId, amount: Coins) -> ()
+    print(UserId.raw(id), Coins.raw(amount))
+end
+
+pay(new UserId(42), new Coins(5))
+```
+
+Put `@must_use` on a function whose result the caller must read: a success flag, a `Result`, a handle. The `unused_must_use` lint reports a call that drops the result. The flag is `AlloyExperimentalMustUse`.
+
+```alloy
+@must_use("false means the player had too few coins")
+local function spend(coins: number, cost: number) -> boolean
+    return coins >= cost
+end
+
+if not spend(3, 5) then
+    print("too few coins")
+end
+```
+
 Use `import inline` for a small `.json` or `.toml` file that one module reads. The table goes into the output of that module, and the file needs no mount. The flag is `AlloyExperimentalInlineDataSyntax`. `alloy doc inline-data` has the rules.
 
 ```
@@ -352,6 +500,71 @@ end
 struct Shot
     x: f32
     power: u8
+end
+```
+
+**Std**
+
+`alloy doc std` lists the types of the std, and `alloy doc Array` lists the methods of one type. Look a method up before you write a loop that does the same work.
+
+Use the Array methods for the work of a loop over a list: `any`, `all`, `sum`, `min_by`, `max_by`, `flat_map`, `flatten`, `group_by`, `chunk`, `zip`, `unique`, `take`, `skip`, `insert_at`, and `binary_search`.
+
+```luau
+-- before
+local scores = { 3, 8, 5 }
+local total = 0
+local high = false
+for _, score in scores do
+    total += score
+    if score > 7 then
+        high = true
+    end
+end
+print(total, high)
+```
+
+```alloy
+-- after
+const scores = [ 3, 8, 5 ]
+print(scores:sum(), scores:any(|score| score > 7))
+```
+
+Use `map_or` and `flatten` on a `Result`, not a `match` that only unwraps.
+
+```alloy
+local function half(n: number) -> Result<number, string>
+    return n % 2 == 0 ? Ok(n / 2) : Err("odd")
+end
+
+print(half(8):map_or(0, |n| n + 1))
+```
+
+Some functions of the std are behind `AlloyExperimentalStdAdditions`: `Array.range`, `Result.all`, `Future.timeout`, `Future.retry`, `Future.from_signal`, `Future.debounce`, and `Future.throttle`. The methods above need no flag.
+
+```alloy
+local function load() -> number
+    return 1
+end
+
+const save = Future.debounce(|text: string| print(text), 0.5)
+save("draft")
+
+async do
+    const value = await Future.timeout(Future.retry(load, 3, 0.5), 10)
+    print(value, Array.range(1, 5):sum())
+end
+```
+
+Use `Net` for an HTTP request, not `HttpService:RequestAsync`. A request gives a `Future` of a `Result`. The flag is `AlloyExperimentalNetLibrary`.
+
+```alloy
+import { Net } from "@alloy/std/net"
+
+async do
+    match await Net.get("https://example.com/items"):timeout(5):retries(3, 0.25):send() with
+        case Ok(response) then print(response.status, response.body)
+        case Err(e) then print(e.kind, e.message)
+    end
 end
 ```
 

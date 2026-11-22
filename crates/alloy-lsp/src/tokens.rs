@@ -638,8 +638,11 @@ fn alloy_tokens(doc: &Doc, types: &[String], modifiers: &[String]) -> Vec<Token>
         }
 
         // `yield` in a generator. The emit writes a call in its place,
-        // and the child paints that call on other columns.
-        if text == "yield" && alloy_syntax::contextual::keyword_at(src, toks, i) {
+        // and the child paints that call on other columns. The emit
+        // drops the word of a `defer` the same way.
+        if matches!(text, "yield" | "defer" | "using")
+            && alloy_syntax::contextual::keyword_at(src, toks, i)
+        {
             push(tok.start, tok.end, "keyword", 0);
             i += 1;
 

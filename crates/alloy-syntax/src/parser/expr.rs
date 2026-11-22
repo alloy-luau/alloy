@@ -231,6 +231,15 @@ impl<'a> Parser<'a> {
 
     pub(super) fn simple_expr(&mut self) -> Result<Expr, ParseError> {
         let start = self.pos;
+
+        // `|x| x * 2` and the `return` of `value ?? return`. No
+        // expression of Luau opens with either. Both checks and both
+        // calls sit out of line, so the frame of this function holds
+        // nothing of them: the depth limit counts on that size.
+        if self.prefix_form_here() {
+            return self.prefix_form(start);
+        }
+
         let e = match self.text() {
             "nil" => {
                 self.bump();
@@ -595,6 +604,141 @@ impl<'a> Parser<'a> {
             filter,
             span: TokSpan::new(start, self.pos),
         })))
+    }
+
+    /// Reports if a lambda, or the word that leaves after a `??`,
+    /// opens at the cursor.
+    #[inline(never)]
+    fn prefix_form_here(&self) -> bool {
+        self.at("|")
+            || (matches!(self.text(), "return" | "break" | "continue")
+                && self.pos >= 2
+                && self.toks[self.pos - 1].text(self.src) == "?"
+                && self.toks[self.pos - 2].text(self.src) == "?")
+    }
+
+    #[inline(never)]
+    fn prefix_form(&mut self, start: usize) -> Result<Expr, ParseError> {
+        match self.at("|") {
+            true => self.lambda(start),
+
+            false => self.bail(start),
+        }
+    }
+
+    #[inline(never)]
+    fn bail(&mut self, start: usize) -> Result<Expr, ParseError> {
+        let returns = self.text() == "return";
+        self.bump();
+        let bare = !returns
+            || self.at_end()
+            || self.at_block_end()
+            || self.at(";")
+            || matches!(self.text(), ")" | "]" | "}" | ",")
+            || self.newline_before_pos();
+        let values = match bare {
+            true => Vec::new(),
+
+            false => self.expr_list()?,
+        };
+
+        Ok(Expr::Bail {
+            values,
+            span: TokSpan::new(start, self.pos),
+        })
+    }
+
+    /*
+    `|a, b: T| value`: a function that returns `value`. `||` takes no
+    parameter. A parameter type stops at a `|`, so a union there needs
+    parens: `|x: (A | B)| ...`.
+    */
+    #[inline(never)]
+    fn lambda(&mut self, start: usize) -> Result<Expr, ParseError> {
+        self.bump();
+        let mut params = Vec::new();
+
+        while !self.at("|") {
+            if self.at_end() {
+                return Err(self.err("expected `|` to close the parameters of the lambda"));
+            }
+
+            let is_vararg = self.at("...");
+            let name = match is_vararg {
+                true => {
+                    let i = self.bump();
+
+                    TokSpan::new(i, i + 1)
+                }
+
+                false => self.expect_name()?,
+            };
+            let ty = match self.eat(":") {
+                true => {
+                    self.enter()?;
+                    let first = self.pos;
+                    let parsed = self.type_negated();
+                    self.leave();
+                    parsed?;
+
+                    Some(TokSpan::new(first, self.pos))
+                }
+
+                false => None,
+            };
+            params.push(Param {
+                attributes: Vec::new(),
+                name,
+                is_vararg,
+                ty,
+                default: None,
+                destructure: None,
+            });
+
+            if is_vararg || !self.eat(",") {
+                break;
+            }
+        }
+
+        if !self.eat("|") {
+            return Err(self.err("expected `|` to close the parameters of the lambda"));
+        }
+
+        let spot = match self.yield_spot {
+            YieldSpot::Outside => YieldSpot::Outside,
+
+            _ => YieldSpot::Nested,
+        };
+        let outer = std::mem::replace(&mut self.yield_spot, spot);
+        let value = self.expr();
+        self.yield_spot = outer;
+        let value = value?;
+        let inner = value.span();
+
+        Ok(Expr::Function {
+            attributes: Vec::new(),
+            body: Box::new(FunctionBody {
+                is_async: None,
+                generator: None,
+                lambda: true,
+                defers: false,
+                generics: None,
+                has_bounds: false,
+                params,
+                ret_type: None,
+                ret_arrow: None,
+                block: Block {
+                    stmts: vec![Stmt::Return(Return {
+                        values: vec![value],
+                        value_only: true,
+                        span: inner,
+                    })],
+                    span: inner,
+                },
+                span: TokSpan::new(start, self.pos),
+            }),
+            span: TokSpan::new(start, self.pos),
+        })
     }
 
     /// `new Name<<T>>(args) { init }`, `new Name(args)`, `new Name { init }`.

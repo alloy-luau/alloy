@@ -63,6 +63,8 @@ pub fn is_contextual(word: &str) -> bool {
             | "with"
             | "where"
             | "yield"
+            | "defer"
+            | "using"
     )
 }
 
@@ -154,6 +156,16 @@ pub fn keyword_at(src: &str, toks: &[Tok], i: usize) -> bool {
         "after" => after_delay_follows(src, toks, i),
 
         "yield" => yield_follows(src, toks, i),
+
+        "defer" => defer_follows(src, toks, i),
+
+        // `using x = open()`: a name, then `=` or the `:` of its type.
+        "using" => {
+            !newline_after(src, toks, i)
+                && toks.get(i + 1).is_some_and(|t| t.kind == TokKind::Ident)
+                && matches!(text(src, toks, i + 2), "=" | ":")
+                && (i == 0 || text(src, toks, i - 1) != ".")
+        }
 
         // A declaration opens with its own name: `enum State as`,
         // `struct Vec2 as`, `interface Named as`.
@@ -592,6 +604,25 @@ pub fn delete_operand_follows(src: &str, toks: &[Tok], i: usize) -> bool {
             toks.get(i + 1).map(|t| t.kind),
             Some(TokKind::Str { .. } | TokKind::Number | TokKind::InterpStr)
         )
+}
+
+/// Reports if the `defer` at token `i` reads as the statement: the word
+/// opens a statement, and a name or a `do` follows on its line. Luau
+/// reads no statement of a name and then a name, so `defer(f)` and
+/// `defer = 1` keep the name.
+pub fn defer_follows(src: &str, toks: &[Tok], i: usize) -> bool {
+    let opens_statement = i == 0
+        || newline_after(src, toks, i - 1)
+        || matches!(
+            text(src, toks, i - 1),
+            "do" | "then" | "else" | ";" | "repeat"
+        );
+    let next = text(src, toks, i + 1);
+
+    opens_statement
+        && !newline_after(src, toks, i)
+        && toks.get(i + 1).is_some_and(|t| t.kind == TokKind::Ident)
+        && (next == "do" || next == "self" || !crate::parser::is_reserved(next))
 }
 
 /// Reports if the `yield` at token `i` is a name by what follows it:

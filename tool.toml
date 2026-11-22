@@ -1,0 +1,5 @@
+# What Ember installs for this tool. embr reads the file from each
+# release, so one `[tools]` entry gives a project the compiler and the
+# language server at one version. The release workflow attaches it.
+[tool]
+bins = ["alloy", "alloy-lsp"]

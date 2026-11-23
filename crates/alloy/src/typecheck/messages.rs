@@ -230,6 +230,20 @@ pub fn rewrite_emitted_name(
                 None,
             ));
         }
+
+        // `@Provider({ lifecycles = [ Lifecycles.Start ] })`: the emit
+        // writes the arguments of an attribute after the declaration, so
+        // the checker reports the name on a line that does not hold it.
+        // The report moves to the attribute line that does.
+        if !names_word(text, name)
+            && let Some(at) = attribute_line_above(source, line, name)
+        {
+            let hint = near_import(source, name)
+                .map(|n| format!("; did you mean `{n}`?"))
+                .unwrap_or_default();
+
+            return Some((format!("`{name}` is not in scope{hint}"), Some(at)));
+        }
     }
 
     // `new n { }`, where `n` is a value: the emit asks it for `new`.
@@ -246,6 +260,33 @@ pub fn rewrite_emitted_name(
     }
 
     None
+}
+
+/// The nearest attribute line above `line` that names the word, as a
+/// line number from 1.
+fn attribute_line_above(source: &str, line: usize, name: &str) -> Option<usize> {
+    source
+        .lines()
+        .enumerate()
+        .take(line)
+        .filter(|(_, text)| text.trim_start().starts_with('@') && names_word(text, name))
+        .map(|(i, _)| i + 1)
+        .last()
+}
+
+/// A name an `import` line of the file binds that differs from `name`
+/// by a tail of one or two letters, such as `Lifecycle` for
+/// `Lifecycles`.
+fn near_import(source: &str, name: &str) -> Option<String> {
+    source
+        .lines()
+        .filter(|l| l.starts_with("import "))
+        .flat_map(|l| l.split(|c: char| !(c.is_alphanumeric() || c == '_')))
+        .find(|w| {
+            w.len().abs_diff(name.len()).clamp(1, 2) == w.len().abs_diff(name.len())
+                && (w.starts_with(name) || name.starts_with(w))
+        })
+        .map(str::to_string)
 }
 
 /// `new Nope { }` with no struct of that name in scope. The emit reads
@@ -3594,6 +3635,26 @@ end
     /// reads a global there and advises assigning to it. The report now
     /// says to move the declaration. A read at the top level, and a
     /// name with no declaration below, keep the checker's words.
+    /// The emit writes the arguments of an attribute after the
+    /// declaration. A name that is not in scope there reports on the
+    /// attribute line, and names the import that is one letter away.
+    #[test]
+    fn an_unknown_name_of_an_attribute_argument_reports_on_its_line() {
+        let src = "import { Provider, Lifecycle } from \"./forge\"\n\n@Provider({ lifecycles = [ Lifecycles.Start ] })\nstruct S as\n    n: number\nend\n";
+
+        assert_eq!(
+            rewrite_emitted_name(
+                "Unknown global 'Lifecycles'; consider assigning to it first",
+                src,
+                6
+            ),
+            Some((
+                "`Lifecycles` is not in scope; did you mean `Lifecycle`?".to_string(),
+                Some(3)
+            ))
+        );
+    }
+
     #[test]
     fn a_const_below_the_function_that_reads_it_says_so() {
         let src = "local function speed(): number\n    return LIMIT * 2\nend\nconst LIMIT = 16\nlocal step = 1\nprint(speed(), step)\n";

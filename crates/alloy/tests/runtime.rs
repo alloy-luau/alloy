@@ -113,3 +113,44 @@ fn the_shim_answers_each_side_check_the_runtime_makes() {
 
     assert_eq!(got, (true, true, true, false, false));
 }
+
+/// Luau copies the table a module returns in one walk, and the walk
+/// stops at `LuauTarjanChildLimit` types: 10000 in Luau, and luau-lsp
+/// and Studio raise it to 15000. Past the limit the module reads as
+/// `any`, a user file gets false errors, and the one report is this
+/// line on the runtime. The Net library took the walk to 15012.
+///
+/// The test gives the checker no flag, so it holds the runtime to the
+/// limit of the luau-lsp on this machine. It skips with no luau-lsp.
+#[test]
+fn the_runtime_checks_under_the_default_node_limit() {
+    let Some(binary) = alloy::typecheck::find_luau_lsp(&alloy::config::FluxConfig::default())
+    else {
+        eprintln!("skipped: luau-lsp is not installed");
+
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("alloy-runtime-limit-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("alloy.luau"), alloy::RUNTIME).unwrap();
+
+    // No Roblox definitions: an unknown global is a report of its own,
+    // and the walk counts the types of the module alone.
+    let out = std::process::Command::new(&binary)
+        .args(["analyze", "--flag:LuauSolverV2=true", "alloy.luau"])
+        .current_dir(&dir)
+        .output()
+        .expect("luau-lsp runs");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(
+        !text.contains("too complex"),
+        "the types of the runtime pass the node limit of {}",
+        binary.display()
+    );
+}

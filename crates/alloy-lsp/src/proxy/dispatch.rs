@@ -296,6 +296,7 @@ impl Server {
                 // it, so the whole mirror must be there before the
                 // first document reaches it. It compiles nothing.
                 let files = self.open_mirror();
+                self.write_project_sourcemap();
 
                 // The shadows compile every file of the project. On
                 // this thread they would hold the editor's first
@@ -596,6 +597,15 @@ impl Server {
 
                 for path in &data_changed {
                     self.refresh_dependents(path);
+                }
+
+                // A file came or went, so the tree has another shape.
+                let tree_moved = changes
+                    .iter()
+                    .any(|c| c.get("type").and_then(Value::as_i64) != Some(2));
+
+                if tree_moved {
+                    self.refresh_tree_sourcemap();
                 }
 
                 // A file the editor shows compiled with the old config,

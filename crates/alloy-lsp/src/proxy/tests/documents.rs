@@ -1369,3 +1369,69 @@ pub(crate) fn a_refactor_follow_up_names_the_source() {
 
     assert!(dropped.get("command").is_none(), "{dropped}");
 }
+
+/// A folder made after the start is in the tree at once. The startup
+/// pass alone wrote the mirror's sourcemap, so `script.Parent=>providers`
+/// reported the new folder until a restart. The child hears of the file,
+/// since the editor watches the project and not the mirror.
+#[test]
+fn a_new_folder_reaches_the_mirror_sourcemap() {
+    let dir = alias_root(
+        "tree-follows",
+        &[
+            (
+                "alloy.toml",
+                "[build]\nin = \"src\"\nout = \"build\"\n\n[project]\nname = \"t\"\n\n[mount]\nclient = [\"src/client\", \"@game/StarterPlayer/StarterPlayerScripts/Client\"]\n",
+            ),
+            ("src/client/main.client.aly", "print(1)\n"),
+        ],
+    );
+    let to_child = Arc::new(Mutex::new(Vec::new()));
+    let server = Arc::new(Server::new(
+        Box::new(Recorder(Arc::clone(&to_child))),
+        Box::new(std::io::sink()),
+        Vec::new(),
+        None,
+    ));
+
+    {
+        let mut st = server.state.lock().expect("state");
+        st.root = Some(dir.clone());
+        st.mirror = dir.join("mirror");
+        st.editor.sourcemap_autogenerate = true;
+    }
+
+    server.open_workspace();
+    let sourcemap = || {
+        let st = server.state.lock().expect("state");
+
+        std::fs::read_to_string(st.mirror_path(&dir.join("sourcemap.json"))).expect("a sourcemap")
+    };
+    assert!(!sourcemap().contains("providers"), "{}", sourcemap());
+
+    let added = dir.join("src/client/providers/Ecs.aly");
+    std::fs::create_dir_all(added.parent().expect("a folder")).expect("the folder");
+    std::fs::write(&added, "return {}\n").expect("the file");
+    to_child.lock().expect("the log").clear();
+    server.handle_client(json!({
+        "jsonrpc": "2.0",
+        "method": "workspace/didChangeWatchedFiles",
+        "params": { "changes": [{ "uri": path_to_uri(&added), "type": 1 }] },
+    }));
+
+    assert!(sourcemap().contains("providers"), "{}", sourcemap());
+    // The setting writes the project's own file too, with source paths.
+    let own = std::fs::read_to_string(dir.join("sourcemap.json")).expect("the project file");
+    assert!(own.contains("src/client/providers/Ecs.aly"), "{own}");
+    let sent = String::from_utf8_lossy(&to_child.lock().expect("the log").clone()).into_owned();
+    assert!(sent.contains("sourcemap.json"), "{sent}");
+
+    // The poll finds a folder the watcher never named.
+    std::fs::create_dir_all(dir.join("src/client/empty")).expect("the folder");
+    std::fs::remove_dir_all(added.parent().expect("a folder")).expect("the removal");
+    server.rescan_workspace();
+    let after = sourcemap();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(!after.contains("providers"), "{after}");
+}

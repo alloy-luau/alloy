@@ -223,6 +223,19 @@ pub fn child_flags(options: &Value) -> Vec<String> {
         }
     }
 
+    // The types of the runtime are one graph, and Luau stops at 10000
+    // nodes of it. luau-lsp 1.70 counts more nodes for the same text:
+    // the runtime then read as `any`, and `Set.new<<T>>()` reported
+    // "Cannot instantiate type parameters". The limit is a guard on
+    // the time of the walk, and 40000 costs no time a reader sees.
+    if !overrides.is_some_and(|o| o.contains_key(alloy::typecheck::NODE_LIMIT_FLAG)) {
+        flags.push(format!(
+            "--flag:{}={}",
+            alloy::typecheck::NODE_LIMIT_FLAG,
+            alloy::typecheck::NODE_LIMIT
+        ));
+    }
+
     if let Some(overrides) = section
         .and_then(|f| f.get("override"))
         .and_then(Value::as_object)
@@ -277,6 +290,7 @@ mod tests {
                 "--no-flags-enabled",
                 "--flag:LuauSolverV2=true",
                 "--flag:LuauTypeMaximumStringifierLength=4000000",
+                "--flag:LuauTarjanChildLimit=40000",
                 "--flag:LuauTableTypeMaximumStringifierLength=100",
                 "--flag:LuauX=true"
             ]
@@ -286,14 +300,16 @@ mod tests {
             vec![
                 "--flag:LuauSolverV2=true",
                 "--flag:LuauTypeMaximumStringifierLength=4000000",
-                "--flag:LuauTableTypeMaximumStringifierLength=4000000"
+                "--flag:LuauTableTypeMaximumStringifierLength=4000000",
+                "--flag:LuauTarjanChildLimit=40000"
             ]
         );
         assert_eq!(
             child_flags(&json!({ "fflags": { "enableNewSolver": false } })),
             vec![
                 "--flag:LuauTypeMaximumStringifierLength=4000000",
-                "--flag:LuauTableTypeMaximumStringifierLength=4000000"
+                "--flag:LuauTableTypeMaximumStringifierLength=4000000",
+                "--flag:LuauTarjanChildLimit=40000"
             ]
         );
     }
@@ -314,7 +330,7 @@ mod tests {
         assert_eq!(flags[0], "--flag:LuauSolverV2=true");
         assert_eq!(flags.last().unwrap(), "--flag:LuauX=true");
         let flags = child_flags(&json!({ "luauLsp": { "fflags": { "enableNewSolver": false } } }));
-        assert!(flags.iter().all(|f| f.contains("Stringifier")));
+        assert!(!flags.iter().any(|f| f.contains("LuauSolverV2")));
         assert_eq!(child_flags(&json!({}))[0], "--flag:LuauSolverV2=true");
     }
 

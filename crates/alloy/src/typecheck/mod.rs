@@ -17,8 +17,10 @@ use crate::render::SpanMap;
 
 mod messages;
 
-/// The Luau flag that caps the nodes of one type graph. The default is
-/// 10000, and the types of the runtime pass it under luau-lsp 1.70.
+/// The Luau flag that caps the nodes of one type graph. Luau stops at
+/// 10000; luau-lsp and Studio raise it to 15000. The runtime is under
+/// both since its aliases share their terms, and
+/// `the_runtime_checks_under_the_default_node_limit` holds it there.
 pub const NODE_LIMIT_FLAG: &str = "LuauTarjanChildLimit";
 
 /// The cap that `alloy flux` and the language server give the checker.

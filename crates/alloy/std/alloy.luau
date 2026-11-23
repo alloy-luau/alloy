@@ -260,21 +260,33 @@ end
 -- `flatten` answers `T`, the inner Result, for the reason `and_then`
 -- answers `R`: the type names no rung. On a Result whose value is no
 -- Result the type still reads `T`, and the call gives the Result back.
-export type ResultMethods<T, E> = {
-	read unwrap: (self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }) -> T,
-	read expect: (self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }, message: string) -> T,
-	read unwrap_or: <D>(self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }, default: D) -> T | D,
-	read map: <U>(self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }, f: (T) -> U) -> Result2<U, any>,
-	read map_err: <F>(self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }, f: (E) -> F) -> Result2<any, F>,
-	read is_ok: (self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }) -> boolean,
-	read is_err: (self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }) -> boolean,
-	read ok: (self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }) -> T?,
-	read and_then: <R>(self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }, f: (T) -> R) -> R,
-	read or_else: <R>(self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }, f: (E) -> R) -> R,
-	read unwrap_or_else: <D>(self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }, f: (E) -> D) -> T | D,
-	read map_or: <U>(self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }, default: U, f: (T) -> U) -> U,
-	read flatten: (self: { read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }) -> T,
+--
+-- `S` is the receiver. The members sit in `ResultMethodsBody` so the
+-- receiver is one type for each `Result<T, E>` and not one for each
+-- member: 13 members, and the table of the runtime reaches 9 copies.
+-- `ArrayShape` gives the count this saves and the limit it is for.
+-- `ResultMethods<T, E>` keeps its name and its two arguments, which
+-- the checker prints and `shapes/results.rs` reads.
+type ResultMethodsBody<T, E, S> = {
+	read unwrap: (self: S) -> T,
+	read expect: (self: S, message: string) -> T,
+	read unwrap_or: <D>(self: S, default: D) -> T | D,
+	read map: <U>(self: S, f: (T) -> U) -> Result2<U, any>,
+	read map_err: <F>(self: S, f: (E) -> F) -> Result2<any, F>,
+	read is_ok: (self: S) -> boolean,
+	read is_err: (self: S) -> boolean,
+	read ok: (self: S) -> T?,
+	read and_then: <R>(self: S, f: (T) -> R) -> R,
+	read or_else: <R>(self: S, f: (E) -> R) -> R,
+	read unwrap_or_else: <D>(self: S, f: (E) -> D) -> T | D,
+	read map_or: <U>(self: S, default: U, f: (T) -> U) -> U,
+	read flatten: (self: S) -> T,
 }
+export type ResultMethods<T, E> = ResultMethodsBody<
+	T,
+	E,
+	{ read tag: "Ok", read _1: T } | { read tag: "Err", read _1: E }
+>
 
 -- `__ok` and `__err` exist in the type alone: they carry `T` and `E` as
 -- plain members, so a generic reads them off a Result it is handed
@@ -306,21 +318,22 @@ export type Result<T, E> = ResultOk<T, E> | ResultErr<T, E>
 -- fallback of another type still names both sides. `map` and `map_err`
 -- climb to `Result3`, the last rung, so `r:map(f):map(g)` keeps the
 -- value type.
-export type ResultMethods2<T, E> = {
-	read unwrap: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> T,
-	read expect: (self: { read tag: "Ok" | "Err", read _1: T | E }, message: string) -> T,
-	read unwrap_or: <D>(self: { read tag: "Ok" | "Err", read _1: T | E }, default: D) -> T | D,
-	read map: <U>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (T) -> U) -> Result3<U, any>,
-	read map_err: <F>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (E) -> F) -> Result3<any, F>,
-	read is_ok: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> boolean,
-	read is_err: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> boolean,
-	read ok: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> T?,
-	read and_then: <R>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (T) -> R) -> R,
-	read or_else: <R>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (E) -> R) -> R,
-	read unwrap_or_else: <D>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (E) -> D) -> T | D,
-	read map_or: <U>(self: { read tag: "Ok" | "Err", read _1: T | E }, default: U, f: (T) -> U) -> U,
-	read flatten: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> T,
+type ResultMethods2Body<T, E, S> = {
+	read unwrap: (self: S) -> T,
+	read expect: (self: S, message: string) -> T,
+	read unwrap_or: <D>(self: S, default: D) -> T | D,
+	read map: <U>(self: S, f: (T) -> U) -> Result3<U, any>,
+	read map_err: <F>(self: S, f: (E) -> F) -> Result3<any, F>,
+	read is_ok: (self: S) -> boolean,
+	read is_err: (self: S) -> boolean,
+	read ok: (self: S) -> T?,
+	read and_then: <R>(self: S, f: (T) -> R) -> R,
+	read or_else: <R>(self: S, f: (E) -> R) -> R,
+	read unwrap_or_else: <D>(self: S, f: (E) -> D) -> T | D,
+	read map_or: <U>(self: S, default: U, f: (T) -> U) -> U,
+	read flatten: (self: S) -> T,
 }
+export type ResultMethods2<T, E> = ResultMethods2Body<T, E, { read tag: "Ok" | "Err", read _1: T | E }>
 
 export type Result2<T, E> = ({ tag: "Ok", read _1: T, read trace: string?, read __ok: T, read __err: E } | { tag: "Err", read _1: E, read trace: string?, read __ok: T, read __err: E }) & ResultMethods2<T, E>
 
@@ -330,21 +343,22 @@ export type Result2<T, E> = ({ tag: "Ok", read _1: T, read trace: string?, read 
 -- to `Result2` or to `Result` makes the solver read the next callback's
 -- parameter as a free type and report `Expected type table` on code
 -- that is right.
-export type ResultMethods3<T, E> = {
-	read unwrap: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> T,
-	read expect: (self: { read tag: "Ok" | "Err", read _1: T | E }, message: string) -> T,
-	read unwrap_or: <D>(self: { read tag: "Ok" | "Err", read _1: T | E }, default: D) -> T | D,
-	read map: <U>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (T) -> U) -> any,
-	read map_err: <F>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (E) -> F) -> any,
-	read is_ok: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> boolean,
-	read is_err: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> boolean,
-	read ok: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> T?,
-	read and_then: <R>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (T) -> R) -> R,
-	read or_else: <R>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (E) -> R) -> R,
-	read unwrap_or_else: <D>(self: { read tag: "Ok" | "Err", read _1: T | E }, f: (E) -> D) -> T | D,
-	read map_or: <U>(self: { read tag: "Ok" | "Err", read _1: T | E }, default: U, f: (T) -> U) -> U,
-	read flatten: (self: { read tag: "Ok" | "Err", read _1: T | E }) -> T,
+type ResultMethods3Body<T, E, S> = {
+	read unwrap: (self: S) -> T,
+	read expect: (self: S, message: string) -> T,
+	read unwrap_or: <D>(self: S, default: D) -> T | D,
+	read map: <U>(self: S, f: (T) -> U) -> any,
+	read map_err: <F>(self: S, f: (E) -> F) -> any,
+	read is_ok: (self: S) -> boolean,
+	read is_err: (self: S) -> boolean,
+	read ok: (self: S) -> T?,
+	read and_then: <R>(self: S, f: (T) -> R) -> R,
+	read or_else: <R>(self: S, f: (E) -> R) -> R,
+	read unwrap_or_else: <D>(self: S, f: (E) -> D) -> T | D,
+	read map_or: <U>(self: S, default: U, f: (T) -> U) -> U,
+	read flatten: (self: S) -> T,
 }
+export type ResultMethods3<T, E> = ResultMethods3Body<T, E, { read tag: "Ok" | "Err", read _1: T | E }>
 
 export type Result3<T, E> = ({ tag: "Ok", read _1: T, read trace: string?, read __ok: T, read __err: E } | { tag: "Err", read _1: E, read trace: string?, read __ok: T, read __err: E }) & ResultMethods3<T, E>
 
@@ -1125,46 +1139,77 @@ alloy.Future = Future
 -- method that returned the array cost 70 more. A file that requires a
 -- runtime over the limit reads every Array as `any`, with no report.
 -- The parameter is read one time for each `Array<T>`.
-type ArrayShape<T, Self> = {
+--
+-- The members sit two aliases down, in `ArrayShapeFns`, for the count
+-- of types. Luau copies the table of the runtime in one walk, and the
+-- walk stops at `LuauTarjanChildLimit` types: 10000 in Luau, 15000 in
+-- luau-lsp and in Studio. Past it the module reads as `any`. Each
+-- `Array<T>` in a signature is a copy of this table, and the table of
+-- the runtime reaches about 50 of them. A term written in each member is one
+-- type for each member of each copy; a term handed in as an argument
+-- is one type for each copy. `R`, `P` and `O` are the receiver, the
+-- test and `T?`. `Peek` to `Pick` are whole functions that two or
+-- three members share. With every term written out the walk was 15012
+-- types; it is 10478 now.
+--
+-- `ArrayShape<T, Self>` keeps its name and its two arguments, since
+-- the checker prints them (`Array2Shape<string, Array2Shape>`) and
+-- `shapes/arrays.rs` reads that text. The alias names the table it
+-- gets, so no report shows `ArrayShapeBody` or `ArrayShapeFns`.
+type ArrayShapeFns<T, Self, R, P, O, Peek, At, Test, Same, Cut, Pick> = {
 	[number]: T,
-	len: (self: { read [number]: T }) -> number,
-	is_empty: (self: { read [number]: T }) -> boolean,
-	push: (self: { read [number]: T }, ...T) -> Self,
-	pop: (self: { read [number]: T }) -> T?,
-	remove: (self: { read [number]: T }, index: number) -> T?,
-	swap_remove: (self: { read [number]: T }, index: number) -> T?,
-	first: (self: { read [number]: T }) -> T?,
-	last: (self: { read [number]: T }) -> T?,
-	map: <U>(self: { read [number]: T }, f: (T, number) -> U) -> Array2<U>,
-	filter: (self: { read [number]: T }, f: (T, number) -> boolean) -> Self,
-	find: (self: { read [number]: T }, f: (T, number) -> boolean) -> T?,
-	find_index: (self: { read [number]: T }, f: (T, number) -> boolean) -> number?,
-	contains: (self: { read [number]: T }, value: T) -> boolean,
-	index_of: (self: { read [number]: T }, value: T) -> number?,
-	for_each: (self: { read [number]: T }, f: (T, number) -> ()) -> (),
-	reduce: <U>(self: { read [number]: T }, f: (U, T, number) -> U, init: U) -> U,
-	slice: (self: { read [number]: T }, from: number, to: number?) -> Self,
-	concat: (self: { read [number]: T }, other: Self) -> Self,
-	reverse: (self: { read [number]: T }) -> Self,
-	sort_by: (self: { read [number]: T }, f: (T, T) -> boolean) -> Self,
-	any: (self: { read [number]: T }, f: (T, number) -> boolean) -> boolean,
-	all: (self: { read [number]: T }, f: (T, number) -> boolean) -> boolean,
+	len: (self: R) -> number,
+	is_empty: (self: R) -> boolean,
+	push: (self: R, ...T) -> Self,
+	pop: Peek,
+	remove: At,
+	swap_remove: At,
+	first: Peek,
+	last: Peek,
+	map: <U>(self: R, f: (T, number) -> U) -> Array2<U>,
+	filter: (self: R, f: P) -> Self,
+	find: (self: R, f: P) -> O,
+	find_index: (self: R, f: P) -> number?,
+	contains: (self: R, value: T) -> boolean,
+	index_of: (self: R, value: T) -> number?,
+	for_each: (self: R, f: (T, number) -> ()) -> (),
+	reduce: <U>(self: R, f: (U, T, number) -> U, init: U) -> U,
+	slice: (self: R, from: number, to: number?) -> Self,
+	concat: (self: R, other: Self) -> Self,
+	reverse: Same,
+	sort_by: (self: R, f: (T, T) -> boolean) -> Self,
+	any: Test,
+	all: Test,
 	sum: (self: { read [number]: number }) -> number,
-	min_by: <K>(self: { read [number]: T }, key: (T) -> K) -> T?,
-	max_by: <K>(self: { read [number]: T }, key: (T) -> K) -> T?,
-	flat_map: <U>(self: { read [number]: T }, f: (T, number) -> { read [number]: U }) -> Array3<U>,
+	min_by: Pick,
+	max_by: Pick,
+	flat_map: <U>(self: R, f: (T, number) -> { read [number]: U }) -> Array3<U>,
 	flatten: <U>(self: { read [number]: { read [number]: U } }) -> Array3<U>,
-	group_by: <K>(self: { read [number]: T }, key: (T, number) -> K) -> { read [K]: Self },
-	chunk: (self: { read [number]: T }, size: number) -> { read [number]: Self },
-	zip: <U>(self: { read [number]: T }, other: { read [number]: U }) -> { { first: T, second: U } },
-	unique: (self: { read [number]: T }) -> Self,
-	take: (self: { read [number]: T }, n: number) -> Self,
-	skip: (self: { read [number]: T }, n: number) -> Self,
-	insert_at: (self: { read [number]: T }, index: number, value: T) -> Self,
-	binary_search: (self: { read [number]: T }, value: T, less: ((T, T) -> boolean)?) -> number?,
-	join: (self: { read [number]: T }, sep: string?) -> string,
-	to_table: (self: { read [number]: T }) -> { T },
+	group_by: <K>(self: R, key: (T, number) -> K) -> { read [K]: Self },
+	chunk: (self: R, size: number) -> { read [number]: Self },
+	zip: <U>(self: R, other: { read [number]: U }) -> { { first: T, second: U } },
+	unique: Same,
+	take: Cut,
+	skip: Cut,
+	insert_at: (self: R, index: number, value: T) -> Self,
+	binary_search: (self: R, value: T, less: ((T, T) -> boolean)?) -> number?,
+	join: (self: R, sep: string?) -> string,
+	to_table: (self: R) -> { T },
 }
+type ArrayShapeBody<T, Self, R, P, O> = ArrayShapeFns<
+	T,
+	Self,
+	R,
+	P,
+	O,
+	(self: R) -> O,
+	(self: R, index: number) -> O,
+	(self: R, f: P) -> boolean,
+	(self: R) -> Self,
+	(self: R, n: number) -> Self,
+	<K>(self: R, key: (T) -> K) -> O
+>
+type ArrayShape<T, Self> = ArrayShapeBody<T, Self, { read [number]: T }, (T, number) -> boolean, T?>
 export type Array<T> = ArrayShape<T, Array<T>>
 
 -- Luau rejects an alias that names itself with other arguments, so
@@ -1173,125 +1218,166 @@ export type Array<T> = ArrayShape<T, Array<T>>
 -- `self` is the bare table: every `self: Array2<T>` is one more
 -- expansion of the alias, and the solver gives up past a few hundred.
 -- A `self: any` is no good either, it turns every inferred `U` to any.
-type Array2Shape<T, Self> = {
+type Array2ShapeFns<T, Self, R, P, O, Peek, At, Test, Same, Cut, Pick> = {
 	[number]: T,
-	len: (self: { read [number]: T }) -> number,
-	is_empty: (self: { read [number]: T }) -> boolean,
-	push: (self: { read [number]: T }, ...T) -> Self,
-	pop: (self: { read [number]: T }) -> T?,
-	remove: (self: { read [number]: T }, index: number) -> T?,
-	swap_remove: (self: { read [number]: T }, index: number) -> T?,
-	first: (self: { read [number]: T }) -> T?,
-	last: (self: { read [number]: T }) -> T?,
-	map: <U>(self: { read [number]: T }, f: (T, number) -> U) -> Array3<U>,
-	filter: (self: { read [number]: T }, f: (T, number) -> boolean) -> Self,
-	find: (self: { read [number]: T }, f: (T, number) -> boolean) -> T?,
-	find_index: (self: { read [number]: T }, f: (T, number) -> boolean) -> number?,
-	contains: (self: { read [number]: T }, value: T) -> boolean,
-	index_of: (self: { read [number]: T }, value: T) -> number?,
-	for_each: (self: { read [number]: T }, f: (T, number) -> ()) -> (),
-	reduce: <U>(self: { read [number]: T }, f: (U, T, number) -> U, init: U) -> U,
-	slice: (self: { read [number]: T }, from: number, to: number?) -> Self,
-	concat: (self: { read [number]: T }, other: Self) -> Self,
-	reverse: (self: { read [number]: T }) -> Self,
-	sort_by: (self: { read [number]: T }, f: (T, T) -> boolean) -> Self,
-	any: (self: { read [number]: T }, f: (T, number) -> boolean) -> boolean,
-	all: (self: { read [number]: T }, f: (T, number) -> boolean) -> boolean,
+	len: (self: R) -> number,
+	is_empty: (self: R) -> boolean,
+	push: (self: R, ...T) -> Self,
+	pop: Peek,
+	remove: At,
+	swap_remove: At,
+	first: Peek,
+	last: Peek,
+	map: <U>(self: R, f: (T, number) -> U) -> Array3<U>,
+	filter: (self: R, f: P) -> Self,
+	find: (self: R, f: P) -> O,
+	find_index: (self: R, f: P) -> number?,
+	contains: (self: R, value: T) -> boolean,
+	index_of: (self: R, value: T) -> number?,
+	for_each: (self: R, f: (T, number) -> ()) -> (),
+	reduce: <U>(self: R, f: (U, T, number) -> U, init: U) -> U,
+	slice: (self: R, from: number, to: number?) -> Self,
+	concat: (self: R, other: Self) -> Self,
+	reverse: Same,
+	sort_by: (self: R, f: (T, T) -> boolean) -> Self,
+	any: Test,
+	all: Test,
 	sum: (self: { read [number]: number }) -> number,
-	min_by: <K>(self: { read [number]: T }, key: (T) -> K) -> T?,
-	max_by: <K>(self: { read [number]: T }, key: (T) -> K) -> T?,
-	flat_map: <U>(self: { read [number]: T }, f: (T, number) -> { read [number]: U }) -> any,
+	min_by: Pick,
+	max_by: Pick,
+	flat_map: <U>(self: R, f: (T, number) -> { read [number]: U }) -> any,
 	flatten: <U>(self: { read [number]: { read [number]: U } }) -> any,
-	group_by: <K>(self: { read [number]: T }, key: (T, number) -> K) -> { read [K]: Self },
-	chunk: (self: { read [number]: T }, size: number) -> { read [number]: Self },
-	zip: <U>(self: { read [number]: T }, other: { read [number]: U }) -> { { first: T, second: U } },
-	unique: (self: { read [number]: T }) -> Self,
-	take: (self: { read [number]: T }, n: number) -> Self,
-	skip: (self: { read [number]: T }, n: number) -> Self,
-	insert_at: (self: { read [number]: T }, index: number, value: T) -> Self,
-	binary_search: (self: { read [number]: T }, value: T, less: ((T, T) -> boolean)?) -> number?,
-	join: (self: { read [number]: T }, sep: string?) -> string,
-	to_table: (self: { read [number]: T }) -> { T },
+	group_by: <K>(self: R, key: (T, number) -> K) -> { read [K]: Self },
+	chunk: (self: R, size: number) -> { read [number]: Self },
+	zip: <U>(self: R, other: { read [number]: U }) -> { { first: T, second: U } },
+	unique: Same,
+	take: Cut,
+	skip: Cut,
+	insert_at: (self: R, index: number, value: T) -> Self,
+	binary_search: (self: R, value: T, less: ((T, T) -> boolean)?) -> number?,
+	join: (self: R, sep: string?) -> string,
+	to_table: (self: R) -> { T },
 }
+type Array2ShapeBody<T, Self, R, P, O> = Array2ShapeFns<
+	T,
+	Self,
+	R,
+	P,
+	O,
+	(self: R) -> O,
+	(self: R, index: number) -> O,
+	(self: R, f: P) -> boolean,
+	(self: R) -> Self,
+	(self: R, n: number) -> Self,
+	<K>(self: R, key: (T) -> K) -> O
+>
+type Array2Shape<T, Self> = Array2ShapeBody<T, Self, { read [number]: T }, (T, number) -> boolean, T?>
 export type Array2<T> = Array2Shape<T, Array2<T>>
 
-type Array3Shape<T, Self> = {
+type Array3ShapeFns<T, Self, R, P, O, Peek, At, Test, Same, Cut, Pick> = {
 	[number]: T,
-	len: (self: { read [number]: T }) -> number,
-	is_empty: (self: { read [number]: T }) -> boolean,
-	push: (self: { read [number]: T }, ...T) -> Self,
-	pop: (self: { read [number]: T }) -> T?,
-	remove: (self: { read [number]: T }, index: number) -> T?,
-	swap_remove: (self: { read [number]: T }, index: number) -> T?,
-	first: (self: { read [number]: T }) -> T?,
-	last: (self: { read [number]: T }) -> T?,
-	map: <U>(self: { read [number]: T }, f: (T, number) -> U) -> any,
-	filter: (self: { read [number]: T }, f: (T, number) -> boolean) -> Self,
-	find: (self: { read [number]: T }, f: (T, number) -> boolean) -> T?,
-	find_index: (self: { read [number]: T }, f: (T, number) -> boolean) -> number?,
-	contains: (self: { read [number]: T }, value: T) -> boolean,
-	index_of: (self: { read [number]: T }, value: T) -> number?,
-	for_each: (self: { read [number]: T }, f: (T, number) -> ()) -> (),
-	reduce: <U>(self: { read [number]: T }, f: (U, T, number) -> U, init: U) -> U,
-	slice: (self: { read [number]: T }, from: number, to: number?) -> Self,
-	concat: (self: { read [number]: T }, other: Self) -> Self,
-	reverse: (self: { read [number]: T }) -> Self,
-	sort_by: (self: { read [number]: T }, f: (T, T) -> boolean) -> Self,
-	any: (self: { read [number]: T }, f: (T, number) -> boolean) -> boolean,
-	all: (self: { read [number]: T }, f: (T, number) -> boolean) -> boolean,
+	len: (self: R) -> number,
+	is_empty: (self: R) -> boolean,
+	push: (self: R, ...T) -> Self,
+	pop: Peek,
+	remove: At,
+	swap_remove: At,
+	first: Peek,
+	last: Peek,
+	map: <U>(self: R, f: (T, number) -> U) -> any,
+	filter: (self: R, f: P) -> Self,
+	find: (self: R, f: P) -> O,
+	find_index: (self: R, f: P) -> number?,
+	contains: (self: R, value: T) -> boolean,
+	index_of: (self: R, value: T) -> number?,
+	for_each: (self: R, f: (T, number) -> ()) -> (),
+	reduce: <U>(self: R, f: (U, T, number) -> U, init: U) -> U,
+	slice: (self: R, from: number, to: number?) -> Self,
+	concat: (self: R, other: Self) -> Self,
+	reverse: Same,
+	sort_by: (self: R, f: (T, T) -> boolean) -> Self,
+	any: Test,
+	all: Test,
 	sum: (self: { read [number]: number }) -> number,
-	min_by: <K>(self: { read [number]: T }, key: (T) -> K) -> T?,
-	max_by: <K>(self: { read [number]: T }, key: (T) -> K) -> T?,
-	flat_map: <U>(self: { read [number]: T }, f: (T, number) -> { read [number]: U }) -> any,
+	min_by: Pick,
+	max_by: Pick,
+	flat_map: <U>(self: R, f: (T, number) -> { read [number]: U }) -> any,
 	flatten: <U>(self: { read [number]: { read [number]: U } }) -> any,
-	group_by: <K>(self: { read [number]: T }, key: (T, number) -> K) -> { read [K]: Self },
-	chunk: (self: { read [number]: T }, size: number) -> { read [number]: Self },
-	zip: <U>(self: { read [number]: T }, other: { read [number]: U }) -> { { first: T, second: U } },
-	unique: (self: { read [number]: T }) -> Self,
-	take: (self: { read [number]: T }, n: number) -> Self,
-	skip: (self: { read [number]: T }, n: number) -> Self,
-	insert_at: (self: { read [number]: T }, index: number, value: T) -> Self,
-	binary_search: (self: { read [number]: T }, value: T, less: ((T, T) -> boolean)?) -> number?,
-	join: (self: { read [number]: T }, sep: string?) -> string,
-	to_table: (self: { read [number]: T }) -> { T },
+	group_by: <K>(self: R, key: (T, number) -> K) -> { read [K]: Self },
+	chunk: (self: R, size: number) -> { read [number]: Self },
+	zip: <U>(self: R, other: { read [number]: U }) -> { { first: T, second: U } },
+	unique: Same,
+	take: Cut,
+	skip: Cut,
+	insert_at: (self: R, index: number, value: T) -> Self,
+	binary_search: (self: R, value: T, less: ((T, T) -> boolean)?) -> number?,
+	join: (self: R, sep: string?) -> string,
+	to_table: (self: R) -> { T },
 }
+type Array3ShapeBody<T, Self, R, P, O> = Array3ShapeFns<
+	T,
+	Self,
+	R,
+	P,
+	O,
+	(self: R) -> O,
+	(self: R, index: number) -> O,
+	(self: R, f: P) -> boolean,
+	(self: R) -> Self,
+	(self: R, n: number) -> Self,
+	<K>(self: R, key: (T) -> K) -> O
+>
+type Array3Shape<T, Self> = Array3ShapeBody<T, Self, { read [number]: T }, (T, number) -> boolean, T?>
 export type Array3<T> = Array3Shape<T, Array3<T>>
 
 -- `read T[]`: the Array methods that do not mutate.
 -- `Arr` is `Array<T>`, a parameter for the reason `Self` is one in
--- `ArrayShape`.
-type ReadArrayShape<T, Arr> = {
+-- `ArrayShape`. The members sit in `ReadArrayShapeFns` for the reason
+-- those of `ArrayShape` sit in `ArrayShapeFns`.
+type ReadArrayShapeFns<T, Arr, R, P, O, Peek, Test, Cut, Pick> = {
 	read [number]: T,
-	len: (self: { read [number]: T }) -> number,
-	is_empty: (self: { read [number]: T }) -> boolean,
-	first: (self: { read [number]: T }) -> T?,
-	last: (self: { read [number]: T }) -> T?,
-	map: <U>(self: { read [number]: T }, f: (T, number) -> U) -> Array<U>,
-	filter: (self: { read [number]: T }, f: (T, number) -> boolean) -> Arr,
-	find: (self: { read [number]: T }, f: (T, number) -> boolean) -> T?,
-	find_index: (self: { read [number]: T }, f: (T, number) -> boolean) -> number?,
-	contains: (self: { read [number]: T }, value: T) -> boolean,
-	index_of: (self: { read [number]: T }, value: T) -> number?,
-	for_each: (self: { read [number]: T }, f: (T, number) -> ()) -> (),
-	reduce: <U>(self: { read [number]: T }, f: (U, T, number) -> U, init: U) -> U,
-	slice: (self: { read [number]: T }, from: number, to: number?) -> Arr,
-	concat: (self: { read [number]: T }, other: Arr) -> Arr,
-	any: (self: { read [number]: T }, f: (T, number) -> boolean) -> boolean,
-	all: (self: { read [number]: T }, f: (T, number) -> boolean) -> boolean,
+	len: (self: R) -> number,
+	is_empty: (self: R) -> boolean,
+	first: Peek,
+	last: Peek,
+	map: <U>(self: R, f: (T, number) -> U) -> Array<U>,
+	filter: (self: R, f: P) -> Arr,
+	find: (self: R, f: P) -> O,
+	find_index: (self: R, f: P) -> number?,
+	contains: (self: R, value: T) -> boolean,
+	index_of: (self: R, value: T) -> number?,
+	for_each: (self: R, f: (T, number) -> ()) -> (),
+	reduce: <U>(self: R, f: (U, T, number) -> U, init: U) -> U,
+	slice: (self: R, from: number, to: number?) -> Arr,
+	concat: (self: R, other: Arr) -> Arr,
+	any: Test,
+	all: Test,
 	sum: (self: { read [number]: number }) -> number,
-	min_by: <K>(self: { read [number]: T }, key: (T) -> K) -> T?,
-	max_by: <K>(self: { read [number]: T }, key: (T) -> K) -> T?,
-	flat_map: <U>(self: { read [number]: T }, f: (T, number) -> { read [number]: U }) -> Array3<U>,
+	min_by: Pick,
+	max_by: Pick,
+	flat_map: <U>(self: R, f: (T, number) -> { read [number]: U }) -> Array3<U>,
 	flatten: <U>(self: { read [number]: { read [number]: U } }) -> Array3<U>,
-	group_by: <K>(self: { read [number]: T }, key: (T, number) -> K) -> { read [K]: Arr },
-	chunk: (self: { read [number]: T }, size: number) -> { read [number]: Arr },
-	zip: <U>(self: { read [number]: T }, other: { read [number]: U }) -> { { first: T, second: U } },
-	unique: (self: { read [number]: T }) -> Arr,
-	take: (self: { read [number]: T }, n: number) -> Arr,
-	skip: (self: { read [number]: T }, n: number) -> Arr,
-	binary_search: (self: { read [number]: T }, value: T, less: ((T, T) -> boolean)?) -> number?,
-	join: (self: { read [number]: T }, sep: string?) -> string,
+	group_by: <K>(self: R, key: (T, number) -> K) -> { read [K]: Arr },
+	chunk: (self: R, size: number) -> { read [number]: Arr },
+	zip: <U>(self: R, other: { read [number]: U }) -> { { first: T, second: U } },
+	unique: (self: R) -> Arr,
+	take: Cut,
+	skip: Cut,
+	binary_search: (self: R, value: T, less: ((T, T) -> boolean)?) -> number?,
+	join: (self: R, sep: string?) -> string,
 }
+type ReadArrayShapeBody<T, Arr, R, P, O> = ReadArrayShapeFns<
+	T,
+	Arr,
+	R,
+	P,
+	O,
+	(self: R) -> O,
+	(self: R, f: P) -> boolean,
+	(self: R, n: number) -> Arr,
+	<K>(self: R, key: (T) -> K) -> O
+>
+type ReadArrayShape<T, Arr> = ReadArrayShapeBody<T, Arr, { read [number]: T }, (T, number) -> boolean, T?>
 export type ReadArray<T> = ReadArrayShape<T, Array<T>>
 
 -- `write T[]`: a sink. Push and index assignment only.

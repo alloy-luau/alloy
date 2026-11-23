@@ -1469,3 +1469,34 @@ fn a_module_with_no_exports_returns_nil() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// `alloy test` reads the flags of the project, as `alloy build` does.
+/// It passed none, so a spec run refused each flagged feature in any
+/// source of a project whose build took it.
+#[test]
+fn a_spec_run_reads_the_flags_of_the_project() {
+    let dir = temp_project("test-flags");
+    fs::write(
+        dir.join("alloy.toml"),
+        "[fflags]\nAlloyExperimentalLambdaSyntax = true\n\n[test]\nlest = true\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/main.aly"),
+        "const twice = |x: number| x * 2\n\n@test namespace MainTests\n  public function doubles()\n    $assert_eq(twice(2), 4)\n  end\nend\n",
+    )
+    .unwrap();
+
+    let config = Config::load(&dir.join("alloy.toml")).unwrap();
+    let report = alloy::testbuild::run(&dir, &config, true).unwrap();
+    let _ = fs::remove_dir_all(&dir);
+
+    let messages: Vec<&str> = report
+        .diagnostics
+        .iter()
+        .map(|(_, d)| d.message.as_str())
+        .collect();
+    assert!(messages.is_empty(), "{messages:?}");
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    assert_eq!(report.tests, 1);
+}

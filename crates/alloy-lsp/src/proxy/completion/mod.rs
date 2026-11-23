@@ -466,6 +466,16 @@ impl State {
                 .find_map(|src| callable_signature(declared_line(src, &key)?))
                 .or_else(|| intrinsic_signature(&key)),
         }?;
+        // A declared attribute takes its arguments by position or as
+        // one table of keys, and the table has a signature of its own.
+        if key.starts_with('@')
+            && keywords::doc(&key).is_none()
+            && let Some(help) =
+                record_signature_help(&doc.source, offset, &key, &label, &parameters)
+        {
+            return Some(help);
+        }
+
         // A caller passes one value for a pattern, so its type stands in
         // the list.
         let label = alloy::desugar::signature_with_pattern_types(&label).unwrap_or(label);
@@ -1720,6 +1730,93 @@ pub(crate) fn attribute_signature(
     }
 
     Some((label, parameters))
+}
+
+/*
+The help for a use that writes its arguments as one table,
+`@Provider({ lifecycles = [ ... ], priority = 10 })`.
+
+The label shows the table, and the active parameter is the key the
+caret stands under, or the first key the table lacks. The count of
+commas says nothing here: the keys go in any order.
+
+An empty `@Provider(` with more than one parameter shows the table
+first and the positional form second. The runtime reads several
+parameters as a table of names, so the table is the form to offer.
+`None` for a use that already writes an argument by position.
+*/
+fn record_signature_help(
+    src: &str,
+    offset: usize,
+    key: &str,
+    positional: &str,
+    parameters: &[String],
+) -> Option<Value> {
+    let (open, _, _) = open_brackets(src, offset)
+        .into_iter()
+        .rev()
+        .find(|(_, c, _)| *c == '(')?;
+    let args = src.get(open + 1..offset)?.trim_start();
+    let body = args.strip_prefix('{');
+
+    if body.is_none() && (!args.is_empty() || parameters.len() < 2) {
+        return None;
+    }
+
+    let name_of = |p: &String| p.split(':').next().unwrap_or(p).trim().to_string();
+    let names: Vec<String> = parameters.iter().map(name_of).collect();
+    // The entries of the table, cut at the commas of its own level.
+    let mut entries = vec![String::new()];
+    let mut depth = 0i32;
+
+    for c in body.unwrap_or_default().chars() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+
+            ')' | ']' | '}' => depth -= 1,
+
+            ',' if depth == 0 => {
+                entries.push(String::new());
+
+                continue;
+            }
+
+            _ => {}
+        }
+
+        if let Some(entry) = entries.last_mut() {
+            entry.push(c);
+        }
+    }
+
+    let key_of = |entry: &String| entry.split('=').next().unwrap_or("").trim().to_string();
+    let last = entries.last().map(key_of).unwrap_or_default();
+    let written: Vec<String> = entries.iter().map(key_of).collect();
+    let active = names
+        .iter()
+        .position(|n| !last.is_empty() && *n == last)
+        .or_else(|| names.iter().position(|n| !written.contains(n)))
+        .unwrap_or(0);
+    let list: Vec<Value> = parameters.iter().map(|p| json!({ "label": p })).collect();
+    let mut signatures = vec![json!({
+        "label": format!("{key}({{ {} }})", parameters.join(", ")),
+        "parameters": list,
+        "activeParameter": active,
+    })];
+
+    if body.is_none() {
+        signatures.push(json!({
+            "label": positional,
+            "parameters": list,
+            "activeParameter": 0,
+        }));
+    }
+
+    Some(json!({
+        "signatures": signatures,
+        "activeSignature": 0,
+        "activeParameter": active,
+    }))
 }
 
 /// The remote declared under the line at `offset`, past any other

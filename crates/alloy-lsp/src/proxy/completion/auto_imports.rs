@@ -3,13 +3,37 @@ use super::*;
 impl State {
     /// Auto-import items for a completion at a source position.
     pub(crate) fn auto_imports(&self, uri: &str, line: u32, character: u32) -> Vec<Value> {
+        let offset = self
+            .docs
+            .get(uri)
+            .and_then(|doc| offset_of(&doc.source, line, character));
+
+        match offset {
+            Some(offset) => self.auto_imports_where(uri, offset, |_| true),
+
+            None => Vec::new(),
+        }
+    }
+
+    /// The auto-imports a type slot takes: an exported type, struct,
+    /// enum, trait or interface. A function or a constant is no type,
+    /// and an attribute reads after `@` alone.
+    pub(crate) fn auto_import_types(&self, uri: &str, offset: usize) -> Vec<Value> {
+        self.auto_imports_where(uri, offset, |e| {
+            !e.is_attribute && (e.is_type || matches!(e.kind, 7 | 8 | 13))
+        })
+    }
+
+    fn auto_imports_where(
+        &self,
+        uri: &str,
+        offset: usize,
+        keep: impl Fn(&imports::Export) -> bool,
+    ) -> Vec<Value> {
         let Some(doc) = self.docs.get(uri) else {
             return Vec::new();
         };
         let Some(path) = uri_to_path(uri) else {
-            return Vec::new();
-        };
-        let Some(offset) = offset_of(&doc.source, line, character) else {
             return Vec::new();
         };
         let prefix = imports::word_before(&doc.source, offset);
@@ -20,12 +44,17 @@ impl State {
 
         let bound = markup_bound(&doc.source);
         let passed = self.passed_on_exports();
-        let mut files: Vec<(PathBuf, &[imports::Export])> = self
+        let kept: Vec<(PathBuf, Vec<imports::Export>)> = self
             .docs
             .iter()
             .filter_map(|(u, d)| uri_to_path(u).map(|p| (p, d.exports.as_slice())))
+            .chain(passed.iter().map(|(p, e)| (p.clone(), e.as_slice())))
+            .map(|(p, exports)| (p, exports.iter().filter(|e| keep(e)).cloned().collect()))
             .collect();
-        files.extend(passed.iter().map(|(p, e)| (p.clone(), e.as_slice())));
+        let files: Vec<(PathBuf, &[imports::Export])> = kept
+            .iter()
+            .map(|(p, e)| (p.clone(), e.as_slice()))
+            .collect();
 
         let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
         let aliases = project_aliases(&dir, self.root.as_deref());

@@ -17,6 +17,15 @@ use crate::render::SpanMap;
 
 mod messages;
 
+/// The Luau flag that caps the nodes of one type graph. Luau stops at
+/// 10000; luau-lsp and Studio raise it to 15000. The runtime is under
+/// both since its aliases share their terms, and
+/// `the_runtime_checks_under_the_default_node_limit` holds it there.
+pub const NODE_LIMIT_FLAG: &str = "LuauTarjanChildLimit";
+
+/// The cap that `alloy flux` and the language server give the checker.
+pub const NODE_LIMIT: u32 = 40000;
+
 pub use messages::*;
 
 /// One source with its check artifact, for the analyzer.
@@ -703,7 +712,10 @@ pub fn analyze(
         // the default limit cuts it to `*TRUNCATED*` first. The language
         // server raises the same two flags, so both say one thing.
         .arg("--flag:LuauTypeMaximumStringifierLength=200000")
-        .arg("--flag:LuauTableTypeMaximumStringifierLength=200000");
+        .arg("--flag:LuauTableTypeMaximumStringifierLength=200000")
+        // The same limit the language server raises. A `[fflags]` entry
+        // of the name comes later and wins.
+        .arg(format!("--flag:{NODE_LIMIT_FLAG}={NODE_LIMIT}"));
 
     // `[flux] new_solver = false` runs the old solver, which evaluates
     // no type function.

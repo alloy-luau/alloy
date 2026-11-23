@@ -726,8 +726,20 @@ fn target_for(
 /// the call, so a first line that opens with `(` starts a statement of
 /// its own. The line joins the first line, so every later line keeps
 /// its number.
+///
+/// A `--!` directive counts only before the first statement of a chunk.
+/// The require goes on the first line after the directives, so
+/// `--!nonstrict` and `--!native` at the head of a file keep their
+/// effect.
 fn with_shim(text: &str, shim_require: &str) -> String {
-    format!("require({}); {text}", luau_string(shim_require))
+    let directives: usize = text
+        .split_inclusive('\n')
+        .take_while(|line| line.trim_start().starts_with("--!"))
+        .map(str::len)
+        .sum();
+    let (head, rest) = text.split_at(directives);
+
+    format!("{head}require({}); {rest}", luau_string(shim_require))
 }
 
 /// Writes the modules folder: every source compiled with file-path
@@ -789,6 +801,9 @@ fn write_modules(
             definitions: rel.to_string_lossy().ends_with(".d.aly"),
             std_require: relative_require(&source_rel, &runtime),
             wait_timeout: config.emit.wait_timeout,
+            // The flags of the project, as the build passes them. Without
+            // them a spec run refused each feature that the build takes.
+            fflags: config.fflags.clone(),
             test_runner: config.test.lest,
             std_globals: config.std.globals.clone(),
             extensions: extensions.to_vec(),
@@ -1048,6 +1063,7 @@ pub fn spec(
         wire_scopes,
         tests: true,
         wait_timeout: config.emit.wait_timeout,
+        fflags: config.fflags.clone(),
         test_runner: config.test.lest,
         std_globals: config.std.globals.clone(),
         extensions: extensions.to_vec(),
@@ -1420,6 +1436,21 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A directive is read only before the first statement, so the
+    /// require of the shim goes after the directives. Each line keeps
+    /// its number.
+    #[test]
+    fn the_shim_require_keeps_the_directives_first() {
+        assert_eq!(
+            with_shim("--!nonstrict\n--!native\n-- text\nlocal a = 1\n", "./shim"),
+            "--!nonstrict\n--!native\nrequire(\"./shim\"); -- text\nlocal a = 1\n"
+        );
+        assert_eq!(
+            with_shim("local a = 1\n", "./shim"),
+            "require(\"./shim\"); local a = 1\n"
+        );
+    }
 
     fn sliced(src: &str) -> Option<String> {
         let parsed = alloy_syntax::parse_lenient(src, Default::default())

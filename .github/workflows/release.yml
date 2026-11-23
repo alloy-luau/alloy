@@ -188,7 +188,7 @@ jobs:
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
             $kind \
-            dist/*.zip
+            dist/*.zip tool.toml
 
   publish:
     name: Publish to crates.io

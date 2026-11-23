@@ -801,6 +801,9 @@ fn write_modules(
             definitions: rel.to_string_lossy().ends_with(".d.aly"),
             std_require: relative_require(&source_rel, &runtime),
             wait_timeout: config.emit.wait_timeout,
+            // The flags of the project, as the build passes them. Without
+            // them a spec run refused each feature that the build takes.
+            fflags: config.fflags.clone(),
             test_runner: config.test.lest,
             std_globals: config.std.globals.clone(),
             extensions: extensions.to_vec(),
@@ -1060,6 +1063,7 @@ pub fn spec(
         wire_scopes,
         tests: true,
         wait_timeout: config.emit.wait_timeout,
+        fflags: config.fflags.clone(),
         test_runner: config.test.lest,
         std_globals: config.std.globals.clone(),
         extensions: extensions.to_vec(),

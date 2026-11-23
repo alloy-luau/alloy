@@ -2312,6 +2312,19 @@ pub(crate) fn an_attribute_argument_completes_its_own_literals() {
         );
     }
 
+    // A list parameter with no list open: the one item opens the list.
+    // A variant alone is no list, so the variants wait for the `[`.
+    let src = format!("{forge}@Provider({{ lifecycles =  }})\nimpl S as\nend\n");
+    assert_eq!(
+        items(&src, "lifecycles = "),
+        [("[ ]".to_string(), "[ $0 ]".to_string())]
+    );
+    let src = format!("{forge}@Provider()\nimpl S as\nend\n");
+    assert_eq!(
+        items(&src, "@Provider("),
+        [("[ ]".to_string(), "[ $0 ]".to_string())]
+    );
+
     // A key of the record: the parameters, less the ones written.
     let src = format!("{forge}@Provider({{  }})\nimpl S as\nend\n");
     assert_eq!(
@@ -3716,6 +3729,40 @@ fn an_attribute_use_answers_its_signature() {
     assert_eq!(label(&help), "@icon(asset: string = \"none\")");
     assert_eq!(params(&help), ["asset: string = \"none\""]);
 
+    // An attribute with several parameters reads at runtime as a table
+    // of names, so the table form comes first and the positional form
+    // second. Inside the table the key under the caret is the active
+    // one, in any order.
+    let forge = "attribute Provider(lifecycles: string[] = [], priority: number = 0) on struct\n\n";
+    let table = "@Provider({ lifecycles: string[] = [], priority: number = 0 })";
+    let help_at = |use_line: &str| {
+        let (st, uri) = one_file(&format!("{forge}{use_line}\nstruct S as\nend\n"));
+
+        st.declared_signature_help(uri, 2, use_line.len() as u32)
+            .expect("@Provider")
+    };
+    let help = help_at("@Provider(");
+    assert_eq!(label(&help), table);
+    assert_eq!(
+        help["signatures"][1]["label"],
+        json!("@Provider(lifecycles: string[] = [], priority: number = 0)")
+    );
+    let help = help_at("@Provider({ priority = ");
+    assert_eq!(label(&help), table);
+    assert_eq!(help["signatures"].as_array().map(Vec::len), Some(1));
+    assert_eq!(help["activeParameter"], json!(1));
+    let help = help_at("@Provider({ priority = 1, ");
+    assert_eq!(help["activeParameter"], json!(0));
+    let help = help_at("@Provider({ lifecycles = [ 'a', ");
+    assert_eq!(help["activeParameter"], json!(0));
+    // A use by position keeps the positional signature.
+    let help = help_at("@Provider([ 'a' ], ");
+    assert_eq!(
+        label(&help),
+        "@Provider(lifecycles: string[] = [], priority: number = 0)"
+    );
+    assert_eq!(help["activeParameter"], json!(1));
+
     // `@u8` takes nothing, and `remote test(` declares.
     let (st, uri) = one_file("@u8(\n");
     assert!(st.declared_signature_help(uri, 0, 4).is_none());
@@ -4562,4 +4609,71 @@ fn a_closing_tag_offers_the_open_element_alone() {
 
     assert_eq!(items.len(), 1, "{items:?}");
     assert_eq!(items[0]["label"], "Frame");
+}
+
+/// A variant of an enum the file does not import: the accept adds the
+/// enum to the import that brought the attribute. A file that already
+/// binds the enum gets no edit.
+#[test]
+fn an_attribute_argument_imports_its_enum() {
+    let dir = super::documents::alias_root(
+        "attribute-enum-import",
+        &[(
+            "src/forge.aly",
+            "export enum Lifecycle as\n    Init\n    Start\nend\nexport attribute Provider(lifecycles: (Lifecycle | string)[] = [], priority: number = 0) on struct\n",
+        )],
+    );
+    let edits = |imports: &str| -> Value {
+        let src = format!(
+            "import {{ {imports} }} from \"./forge\"\n\n@Provider({{ lifecycles = [  ] }})\nstruct S as\nend\n"
+        );
+        let uri = path_to_uri(&dir.join("src/main.aly"));
+        let st = files(&[(uri.as_str(), src.as_str())]);
+        let at = src.find("[ ").expect("the list") + 2;
+        let ctx = context::detect(&src, at).expect("a context");
+        let items = st.context_items(&uri, at, &ctx);
+        assert_eq!(items[0]["label"], json!("Lifecycle.Init"), "{items:?}");
+
+        items[0]["additionalTextEdits"].clone()
+    };
+    let missing = edits("Provider");
+    let held = edits("Provider, Lifecycle");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(
+        missing[0]["newText"],
+        json!("import { Provider, Lifecycle } from \"./forge\""),
+        "{missing}"
+    );
+    assert_eq!(held, Value::Null);
+}
+
+/// A type slot offers the types other modules export, and the accept
+/// writes the import. `system: Sys` offered nothing for a `System` the
+/// file had not imported yet. A function of the same module stays out.
+#[test]
+fn a_type_slot_offers_auto_imports() {
+    let lib = "file:///p/src/lib.aly";
+    let main = "file:///p/src/main.aly";
+    let src = "struct S as\n    private system: Sys\nend\n";
+    let st = files(&[
+        (
+            lib,
+            "export type System = { run: () -> () }\nexport struct SysBox as\n    n: number\nend\nexport function sysmake() end\n",
+        ),
+        (main, src),
+    ]);
+    let at = src.find("Sys").expect("the type") + 3;
+    let ctx = context::detect(src, at).expect("a type slot");
+    let items = st.context_items(main, at, &ctx);
+    let found = |name: &str| items.iter().find(|i| i["label"] == json!(name));
+
+    let system = found("System").expect("the exported type");
+    assert_eq!(
+        system["additionalTextEdits"][0]["newText"],
+        json!("import { type System } from './lib'\n"),
+        "{system}"
+    );
+    assert!(found("SysBox").is_some(), "{items:?}");
+    assert!(found("sysmake").is_none(), "{items:?}");
 }

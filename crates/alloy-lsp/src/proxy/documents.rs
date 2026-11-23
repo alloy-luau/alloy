@@ -657,6 +657,7 @@ impl Server {
     /// changes on disk.
     pub(crate) fn open_workspace(&self) {
         let files = self.open_mirror();
+        self.write_project_sourcemap();
         self.open_shadows(files);
     }
 
@@ -985,6 +986,127 @@ impl Server {
         ))
     }
 
+    /// The path of the mirror's sourcemap and the text the tree gives it
+    /// now. `None` when the project has no mount table.
+    fn tree_sourcemap_text(&self) -> Option<(PathBuf, String)> {
+        let root = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .root
+            .clone()?;
+        let path = Config::find_within(&root, &root)?;
+        let config = Config::load(&path).ok()?;
+
+        if !tree_sourcemap(&root, Some(&config)) {
+            return None;
+        }
+
+        let base = path.parent().unwrap_or(&root);
+        let input = base.join(&config.build.input);
+        let out = base.join(&config.build.out);
+        let text = alloy::project::luau_sourcemap(&root, &config, None)?;
+
+        Some((
+            root.join("sourcemap.json"),
+            mirrored_sourcemap(&text, &input, Some(&out), &root),
+        ))
+    }
+
+    /// Writes `sourcemap.json` at the project root from the tree, when
+    /// the editor asks for it and the project has mounts. Rojo reads no
+    /// `.aly` file as a script, so its sourcemap of an Alloy tree is
+    /// `null`. The write is skipped when the file already holds the text.
+    pub(crate) fn write_project_sourcemap(&self) {
+        let (root, wanted) = {
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+
+            (st.root.clone(), st.editor.sourcemap_autogenerate)
+        };
+        let Some(root) = root.filter(|_| wanted) else {
+            return;
+        };
+        let Some(config) = Config::find_within(&root, &root).and_then(|p| Config::load(&p).ok())
+        else {
+            return;
+        };
+
+        if !tree_sourcemap(&root, Some(&config)) {
+            return;
+        }
+
+        let file = root.join("sourcemap.json");
+
+        if let Some(text) = alloy::project::luau_sourcemap(&root, &config, None)
+            && std::fs::read_to_string(&file).ok().as_deref() != Some(text.as_str())
+        {
+            let _ = std::fs::write(&file, text);
+        }
+    }
+
+    /// The mirror's sourcemap as the child last read it.
+    fn mirror_sourcemap(&self) -> Option<String> {
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let root = st.root.clone()?;
+
+        std::fs::read_to_string(st.mirror_path(&root.join("sourcemap.json"))).ok()
+    }
+
+    /// Tells the child that the mirror's sourcemap moved, and checks
+    /// each open document again. The editor watches the project, not
+    /// the mirror, so the child hears of this file from here alone.
+    fn announce_sourcemap(&self) {
+        let (root, open) = {
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+
+            (
+                st.root.clone(),
+                st.editor_open.iter().cloned().collect::<Vec<String>>(),
+            )
+        };
+        let Some(root) = root else {
+            return;
+        };
+
+        self.forward_plain(json!({
+            "jsonrpc": "2.0",
+            "method": "workspace/didChangeWatchedFiles",
+            "params": {
+                "changes": [{ "uri": path_to_uri(&root.join("sourcemap.json")), "type": 2 }]
+            }
+        }));
+
+        for uri in open {
+            self.wait_for_requests();
+            self.resend_doc(&uri);
+            self.publish(&uri);
+        }
+    }
+
+    /// Writes the mirror's sourcemap from the tree when a file or a
+    /// folder came or went. The startup pass wrote it once, so
+    /// `script.Parent=>providers` reported a folder made after the
+    /// start until a restart. Returns whether the sourcemap moved.
+    pub(crate) fn refresh_tree_sourcemap(&self) -> bool {
+        self.write_project_sourcemap();
+
+        let Some((file, want)) = self.tree_sourcemap_text() else {
+            return false;
+        };
+
+        if self.mirror_sourcemap().as_deref() == Some(want.as_str()) {
+            return false;
+        }
+
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .write_mirror(&file, &want);
+        self.announce_sourcemap();
+
+        true
+    }
+
     /// Re-reads the project from disk. A package install writes a whole
     /// tree at once: the new files reach the mirror, the child hears
     /// that each plain module changed, and every document that imports
@@ -1121,8 +1243,14 @@ impl Server {
         };
 
         if changed.is_empty() && fresh.is_empty() && stale.is_empty() {
+            // An empty folder, or a file the watcher already opened: no
+            // file is new to the pass, and the tree still moved.
+            self.refresh_tree_sourcemap();
+
             return;
         }
+
+        let sourcemap_before = self.mirror_sourcemap();
 
         log::info(&format!(
             "rescan: {} plain files, {} shadows, {} saved sources",
@@ -1134,6 +1262,11 @@ impl Server {
 
         for (uri, text) in &stale {
             self.open_doc(uri, text.clone(), 0, false);
+        }
+
+        // The pass wrote the sourcemap; the child reads it on a notice.
+        if self.mirror_sourcemap() != sourcemap_before {
+            self.announce_sourcemap();
         }
 
         // The child caches a module it has read; it re-reads one it

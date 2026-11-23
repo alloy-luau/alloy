@@ -1420,6 +1420,73 @@ fn a_module_added_on_disk_types_without_a_restart() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A script made after the start is in the tree at once. The startup
+/// pass alone wrote the sourcemap, so the child knew no parent for the
+/// new script and reported `script.Parent` as an `Instance?`.
+#[test]
+fn a_script_added_on_disk_knows_its_parent_without_a_restart() {
+    let Some(child) = luau_lsp() else {
+        eprintln!("luau-lsp not found; skipping");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("alloy-lsp-tree-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src/client")).unwrap();
+    std::fs::write(
+        dir.join("alloy.toml"),
+        "[build]\nin = \"src\"\nout = \"build\"\n\n[project]\nname = \"game\"\n\n[mount]\nclient = [\"src/client\", \"@game/StarterPlayer/StarterPlayerScripts/Client\"]\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("src/client/first.aly"), "return {}\n").unwrap();
+
+    // The poll is far off, so the watched change alone moves the tree.
+    let mut s = start_env(
+        &child,
+        json!({ "processId": std::process::id(), "rootUri": format!("file://{}", dir.display()), "capabilities": {} }),
+        &[("ALLOY_LSP_POLL_SECS", "3600")],
+    );
+    let first = format!("file://{}", dir.join("src/client/first.aly").display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": first, "languageId": "alloy-luau", "version": 1, "text": "return {}\n" } } }),
+    );
+    s.diagnostics(&first, |_| true);
+
+    let src = "const providers: Instance = script.Parent=>providers\nprint(providers)\n";
+    let file = dir.join("src/client/main.client.aly");
+    std::fs::create_dir_all(dir.join("src/client/providers")).unwrap();
+    std::fs::write(dir.join("src/client/providers/Ecs.aly"), "return {}\n").unwrap();
+    std::fs::write(&file, src).unwrap();
+    let uri = format!("file://{}", file.display());
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "workspace/didChangeWatchedFiles", "params": { "changes": [
+            { "uri": uri, "type": 1 },
+            { "uri": format!("file://{}", dir.join("src/client/providers/Ecs.aly").display()), "type": 1 },
+        ] } }),
+    );
+    write(
+        &mut s.stdin,
+        &json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": uri, "languageId": "alloy-luau", "version": 1, "text": src } } }),
+    );
+    s.drain(Duration::from_secs(6));
+    let last: Vec<String> = s
+        .seen
+        .iter()
+        .rfind(|m| m["method"] == "textDocument/publishDiagnostics" && m["params"]["uri"] == uri)
+        .and_then(|m| m["params"]["diagnostics"].as_array().cloned())
+        .expect("a report on the new script")
+        .iter()
+        .filter_map(|d| d["message"].as_str().map(str::to_string))
+        .collect();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(last.is_empty(), "{last:?}");
+}
+
 /// An enum's variants complete as enum members with their signatures,
 /// and a payload position offers types, not values.
 #[test]

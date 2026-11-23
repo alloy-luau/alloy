@@ -48,6 +48,9 @@ pub struct Editor {
     /// Write a function's return type hint as `-> T`, the way
     /// `function f() -> T` spells it, rather than `: T`.
     pub arrow_return_hints: bool,
+    /// Write `sourcemap.json` at the project root each time the tree of
+    /// a project with mounts changes, as `alloy build` writes it.
+    pub sourcemap_autogenerate: bool,
 }
 
 impl Default for Editor {
@@ -58,6 +61,7 @@ impl Default for Editor {
             hide_roblox_deprecated: false,
             hide_all_deprecated: false,
             arrow_return_hints: false,
+            sourcemap_autogenerate: false,
         }
     }
 }
@@ -74,6 +78,10 @@ pub fn editor(options: &Value, current: Editor) -> Editor {
         hide_roblox_deprecated: flag("hideRobloxDeprecated", current.hide_roblox_deprecated),
         hide_all_deprecated: flag("hideAllDeprecated", current.hide_all_deprecated),
         arrow_return_hints: flag("arrowReturnHints", current.arrow_return_hints),
+        sourcemap_autogenerate: options
+            .pointer("/sourcemap/autogenerate")
+            .and_then(Value::as_bool)
+            .unwrap_or(current.sourcemap_autogenerate),
     }
 }
 

@@ -425,8 +425,24 @@ impl State {
                     }
                 }
 
-                if let Some(ty) = ty {
+                // A list parameter takes its entries inside `[ ]`. With
+                // no list open, an entry alone is a type error, so the
+                // one item opens the list.
+                let listed = ty.is_some_and(|t| is_list_type(t));
+                let outside_list = listed && quote.is_none() && innermost_open(head) != Some('[');
+
+                if let Some(ty) = ty.filter(|_| outside_list) {
+                    let detail = format!("takes `{ty}` for `@{attr}`");
+                    items.push(snippet("[ ]", "[ $0 ]", 21, &detail, None, from));
+                }
+
+                if let Some(ty) = ty.filter(|_| !outside_list) {
                     let element = element_type(ty);
+                    // `Lifecycle.Init` needs `Lifecycle` in scope. The
+                    // enum comes from the module that the attribute
+                    // comes from, so the accept adds the name to that
+                    // import.
+                    let mut imported: HashMap<String, Option<Value>> = HashMap::new();
 
                     for (label, insert, detail) in
                         self.literal_items(uri, &element, *quote, attr.as_str())
@@ -435,6 +451,16 @@ impl State {
                         item["textEdit"]["newText"] = json!(insert);
                         item["detail"] = json!(detail);
                         item["sortText"] = json!("0");
+
+                        if quote.is_none()
+                            && let Some((owner, _)) = label.split_once('.')
+                            && let Some(edit) = imported
+                                .entry(owner.to_string())
+                                .or_insert_with(|| self.enum_import_edit(uri, doc, attr, owner))
+                        {
+                            item["additionalTextEdits"] = json!([edit]);
+                        }
+
                         items.push(item);
                     }
                 }
@@ -1174,6 +1200,14 @@ impl State {
                         "command": "editor.action.triggerSuggest",
                     });
                     items.push(item);
+                }
+
+                // `system: Sys|`: a type another module exports. The
+                // accept writes the import, as it does for a value.
+                for item in self.auto_import_types(uri, offset) {
+                    if !items.iter().any(|i| i["label"] == item["label"]) {
+                        items.push(item);
+                    }
                 }
             }
 
@@ -2882,6 +2916,37 @@ impl State {
     source writes it, `Lifecycle.Init`. Any other type gives nothing: the
     argument is a literal, and this offers only the ones the type names.
     */
+    /// The edit that brings the enum `owner` into the file, from the
+    /// module the file imports the attribute `attr` from. `None` when
+    /// the file already binds or declares the name, or when that module
+    /// exports no such name.
+    fn enum_import_edit(&self, uri: &str, doc: &Doc, attr: &str, owner: &str) -> Option<Value> {
+        let bound = imports::bound_names(&doc.source).iter().any(|b| b == owner)
+            || doc.decls.iter().any(|d| d.name == owner);
+
+        if bound {
+            return None;
+        }
+
+        let entry = crate::proxy::navigation::import_entries(&doc.source)
+            .into_iter()
+            .find(|e| e.bound == attr)?;
+        let file = self
+            .resolve_spec(uri, &entry.spec)
+            .and_then(|p| imports::module_file(&imports::module_path(&p)))?;
+        let export = imports::exports_of_file(&file, 0)
+            .into_iter()
+            .find(|e| e.name == owner && !e.is_type)?;
+        let quote = imports::quote_for(&doc.source, self.fmt_config(uri).quote_style);
+
+        Some(imports::import_edit(
+            &doc.source,
+            &entry.spec,
+            &export,
+            quote,
+        ))
+    }
+
     fn literal_items(
         &self,
         uri: &str,
@@ -2950,6 +3015,36 @@ impl State {
 
         out
     }
+}
+
+/// Whether a parameter type is a list: `T[]` or `Array<T>`, with or
+/// without a default.
+fn is_list_type(ty: &str) -> bool {
+    let ty = ty.split(" = ").next().unwrap_or(ty).trim();
+
+    ty.ends_with("[]") || ty.starts_with("Array<")
+}
+
+/// The bracket that is still open at the end of `head`, innermost.
+///
+/// ponytail: a bracket inside a string counts as a bracket, as in
+/// `at_record_key`. Lex the text when a real use breaks.
+fn innermost_open(head: &str) -> Option<char> {
+    let mut open = Vec::new();
+
+    for c in head.chars() {
+        match c {
+            '(' | '[' | '{' => open.push(c),
+
+            ')' | ']' | '}' => {
+                open.pop();
+            }
+
+            _ => {}
+        }
+    }
+
+    open.last().copied()
 }
 
 /*

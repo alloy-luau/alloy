@@ -606,7 +606,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Style,
         default: Level::Warn,
         summary: "`typeof(x) == \"T\"` in place of `x is T`",
-        detail: "Flux. `x is T` compiles to the right test for the name, `type`, `typeof`, or `IsA`, and the checker narrows `x` in the branch. A string comparison narrows nothing. `alloy flux --fix` rewrites primitives, `Instance`, and the Roblox datatypes.",
+        detail: "Flux. `x is T` compiles to the right test for the name, `type`, `typeof`, or `IsA`, and the checker narrows `x` in the branch. A string comparison narrows nothing. `alloy flux --fix` rewrites primitives, `Instance`, and the Roblox datatypes. `typeof(x)` against `table`, `userdata` or `vector` stays as written: `is` tests those with `type`, and `typeof` answers another way for a Roblox datatype and for a value with a `__type` field.",
     },
     LintInfo {
         name: "array_long_string",
@@ -1402,6 +1402,41 @@ mod tests {
             ),
             Vec::<&str>::new()
         );
+    }
+
+    /// `remote`, `declare` and `attribute` open a declaration with no
+    /// body when a word follows. A value of one of those names with a
+    /// function written into it holds a body. Read as a signature, its
+    /// `end` closed the function around it, and each lint lost the
+    /// rest of the namespace.
+    #[test]
+    fn a_function_written_into_a_value_named_remote_has_a_body() {
+        for name in ["remote", "declare", "attribute"] {
+            let src = format!(
+                "namespace Counter\n  local count: number? = nil\n\n  function wire({name}: {{ fire: () -> () }})\n    {name}.fire = function()\n      print(1)\n    end\n  end\n\n  function bump()\n    count = 1\n    print(count)\n  end\nend\n\nCounter.wire({{ fire = print }})\nCounter.bump()\n"
+            );
+            assert_eq!(names(&src), Vec::<&str>::new(), "{name}");
+            assert_eq!(
+                crate::fmt::format(&src).as_deref(),
+                Ok(src.as_str()),
+                "{name}"
+            );
+        }
+    }
+
+    /// The commas between the bars of a lambda split its parameters,
+    /// not the arguments of the call that takes it.
+    #[test]
+    fn the_parameters_of_a_lambda_are_one_argument() {
+        let head = "local function heap(less: (a: number, b: number) -> boolean, size: number?)\n    return less, size\nend\n";
+        let counts =
+            |call: &str| names(&format!("{head}print({call})\n")).contains(&"argument_count");
+
+        assert!(!counts("heap(|a, b| a < b)"));
+        assert!(!counts("heap(|a: (number | string), b| a < b, 4)"));
+        assert!(!counts("heap(|| true, 4)"));
+        assert!(counts("heap(|a, b| a < b, 4, 5)"));
+        assert!(counts("heap(|| true, 4, 5)"));
     }
 
     /// The head of a message declares its parameters and its answer; it

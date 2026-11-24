@@ -880,6 +880,9 @@ impl<'s> Scan<'s> {
 
         while c > 0
             && !COND_BEFORE.contains(&self.prev(c))
+            // The bar that closes the parameters of a lambda: the value
+            // starts after it. The bar of a `|>` has its `>` here.
+            && !(self.prev(c) == "|" && !self.at(c, ">"))
             && self.line_of(c - 1) == self.line_of(c)
         {
             c = match self.prev(c) {

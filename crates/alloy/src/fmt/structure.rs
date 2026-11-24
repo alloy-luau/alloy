@@ -256,11 +256,11 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
                 "if" if in_array(&stack) && !prev.is_some_and(super::expression_context) => {}
 
                 "if" => {
-                    // `): number?` ends a signature line; the `if` that
-                    // opens the next line is a statement, not a ternary.
                     let first_on_line = i == 0 || lines[i - 1] != line;
+                    let before = i.checked_sub(2).map(|b| toks[b].text(src));
                     let in_expr = (prev.is_some_and(super::expression_context)
-                        && !(first_on_line && matches!(prev, Some("?" | "!" | ">" | ">>"))))
+                        && !(first_on_line
+                            && prev.is_some_and(|p| super::line_if_is_statement(p, before))))
                         || (matches!(prev, Some("then" | "else"))
                             && top(&stack) == Some(Kind::ExprIf))
                         || (prev == Some("then")
@@ -490,7 +490,7 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
 fn signature_only(src: &str, toks: &[Tok], i: usize, stack: &[Frame], lines: &[usize]) -> bool {
     if ["declare", "remote", "attribute"]
         .iter()
-        .any(|w| line_has_before(src, toks, i, w))
+        .any(|w| line_declares(src, toks, i, w))
     {
         return true;
     }
@@ -547,6 +547,21 @@ fn is_name(s: &str) -> bool {
         .is_some_and(|c| c.is_alphabetic() || c == '_')
 }
 
+/// Whether `word` opens a declaration before `i` on the same line: a
+/// word follows it, as in `declare function f` and `remote function f`.
+/// A value of that name does not: `remote.fire = function() end`
+/// writes a function with a body.
+fn line_declares(src: &str, toks: &[Tok], i: usize, word: &str) -> bool {
+    let line_start = src[..toks[i].start as usize]
+        .rfind('\n')
+        .map_or(0, |p| p + 1);
+
+    (0..i)
+        .rev()
+        .take_while(|&k| toks[k].start as usize >= line_start)
+        .any(|k| toks[k].text(src) == word && toks[k + 1].kind == TokKind::Ident)
+}
+
 /// Whether a token before `i` on the same line is `word`.
 fn line_has_before(src: &str, toks: &[Tok], i: usize, word: &str) -> bool {
     let line_start = src[..toks[i].start as usize]
@@ -571,5 +586,18 @@ mod statement_if_tests {
         let prev = toks[i - 1].text(src);
         let end = st.ends[i].map(|e| toks[e].text(src).to_string());
         assert_eq!((prev, end), ("?", Some("end".to_string())));
+    }
+
+    #[test]
+    fn a_statement_if_after_a_bare_bail_opens_a_block() {
+        let src = "local function f(n: number?)\n    local m = n ?? return\n    if m < 1 then\n        print(m)\n    end\n    print(m)\nend\n";
+        let toks = alloy_syntax::lexer::lex(src).unwrap().toks;
+        let st = super::structure(src, &toks);
+        let i = toks.iter().position(|t| t.text(src) == "if").unwrap();
+        // The last `end` closes the function, at depth one.
+        assert_eq!(
+            (st.steps[i].opens, st.steps[toks.len() - 1].depth_before),
+            (1, 1)
+        );
     }
 }

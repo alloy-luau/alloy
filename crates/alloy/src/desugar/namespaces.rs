@@ -1535,12 +1535,17 @@ fn block_namespaces(block: &Block, out: &mut Vec<TokSpan>) {
 
 /// Whether a declaration's emit copies its own name from the source.
 /// Those take the namespace prefix as an insert; every other head is
-/// generated and reads `decl_name`.
+/// generated and reads `decl_name`. A local with an initialiser block
+/// or a pattern writes its head again, so it is one of the others.
 fn copies_its_name(stmt: &Stmt) -> bool {
-    matches!(
-        stmt,
-        Stmt::Function(_) | Stmt::LocalFunction(_) | Stmt::Local(_) | Stmt::TypeAlias(_)
-    )
+    match stmt {
+        Stmt::Local(l) => !super::local_needs_rewrite(l),
+
+        _ => matches!(
+            stmt,
+            Stmt::Function(_) | Stmt::LocalFunction(_) | Stmt::TypeAlias(_)
+        ),
+    }
 }
 
 /// The parts of a `declare` member: the name it binds, the type text

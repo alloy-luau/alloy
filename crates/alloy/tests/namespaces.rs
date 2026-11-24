@@ -66,6 +66,37 @@ fn output(dir: &Path, rel: &str) -> String {
 
 // --- 1. what a namespace emits ----------------------------------------------
 
+/// A member whose emit writes its head again binds the prefixed name:
+/// the line that fills the table reads that name, and so does a sibling.
+/// The initialiser block, a pattern beside a plain name, and a match
+/// that runs statements each write the head.
+#[test]
+fn a_member_with_a_written_head_binds_the_prefixed_name() {
+    let src = "namespace N\n    const PART = new Instance(\"Part\") { Name = \"x\" }\n    local FOLDER = new Instance(\"Folder\") { Name = \"f\" }\n    private const HIDDEN = new Instance(\"Part\") { Name = \"h\" }\n    const plain, { f } = 1, { f = 2 }\n    const m = match plain with\n        case 1 then\n            print(f)\n            2\n        default 0\n    end\n    function all()\n        return PART, FOLDER, HIDDEN, plain, m\n    end\nend\nprint(N.PART, N.FOLDER, N.plain, N.m, N.all())\n";
+    let (ship, check, messages) = compile(src);
+    assert!(messages.is_empty(), "{messages:?}");
+
+    for out in [&ship, &check] {
+        for want in [
+            "local N_PART = Instance.new(\"Part\") N_PART.Name = \"x\"",
+            "N.PART = N_PART",
+            "local N_FOLDER = Instance.new(\"Folder\") N_FOLDER.Name = \"f\"",
+            "local N_HIDDEN = Instance.new(\"Part\") N_HIDDEN.Name = \"h\"",
+            "const N_plain = 1",
+            "N.plain = N_plain",
+            "local N_m",
+            "N_m = 2",
+            "else N_m = 0",
+            "N.m = N_m",
+            "return N_PART, N_FOLDER, N_HIDDEN, N_plain, N_m",
+        ] {
+            assert!(out.contains(want), "{want}\n{out}");
+        }
+
+        assert_eq!(out.lines().count(), src.lines().count(), "{out}");
+    }
+}
+
 /// The header opens a table and each member lands on it.
 #[test]
 fn the_header_opens_a_table_and_members_land_on_it() {

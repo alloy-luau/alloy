@@ -1063,6 +1063,10 @@ pub struct TypeAlias {
     /// `@name` lines above the alias. `attribute X on type` declares
     /// one, so the alias carries them and the check reads the target.
     pub attributes: Vec<Attr>,
+    /// The body of a `type function`. The emit copies it as written,
+    /// so no walk of statements reads it; the compiler checks that it
+    /// holds Luau alone.
+    pub function: Option<Box<FunctionBody>>,
     pub span: TokSpan,
 }
 

@@ -464,6 +464,30 @@ impl<'s> Scan<'s> {
                 continue;
             }
 
+            // `|a, b| value`: a bar where a value starts opens the
+            // parameters of a lambda, and their commas split no
+            // argument. A parameter type may hold a union in parens.
+            if text == "|" && depth == 1 && matches!(self.prev(k), "(" | ",") {
+                let mut nest = 0i32;
+
+                if let Some(close) = (k + 1..self.toks.len()).find(|&j| {
+                    match self.t(j) {
+                        "(" | "[" | "{" => nest += 1,
+
+                        ")" | "]" | "}" => nest -= 1,
+
+                        _ => {}
+                    }
+
+                    nest < 0 || (nest == 0 && self.t(j) == "|")
+                }) && self.t(close) == "|"
+                {
+                    skip = close;
+                }
+
+                continue;
+            }
+
             if angle > 0 || (text == "<" && (cast || self.at(k + 1, "<"))) {
                 match text {
                     "<" => angle += 1,

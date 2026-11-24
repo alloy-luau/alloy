@@ -180,9 +180,17 @@ end
 -- ---------------------------------------------------------------------------
 
 --- `struct<T>`: the struct whose values are `T`. `new` constructs one
---- from a table of its fields. The type names `new` alone: the checker
---- sees a struct as a plain table, with no call of its own.
-export type Struct<T> = { read new: (fields: any) -> T }
+--- from a table of its fields. The checker sees a struct as a plain
+--- table, with no call of its own.
+-- `new` takes `any`, so a caller passes the fields of a struct it does
+-- not know. The checker reports no mismatch on a path through `any`,
+-- so `new` alone let each struct pass as `struct<T>` for each `T`.
+-- `__index` is the struct itself, and its `new` there takes `never`:
+-- that path holds no `any`, and it refuses a struct of other values.
+export type Struct<T> = {
+	read new: (fields: any) -> T,
+	read __index: { read new: (fields: never) -> T },
+}
 
 --- `enum`: any enum. An enum is a table that tests a value with `is`.
 export type Enum = { read is: (value: any) -> boolean }
@@ -3678,6 +3686,73 @@ function alloy.append_checked<X>(target: X): (value: __append_item<X>) -> ()
 	end
 end
 
+-- How `target := value` reaches the target, as one word: `push` or
+-- `add` for a method of that name, `list` for the items of a list,
+-- `none` for a target that holds no items, `any` for a target with no
+-- type. The rules are those of `__append_item`.
+type function __append_kind(X: type)
+	if X:is("any") or X:is("unknown") then
+		return types.singleton("any")
+	end
+	if not X:is("table") then
+		return types.singleton("none")
+	end
+	local function has(name: string): boolean
+		local key = types.singleton(name)
+		local f = X:readproperty(key)
+		local mt = X:metatable()
+		if f == nil and mt ~= nil then
+			local index = mt:readproperty(types.singleton("__index"))
+			if index ~= nil and index:is("table") then
+				f = index:readproperty(key)
+			end
+		end
+		return f ~= nil and f:is("function")
+	end
+	if has("push") then
+		return types.singleton("push")
+	end
+	if has("add") then
+		return types.singleton("add")
+	end
+	local indexer = X:indexer()
+	if indexer ~= nil and (indexer.index:is("number") or indexer.index:is("any")) then
+		return types.singleton("list")
+	end
+	return types.singleton("none")
+end
+
+-- A value with one method, `__append`, that takes what the target
+-- takes. `__append_kind` picks the row, and `index` reads each type
+-- from the target itself. A type that a type function returns is a
+-- copy: an alias loses its name and a generic function no longer
+-- equals itself. A list of functions over a `jecs.World` then failed
+-- with "Code is too complex", so no row passes a type of the target
+-- through a type function. A method row is the target with `__append`
+-- as that method, so the checker reads the call as the method call.
+type AppendTo<X> = index<
+	{
+		any: { __append: (any, any) -> () },
+		none: { __append: (any, "__append_none") -> () },
+		list: { __append: (any, index<X, number>) -> () },
+		push: X & { __append: index<X, "push"> },
+		add: X & { __append: index<X, "add"> },
+	},
+	__append_kind<X>
+>
+
+--- `alloy.append` with a type, for the check artifact, which writes
+--- `append_to(xs):__append(v)`: the value must fit what the target
+--- takes. `append_checked` stays for a generic scope, where a type
+--- function does not reduce and this type reports.
+function alloy.append_to<X>(target: X): AppendTo<X>
+	return ({
+		__append = function(_, value)
+			alloy.append(target, value)
+		end,
+	} :: any)
+end
+
 -- A table with the functions of the `table` library as methods. A
 -- property the table has under the same name stays. A value that is no
 -- plain table keeps its own type, since its own methods answer first.
@@ -5331,12 +5406,17 @@ export type NetError = {
 	read response: NetResponse?,
 }
 
--- What `send` returns: a Future, under a type of its own. Two members
--- of NetRequest that return `Future<Result<T, NetError>>` cost the
--- checker 15000 nodes of its 10000 (`LuauTarjanChildLimit`) under the
--- Roblox definitions, and past the limit a user file reads the whole
--- std as `any` with no report. The callbacks read `any` here, and
--- `await` reads the value off `__values`.
+-- What `send` returns: a Future, under a type of its own. Luau copies
+-- the table the runtime returns in one walk, `ClonePublicInterface`,
+-- over each type the table reaches. The walk stops at
+-- `LuauTarjanChildLimit` types: 15000 in luau-lsp and in Studio, 10000
+-- in bare `luau-analyze`. Past the limit a user file reads the whole
+-- std as `any` with no report. Two members of NetRequest that return
+-- `Future<Result<T, NetError>>` took the walk past the limit. The cost
+-- then was the method table of Array, which the walk copied about 50
+-- times; see `ArrayShapeFns`. The callbacks read `any` here, and
+-- `await` reads the value off `__values`. The full Future type can
+-- come back when a count of the walk shows room for it.
 export type NetFuture<T> = {
 	read __value: T,
 	read __values: (T) -> (),
@@ -5845,8 +5925,9 @@ local JSON_REQUEST = { _method = "JSON", _url = "" }
 
 --- A value as JSON text, or an Err of kind `Encode`.
 -- The Ok side is `any`, and holds a string. `Result<string, NetError>`
--- costs the checker 14000 nodes of its 10000 (`LuauTarjanChildLimit`),
--- since each method of Result then walks the string library.
+-- took the walk that copies the table of the runtime past its limit,
+-- `LuauTarjanChildLimit`; see `NetFuture`. The string type can come
+-- back when a count of the walk shows room for it.
 function Net.to_json(value: any): Result<any, NetError>
 	local ok, text = pcall(function()
 		return http_service():JSONEncode(value)

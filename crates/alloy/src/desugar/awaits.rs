@@ -98,6 +98,10 @@ impl Desugar<'_> {
             }
 
             Stmt::Impl(i) => {
+                if i.generics.is_some() {
+                    self.generic_scope(i.span);
+                }
+
                 for m in &i.methods {
                     let name = self.function_name(m);
                     self.awaits_in_body(&m.body, name);
@@ -114,6 +118,9 @@ impl Desugar<'_> {
             }
 
             Stmt::Trait(t) => {
+                // A default body names `Self`, which is open there.
+                self.generic_scope(t.span);
+
                 for m in &t.methods {
                     if let Some(body) = &m.body {
                         let name = Some(self.text_of(m.name).to_string());
@@ -138,6 +145,12 @@ impl Desugar<'_> {
                 value: DefaultExport::Decl(inner),
                 ..
             } => self.awaits_in_stmt(inner, spot),
+
+            Stmt::TypeAlias(t) => {
+                if let Some(body) = &t.function {
+                    self.type_function_body(body);
+                }
+            }
 
             Stmt::Local(l) if l.using => {
                 if !self.options.fflags.on(&crate::fflags::USING_SYNTAX) {
@@ -208,6 +221,11 @@ impl Desugar<'_> {
         }
     }
 
+    fn generic_scope(&mut self, span: TokSpan) {
+        self.generic_scopes
+            .push((self.byte_start(span), self.byte_end(span)));
+    }
+
     /// A function body, under its own spot. A parameter default is read
     /// inside the body, so it takes the body's spot too.
     fn awaits_in_body(&mut self, body: &FunctionBody, name: Option<String>) {
@@ -219,8 +237,15 @@ impl Desugar<'_> {
             Spot::Plain(name)
         };
 
-        // Every function body passes here once, so the reports of a
-        // `function*` sit here and not in the emit, which may run twice.
+        self.awaits_in_body_at(body, &spot);
+    }
+
+    /// A function body under a spot the caller gives: a spawner runs
+    /// the literal it takes on a thread of its own.
+    fn awaits_in_body_at(&mut self, body: &FunctionBody, spot: &Spot) {
+        // Every function body passes here once, the literal a spawner
+        // takes too. The reports of a `function*` and of a lambda sit
+        // here and not in the emit, which may run twice.
         if let Some(star) = body.generator {
             if !self.options.fflags.on(&crate::fflags::GENERATOR_SYNTAX) {
                 let report = format!(
@@ -236,6 +261,10 @@ impl Desugar<'_> {
             }
         }
 
+        if body.generics.is_some() {
+            self.generic_scope(body.span);
+        }
+
         if body.lambda && !self.options.fflags.on(&crate::fflags::LAMBDA_SYNTAX) {
             let report = format!(
                 "`|x| value` is not final; set `{} = true` under `[fflags]` in alloy.toml to use it",
@@ -245,10 +274,6 @@ impl Desugar<'_> {
             self.diagnose(bar, &report);
         }
 
-        self.awaits_in_body_at(body, &spot);
-    }
-
-    fn awaits_in_body_at(&mut self, body: &FunctionBody, spot: &Spot) {
         for p in &body.params {
             if let Some(d) = &p.default {
                 self.awaits_in_expr(d, spot);

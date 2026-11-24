@@ -440,7 +440,14 @@ impl<'s> Scan<'s> {
                 || PRIMITIVES.contains(&name)
                 || (call == "typeof" && (name == "Instance" || DATATYPES.contains(&name)));
 
-            if !known {
+            // `is` tests a primitive with `type`. For these three names
+            // `typeof` answers another way: a Roblox datatype is a
+            // `userdata` or a `vector` to `type` and its own name to
+            // `typeof`, and a value with a `__type` field is that name
+            // to `typeof` alone. The rewrite would change the test.
+            let differs = call == "typeof" && matches!(name, "table" | "userdata" | "vector");
+
+            if !known || differs {
                 continue;
             }
 
@@ -1358,6 +1365,21 @@ mod tests {
         assert_eq!(
             fixed("if type(x) ~= \"string\" then end\n"),
             "if x is not string then end\n"
+        );
+        // `is table` tests with `type`, which `typeof` does not match
+        // for a value with a `__type` field or a Roblox datatype.
+        for name in ["table", "userdata", "vector"] {
+            let src = format!("if typeof(x) ~= \"{name}\" then end\n");
+            assert!(!names(&src).contains(&"manual_type_test"), "{name}");
+            assert_eq!(fixed(&src), src);
+            assert_eq!(
+                fixed(&format!("if type(x) ~= \"{name}\" then end\n")),
+                format!("if x is not {name} then end\n")
+            );
+        }
+        assert_eq!(
+            fixed("if typeof(x) == \"string\" then end\n"),
+            "if x is string then end\n"
         );
         assert_eq!(
             fixed("if typeof(x) == \"Vector3\" then end\n"),

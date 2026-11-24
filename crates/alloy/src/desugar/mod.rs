@@ -41,6 +41,7 @@ mod pipes;
 mod remotes;
 pub mod statements;
 mod structs;
+mod type_functions;
 mod types;
 
 use macros::MacroRef;
@@ -747,6 +748,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         array_elems: HashMap::new(),
         value_sink: None,
         function_depth: 0,
+        generic_scopes: Vec::new(),
         defer_lists: Vec::new(),
         for_header: 0,
         child_cast: None,
@@ -1561,6 +1563,11 @@ struct Desugar<'s> {
     /// How many function bodies the report walk stands in. A `defer`
     /// at zero has no function to end.
     function_depth: u32,
+    /// The bytes of each scope that binds a type parameter: a generic
+    /// function, an `impl` with parameters, a trait. A type function
+    /// does not reduce on an open generic, so the check of `:=` takes
+    /// another form there.
+    generic_scopes: Vec<(u32, u32)>,
     /// One entry for each function body under render: whether its
     /// header wrote the list a `defer` adds to.
     defer_lists: Vec<bool>,
@@ -4466,5 +4473,82 @@ f(1)
             .collect();
 
         assert_eq!(messages, vec!["this expression is not a statement"]);
+    }
+    /// The emit copies the body of a type function as written, so a
+    /// form it lowers elsewhere reports there. The report names the
+    /// form and sits on it. Luau's own attributes pass.
+    #[test]
+    fn a_type_function_body_takes_luau_alone() {
+        let options = EmitOptions {
+            fflags: toml::from_str("OnByDefault = true").unwrap(),
+            ..EmitOptions::default()
+        };
+        let reports = |line: &str| -> Vec<(u32, String)> {
+            let src = format!(
+                "export type function f(t)\n    local found, xs = false, {{}}\n    {line}\n    return t\nend\n"
+            );
+            let at = src.find(line).unwrap() as u32;
+
+            crate::compile_with(&src, &options)
+                .unwrap()
+                .diagnostics
+                .into_iter()
+                .map(|d| (d.start - at, d.message))
+                .collect()
+        };
+
+        for (line, column, name) in [
+            ("found or= true", 6, "`or=`"),
+            ("found ??= true", 6, "`??=`"),
+            ("xs := 1", 3, "`:=`"),
+            ("local a = found ? 1 : 2", 10, "a ternary, `? :`"),
+            ("local a = t?.x", 10, "an optional chain, `?.`"),
+            ("local a = found ?? 3", 16, "`??`"),
+            ("local a = [ 1, 2 ]", 10, "an array literal"),
+            ("if t is string then print(1) end", 3, "`is`"),
+            ("local g = |a| a", 10, "a lambda"),
+            (
+                "local function g(a: number) -> number return a end",
+                28,
+                "`->` for a return type",
+            ),
+            ("for _, c in xs do found and= c end", 24, "`and=`"),
+            ("local { a } = t", 0, "a pattern in a `local`"),
+            (
+                "match found with case true then print(1) default print(2) end",
+                0,
+                "`match`",
+            ),
+            (
+                "while true do break print(1) end",
+                14,
+                "a statement after the way out of a block",
+            ),
+            ("@memo local function g() end", 0, "`@memo`"),
+            ("local a: number[] = {}", 9, "this type syntax"),
+            ("local a: ~nil = 1", 9, "this type syntax"),
+        ] {
+            let found = reports(line);
+            assert_eq!(found.len(), 1, "{line}: {found:?}");
+            assert_eq!(found[0].0, column, "{line}");
+            assert_eq!(
+                found[0].1,
+                format!(
+                    "{name} is Alloy; a type function body is Luau: the type checker runs it and the compiler copies it as written"
+                ),
+                "{line}"
+            );
+        }
+
+        for line in [
+            "local a = if found then 1 else 2",
+            "found = found or t:is(\"singleton\")",
+            "for _, c in t:components() do xs[#xs + 1] = c end",
+            "local a: { [string]: number } = {}",
+            "@native local function g() end",
+            "@[native, checked] local function g() end",
+        ] {
+            assert_eq!(reports(line), [], "{line}");
+        }
     }
 }

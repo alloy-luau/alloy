@@ -26,6 +26,17 @@ impl<'s> Formatter<'s> {
         }
     }
 
+    /// Whether the `if` at `i` opens a line as a statement, after a
+    /// token that can also stand before an expression.
+    pub(crate) fn line_if_is_statement(&self, i: usize) -> bool {
+        let prev = self.prev_code(i);
+        let text = |p: usize| self.items[p].text.as_str();
+
+        self.first_on_line(i)
+            && prev
+                .is_some_and(|p| super::line_if_is_statement(text(p), self.prev_code(p).map(text)))
+    }
+
     /// Whether the keyword at `i` opens a block: `function` always but
     /// for a signature; `if`, `do`, `match` when they start a statement.
     pub(crate) fn starts_block(&self, i: usize) -> bool {
@@ -46,21 +57,17 @@ impl<'s> Formatter<'s> {
                     .and_then(|_| self.prev_code(self.prev_code(i)?))
                     .map(|p| self.items[p].text.as_str());
 
-                !self.line_has_before(i, "declare")
-                    && !self.line_has_before(i, "attribute")
+                !self.line_declares(i, "declare")
+                    && !self.line_declares(i, "attribute")
                     && prev != Some("remote")
                     && prev != Some("is")
                     && before_not != Some("is")
                     && self.signature.get(i) != Some(&true)
             }
 
-            // `): number?` ends a signature line; the `if` that opens
-            // the next line is a statement, not a ternary.
             "if" => {
                 !self.expr_ifs.contains(&self.items[i].start)
-                    && (!prev.is_some_and(expression_context)
-                        || (self.first_on_line(i)
-                            && matches!(prev, Some("?") | Some("!") | Some(">") | Some(">>"))))
+                    && (!prev.is_some_and(expression_context) || self.line_if_is_statement(i))
             }
 
             "do" => !self.for_header_before(i),
@@ -196,6 +203,23 @@ impl<'s> Formatter<'s> {
                 t if t.ends_with('(') || t.ends_with('[') || t.ends_with('{') => depth += 1,
 
                 _ => {}
+            }
+        }
+
+        false
+    }
+
+    /// Whether `word` opens a declaration before `i` on the line: a
+    /// word follows it. `declare.f = function() end` holds a value of
+    /// that name, and the function there has a body.
+    fn line_declares(&self, i: usize, word: &str) -> bool {
+        let mut j = i;
+
+        while j > 0 && self.items[j].newlines_before == 0 {
+            j -= 1;
+
+            if self.items[j].is(word) && self.items[j + 1].is_ident() {
+                return true;
             }
         }
 
@@ -460,9 +484,7 @@ impl<'s> Formatter<'s> {
                     }
 
                     if text == "if"
-                        && ((prev.is_some_and(expression_context)
-                            && !(self.first_on_line(i)
-                                && matches!(prev, Some("?") | Some("!") | Some(">") | Some(">>"))))
+                        && ((prev.is_some_and(expression_context) && !self.line_if_is_statement(i))
                             || (matches!(prev, Some("then") | Some("else")) && in_expr_if(&stack))
                             || self.expr_ifs.contains(&it.start))
                     {
@@ -656,12 +678,21 @@ impl<'s> Formatter<'s> {
         // The open `<` of type arguments. A comma inside them, as in
         // `Result<T, E>`, separates no elements of the group.
         let mut angle = 0usize;
+        // The open parameter bars of a lambda. A comma between them, as
+        // in `|a, b| a + b`, separates no elements of the group either.
+        let mut bars = 0usize;
 
         while *pos < self.items.len() {
             let it = &self.items[*pos];
 
+            if !it.is_comment() {
+                bars += usize::from(self.lambda_open.contains(&it.start));
+                bars = bars.saturating_sub(usize::from(self.lambda_close.contains(&it.start)));
+            }
+
             if until.is_some() && !it.is_comment() {
-                let separator = (it.is(",") || it.is(";")) && block_depth <= 0 && angle == 0;
+                let separator =
+                    (it.is(",") || it.is(";")) && block_depth <= 0 && angle == 0 && bars == 0;
 
                 if separator || Some(it.text.as_str()) == until {
                     return out;

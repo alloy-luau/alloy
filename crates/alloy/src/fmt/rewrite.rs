@@ -447,9 +447,11 @@ impl<'s> Formatter<'s> {
         while i < n {
             let it = &self.items[i];
             let conditional = it.is("if")
-                && !self
+                && !self.expr_ifs.contains(&it.start)
+                && (!self
                     .prev_code(i)
-                    .is_some_and(|p| expression_context(&self.items[p].text));
+                    .is_some_and(|p| expression_context(&self.items[p].text))
+                    || self.line_if_is_statement(i));
             let function = it.is("function");
             let wanted = (conditional
                 && matches!(mode, Collapse::ConditionalOnly | Collapse::Always))

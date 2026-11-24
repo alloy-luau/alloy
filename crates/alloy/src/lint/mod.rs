@@ -1404,6 +1404,21 @@ mod tests {
         );
     }
 
+    /// The commas between the bars of a lambda split its parameters,
+    /// not the arguments of the call that takes it.
+    #[test]
+    fn the_parameters_of_a_lambda_are_one_argument() {
+        let head = "local function heap(less: (a: number, b: number) -> boolean, size: number?)\n    return less, size\nend\n";
+        let counts =
+            |call: &str| names(&format!("{head}print({call})\n")).contains(&"argument_count");
+
+        assert!(!counts("heap(|a, b| a < b)"));
+        assert!(!counts("heap(|a: (number | string), b| a < b, 4)"));
+        assert!(!counts("heap(|| true, 4)"));
+        assert!(counts("heap(|a, b| a < b, 4, 5)"));
+        assert!(counts("heap(|| true, 4, 5)"));
+    }
+
     /// The head of a message declares its parameters and its answer; it
     /// calls no function of the same name.
     #[test]

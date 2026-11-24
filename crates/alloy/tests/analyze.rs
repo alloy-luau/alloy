@@ -2102,6 +2102,86 @@ print(list, arr, queue, seen, add)
     }
 }
 
+/// `struct<T>` takes the struct of `T` alone. Its `new` takes `any`,
+/// and the checker reports no mismatch on a path through `any`: with
+/// `new` as the one member, each struct passed as `struct<T>` for
+/// each `T`. A struct of the same values, a generic one, one with a
+/// private field, and one in a namespace still pass.
+#[test]
+fn a_struct_supertype_refuses_another_struct() {
+    let flags = "AlloyExperimentalSupertypes = true\nAlloyExperimentalNewtypeSyntax = true\n";
+    let src = r#"struct Door
+    open: boolean
+end
+
+struct Point
+    x: number
+    y: number
+end
+
+struct Box<T>
+    value: T
+end
+
+struct Secret
+    private key: string
+    shown: number
+end
+
+struct UserId(number)
+
+namespace Shapes
+    struct Circle
+        r: number
+    end
+end
+
+local function make<T>(s: struct<T>, fields: { [string]: unknown }): T
+    return s.new(fields)
+end
+
+local function show(s: struct)
+    print(s)
+end
+
+local d: Door = make<<Door>>(Door, { open = true })
+local b: Box<number> = make<<Box<number>>>(Box, { value = 1 })
+local k: Secret = make<<Secret>>(Secret, { key = "k", shown = 1 })
+local c: Shapes.Circle = make<<Shapes.Circle>>(Shapes.Circle, { r = 1 })
+local u: UserId = make<<UserId>>(UserId, {})
+show(Door)
+show(Box)
+show(Shapes.Circle)
+make<<Door>>(Point, {})
+make<<Point>>(Door, {})
+make<<Door>>(Box, {})
+make<<Secret>>(Shapes.Circle, {})
+make<<Door>>(UserId, {})
+make<<Door>>(1, {})
+show(2)
+print(d, b, k, c, u)
+"#;
+    let Some(bad) = reports_under(src, "struct-supertype", flags) else {
+        return;
+    };
+    let lines: Vec<usize> = (43..=49)
+        .filter(|n| bad.iter().any(|r| r.contains(&format!("({n},"))))
+        .collect();
+
+    assert_eq!(lines, [43, 44, 45, 46, 47, 48, 49], "{}", bad.join("\n"));
+    assert!(
+        bad.iter()
+            .all(|r| (43..=49).any(|n| r.contains(&format!("({n},")))),
+        "{}",
+        bad.join("\n")
+    );
+    assert!(
+        bad[0].contains("Expected this to be 'Struct<Door>', but got 'Point'"),
+        "{}",
+        bad[0]
+    );
+}
+
 const TABLE_FLAG: &str = "AlloyExperimentalTableStdInheritance = true\n";
 
 /// The `table` library as methods: a plain table and an Array take

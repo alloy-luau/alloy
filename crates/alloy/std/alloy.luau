@@ -180,9 +180,17 @@ end
 -- ---------------------------------------------------------------------------
 
 --- `struct<T>`: the struct whose values are `T`. `new` constructs one
---- from a table of its fields. The type names `new` alone: the checker
---- sees a struct as a plain table, with no call of its own.
-export type Struct<T> = { read new: (fields: any) -> T }
+--- from a table of its fields. The checker sees a struct as a plain
+--- table, with no call of its own.
+-- `new` takes `any`, so a caller passes the fields of a struct it does
+-- not know. The checker reports no mismatch on a path through `any`,
+-- so `new` alone let each struct pass as `struct<T>` for each `T`.
+-- `__index` is the struct itself, and its `new` there takes `never`:
+-- that path holds no `any`, and it refuses a struct of other values.
+export type Struct<T> = {
+	read new: (fields: any) -> T,
+	read __index: { read new: (fields: never) -> T },
+}
 
 --- `enum`: any enum. An enum is a table that tests a value with `is`.
 export type Enum = { read is: (value: any) -> boolean }

@@ -1017,6 +1017,16 @@ fn expression_context(prev: &str) -> bool {
         )
 }
 
+/// Whether an `if` that opens a line after `prev` starts a statement,
+/// though `prev` can stand before an expression. `): number?` ends a
+/// signature line. `x ?? return` at the end of a line leaves with no
+/// value, as the parser reads it, so the `if` below is no return value.
+/// `before` is the token before `prev`; the lexer gives `??` as two `?`.
+fn line_if_is_statement(prev: &str, before: Option<&str>) -> bool {
+    matches!(prev, "?" | "!" | ">" | ">>")
+        || (prev == "return" && matches!(before, Some("?" | "??")))
+}
+
 /// Tokens that continue the expression of the line before, when they
 /// start a line.
 fn continues(text: &str) -> bool {
@@ -1584,6 +1594,19 @@ mod tests {
     fn an_end_after_an_if_expression_closes_its_block() {
         let src = "local function f(c: boolean, a: boolean)\n  local y = 0\n  if c then y = if a then 1 else 2 end\n  print(y)\nend\n\nf(true, false)\n";
         assert_eq!(fmt(src), src);
+    }
+
+    /// `?? return` at the end of a line leaves with no value. The `if`
+    /// on the next line is a statement, so its `end` closes it and not
+    /// the function.
+    #[test]
+    fn an_if_after_a_bare_bail_opens_a_block() {
+        for word in ["return", "break", "continue"] {
+            let src = format!(
+                "local function f(seen: {{ number }})\n  while true do\n    local n = seen[1] ?? {word}\n\n    if n > 1 then\n      print(n)\n    end\n\n    seen[1] = nil\n  end\nend\n\nf({{}})\n"
+            );
+            assert_eq!(fmt(&src), src);
+        }
     }
 
     /// A long `if` expression breaks at its keywords before a bracket

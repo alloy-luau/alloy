@@ -256,11 +256,11 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
                 "if" if in_array(&stack) && !prev.is_some_and(super::expression_context) => {}
 
                 "if" => {
-                    // `): number?` ends a signature line; the `if` that
-                    // opens the next line is a statement, not a ternary.
                     let first_on_line = i == 0 || lines[i - 1] != line;
+                    let before = i.checked_sub(2).map(|b| toks[b].text(src));
                     let in_expr = (prev.is_some_and(super::expression_context)
-                        && !(first_on_line && matches!(prev, Some("?" | "!" | ">" | ">>"))))
+                        && !(first_on_line
+                            && prev.is_some_and(|p| super::line_if_is_statement(p, before))))
                         || (matches!(prev, Some("then" | "else"))
                             && top(&stack) == Some(Kind::ExprIf))
                         || (prev == Some("then")
@@ -571,5 +571,18 @@ mod statement_if_tests {
         let prev = toks[i - 1].text(src);
         let end = st.ends[i].map(|e| toks[e].text(src).to_string());
         assert_eq!((prev, end), ("?", Some("end".to_string())));
+    }
+
+    #[test]
+    fn a_statement_if_after_a_bare_bail_opens_a_block() {
+        let src = "local function f(n: number?)\n    local m = n ?? return\n    if m < 1 then\n        print(m)\n    end\n    print(m)\nend\n";
+        let toks = alloy_syntax::lexer::lex(src).unwrap().toks;
+        let st = super::structure(src, &toks);
+        let i = toks.iter().position(|t| t.text(src) == "if").unwrap();
+        // The last `end` closes the function, at depth one.
+        assert_eq!(
+            (st.steps[i].opens, st.steps[toks.len() - 1].depth_before),
+            (1, 1)
+        );
     }
 }

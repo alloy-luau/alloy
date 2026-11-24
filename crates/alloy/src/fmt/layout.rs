@@ -26,6 +26,17 @@ impl<'s> Formatter<'s> {
         }
     }
 
+    /// Whether the `if` at `i` opens a line as a statement, after a
+    /// token that can also stand before an expression.
+    pub(crate) fn line_if_is_statement(&self, i: usize) -> bool {
+        let prev = self.prev_code(i);
+        let text = |p: usize| self.items[p].text.as_str();
+
+        self.first_on_line(i)
+            && prev
+                .is_some_and(|p| super::line_if_is_statement(text(p), self.prev_code(p).map(text)))
+    }
+
     /// Whether the keyword at `i` opens a block: `function` always but
     /// for a signature; `if`, `do`, `match` when they start a statement.
     pub(crate) fn starts_block(&self, i: usize) -> bool {
@@ -54,13 +65,9 @@ impl<'s> Formatter<'s> {
                     && self.signature.get(i) != Some(&true)
             }
 
-            // `): number?` ends a signature line; the `if` that opens
-            // the next line is a statement, not a ternary.
             "if" => {
                 !self.expr_ifs.contains(&self.items[i].start)
-                    && (!prev.is_some_and(expression_context)
-                        || (self.first_on_line(i)
-                            && matches!(prev, Some("?") | Some("!") | Some(">") | Some(">>"))))
+                    && (!prev.is_some_and(expression_context) || self.line_if_is_statement(i))
             }
 
             "do" => !self.for_header_before(i),
@@ -460,9 +467,7 @@ impl<'s> Formatter<'s> {
                     }
 
                     if text == "if"
-                        && ((prev.is_some_and(expression_context)
-                            && !(self.first_on_line(i)
-                                && matches!(prev, Some("?") | Some("!") | Some(">") | Some(">>"))))
+                        && ((prev.is_some_and(expression_context) && !self.line_if_is_statement(i))
                             || (matches!(prev, Some("then") | Some("else")) && in_expr_if(&stack))
                             || self.expr_ifs.contains(&it.start))
                     {

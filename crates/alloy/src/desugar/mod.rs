@@ -41,6 +41,7 @@ mod pipes;
 mod remotes;
 pub mod statements;
 mod structs;
+mod type_functions;
 mod types;
 
 use macros::MacroRef;
@@ -3001,31 +3002,6 @@ fn block_needs_desugar(b: &Block) -> bool {
     block_has_dead_code(b) || b.stmts.iter().any(stmt_needs_desugar)
 }
 
-/// The first statement of a block that Luau does not read as written:
-/// the innermost one, so a report points at the form and not at the
-/// loop around it.
-fn first_alloy_stmt(b: &Block) -> Option<&Stmt> {
-    let found = match b.stmts.iter().position(stmt_needs_desugar) {
-        Some(i) => &b.stmts[i],
-
-        // A statement after a `return`: Alloy fences it, Luau rejects it.
-        None => b
-            .stmts
-            .iter()
-            .find(|s| is_early_exit(s))
-            .filter(|_| block_has_dead_code(b))?,
-    };
-    let inner = stmt_children(found).into_iter().find_map(|c| match c {
-        Child::Block(b) => first_alloy_stmt(b),
-
-        Child::Function(f) => first_alloy_stmt(&f.block),
-
-        Child::Expr(_) => None,
-    });
-
-    Some(inner.unwrap_or(found))
-}
-
 fn expr_needs_desugar(e: &Expr) -> bool {
     match e {
         Expr::Binary { op, .. } if op.end - op.start == 2 => return true,
@@ -4499,8 +4475,8 @@ f(1)
         assert_eq!(messages, vec!["this expression is not a statement"]);
     }
     /// The emit copies the body of a type function as written, so a
-    /// form it lowers elsewhere reports there. The source column of
-    /// each report is the form.
+    /// form it lowers elsewhere reports there. The report names the
+    /// form and sits on it. Luau's own attributes pass.
     #[test]
     fn a_type_function_body_takes_luau_alone() {
         let options = EmitOptions {
@@ -4521,26 +4497,46 @@ f(1)
                 .collect()
         };
 
-        for (line, column) in [
-            ("found or= true", 0),
-            ("found ??= true", 0),
-            ("xs := 1", 0),
-            ("local a = found ? 1 : 2", 0),
-            ("local a = t?.x", 0),
-            ("local a = [ 1, 2 ]", 0),
-            ("if t is string then print(1) end", 0),
-            ("local g = |a| a", 0),
-            ("local function g(a: number) -> number return a end", 0),
-            ("for _, c in xs do found and= c end", 18),
-            ("local a: number[] = {}", 9),
-            ("local a: ~nil = 1", 9),
+        for (line, column, name) in [
+            ("found or= true", 6, "`or=`"),
+            ("found ??= true", 6, "`??=`"),
+            ("xs := 1", 3, "`:=`"),
+            ("local a = found ? 1 : 2", 10, "a ternary, `? :`"),
+            ("local a = t?.x", 10, "an optional chain, `?.`"),
+            ("local a = found ?? 3", 16, "`??`"),
+            ("local a = [ 1, 2 ]", 10, "an array literal"),
+            ("if t is string then print(1) end", 3, "`is`"),
+            ("local g = |a| a", 10, "a lambda"),
+            (
+                "local function g(a: number) -> number return a end",
+                28,
+                "`->` for a return type",
+            ),
+            ("for _, c in xs do found and= c end", 24, "`and=`"),
+            ("local { a } = t", 0, "a pattern in a `local`"),
+            (
+                "match found with case true then print(1) default print(2) end",
+                0,
+                "`match`",
+            ),
+            (
+                "while true do break print(1) end",
+                14,
+                "a statement after the way out of a block",
+            ),
+            ("@memo local function g() end", 0, "`@memo`"),
+            ("local a: number[] = {}", 9, "this type syntax"),
+            ("local a: ~nil = 1", 9, "this type syntax"),
         ] {
             let found = reports(line);
             assert_eq!(found.len(), 1, "{line}: {found:?}");
             assert_eq!(found[0].0, column, "{line}");
-            assert!(
-                found[0].1.starts_with("a type function body is Luau"),
-                "{line}: {found:?}"
+            assert_eq!(
+                found[0].1,
+                format!(
+                    "{name} is Alloy; a type function body is Luau: the type checker runs it and the compiler copies it as written"
+                ),
+                "{line}"
             );
         }
 
@@ -4549,6 +4545,8 @@ f(1)
             "found = found or t:is(\"singleton\")",
             "for _, c in t:components() do xs[#xs + 1] = c end",
             "local a: { [string]: number } = {}",
+            "@native local function g() end",
+            "@[native, checked] local function g() end",
         ] {
             assert_eq!(reports(line), [], "{line}");
         }

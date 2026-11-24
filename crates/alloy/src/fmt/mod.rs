@@ -1609,6 +1609,23 @@ mod tests {
         }
     }
 
+    /// A member of a union or an intersection that opens a line goes on
+    /// with the type above it, so it takes one more level. A bar that
+    /// opens a lambda starts a value and takes none.
+    #[test]
+    fn a_type_member_that_opens_a_line_keeps_its_indent() {
+        for src in [
+            "export type To =\n  Player\n  | { Player }\n  | ((player: Player) -> boolean)\n  | Filter\n",
+            "type Lead =\n  | Player\n  | Filter\n",
+            "type Both =\n  { a: number }\n  & { b: string }\n  & { c: boolean }\n",
+            "struct Wire\n  to: Player\n    | { Player }\n    | Filter\n  n: number\nend\n",
+            "namespace N\n  type Inner =\n    Player\n    | Filter\n\n  local function f(x: Inner)\n    local v: Player\n      | Filter = x\n    print(v)\n  end\nend\n",
+            "local t = {\n  less = 1,\n  pick = function()\n    return heap(\n      first_long_argument_name_here_to_break_the_call_over_lines_of_its_own_1,\n      |a, b| a < b\n    )\n  end,\n}\n",
+        ] {
+            assert_eq!(fmt(src), src);
+        }
+    }
+
     /// The commas between the bars of a lambda separate its parameters,
     /// not the elements of the list around it.
     #[test]

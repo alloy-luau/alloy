@@ -86,6 +86,13 @@ impl<'s> Formatter<'s> {
             return !it.value_start;
         }
 
+        // A member of a union or an intersection that opens a line goes
+        // on with the type above it. A bar that opens the parameters
+        // of a lambda starts a value.
+        if (it.is("|") || it.is("&")) && !self.lambda_open.contains(&it.start) {
+            return true;
+        }
+
         // The `where` of a header, at either end of a line: the header
         // goes on to its `then` or `do` (LANG_BUGS 116). A local named
         // `where` starts a line of its own.

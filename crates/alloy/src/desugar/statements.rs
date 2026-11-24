@@ -2743,7 +2743,7 @@ impl<'s> Desugar<'s> {
             }
 
             self.blank_lines(head_end, m_start);
-            let sink = format!("{} = ", self.text_of(name.name));
+            let sink = format!("{} = ", self.decl_name(name.name));
             self.match_hoisted(m, &sink, " ");
             self.declare_binding(name);
         } else if local_needs_rewrite(l) {
@@ -2851,7 +2851,15 @@ impl<'s> Desugar<'s> {
                     self.generate(anchor, ", ");
                 }
 
-                self.copy_on_line(anchor, *name);
+                // A member of a namespace binds its prefixed name.
+                let rendered = self.decl_name(*name);
+
+                match rendered == self.text_of(*name) {
+                    true => self.copy_on_line(anchor, *name),
+
+                    false => self.generate(anchor, &rendered),
+                }
+
                 self.generate(anchor, ty);
             }
 
@@ -2898,7 +2906,9 @@ impl<'s> Desugar<'s> {
 
             None => String::new(),
         };
-        let binding = self.text_of(l.names[0].name).to_string();
+        // A member of a namespace binds its prefixed name, which the
+        // line that fills the table reads.
+        let binding = self.decl_name(l.names[0].name);
         self.new_init(
             &format!("local {binding}{ty}"),
             &binding,

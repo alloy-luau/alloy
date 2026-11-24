@@ -5406,12 +5406,17 @@ export type NetError = {
 	read response: NetResponse?,
 }
 
--- What `send` returns: a Future, under a type of its own. Two members
--- of NetRequest that return `Future<Result<T, NetError>>` cost the
--- checker 15000 nodes of its 10000 (`LuauTarjanChildLimit`) under the
--- Roblox definitions, and past the limit a user file reads the whole
--- std as `any` with no report. The callbacks read `any` here, and
--- `await` reads the value off `__values`.
+-- What `send` returns: a Future, under a type of its own. Luau copies
+-- the table the runtime returns in one walk, `ClonePublicInterface`,
+-- over each type the table reaches. The walk stops at
+-- `LuauTarjanChildLimit` types: 15000 in luau-lsp and in Studio, 10000
+-- in bare `luau-analyze`. Past the limit a user file reads the whole
+-- std as `any` with no report. Two members of NetRequest that return
+-- `Future<Result<T, NetError>>` took the walk past the limit. The cost
+-- then was the method table of Array, which the walk copied about 50
+-- times; see `ArrayShapeFns`. The callbacks read `any` here, and
+-- `await` reads the value off `__values`. The full Future type can
+-- come back when a count of the walk shows room for it.
 export type NetFuture<T> = {
 	read __value: T,
 	read __values: (T) -> (),
@@ -5920,8 +5925,9 @@ local JSON_REQUEST = { _method = "JSON", _url = "" }
 
 --- A value as JSON text, or an Err of kind `Encode`.
 -- The Ok side is `any`, and holds a string. `Result<string, NetError>`
--- costs the checker 14000 nodes of its 10000 (`LuauTarjanChildLimit`),
--- since each method of Result then walks the string library.
+-- took the walk that copies the table of the runtime past its limit,
+-- `LuauTarjanChildLimit`; see `NetFuture`. The string type can come
+-- back when a count of the walk shows room for it.
 function Net.to_json(value: any): Result<any, NetError>
 	local ok, text = pcall(function()
 		return http_service():JSONEncode(value)

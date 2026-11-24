@@ -219,8 +219,15 @@ impl Desugar<'_> {
             Spot::Plain(name)
         };
 
-        // Every function body passes here once, so the reports of a
-        // `function*` sit here and not in the emit, which may run twice.
+        self.awaits_in_body_at(body, &spot);
+    }
+
+    /// A function body under a spot the caller gives: a spawner runs
+    /// the literal it takes on a thread of its own.
+    fn awaits_in_body_at(&mut self, body: &FunctionBody, spot: &Spot) {
+        // Every function body passes here once, the literal a spawner
+        // takes too. The reports of a `function*` and of a lambda sit
+        // here and not in the emit, which may run twice.
         if let Some(star) = body.generator {
             if !self.options.fflags.on(&crate::fflags::GENERATOR_SYNTAX) {
                 let report = format!(
@@ -245,10 +252,6 @@ impl Desugar<'_> {
             self.diagnose(bar, &report);
         }
 
-        self.awaits_in_body_at(body, &spot);
-    }
-
-    fn awaits_in_body_at(&mut self, body: &FunctionBody, spot: &Spot) {
         for p in &body.params {
             if let Some(d) = &p.default {
                 self.awaits_in_expr(d, spot);

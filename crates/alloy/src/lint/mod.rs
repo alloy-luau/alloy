@@ -1404,6 +1404,26 @@ mod tests {
         );
     }
 
+    /// `remote`, `declare` and `attribute` open a declaration with no
+    /// body when a word follows. A value of one of those names with a
+    /// function written into it holds a body. Read as a signature, its
+    /// `end` closed the function around it, and each lint lost the
+    /// rest of the namespace.
+    #[test]
+    fn a_function_written_into_a_value_named_remote_has_a_body() {
+        for name in ["remote", "declare", "attribute"] {
+            let src = format!(
+                "namespace Counter\n  local count: number? = nil\n\n  function wire({name}: {{ fire: () -> () }})\n    {name}.fire = function()\n      print(1)\n    end\n  end\n\n  function bump()\n    count = 1\n    print(count)\n  end\nend\n\nCounter.wire({{ fire = print }})\nCounter.bump()\n"
+            );
+            assert_eq!(names(&src), Vec::<&str>::new(), "{name}");
+            assert_eq!(
+                crate::fmt::format(&src).as_deref(),
+                Ok(src.as_str()),
+                "{name}"
+            );
+        }
+    }
+
     /// The commas between the bars of a lambda split its parameters,
     /// not the arguments of the call that takes it.
     #[test]

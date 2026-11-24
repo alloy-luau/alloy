@@ -57,8 +57,8 @@ impl<'s> Formatter<'s> {
                     .and_then(|_| self.prev_code(self.prev_code(i)?))
                     .map(|p| self.items[p].text.as_str());
 
-                !self.line_has_before(i, "declare")
-                    && !self.line_has_before(i, "attribute")
+                !self.line_declares(i, "declare")
+                    && !self.line_declares(i, "attribute")
                     && prev != Some("remote")
                     && prev != Some("is")
                     && before_not != Some("is")
@@ -203,6 +203,23 @@ impl<'s> Formatter<'s> {
                 t if t.ends_with('(') || t.ends_with('[') || t.ends_with('{') => depth += 1,
 
                 _ => {}
+            }
+        }
+
+        false
+    }
+
+    /// Whether `word` opens a declaration before `i` on the line: a
+    /// word follows it. `declare.f = function() end` holds a value of
+    /// that name, and the function there has a body.
+    fn line_declares(&self, i: usize, word: &str) -> bool {
+        let mut j = i;
+
+        while j > 0 && self.items[j].newlines_before == 0 {
+            j -= 1;
+
+            if self.items[j].is(word) && self.items[j + 1].is_ident() {
+                return true;
             }
         }
 

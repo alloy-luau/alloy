@@ -490,7 +490,7 @@ pub fn structure(src: &str, toks: &[Tok]) -> Structure {
 fn signature_only(src: &str, toks: &[Tok], i: usize, stack: &[Frame], lines: &[usize]) -> bool {
     if ["declare", "remote", "attribute"]
         .iter()
-        .any(|w| line_has_before(src, toks, i, w))
+        .any(|w| line_declares(src, toks, i, w))
     {
         return true;
     }
@@ -545,6 +545,21 @@ fn is_name(s: &str) -> bool {
     s.chars()
         .next()
         .is_some_and(|c| c.is_alphabetic() || c == '_')
+}
+
+/// Whether `word` opens a declaration before `i` on the same line: a
+/// word follows it, as in `declare function f` and `remote function f`.
+/// A value of that name does not: `remote.fire = function() end`
+/// writes a function with a body.
+fn line_declares(src: &str, toks: &[Tok], i: usize, word: &str) -> bool {
+    let line_start = src[..toks[i].start as usize]
+        .rfind('\n')
+        .map_or(0, |p| p + 1);
+
+    (0..i)
+        .rev()
+        .take_while(|&k| toks[k].start as usize >= line_start)
+        .any(|k| toks[k].text(src) == word && toks[k + 1].kind == TokKind::Ident)
 }
 
 /// Whether a token before `i` on the same line is `word`.

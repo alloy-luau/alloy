@@ -139,6 +139,12 @@ impl Desugar<'_> {
                 ..
             } => self.awaits_in_stmt(inner, spot),
 
+            Stmt::TypeAlias(t) => {
+                if let Some(body) = &t.function {
+                    self.type_function_body(body);
+                }
+            }
+
             Stmt::Local(l) if l.using => {
                 if !self.options.fflags.on(&crate::fflags::USING_SYNTAX) {
                     let report = format!(
@@ -205,6 +211,33 @@ impl Desugar<'_> {
             Child::Block(b) => self.awaits_in_block(b, spot),
 
             Child::Function(f) => self.awaits_in_body(f, None),
+        }
+    }
+
+    /// The type checker runs the body of a `type function`, and the
+    /// emit copies it as written. A form the emit lowers elsewhere
+    /// would reach Luau as it stands, so each one reports here. The
+    /// body takes no lowering: most forms need the runtime or a name of
+    /// the module, and a type function sees neither.
+    fn type_function_body(&mut self, body: &FunctionBody) {
+        const REPORT: &str = "a type function body is Luau: the type checker runs it and the compiler copies it as written; write this in Luau, without Alloy syntax";
+        let start = self.byte_start(body.span);
+        let end = self.byte_end(body.span);
+        let word = |at: usize| TokSpan::new(at, at + 1);
+
+        let at = if super::function_needs_rewrite(body) {
+            Some(body.span.start as usize)
+        } else if let Some(s) = super::first_alloy_stmt(&body.block) {
+            Some(s.span().start as usize)
+        } else {
+            // Alloy syntax in a type, `T[]` or `~T`: the emit writes a
+            // name of the module there, which the body cannot read.
+            self.earliest_edit_start(start, end)
+                .and_then(|byte| self.toks.iter().position(|t| t.start == byte))
+        };
+
+        if let Some(at) = at {
+            self.diagnose(word(at), REPORT);
         }
     }
 

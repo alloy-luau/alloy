@@ -722,12 +722,13 @@ impl<'a> Parser<'a> {
             // `type function f() ... end` is a user-defined type function.
             let keyword = self.bump();
             let name = self.expect_name()?;
-            self.function_body(keyword)?;
+            let body = self.function_body(keyword)?;
 
             return Ok(Stmt::TypeAlias(TypeAlias {
                 exported,
                 name,
                 attributes: Vec::new(),
+                function: Some(Box::new(body)),
                 span: TokSpan::new(start, self.pos),
             }));
         }
@@ -744,6 +745,7 @@ impl<'a> Parser<'a> {
             exported,
             name,
             attributes: Vec::new(),
+            function: None,
             span: TokSpan::new(start, self.pos),
         }))
     }

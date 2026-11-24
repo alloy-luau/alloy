@@ -2995,6 +2995,31 @@ fn block_needs_desugar(b: &Block) -> bool {
     block_has_dead_code(b) || b.stmts.iter().any(stmt_needs_desugar)
 }
 
+/// The first statement of a block that Luau does not read as written:
+/// the innermost one, so a report points at the form and not at the
+/// loop around it.
+fn first_alloy_stmt(b: &Block) -> Option<&Stmt> {
+    let found = match b.stmts.iter().position(stmt_needs_desugar) {
+        Some(i) => &b.stmts[i],
+
+        // A statement after a `return`: Alloy fences it, Luau rejects it.
+        None => b
+            .stmts
+            .iter()
+            .find(|s| is_early_exit(s))
+            .filter(|_| block_has_dead_code(b))?,
+    };
+    let inner = stmt_children(found).into_iter().find_map(|c| match c {
+        Child::Block(b) => first_alloy_stmt(b),
+
+        Child::Function(f) => first_alloy_stmt(&f.block),
+
+        Child::Expr(_) => None,
+    });
+
+    Some(inner.unwrap_or(found))
+}
+
 fn expr_needs_desugar(e: &Expr) -> bool {
     match e {
         Expr::Binary { op, .. } if op.end - op.start == 2 => return true,
@@ -4466,5 +4491,60 @@ f(1)
             .collect();
 
         assert_eq!(messages, vec!["this expression is not a statement"]);
+    }
+    /// The emit copies the body of a type function as written, so a
+    /// form it lowers elsewhere reports there. The source column of
+    /// each report is the form.
+    #[test]
+    fn a_type_function_body_takes_luau_alone() {
+        let options = EmitOptions {
+            fflags: toml::from_str("OnByDefault = true").unwrap(),
+            ..EmitOptions::default()
+        };
+        let reports = |line: &str| -> Vec<(u32, String)> {
+            let src = format!(
+                "export type function f(t)\n    local found, xs = false, {{}}\n    {line}\n    return t\nend\n"
+            );
+            let at = src.find(line).unwrap() as u32;
+
+            crate::compile_with(&src, &options)
+                .unwrap()
+                .diagnostics
+                .into_iter()
+                .map(|d| (d.start - at, d.message))
+                .collect()
+        };
+
+        for (line, column) in [
+            ("found or= true", 0),
+            ("found ??= true", 0),
+            ("xs := 1", 0),
+            ("local a = found ? 1 : 2", 0),
+            ("local a = t?.x", 0),
+            ("local a = [ 1, 2 ]", 0),
+            ("if t is string then print(1) end", 0),
+            ("local g = |a| a", 0),
+            ("local function g(a: number) -> number return a end", 0),
+            ("for _, c in xs do found and= c end", 18),
+            ("local a: number[] = {}", 9),
+            ("local a: ~nil = 1", 9),
+        ] {
+            let found = reports(line);
+            assert_eq!(found.len(), 1, "{line}: {found:?}");
+            assert_eq!(found[0].0, column, "{line}");
+            assert!(
+                found[0].1.starts_with("a type function body is Luau"),
+                "{line}: {found:?}"
+            );
+        }
+
+        for line in [
+            "local a = if found then 1 else 2",
+            "found = found or t:is(\"singleton\")",
+            "for _, c in t:components() do xs[#xs + 1] = c end",
+            "local a: { [string]: number } = {}",
+        ] {
+            assert_eq!(reports(line), [], "{line}");
+        }
     }
 }

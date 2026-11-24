@@ -606,7 +606,7 @@ pub const LINTS: &[LintInfo] = &[
         group: Group::Style,
         default: Level::Warn,
         summary: "`typeof(x) == \"T\"` in place of `x is T`",
-        detail: "Flux. `x is T` compiles to the right test for the name, `type`, `typeof`, or `IsA`, and the checker narrows `x` in the branch. A string comparison narrows nothing. `alloy flux --fix` rewrites primitives, `Instance`, and the Roblox datatypes.",
+        detail: "Flux. `x is T` compiles to the right test for the name, `type`, `typeof`, or `IsA`, and the checker narrows `x` in the branch. A string comparison narrows nothing. `alloy flux --fix` rewrites primitives, `Instance`, and the Roblox datatypes. `typeof(x)` against `table`, `userdata` or `vector` stays as written: `is` tests those with `type`, and `typeof` answers another way for a Roblox datatype and for a value with a `__type` field.",
     },
     LintInfo {
         name: "array_long_string",

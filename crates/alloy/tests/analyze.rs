@@ -368,6 +368,17 @@ fn reports(src: &str, name: &str) -> Option<Vec<String>> {
 
 /// `reports`, with the `[fflags]` table a project would write.
 fn reports_under(src: &str, name: &str, fflags: &str) -> Option<Vec<String>> {
+    reports_beside(src, name, fflags, &[])
+}
+
+/// `reports_under`, with Luau modules written beside the artifact, each
+/// by its file name and its text.
+fn reports_beside(
+    src: &str,
+    name: &str,
+    fflags: &str,
+    modules: &[(&str, &str)],
+) -> Option<Vec<String>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let defs = root.join("../tools/types/globalTypes.d.luau");
 
@@ -392,6 +403,11 @@ fn reports_under(src: &str, name: &str, fflags: &str) -> Option<Vec<String>> {
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join(format!("{name}.luau"));
     std::fs::write(&file, &out.check).unwrap();
+
+    for (module, text) in modules {
+        std::fs::write(dir.join(module), text).unwrap();
+    }
+
     // The runtime sits beside the artifact, which requires it by alias.
     std::fs::write(
         dir.join("alloy.luau"),
@@ -2100,6 +2116,46 @@ print(list, arr, queue, seen, add)
             "{report}"
         );
     }
+}
+
+/// The case that found the copy: a list of functions over a
+/// `jecs.World`. The fixture holds the type declarations of jecs that
+/// the case needs. Through `__append_item` the checker answered "Code
+/// is too complex to typecheck" on the append.
+#[test]
+fn an_append_of_a_function_over_a_large_type_checks() {
+    let src = r#"import * as jecs from "./jecs_world_types"
+
+type System = (world: jecs.World, dt: number) -> ()
+
+local function work(world: jecs.World, dt: number)
+    print(world, dt)
+end
+
+local systems: { System } = {}
+local arr: System[] = []
+systems := work
+arr := work
+systems := 1
+print(systems, arr)
+"#;
+    let fixture = include_str!("fixtures/jecs_world_types.luau");
+    let Some(bad) = reports_beside(
+        src,
+        "appends-jecs",
+        WALRUS_FLAGS,
+        &[("jecs_world_types.luau", fixture)],
+    ) else {
+        return;
+    };
+
+    assert_eq!(bad.len(), 1, "{}", bad.join("\n"));
+    assert!(
+        bad[0].contains("(13,")
+            && bad[0].contains("Expected this to be '(World, number) -> ()', but got 'number'"),
+        "{}",
+        bad[0]
+    );
 }
 
 /// `struct<T>` takes the struct of `T` alone. Its `new` takes `any`,

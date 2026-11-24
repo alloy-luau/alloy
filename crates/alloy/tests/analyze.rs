@@ -368,6 +368,17 @@ fn reports(src: &str, name: &str) -> Option<Vec<String>> {
 
 /// `reports`, with the `[fflags]` table a project would write.
 fn reports_under(src: &str, name: &str, fflags: &str) -> Option<Vec<String>> {
+    reports_beside(src, name, fflags, &[])
+}
+
+/// `reports_under`, with Luau modules written beside the artifact, each
+/// by its file name and its text.
+fn reports_beside(
+    src: &str,
+    name: &str,
+    fflags: &str,
+    modules: &[(&str, &str)],
+) -> Option<Vec<String>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let defs = root.join("../tools/types/globalTypes.d.luau");
 
@@ -392,6 +403,11 @@ fn reports_under(src: &str, name: &str, fflags: &str) -> Option<Vec<String>> {
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join(format!("{name}.luau"));
     std::fs::write(&file, &out.check).unwrap();
+
+    for (module, text) in modules {
+        std::fs::write(dir.join(module), text).unwrap();
+    }
+
     // The runtime sits beside the artifact, which requires it by alias.
     std::fs::write(
         dir.join("alloy.luau"),
@@ -2048,6 +2064,178 @@ fn an_append_of_the_wrong_value_reports() {
     // With the syntax flag alone the checker reads no type of the append.
     let syntax = reports_under(src, "appends-any", "AlloyExperimentalWalrusSyntax = true\n");
     assert_eq!(syntax, Some(Vec::new()));
+}
+
+/// The check reads the type of the items from the target itself. A
+/// type function gives a copy, and a copy of a large type, such as a
+/// function over a `jecs.World`, did not equal the type it came from.
+/// So a report names the item type as the source wrote it, on each
+/// kind of target, and a value that fits passes.
+#[test]
+fn an_append_reads_the_item_type_from_the_target() {
+    let src = r#"type Store = {
+    get: <T>(self: Store, key: { __T: T }) -> T,
+    rows: ((Store) -> { Store }) & (<A>(Store, { __T: A }) -> { A }),
+}
+type Step = (store: Store, dt: number) -> ()
+
+local function work(store: Store, dt: number)
+    print(store, dt)
+end
+
+local list: { Step } = {}
+local arr: Step[] = []
+local queue: Queue<Step> = Queue.new()
+local seen: Set<Step> = Set.new()
+list := work
+arr := work
+queue := work
+seen := work
+list := 1
+arr := 2
+queue := 3
+seen := 4
+
+local function add<T>(xs: { T }, v: T, steps: { Step })
+    xs := v
+    steps := work
+end
+
+print(list, arr, queue, seen, add)
+"#;
+    let Some(bad) = reports_under(src, "appends-by-reference", WALRUS_FLAGS) else {
+        return;
+    };
+
+    assert_eq!(bad.len(), 4, "{}", bad.join("\n"));
+
+    for (report, line) in bad.iter().zip(19..) {
+        assert!(
+            report.contains(&format!("({line},"))
+                && report.contains("Expected this to be '(Store, number) -> ()', but got 'number'"),
+            "{report}"
+        );
+    }
+}
+
+/// The case that found the copy: a list of functions over a
+/// `jecs.World`. The fixture holds the type declarations of jecs that
+/// the case needs. Through `__append_item` the checker answered "Code
+/// is too complex to typecheck" on the append.
+#[test]
+fn an_append_of_a_function_over_a_large_type_checks() {
+    let src = r#"import * as jecs from "./jecs_world_types"
+
+type System = (world: jecs.World, dt: number) -> ()
+
+local function work(world: jecs.World, dt: number)
+    print(world, dt)
+end
+
+local systems: { System } = {}
+local arr: System[] = []
+systems := work
+arr := work
+systems := 1
+print(systems, arr)
+"#;
+    let fixture = include_str!("fixtures/jecs_world_types.luau");
+    let Some(bad) = reports_beside(
+        src,
+        "appends-jecs",
+        WALRUS_FLAGS,
+        &[("jecs_world_types.luau", fixture)],
+    ) else {
+        return;
+    };
+
+    assert_eq!(bad.len(), 1, "{}", bad.join("\n"));
+    assert!(
+        bad[0].contains("(13,")
+            && bad[0].contains("Expected this to be '(World, number) -> ()', but got 'number'"),
+        "{}",
+        bad[0]
+    );
+}
+
+/// `struct<T>` takes the struct of `T` alone. Its `new` takes `any`,
+/// and the checker reports no mismatch on a path through `any`: with
+/// `new` as the one member, each struct passed as `struct<T>` for
+/// each `T`. A struct of the same values, a generic one, one with a
+/// private field, and one in a namespace still pass.
+#[test]
+fn a_struct_supertype_refuses_another_struct() {
+    let flags = "AlloyExperimentalSupertypes = true\nAlloyExperimentalNewtypeSyntax = true\n";
+    let src = r#"struct Door
+    open: boolean
+end
+
+struct Point
+    x: number
+    y: number
+end
+
+struct Box<T>
+    value: T
+end
+
+struct Secret
+    private key: string
+    shown: number
+end
+
+struct UserId(number)
+
+namespace Shapes
+    struct Circle
+        r: number
+    end
+end
+
+local function make<T>(s: struct<T>, fields: { [string]: unknown }): T
+    return s.new(fields)
+end
+
+local function show(s: struct)
+    print(s)
+end
+
+local d: Door = make<<Door>>(Door, { open = true })
+local b: Box<number> = make<<Box<number>>>(Box, { value = 1 })
+local k: Secret = make<<Secret>>(Secret, { key = "k", shown = 1 })
+local c: Shapes.Circle = make<<Shapes.Circle>>(Shapes.Circle, { r = 1 })
+local u: UserId = make<<UserId>>(UserId, {})
+show(Door)
+show(Box)
+show(Shapes.Circle)
+make<<Door>>(Point, {})
+make<<Point>>(Door, {})
+make<<Door>>(Box, {})
+make<<Secret>>(Shapes.Circle, {})
+make<<Door>>(UserId, {})
+make<<Door>>(1, {})
+show(2)
+print(d, b, k, c, u)
+"#;
+    let Some(bad) = reports_under(src, "struct-supertype", flags) else {
+        return;
+    };
+    let lines: Vec<usize> = (43..=49)
+        .filter(|n| bad.iter().any(|r| r.contains(&format!("({n},"))))
+        .collect();
+
+    assert_eq!(lines, [43, 44, 45, 46, 47, 48, 49], "{}", bad.join("\n"));
+    assert!(
+        bad.iter()
+            .all(|r| (43..=49).any(|n| r.contains(&format!("({n},")))),
+        "{}",
+        bad.join("\n")
+    );
+    assert!(
+        bad[0].contains("Expected this to be 'Struct<Door>', but got 'Point'"),
+        "{}",
+        bad[0]
+    );
 }
 
 const TABLE_FLAG: &str = "AlloyExperimentalTableStdInheritance = true\n";

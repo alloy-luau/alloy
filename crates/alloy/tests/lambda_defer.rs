@@ -188,6 +188,47 @@ fn each_form_with_its_flag_off_names_the_flag() {
     );
 }
 
+/// A spawner runs the literal it takes on a thread of its own, so the
+/// walk gives that body another spot. The flag check holds there too.
+#[test]
+fn a_literal_a_spawner_takes_needs_its_flag_too() {
+    for (src, flag) in [
+        (
+            "o:Connect(|dt| print(dt))\n",
+            "AlloyExperimentalLambdaSyntax",
+        ),
+        ("o:Once(|dt| print(dt))\n", "AlloyExperimentalLambdaSyntax"),
+        (
+            "s:connect(|dt| print(dt))\n",
+            "AlloyExperimentalLambdaSyntax",
+        ),
+        ("task.spawn(|| print(1))\n", "AlloyExperimentalLambdaSyntax"),
+        (
+            "task.delay(1, || print(1))\n",
+            "AlloyExperimentalLambdaSyntax",
+        ),
+        ("o:m(|dt| print(dt))\n", "AlloyExperimentalLambdaSyntax"),
+        (
+            "task.spawn(function*()\n    yield 1\nend)\n",
+            "AlloyExperimentalGeneratorSyntax",
+        ),
+        (
+            "o:Connect(function*()\n    yield 1\nend)\n",
+            "AlloyExperimentalGeneratorSyntax",
+        ),
+    ] {
+        let off = compiled(src, "");
+        let found = messages(&off);
+        assert!(
+            found.len() == 1 && found[0].contains(flag),
+            "{src}: {found:?}"
+        );
+    }
+
+    let on = compiled("o:Connect(|dt| print(dt))\n", ON);
+    assert!(on.diagnostics.is_empty(), "{:?}", messages(&on));
+}
+
 #[test]
 fn a_defer_needs_a_function_and_takes_no_defer() {
     let out = compiled("defer print(1)\n", ON);

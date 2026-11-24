@@ -1506,6 +1506,39 @@ mod tests {
 
     /// A call on the left: the walk back stopped at the `(` of the call
     /// and quoted "`) == true` is `)`".
+    /// The value of a lambda starts after the bar that closes its
+    /// parameters. The report quoted the parameters with the value, and
+    /// its `not` then stood in front of the lambda.
+    #[test]
+    fn bool_comparison_stays_in_the_value_of_a_lambda() {
+        for (src, want) in [
+            (
+                "local f = |player: Player| allowed[player] == false\nprint(f)\n",
+                "`allowed[player] == false` is `not allowed[player]` when",
+            ),
+            (
+                "local t = { pick = |a, b| a.ok ~= true, n = 1 }\nprint(t)\n",
+                "`a.ok ~= true` is `not a.ok` when",
+            ),
+            (
+                "local f = || ready == true\nprint(f)\n",
+                "`ready == true` is `ready` when",
+            ),
+            (
+                "local v = xs |> first(_) == false\nprint(v)\n",
+                "`xs |> first(_) == false` is `not xs |> first(_)` when",
+            ),
+        ] {
+            let found: Vec<String> = lints(src)
+                .into_iter()
+                .filter(|l| l.name == "bool_comparison")
+                .map(|l| l.message)
+                .collect();
+            assert_eq!(found.len(), 1, "{src}: {found:?}");
+            assert!(found[0].starts_with(want), "{src}: {found:?}");
+        }
+    }
+
     #[test]
     fn bool_comparison_quotes_a_call_whole() {
         let got = lints("local ok = t.value(a, b) == true\n");

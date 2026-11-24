@@ -1017,6 +1017,16 @@ fn expression_context(prev: &str) -> bool {
         )
 }
 
+/// Whether an `if` that opens a line after `prev` starts a statement,
+/// though `prev` can stand before an expression. `): number?` ends a
+/// signature line. `x ?? return` at the end of a line leaves with no
+/// value, as the parser reads it, so the `if` below is no return value.
+/// `before` is the token before `prev`; the lexer gives `??` as two `?`.
+fn line_if_is_statement(prev: &str, before: Option<&str>) -> bool {
+    matches!(prev, "?" | "!" | ">" | ">>")
+        || (prev == "return" && matches!(before, Some("?" | "??")))
+}
+
 /// Tokens that continue the expression of the line before, when they
 /// start a line.
 fn continues(text: &str) -> bool {
@@ -1584,6 +1594,50 @@ mod tests {
     fn an_end_after_an_if_expression_closes_its_block() {
         let src = "local function f(c: boolean, a: boolean)\n  local y = 0\n  if c then y = if a then 1 else 2 end\n  print(y)\nend\n\nf(true, false)\n";
         assert_eq!(fmt(src), src);
+    }
+
+    /// `?? return` at the end of a line leaves with no value. The `if`
+    /// on the next line is a statement, so its `end` closes it and not
+    /// the function.
+    #[test]
+    fn an_if_after_a_bare_bail_opens_a_block() {
+        for word in ["return", "break", "continue"] {
+            let src = format!(
+                "local function f(seen: {{ number }})\n  while true do\n    local n = seen[1] ?? {word}\n\n    if n > 1 then\n      print(n)\n    end\n\n    seen[1] = nil\n  end\nend\n\nf({{}})\n"
+            );
+            assert_eq!(fmt(&src), src);
+        }
+    }
+
+    /// A member of a union or an intersection that opens a line goes on
+    /// with the type above it, so it takes one more level. A bar that
+    /// opens a lambda starts a value and takes none.
+    #[test]
+    fn a_type_member_that_opens_a_line_keeps_its_indent() {
+        for src in [
+            "export type To =\n  Player\n  | { Player }\n  | ((player: Player) -> boolean)\n  | Filter\n",
+            "type Lead =\n  | Player\n  | Filter\n",
+            "type Both =\n  { a: number }\n  & { b: string }\n  & { c: boolean }\n",
+            "struct Wire\n  to: Player\n    | { Player }\n    | Filter\n  n: number\nend\n",
+            "namespace N\n  type Inner =\n    Player\n    | Filter\n\n  local function f(x: Inner)\n    local v: Player\n      | Filter = x\n    print(v)\n  end\nend\n",
+            "local t = {\n  less = 1,\n  pick = function()\n    return heap(\n      first_long_argument_name_here_to_break_the_call_over_lines_of_its_own_1,\n      |a, b| a < b\n    )\n  end,\n}\n",
+        ] {
+            assert_eq!(fmt(src), src);
+        }
+    }
+
+    /// The commas between the bars of a lambda separate its parameters,
+    /// not the elements of the list around it.
+    #[test]
+    fn a_broken_list_keeps_the_parameters_of_a_lambda_whole() {
+        stable(
+            "local ONE = { forms = { 'one', 'other' }, pick = |n, i| (i == 1 and n == 1) ? 'one' : 'other', zero = || 0 }\n",
+            "local ONE = {\n  forms = { 'one', 'other' },\n  pick = |n, i| (i == 1 and n == 1) ? 'one' : 'other',\n  zero = || 0,\n}\n",
+        );
+        stable(
+            "local h = heap(|a: Timer<E>, b: Timer<E>| a.at < b.at or a.at == b.at and tostring(a.e) < tostring(b.e))\n",
+            "local h = heap(\n  |a: Timer<E>, b: Timer<E>| a.at < b.at or a.at == b.at and tostring(a.e) < tostring(b.e)\n)\n",
+        );
     }
 
     /// A long `if` expression breaks at its keywords before a bracket

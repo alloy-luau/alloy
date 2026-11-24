@@ -2531,9 +2531,15 @@ impl<'s> Desugar<'s> {
     how it appends, so the emit reads no type.
 
     Under the analysis flag the check artifact writes
-    `__alloy.append_checked(xs)(v)`, which has a type: the value must fit
-    the items of the target. Both sides keep their source map, so a
+    `__alloy.append_to(xs):__append(v)`, which has a type: the value must
+    fit what the target takes. Both sides keep their source map, so a
     report sits on the text the author wrote.
+
+    That type reads each type from the target, and reports where the
+    target has an open type parameter. In a scope that binds one, and
+    in a macro expansion, whose scope the fragment cannot read, the
+    artifact writes `__alloy.append_checked(xs)(v)`. Its type function
+    stays quiet on an open parameter, and gives a copy of the item type.
     */
     fn append_stmt(&mut self, a: &Assign) {
         let anchor = self.byte_start(a.span);
@@ -2562,10 +2568,17 @@ impl<'s> Desugar<'s> {
         let target = self.render_to_side(&a.targets[0]);
         let value = self.render_to_side(&a.values[0]);
         let std = self.std();
-        let (name, between) = match checked {
-            true => ("append_checked", ")("),
+        let open_generic = self.options.macro_depth > 0
+            || self
+                .generic_scopes
+                .iter()
+                .any(|&(s, e)| s <= anchor && anchor < e);
+        let (name, between) = match (checked, open_generic) {
+            (true, false) => ("append_to", "):__append("),
 
-            false => ("append", ", "),
+            (true, true) => ("append_checked", ")("),
+
+            (false, _) => ("append", ", "),
         };
 
         self.generate(anchor, &format!("{std}.{name}("));
@@ -2743,7 +2756,7 @@ impl<'s> Desugar<'s> {
             }
 
             self.blank_lines(head_end, m_start);
-            let sink = format!("{} = ", self.text_of(name.name));
+            let sink = format!("{} = ", self.decl_name(name.name));
             self.match_hoisted(m, &sink, " ");
             self.declare_binding(name);
         } else if local_needs_rewrite(l) {
@@ -2851,7 +2864,15 @@ impl<'s> Desugar<'s> {
                     self.generate(anchor, ", ");
                 }
 
-                self.copy_on_line(anchor, *name);
+                // A member of a namespace binds its prefixed name.
+                let rendered = self.decl_name(*name);
+
+                match rendered == self.text_of(*name) {
+                    true => self.copy_on_line(anchor, *name),
+
+                    false => self.generate(anchor, &rendered),
+                }
+
                 self.generate(anchor, ty);
             }
 
@@ -2898,7 +2919,9 @@ impl<'s> Desugar<'s> {
 
             None => String::new(),
         };
-        let binding = self.text_of(l.names[0].name).to_string();
+        // A member of a namespace binds its prefixed name, which the
+        // line that fills the table reads.
+        let binding = self.decl_name(l.names[0].name);
         self.new_init(
             &format!("local {binding}{ty}"),
             &binding,

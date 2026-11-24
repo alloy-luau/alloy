@@ -98,6 +98,10 @@ impl Desugar<'_> {
             }
 
             Stmt::Impl(i) => {
+                if i.generics.is_some() {
+                    self.generic_scope(i.span);
+                }
+
                 for m in &i.methods {
                     let name = self.function_name(m);
                     self.awaits_in_body(&m.body, name);
@@ -114,6 +118,9 @@ impl Desugar<'_> {
             }
 
             Stmt::Trait(t) => {
+                // A default body names `Self`, which is open there.
+                self.generic_scope(t.span);
+
                 for m in &t.methods {
                     if let Some(body) = &m.body {
                         let name = Some(self.text_of(m.name).to_string());
@@ -241,6 +248,11 @@ impl Desugar<'_> {
         }
     }
 
+    fn generic_scope(&mut self, span: TokSpan) {
+        self.generic_scopes
+            .push((self.byte_start(span), self.byte_end(span)));
+    }
+
     /// A function body, under its own spot. A parameter default is read
     /// inside the body, so it takes the body's spot too.
     fn awaits_in_body(&mut self, body: &FunctionBody, name: Option<String>) {
@@ -274,6 +286,10 @@ impl Desugar<'_> {
                     "a generator cannot be `async`; its reader resumes it, and a Future resumes on its own",
                 );
             }
+        }
+
+        if body.generics.is_some() {
+            self.generic_scope(body.span);
         }
 
         if body.lambda && !self.options.fflags.on(&crate::fflags::LAMBDA_SYNTAX) {

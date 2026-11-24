@@ -2050,6 +2050,58 @@ fn an_append_of_the_wrong_value_reports() {
     assert_eq!(syntax, Some(Vec::new()));
 }
 
+/// The check reads the type of the items from the target itself. A
+/// type function gives a copy, and a copy of a large type, such as a
+/// function over a `jecs.World`, did not equal the type it came from.
+/// So a report names the item type as the source wrote it, on each
+/// kind of target, and a value that fits passes.
+#[test]
+fn an_append_reads_the_item_type_from_the_target() {
+    let src = r#"type Store = {
+    get: <T>(self: Store, key: { __T: T }) -> T,
+    rows: ((Store) -> { Store }) & (<A>(Store, { __T: A }) -> { A }),
+}
+type Step = (store: Store, dt: number) -> ()
+
+local function work(store: Store, dt: number)
+    print(store, dt)
+end
+
+local list: { Step } = {}
+local arr: Step[] = []
+local queue: Queue<Step> = Queue.new()
+local seen: Set<Step> = Set.new()
+list := work
+arr := work
+queue := work
+seen := work
+list := 1
+arr := 2
+queue := 3
+seen := 4
+
+local function add<T>(xs: { T }, v: T, steps: { Step })
+    xs := v
+    steps := work
+end
+
+print(list, arr, queue, seen, add)
+"#;
+    let Some(bad) = reports_under(src, "appends-by-reference", WALRUS_FLAGS) else {
+        return;
+    };
+
+    assert_eq!(bad.len(), 4, "{}", bad.join("\n"));
+
+    for (report, line) in bad.iter().zip(19..) {
+        assert!(
+            report.contains(&format!("({line},"))
+                && report.contains("Expected this to be '(Store, number) -> ()', but got 'number'"),
+            "{report}"
+        );
+    }
+}
+
 const TABLE_FLAG: &str = "AlloyExperimentalTableStdInheritance = true\n";
 
 /// The `table` library as methods: a plain table and an Array take

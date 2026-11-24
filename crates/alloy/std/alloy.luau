@@ -3678,6 +3678,73 @@ function alloy.append_checked<X>(target: X): (value: __append_item<X>) -> ()
 	end
 end
 
+-- How `target := value` reaches the target, as one word: `push` or
+-- `add` for a method of that name, `list` for the items of a list,
+-- `none` for a target that holds no items, `any` for a target with no
+-- type. The rules are those of `__append_item`.
+type function __append_kind(X: type)
+	if X:is("any") or X:is("unknown") then
+		return types.singleton("any")
+	end
+	if not X:is("table") then
+		return types.singleton("none")
+	end
+	local function has(name: string): boolean
+		local key = types.singleton(name)
+		local f = X:readproperty(key)
+		local mt = X:metatable()
+		if f == nil and mt ~= nil then
+			local index = mt:readproperty(types.singleton("__index"))
+			if index ~= nil and index:is("table") then
+				f = index:readproperty(key)
+			end
+		end
+		return f ~= nil and f:is("function")
+	end
+	if has("push") then
+		return types.singleton("push")
+	end
+	if has("add") then
+		return types.singleton("add")
+	end
+	local indexer = X:indexer()
+	if indexer ~= nil and (indexer.index:is("number") or indexer.index:is("any")) then
+		return types.singleton("list")
+	end
+	return types.singleton("none")
+end
+
+-- A value with one method, `__append`, that takes what the target
+-- takes. `__append_kind` picks the row, and `index` reads each type
+-- from the target itself. A type that a type function returns is a
+-- copy: an alias loses its name and a generic function no longer
+-- equals itself. A list of functions over a `jecs.World` then failed
+-- with "Code is too complex", so no row passes a type of the target
+-- through a type function. A method row is the target with `__append`
+-- as that method, so the checker reads the call as the method call.
+type AppendTo<X> = index<
+	{
+		any: { __append: (any, any) -> () },
+		none: { __append: (any, "__append_none") -> () },
+		list: { __append: (any, index<X, number>) -> () },
+		push: X & { __append: index<X, "push"> },
+		add: X & { __append: index<X, "add"> },
+	},
+	__append_kind<X>
+>
+
+--- `alloy.append` with a type, for the check artifact, which writes
+--- `append_to(xs):__append(v)`: the value must fit what the target
+--- takes. `append_checked` stays for a generic scope, where a type
+--- function does not reduce and this type reports.
+function alloy.append_to<X>(target: X): AppendTo<X>
+	return ({
+		__append = function(_, value)
+			alloy.append(target, value)
+		end,
+	} :: any)
+end
+
 -- A table with the functions of the `table` library as methods. A
 -- property the table has under the same name stays. A value that is no
 -- plain table keeps its own type, since its own methods answer first.

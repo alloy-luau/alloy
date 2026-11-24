@@ -51,7 +51,9 @@ fn an_append_calls_the_runtime_and_keeps_its_line() {
 fn the_analysis_flag_types_the_check_artifact() {
     let typed = compiled(APPEND, BOTH);
     assert!(
-        typed.check.contains("__alloy.append_checked(t.items)(2)"),
+        typed
+            .check
+            .contains("__alloy.append_to(t.items):__append(2)"),
         "{}",
         typed.check
     );
@@ -68,10 +70,34 @@ fn the_analysis_flag_types_the_check_artifact() {
         untyped.check
     );
     assert!(
-        !untyped.check.contains("append_checked"),
+        !untyped.check.contains("append_checked") && !untyped.check.contains("append_to"),
         "{}",
         untyped.check
     );
+}
+
+/// The typed call reads each type from the target, so a type function
+/// copies none. That type reports on an open type parameter. A scope
+/// that binds one keeps the form whose type function stays quiet
+/// there: a generic function, an `impl` with parameters, a trait, and
+/// the expansion of a macro.
+#[test]
+fn a_scope_with_a_type_parameter_keeps_the_quiet_form() {
+    let src = "struct Box<T>\n    items: { T }\nend\nimpl Box<T>\n    function put(self, v: T)\n        self.items := v\n    end\nend\ntrait Sink\n    function take(self, xs: { Self })\n        xs := self\n    end\nend\nlocal function add<T>(xs: { T }, v: T)\n    local inner = function()\n        xs := v\n    end\n    inner()\nend\nmacro push(xs, v)\n    xs := v\nend\nlocal function plain(ys: { number })\n    ys := 1\n    $push(ys, 2)\nend\nprint(add, plain)\n";
+    let out = compiled(src, BOTH);
+    assert_eq!(messages(&out), [] as [&str; 0]);
+
+    for want in [
+        "__alloy.append_checked(self.items)(v)",
+        "__alloy.append_checked(xs)(self)",
+        "__alloy.append_checked(xs)(v)",
+        "__alloy.append_to(ys):__append(1)",
+        "__alloy.append_checked(ys)(2)",
+    ] {
+        assert!(out.check.contains(want), "{want}\n{}", out.check);
+    }
+
+    assert_eq!(out.check.matches("append_to").count(), 1, "{}", out.check);
 }
 
 #[test]

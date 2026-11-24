@@ -747,6 +747,7 @@ pub fn render(src: &str, toks: &[Tok], chunk: &Chunk, options: &EmitOptions) -> 
         array_elems: HashMap::new(),
         value_sink: None,
         function_depth: 0,
+        generic_scopes: Vec::new(),
         defer_lists: Vec::new(),
         for_header: 0,
         child_cast: None,
@@ -1561,6 +1562,11 @@ struct Desugar<'s> {
     /// How many function bodies the report walk stands in. A `defer`
     /// at zero has no function to end.
     function_depth: u32,
+    /// The bytes of each scope that binds a type parameter: a generic
+    /// function, an `impl` with parameters, a trait. A type function
+    /// does not reduce on an open generic, so the check of `:=` takes
+    /// another form there.
+    generic_scopes: Vec<(u32, u32)>,
     /// One entry for each function body under render: whether its
     /// header wrote the list a `defer` adds to.
     defer_lists: Vec<bool>,

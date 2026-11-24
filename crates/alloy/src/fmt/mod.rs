@@ -1609,6 +1609,20 @@ mod tests {
         }
     }
 
+    /// The commas between the bars of a lambda separate its parameters,
+    /// not the elements of the list around it.
+    #[test]
+    fn a_broken_list_keeps_the_parameters_of_a_lambda_whole() {
+        stable(
+            "local ONE = { forms = { 'one', 'other' }, pick = |n, i| (i == 1 and n == 1) ? 'one' : 'other', zero = || 0 }\n",
+            "local ONE = {\n  forms = { 'one', 'other' },\n  pick = |n, i| (i == 1 and n == 1) ? 'one' : 'other',\n  zero = || 0,\n}\n",
+        );
+        stable(
+            "local h = heap(|a: Timer<E>, b: Timer<E>| a.at < b.at or a.at == b.at and tostring(a.e) < tostring(b.e))\n",
+            "local h = heap(\n  |a: Timer<E>, b: Timer<E>| a.at < b.at or a.at == b.at and tostring(a.e) < tostring(b.e)\n)\n",
+        );
+    }
+
     /// A long `if` expression breaks at its keywords before a bracket
     /// group inside it breaks, the way StyLua 2.5.2 lays it out. An `if`
     /// in an `else` breaks only when its own line is too long.

@@ -661,12 +661,21 @@ impl<'s> Formatter<'s> {
         // The open `<` of type arguments. A comma inside them, as in
         // `Result<T, E>`, separates no elements of the group.
         let mut angle = 0usize;
+        // The open parameter bars of a lambda. A comma between them, as
+        // in `|a, b| a + b`, separates no elements of the group either.
+        let mut bars = 0usize;
 
         while *pos < self.items.len() {
             let it = &self.items[*pos];
 
+            if !it.is_comment() {
+                bars += usize::from(self.lambda_open.contains(&it.start));
+                bars = bars.saturating_sub(usize::from(self.lambda_close.contains(&it.start)));
+            }
+
             if until.is_some() && !it.is_comment() {
-                let separator = (it.is(",") || it.is(";")) && block_depth <= 0 && angle == 0;
+                let separator =
+                    (it.is(",") || it.is(";")) && block_depth <= 0 && angle == 0 && bars == 0;
 
                 if separator || Some(it.text.as_str()) == until {
                     return out;

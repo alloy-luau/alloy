@@ -328,20 +328,44 @@ fn relative_to(root: &Path, path: &Path) -> PathBuf {
     out
 }
 
-fn link_entry(from: &Path, to: &Path) {
+/// Puts `from` at `to` in the mirror, and says whether it got there.
+fn link_entry(from: &Path, to: &Path) -> bool {
     #[cfg(unix)]
     {
-        let _ = std::os::unix::fs::symlink(from, to);
+        std::os::unix::fs::symlink(from, to).is_ok()
     }
 
+    // A symlink on Windows needs Developer Mode or an admin shell. With
+    // neither, a folder becomes a junction, which needs no right, and a
+    // file becomes a copy. A hard link is no fallback: `write_unlinked`
+    // writes through it into the project.
     #[cfg(windows)]
     {
         if from.is_dir() {
-            let _ = std::os::windows::fs::symlink_dir(from, to);
+            std::os::windows::fs::symlink_dir(from, to).is_ok() || junction(from, to)
         } else {
-            let _ = std::os::windows::fs::symlink_file(from, to);
+            std::os::windows::fs::symlink_file(from, to).is_ok() || std::fs::copy(from, to).is_ok()
         }
     }
+}
+
+/// A junction at `to` that points at the folder `from`. The std has no
+/// call for it, so `mklink /J` makes it.
+#[cfg(windows)]
+fn junction(from: &Path, to: &Path) -> bool {
+    // A junction holds an absolute target.
+    let Ok(from) = std::path::absolute(from) else {
+        return false;
+    };
+
+    Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(to)
+        .arg(&from)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 /// Writes `text` at `target`, a path under `base`. Each folder on the way
@@ -367,7 +391,7 @@ fn write_unlinked(base: &Path, target: &Path, text: &str) -> std::io::Result<()>
             std::fs::create_dir(&at)?;
 
             for entry in std::fs::read_dir(&real)?.flatten() {
-                link_entry(&entry.path(), &at.join(entry.file_name()));
+                let _ = link_entry(&entry.path(), &at.join(entry.file_name()));
             }
         }
     }
@@ -446,10 +470,20 @@ pub fn analyze(
             || Path::new(&name) == config.build.out
             || Path::new(&name) == config.test.out;
 
-        if !skip {
-            link_entry(&entry.path(), &mirror.join(&name));
-            linked.push(name);
+        if skip {
+            continue;
         }
+
+        // A missing entry shows up later as an UnknownModule on each
+        // import through it, so the note names the real cause.
+        if !link_entry(&entry.path(), &mirror.join(&name)) {
+            analysis.notes.push(format!(
+                "cannot link {} into the check mirror; imports through it do not resolve",
+                name.to_string_lossy()
+            ));
+        }
+
+        linked.push(name);
     }
 
     // A dependency inside the root, as a package under `packages/`, lands
